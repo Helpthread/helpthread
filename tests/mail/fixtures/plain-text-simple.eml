@@ -1,0 +1,13 @@
+From: Alice Sender <alice@example.test>
+To: Bob Receiver <bob@example.test>
+Subject: Plain text simple message
+Message-ID: <msg-a-0001@example.test>
+Date: Mon, 01 Jun 2026 12:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+Hello Bob,
+
+This is a simple plain-text message body.
+
+Regards,
+Alice

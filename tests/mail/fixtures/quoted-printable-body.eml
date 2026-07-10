@@ -1,0 +1,10 @@
+From: Mia Quoted <mia@example.test>
+To: Noah Recipient <noah@example.test>
+Subject: Quoted-printable body test
+Message-ID: <msg-g-0001@example.test>
+Date: Sun, 07 Jun 2026 15:10:00 +0000
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+This body has an =E2=82=AC euro sign and a soft line break=
+ that should join.

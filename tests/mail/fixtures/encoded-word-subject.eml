@@ -1,0 +1,8 @@
+From: Ken Encode <ken@example.test>
+To: Liam Recipient <liam@example.test>
+Subject: =?UTF-8?B?SGVsbG8sIFdvcmxkIQ==?=
+Message-ID: <msg-f-0001@example.test>
+Date: Sat, 06 Jun 2026 14:20:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+Encoded subject test body.

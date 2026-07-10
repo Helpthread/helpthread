@@ -1,0 +1,21 @@
+From: Ivy Files <ivy@example.test>
+To: Jack Recipient <jack@example.test>
+Subject: Message with attachment
+Message-ID: <msg-e-0001@example.test>
+Date: Fri, 05 Jun 2026 13:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUNDARY-E"
+
+--BOUNDARY-E
+Content-Type: text/plain; charset=utf-8
+
+Please find the attached file.
+
+--BOUNDARY-E
+Content-Type: text/plain; charset=utf-8; name="hello.txt"
+Content-Disposition: attachment; filename="hello.txt"
+Content-Transfer-Encoding: base64
+
+SGVsbG8sIHdvcmxkIQ==
+
+--BOUNDARY-E--

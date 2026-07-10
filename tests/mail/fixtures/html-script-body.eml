@@ -1,0 +1,9 @@
+From: Eve Html <eve@example.test>
+To: Frank Recipient <frank@example.test>
+Subject: HTML body with script tag
+Message-ID: <msg-c-0001@example.test>
+Date: Wed, 03 Jun 2026 10:15:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Hello</p><script>alert(1)</script></body></html>
