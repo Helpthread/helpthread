@@ -5,8 +5,13 @@ Helpthread is an open-source serverless helpdesk (AGPL-3.0 core, owned by Resona
 ## References & provenance
 
 - Helpthread is an independent implementation. No code copied or derived from copyleft-licensed projects, ever.
-- Dependencies and study references are permissively licensed (MIT/Apache), with the license verified at adoption.
-- Behavior is specified from public standards (RFCs), public documentation, and black-box testing of running systems.
+- **The core is our own code, or fully-free (permissively-licensed) code.** Study/adapt references, license verified at adoption:
+  - **RFCs** (5322 etc.) for mail semantics — public standards, the primary source.
+  - **postal-mime** (MIT-0) — modern serverless MIME parsing; the parsing dependency.
+  - **Chatwoot** (MIT core; the `enterprise/` folder is NOT MIT — exclude it) — behavioral/feature reference, adaptable with attribution.
+  - Modern TS/AI helpdesks (e.g. antiwork/helper) may be *looked at* for UX/AI patterns, but **their code is not adapted unless a permissive LICENSE is confirmed** — as of 2026-07-10 helper's and cossistant's licenses did not resolve on GitHub, so: look-only.
+- **FreeScout's role: a window into the Help Scout experience, nothing more.** Help Scout (closed SaaS) is the ease-of-use North Star; FreeScout is the open, self-hostable pane of glass we use to *model the interface* toward that bar. It is a UX/experience reference, never a code source. Its AGPL source is never read in a Helpthread session (the operating habit lives in `CLAUDE.local.md`).
+- Behavior is specified from RFCs, public documentation, and — where already captured — the black-box fixtures; we do not observe FreeScout further.
 - Every substantive change gets real human review before merge — ordinary PR review, preserved in git history. This is also what keeps AI-assisted work copyrightable and thus dual-licensable; a rubber stamp doesn't meet that bar.
 
 ## Coding discipline
