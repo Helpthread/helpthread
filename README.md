@@ -15,6 +15,22 @@ Open-source, serverless helpdesk — shared inbox, threaded email conversations,
 
 TypeScript on Vercel (Fluid Compute, Workflows, Queues, Cron — no daemons, no polling) plus Supabase (Postgres, Auth, Storage, Realtime). Inbound mail arrives by push webhook, not IMAP polling. Threading authority lives on the outbound side: signed reply tokens in the Message-IDs the engine emits. See the charter for the reasoning.
 
+## Development
+
+Prerequisites: Node 20+.
+
+```
+npm install
+```
+
+Scripts:
+
+- `npm run typecheck` — TypeScript, strict, no emit.
+- `npm run lint` / `npm run lint:fix` — Biome lint (and autofix).
+- `npm run format` — Biome format.
+- `npm test` / `npm run test:watch` — Vitest.
+- `npm run test:coverage` — Vitest with v8 coverage (text + lcov).
+
 ## Contributing
 
 Not accepting external contributions yet — see [CONTRIBUTING.md](CONTRIBUTING.md). Issues and discussion are welcome.

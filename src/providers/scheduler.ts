@@ -21,7 +21,7 @@
  * concern (e.g. a lookup table the adapter's HTTP entry point dispatches
  * through).
  */
-export type HandlerRef = string;
+export type HandlerRef = string
 
 /**
  * Provider for time-based and durable work: recurring cron schedules, and
@@ -46,11 +46,7 @@ export interface SchedulerProvider {
    * without a deploy — the return value/promise resolving only means the
    * registration was accepted, not that the schedule is live.
    */
-  registerCron(
-    name: string,
-    cronExpr: string,
-    handlerRef: HandlerRef,
-  ): Promise<void>;
+  registerCron(name: string, cronExpr: string, handlerRef: HandlerRef): Promise<void>
 
   /**
    * Schedule `action` to run at or after `runAt`, carrying `payload`.
@@ -72,11 +68,7 @@ export interface SchedulerProvider {
    * delivered may cause the next tick to dispatch it again. Handlers MUST
    * be idempotent for the same action id.
    */
-  scheduleAction<T>(
-    runAt: Date,
-    action: HandlerRef,
-    payload: T,
-  ): Promise<string>;
+  scheduleAction<T>(runAt: Date, action: HandlerRef, payload: T): Promise<string>
 
   /**
    * Cancel a previously scheduled action by id. Resolves whether or not
@@ -86,5 +78,5 @@ export interface SchedulerProvider {
    * relying on this call to report it, since a race between cancellation
    * and delivery is inherent to the poll-based delivery model above.
    */
-  cancelAction(id: string): Promise<void>;
+  cancelAction(id: string): Promise<void>
 }

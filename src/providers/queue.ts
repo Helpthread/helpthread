@@ -32,7 +32,7 @@ export interface EnqueueOptions {
    * Delay delivery by this many seconds after enqueue. Omit or `0` for
    * immediate (best-effort) delivery.
    */
-  delaySeconds?: number;
+  delaySeconds?: number
 
   /**
    * Caller-supplied idempotency key. Implementations SHOULD suppress
@@ -42,7 +42,7 @@ export interface EnqueueOptions {
    * best-effort de-duplication aid, not a substitute for idempotent
    * handlers — see the at-least-once note above.
    */
-  dedupeKey?: string;
+  dedupeKey?: string
 }
 
 /**
@@ -51,13 +51,13 @@ export interface EnqueueOptions {
  */
 export interface QueueMessage<T> {
   /** Provider-assigned unique id for this delivery attempt's message. */
-  id: string;
+  id: string
 
   /** The topic/queue name this message was enqueued on. */
-  topic: string;
+  topic: string
 
   /** The payload as originally enqueued. */
-  payload: T;
+  payload: T
 
   /**
    * How many times delivery of this message has been attempted, starting
@@ -65,10 +65,10 @@ export interface QueueMessage<T> {
    * their own retry-count-aware logic (e.g. escalate to dead-letter after
    * N attempts) independent of what the platform's own retry policy does.
    */
-  attempts: number;
+  attempts: number
 
   /** When this message was originally enqueued (producer-observed time). */
-  enqueuedAt: Date;
+  enqueuedAt: Date
 }
 
 /**
@@ -78,9 +78,9 @@ export interface QueueMessage<T> {
  * accident of which exceptions happen to propagate.
  */
 export type QueueHandlerResult =
-  | { kind: "ack" }
-  | { kind: "retry"; backoffSeconds?: number }
-  | { kind: "deadLetter"; reason: string };
+  | { kind: 'ack' }
+  | { kind: 'retry'; backoffSeconds?: number }
+  | { kind: 'deadLetter'; reason: string }
 
 /**
  * Consumer contract: a handler processes one `QueueMessage` and returns a
@@ -100,9 +100,7 @@ export type QueueHandlerResult =
  * retry intent is visible in the return type rather than inferred from an
  * uncaught exception.
  */
-export type QueueMessageHandler<T> = (
-  message: QueueMessage<T>,
-) => Promise<QueueHandlerResult>;
+export type QueueMessageHandler<T> = (message: QueueMessage<T>) => Promise<QueueHandlerResult>
 
 /**
  * Provider for enqueueing at-least-once background work. See the module
@@ -117,9 +115,5 @@ export interface QueueProvider {
    * resolves once the message is durably accepted by the provider, not
    * once it has been processed.
    */
-  enqueue<T>(
-    topic: string,
-    payload: T,
-    opts?: EnqueueOptions,
-  ): Promise<void>;
+  enqueue<T>(topic: string, payload: T, opts?: EnqueueOptions): Promise<void>
 }

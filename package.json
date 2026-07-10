@@ -1,0 +1,26 @@
+{
+  "name": "helpthread",
+  "version": "0.0.0",
+  "private": false,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "description": "Open-source, serverless helpdesk engine — shared inbox, threaded email, knowledge base — for teams who live on Vercel and Supabase.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.3",
+    "@vitest/coverage-v8": "4.1.10",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}
