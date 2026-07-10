@@ -18,6 +18,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.4",
     "postal-mime": "^2.7.5"
   },
   "devDependencies": {
