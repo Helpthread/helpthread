@@ -62,12 +62,58 @@ CREATE INDEX threads_conversation_id_idx ON threads (conversation_id);
 `
 
 /**
+ * Migration 002 — outbound delivery status (specs/mail/sending.md §3).
+ *
+ * An outbound thread is an outbox item: it carries `pending`/`sent`/`failed`
+ * to make "persisted" and "delivered" distinct facts (a crash mid-send must
+ * never be misreported as delivered). Inbound threads have no delivery
+ * concept, so the column stays `NULL` for them.
+ *
+ * The constraint is a CROSS-COLUMN (table-level) invariant tying status to
+ * direction, not a value-only check: an inbound row MUST be `NULL` and an
+ * outbound row MUST be one of the three states. This makes the illegal
+ * states — an inbound thread marked `'sent'`, or an outbound thread with a
+ * `NULL` status invisible to a future delivery worker — unrepresentable at
+ * the database level, not merely discouraged in application code (a
+ * table-level constraint is added with a separate `ADD CONSTRAINT` because an
+ * inline `ADD COLUMN ... CHECK` may only reference its own column).
+ */
+// NOTE on the explicit \`delivery_status IS NOT NULL\` in the outbound branch:
+// a CHECK constraint passes on TRUE *or* NULL (unknown) and only fails on
+// FALSE. Without the IS-NOT-NULL guard, an outbound row with a NULL status
+// makes \`delivery_status IN (...)\` evaluate to NULL, so the whole CHECK is
+// NULL and the row is (wrongly) ACCEPTED — the exact "outbound with no status,
+// invisible to the delivery worker" state this constraint exists to forbid.
+// The guard forces that case to FALSE so it is rejected.
+// The BACKFILL between ADD COLUMN and ADD CONSTRAINT is load-bearing, not
+// cosmetic: on a database that already ran migration 001 and stored outbound
+// threads, ADD COLUMN gives those rows a NULL delivery_status, which the new
+// direction-tied CHECK (with its IS NOT NULL guard) would then REJECT —
+// failing the whole migration on any non-fresh database. Backfilling existing
+// outbound rows to 'pending' (a truthful "delivery state unknown/unconfirmed"
+// for rows that predate delivery tracking) makes them satisfy the constraint
+// before it is added. Inbound rows correctly stay NULL.
+const MIGRATION_002_ADD_THREAD_DELIVERY_STATUS = `
+ALTER TABLE threads ADD COLUMN delivery_status text;
+UPDATE threads SET delivery_status = 'pending' WHERE direction = 'outbound' AND delivery_status IS NULL;
+ALTER TABLE threads ADD CONSTRAINT threads_delivery_status_by_direction CHECK (
+  (direction = 'inbound' AND delivery_status IS NULL)
+  OR (direction = 'outbound' AND delivery_status IS NOT NULL AND delivery_status IN ('pending','sent','failed'))
+);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
  */
 const MIGRATIONS: Migration[] = [
   { id: 1, name: 'conversations_and_threads', sql: MIGRATION_001_CONVERSATIONS_AND_THREADS },
+  {
+    id: 2,
+    name: 'add_thread_delivery_status',
+    sql: MIGRATION_002_ADD_THREAD_DELIVERY_STATUS,
+  },
 ]
 
 /**
@@ -138,8 +184,18 @@ const MIGRATION_ADVISORY_LOCK_KEY = 4_137_231_984
  * only reproducible against a real multi-connection server, so it is not
  * unit-testable here. The idempotency test covers the apply-once bookkeeping;
  * true concurrent-migrate coverage waits for the Supabase-backed `Db`.)
+ *
+ * ## `throughId`
+ *
+ * `options.throughId` applies only migrations with `id <= throughId`, leaving
+ * later ones pending. Its main use is staged rollouts and testing forward
+ * UPGRADE paths — applying an earlier schema, writing data against it, then
+ * applying the next migration over that data (exactly what a real deploy does,
+ * and what a fresh-only test never exercises). Omitted, every pending
+ * migration is applied.
  */
-export async function migrate(db: Db): Promise<void> {
+export async function migrate(db: Db, options?: { throughId?: number }): Promise<void> {
+  const throughId = options?.throughId
   await db.transaction(async (tx) => {
     // Serialize concurrent migrate() runs before touching any state. A bare
     // integer key needs no table, so this is safe to take before `_migrations`
@@ -157,9 +213,10 @@ export async function migrate(db: Db): Promise<void> {
     const applied = await tx.query<{ id: number }>('SELECT id FROM _migrations')
     const appliedIds = new Set(applied.map((row) => row.id))
 
-    const pending = MIGRATIONS.filter((migration) => !appliedIds.has(migration.id)).sort(
-      (a, b) => a.id - b.id,
-    )
+    const pending = MIGRATIONS.filter(
+      (migration) =>
+        !appliedIds.has(migration.id) && (throughId === undefined || migration.id <= throughId),
+    ).sort((a, b) => a.id - b.id)
 
     for (const migration of pending) {
       for (const statement of splitStatements(migration.sql)) {

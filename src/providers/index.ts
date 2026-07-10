@@ -5,6 +5,7 @@
  */
 
 export type { BlobStore } from './blob.js'
+export type { EmailSender, EmailSendResult, OutboundEmail } from './email-sender.js'
 export type {
   InboundEmailProvider,
   NormalizedInboundAttachment,

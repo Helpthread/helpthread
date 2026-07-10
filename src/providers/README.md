@@ -5,17 +5,19 @@ calls a platform directly: queueing, scheduled and durable work, blob
 storage, and inbound email all sit behind thin provider interfaces the
 project owns, with today's implementations (Vercel Queues, Vercel Cron and
 Workflows, Supabase Storage, Gmail push) as adapters"** rather than
-assumptions baked into engine code.
+assumptions baked into engine code. Outbound email (`EmailSender`,
+specs/mail/sending.md §4) follows the same discipline, even though it
+predates a name-check in that charter sentence.
 
 ## The rule
 
 **Engine core imports only from `src/providers`** — the interfaces and types
 defined in this directory — never a platform SDK (`@vercel/*`,
 `@supabase/*`, `googleapis`, etc.) directly. If an engine module needs to
-enqueue work, schedule an action, store a blob, or read an inbound email, it
-takes a dependency on the relevant interface (`QueueProvider`,
-`SchedulerProvider`, `BlobStore`, `InboundEmailProvider`) — never on the
-package that implements it.
+enqueue work, schedule an action, store a blob, read an inbound email, or
+send an outbound email, it takes a dependency on the relevant interface
+(`QueueProvider`, `SchedulerProvider`, `BlobStore`, `InboundEmailProvider`,
+`EmailSender`) — never on the package that implements it.
 
 Concrete implementations — **adapters** — live in `src/providers/adapters/<name>/`
 (e.g. `src/providers/adapters/vercel-queues/`). This task defines the
@@ -45,8 +47,8 @@ seams the charter names.
 
 Because engine code depends on these interfaces rather than concrete SDKs,
 the engine's test suite runs against **in-memory fakes** of `QueueProvider`,
-`SchedulerProvider`, `BlobStore`, and `InboundEmailProvider` — no cloud
-account, network call, or platform emulator required to exercise queueing,
-scheduling, storage, or inbound-mail logic. Adapters get their own
-integration tests against the real platform; engine logic does not need
-those to run.
+`SchedulerProvider`, `BlobStore`, `InboundEmailProvider`, and `EmailSender`
+— no cloud account, network call, or platform emulator required to exercise
+queueing, scheduling, storage, inbound-mail, or outbound-send logic.
+Adapters get their own integration tests against the real platform; engine
+logic does not need those to run.
