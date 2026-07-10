@@ -65,4 +65,27 @@ describe('extractMessageIds', () => {
   it('ignores an unterminated < with no closing >', () => {
     expect(extractMessageIds('<a@b.test> <unterminated')).toEqual(['<a@b.test>'])
   })
+
+  // Codex: a `>` inside the msg-id's own quoted id-left / domain-literal must
+  // not terminate it (RFC 5322 §3.6.4 / §3.4.1).
+  it('a quoted id-left containing > does not terminate the msg-id', () => {
+    expect(extractMessageIds('<"a>b"@example.test> <real@b.test>')).toEqual([
+      '<"a>b"@example.test>',
+      '<real@b.test>',
+    ])
+  })
+
+  it('a domain-literal containing > does not terminate the msg-id', () => {
+    expect(extractMessageIds('<left@[x>y.example]> <real@b.test>')).toEqual([
+      '<left@[x>y.example]>',
+      '<real@b.test>',
+    ])
+  })
+
+  it('an escaped quote inside a quoted id-left is honoured', () => {
+    expect(extractMessageIds('<"a\\">b"@example.test> <real@b.test>')).toEqual([
+      '<"a\\">b"@example.test>',
+      '<real@b.test>',
+    ])
+  })
 })

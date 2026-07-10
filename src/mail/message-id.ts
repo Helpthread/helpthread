@@ -11,9 +11,10 @@
  * (honouring nesting and `\` quoted-pairs) and returns only the top-level
  * `<...>` tokens, in order.
  *
- * Scope note: an exotic `msg-id` whose quoted `id-left` embeds a literal `>`
- * is not handled (we read `<` to the next `>`), but that form never occurs in
- * practice and never in tokens this engine mints. specs/mail/threading.md §3.
+ * The `<...>` scan is itself substructure-aware: a `>` inside a quoted
+ * `id-left` (`"..."`) or a domain-literal (`[...]`) does not terminate the
+ * msg-id (RFC 5322 §3.6.4 / §3.4.1), so `<"a>b"@x>` and `<l@[a>b]>` parse
+ * whole. specs/mail/threading.md §3.
  */
 export function extractMessageIds(headerValue: string): string[] {
   const ids: string[] = []
@@ -56,7 +57,33 @@ export function extractMessageIds(headerValue: string): string[] {
     }
 
     if (c === '<') {
-      const end = headerValue.indexOf('>', i)
+      // Scan to the terminating `>`, but a `>` inside a quoted id-left
+      // (`"..."`) or a domain-literal (`[...]`) does not count — honour those
+      // substructures and their `\` quoted-pairs.
+      let j = i + 1
+      let inQuote = false
+      let inDomainLiteral = false
+      let end = -1
+      while (j < n) {
+        const ch = headerValue[j]
+        if ((inQuote || inDomainLiteral) && ch === '\\') {
+          j += 2
+          continue
+        }
+        if (inQuote) {
+          if (ch === '"') inQuote = false
+        } else if (inDomainLiteral) {
+          if (ch === ']') inDomainLiteral = false
+        } else if (ch === '"') {
+          inQuote = true
+        } else if (ch === '[') {
+          inDomainLiteral = true
+        } else if (ch === '>') {
+          end = j
+          break
+        }
+        j += 1
+      }
       if (end === -1) break // unterminated msg-id — nothing more to extract
       ids.push(headerValue.slice(i, end + 1))
       i = end + 1
