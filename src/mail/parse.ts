@@ -143,15 +143,16 @@ export async function parseInboundEmail(
 }
 
 /**
- * Split a raw `References` header value into individual message-ids.
- * Message-ids are whitespace-separated per RFC 5322 §3.6.4; postal-mime
- * already unfolds continuation lines (merging them with an embedded `\n`
- * rather than collapsing to a space), so splitting on any run of
- * whitespace handles both same-line and folded references uniformly.
+ * Extract the individual message-ids from a raw `References` header value.
+ * A message-id is an angle-bracketed `<...>` token (RFC 5322 §3.6.4).
+ * We match those tokens directly rather than splitting on whitespace, so
+ * that CFWS/comments legally interspersed between ids (e.g.
+ * `References: (legacy MUA) <a@b> <c@d>`) don't leak in as bogus
+ * "message-ids". Order is preserved. This is threading-critical.
  */
 function parseReferences(references: string | undefined): string[] {
   if (!references) return []
-  return references.split(/\s+/).filter((id) => id.length > 0)
+  return references.match(/<[^>]+>/g) ?? []
 }
 
 /**
@@ -169,17 +170,23 @@ function parseDate(date: string | undefined): Date | null {
 /**
  * postal-mime's `Address` type is a union of a plain `Mailbox`
  * (`{name, address}`) and an RFC 5322 address GROUP
- * (`{name, group: Mailbox[]}`, no top-level `address`) — group syntax is
- * legal in `To`/`Cc`/`Bcc` (e.g. `undisclosed-recipients:;`) but not in
- * `From`. `ParsedAddress` has no group concept, so a bare group here (no
- * `address`) maps to `null` — this only matters for `From`, where a group
- * would be non-conformant mail anyway. `to`/`cc` use `toParsedAddressList`
- * below, which flattens groups into their member addresses instead of
- * dropping them.
+ * (`{name, group: Mailbox[]}`, no top-level `address`). Group syntax is
+ * common in `To`/`Cc` and — per RFC 6854 — also legal in `From`. Since
+ * `ParsedAddress` is a single flat mailbox, a group-form `From` maps to
+ * its FIRST member rather than being dropped to `null` (which would lose
+ * the sender). An empty group (no members) maps to `null`. `to`/`cc` use
+ * `toParsedAddressList`, which flattens every group member.
  */
 function toParsedAddress(addr: Address | undefined): ParsedAddress | null {
-  if (!addr?.address) return null
-  return addr.name ? { address: addr.address, name: addr.name } : { address: addr.address }
+  if (!addr) return null
+  if (addr.address) {
+    return addr.name ? { address: addr.address, name: addr.name } : { address: addr.address }
+  }
+  const first = addr.group?.[0]
+  if (first) {
+    return first.name ? { address: first.address, name: first.name } : { address: first.address }
+  }
+  return null
 }
 
 /**
@@ -217,7 +224,11 @@ function toParsedAddressList(addrs: Address[] | undefined): ParsedAddress[] {
  * `ParsedEmail` for the join convention.
  */
 function toHeaderRecord(headers: Header[]): Record<string, string> {
-  const record: Record<string, string> = {}
+  // Null-prototype: header names come from untrusted senders, so a header
+  // literally named `__proto__` or `constructor` must be stored as an
+  // ordinary own key, not mutate the object's prototype or read an
+  // inherited value. (Prototype-pollution hardening.)
+  const record: Record<string, string> = Object.create(null)
   for (const header of headers) {
     const key = header.key.toLowerCase()
     const existing = record[key]

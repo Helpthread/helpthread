@@ -250,4 +250,74 @@ describe('parseInboundEmail', () => {
     expect(parsed.subject).toBe('')
     expect(parsed.date).toBeNull()
   })
+
+  // CodeRabbit follow-up: References may contain CFWS/comments between ids;
+  // only the angle-bracketed message-ids should be extracted (threading-critical).
+  it('extracts only message-ids from a References header containing comments', async () => {
+    const raw = [
+      'From: alice@example.test',
+      'To: bob@example.test',
+      'Subject: Re: threaded',
+      'Message-ID: <reply-cfws@example.test>',
+      'In-Reply-To: <root@example.test>',
+      'References: (legacy MUA) <root@example.test> (added by relay) <mid@example.test>',
+      '',
+      'body',
+      '',
+    ].join('\n')
+
+    const parsed = await parseInboundEmail(raw)
+
+    expect(parsed.references).toEqual(['<root@example.test>', '<mid@example.test>'])
+    expect(parsed.inReplyTo).toBe('<root@example.test>')
+  })
+
+  // CodeRabbit follow-up (RFC 6854): group-form From must not drop the sender —
+  // it maps to the group's first member rather than null.
+  it('maps a group-form From to its first member instead of null', async () => {
+    const raw = [
+      'From: Automated Systems: alice@example.test, carol@example.test;',
+      'To: bob@example.test',
+      'Subject: Group From',
+      'Message-ID: <group-from@example.test>',
+      '',
+      'body',
+      '',
+    ].join('\n')
+
+    const parsed = await parseInboundEmail(raw)
+
+    expect(parsed.from).toEqual({ address: 'alice@example.test' })
+  })
+
+  // CodeRabbit follow-up: header names come from untrusted senders. A header
+  // literally named `__proto__` or `constructor` must be stored as an ordinary
+  // own key, not pollute the prototype or read an inherited value.
+  it('safely stores headers named like reserved object keys', async () => {
+    const raw = [
+      'From: alice@example.test',
+      'To: bob@example.test',
+      'Subject: Proto',
+      'Message-ID: <proto@example.test>',
+      '__proto__: injected-value',
+      'constructor: constructor-value',
+      '',
+      'body',
+      '',
+    ].join('\n')
+
+    const parsed = await parseInboundEmail(raw)
+
+    // Read via descriptor: `parsed.headers` is a null-prototype object, so
+    // '__proto__' here is an ordinary own key — but the bracket/dot accessor
+    // would trip the deprecated-__proto__ lint rule. The descriptor proves the
+    // own property exists with the injected value, with no prototype access.
+    expect(Object.getPrototypeOf(parsed.headers)).toBeNull()
+    expect(Object.getOwnPropertyDescriptor(parsed.headers, '__proto__')?.value).toBe(
+      'injected-value',
+    )
+    expect(Object.getOwnPropertyDescriptor(parsed.headers, 'constructor')?.value).toBe(
+      'constructor-value',
+    )
+  })
 })
