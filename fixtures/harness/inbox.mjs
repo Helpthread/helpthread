@@ -88,15 +88,20 @@ function parseRawMessage(source) {
 }
 
 /**
- * Search one mailbox for a message addressed to `toAddress` whose subject
- * contains `subjectContains`. Returns the parsed message for the most
- * recent match, or null.
+ * Search one mailbox for a message whose subject contains `subjectContains`.
+ * Returns the parsed message for the most recent match, or null.
+ *
+ * Deliberately does NOT filter on the To header: Gmail's SMTP submission
+ * rewrites plus-addressed From values to the canonical account address, so
+ * the helpdesk replies to the base address and a plus-tagged To filter never
+ * matches (learned the hard way in run 23ad1ec4). Run markers are unique per
+ * run+scenario, so subject-only matching is precise.
  */
 async function searchMailbox(client, path, toAddress, subjectContains) {
   const lock = await client.getMailboxLock(path);
   try {
     const uids = await client.search(
-      { to: toAddress, subject: subjectContains },
+      { subject: subjectContains },
       { uid: true },
     );
     if (!uids || uids.length === 0) return null;

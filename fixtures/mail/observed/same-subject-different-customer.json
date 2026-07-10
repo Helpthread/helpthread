@@ -1,7 +1,7 @@
 {
   "scenario": "same-subject-different-customer",
-  "title": "Different customer, identical subject to an existing conversation",
-  "expectation": "A new sender using the exact subject of an existing conversation may merge into it or create its own — observed, not assumed.",
+  "title": "Same customer, identical subject, no reference headers (intended different-customer — see correction)",
+  "expectation": "A second email reusing the exact subject of an existing conversation, with no reference headers, may merge or create its own conversation — observed, not assumed.",
   "runId": "23ad1ec4",
   "recordedAt": "2026-07-10T04:20:05.411Z",
   "sent": [
@@ -365,5 +365,8 @@
       ]
     }
   },
-  "notes": "Created its own conversation, distinct from scenario A's (id 14)."
+  "notes": [
+    "Created its own conversation, distinct from scenario A's (id 14).",
+    "CORRECTION (post-run): the run intended a DIFFERENT customer via a plus-addressed From, but Gmail SMTP rewrites plus-addressed From values to the canonical account address, so the sender was the SAME customer as the original conversation. Observation stands and is arguably stronger: even the same customer with an identical subject and no reference headers produced a SEPARATE conversation — threading does not use subject or customer identity. A true different-customer variant needs a distinct sending identity (send-as alias or second account)."
+  ]
 }
