@@ -56,7 +56,7 @@
  * call — see its doc comment for the concurrency reasoning.
  */
 
-import type { Db, Queryable } from '../db/client.js'
+import type { Db, Queryable, SqlValue } from '../db/client.js'
 
 /** One message to be persisted as a new thread — inbound customer mail, or outbound agent/assistant mail. */
 export interface NewThread {
@@ -164,9 +164,18 @@ export interface ConversationStore {
    * (`created_at, id` — the `id` tiebreak makes ordering stable even for
    * threads inserted within the same timestamp tick). Returns `null` if no
    * conversation exists with that id.
+   *
+   * `options.includeDeleted` defaults to `true` (the row is returned whatever
+   * its status). Pass `false` on a public read path (the Agent Inbox API):
+   * a `deleted` conversation then returns `null` — decided by the
+   * conversation lookup itself, BEFORE any threads are loaded — so a deleted
+   * id is indistinguishable from a nonexistent one not just in the response
+   * body but in the work done (no thread-count-dependent latency signal;
+   * specs/api/agent-inbox-v1.md §5 "no existence leak").
    */
   getConversation(
     conversationId: string,
+    options?: { includeDeleted?: boolean },
   ): Promise<(StoredConversation & { threads: StoredThread[] }) | null>
 
   /**
@@ -178,6 +187,84 @@ export interface ConversationStore {
    * and the row was already durably persisted before the send was attempted.
    */
   setThreadDeliveryStatus(threadId: string, status: 'pending' | 'sent' | 'failed'): Promise<void>
+
+  /**
+   * List conversation summaries for the agent inbox — the read path behind
+   * `GET /api/v1/conversations` (specs/api/agent-inbox-v1.md §3a). Ordered
+   * `updated_at DESC, id DESC` (most-recently-active first, `id` as a
+   * stable tiebreak for rows updated in the same instant — the same
+   * stable-tiebreak pattern {@link getConversation} uses for threads). A
+   * `deleted` conversation is NEVER returned, regardless of
+   * `options.status` — see {@link ListConversationsOptions.status}.
+   *
+   * Returns exactly `options.limit` rows (or fewer, at the end of the
+   * result set) — this method does no over-fetching of its own. Detecting
+   * "is there a next page" by asking for `limit + 1` is the HTTP layer's
+   * job (`src/api/conversations.ts`), which knows about `nextCursor`; this
+   * store method only knows how to fetch a page.
+   */
+  listConversations(options: ListConversationsOptions): Promise<ConversationSummary[]>
+}
+
+/**
+ * Correlated subquery for a conversation's thread count, cast to `::int` so
+ * PGlite/`pg` hand back a plain JS `number` rather than a `bigint`-shaped
+ * string (Postgres's `count()` aggregate returns `bigint` by default,
+ * which node-postgres-family drivers serialize as a string specifically to
+ * avoid silently truncating a value bigger than `Number.MAX_SAFE_INTEGER`;
+ * a per-conversation thread count will never approach that, so the `::int`
+ * cast is safe and keeps the mapped {@link ConversationSummary} shape a
+ * plain `number` like every other count in this codebase, e.g. the
+ * `count(*)::int` precedent in `conversations.test.ts`).
+ */
+const THREAD_COUNT_SUBQUERY =
+  '(SELECT count(*) FROM threads t WHERE t.conversation_id = c.id)::int AS thread_count'
+
+/**
+ * A conversation summary as read back for the inbox list — the same
+ * conversation fields as {@link StoredConversation} minus the internal
+ * `deleted` status (never surfaced, per spec §3a) plus `threadCount`, a
+ * count that would otherwise cost every list consumer a second round trip.
+ * This is the store-layer shape `src/api/conversations.ts`'s list handler
+ * serializes to the wire `ConversationSummary` (specs/api/agent-inbox-v1.md
+ * §2) with `Date` → ISO string.
+ */
+export interface ConversationSummary {
+  id: string
+  subject: string
+  customerEmail: string
+  status: 'open' | 'closed'
+  threadCount: number
+  createdAt: Date
+  updatedAt: Date
+}
+
+/**
+ * A keyset pagination cursor: the `(updatedAt, id)` of the last row a
+ * previous page returned. Paired with {@link ListConversationsOptions.status}
+ * and the ordering `listConversations` commits to (`updated_at DESC, id
+ * DESC`), this lets the next page ask for rows strictly AFTER this position
+ * without an OFFSET — correct even if conversations are inserted/updated
+ * between page fetches, which an offset-based scheme would skip or
+ * duplicate under (specs/api/agent-inbox-v1.md §3a).
+ */
+export interface ConversationListCursor {
+  updatedAt: Date
+  id: string
+}
+
+/** Input to {@link ConversationStore.listConversations}. */
+export interface ListConversationsOptions {
+  /**
+   * When given, filter to exactly this status. When omitted, return every
+   * conversation EXCEPT `deleted` — there is no filter value that returns
+   * deleted rows; they are never surfaced by this call (spec §3a).
+   */
+  status?: 'open' | 'closed'
+  /** Exact row count to fetch — callers (the HTTP layer) decide over-fetch-by-one for pagination detection themselves. */
+  limit: number
+  /** Keyset cursor: return rows ordered strictly after this position. Omit for the first page. */
+  cursor?: ConversationListCursor
 }
 
 /** Raw `conversations` row shape, before mapping to {@link StoredConversation}. */
@@ -188,6 +275,18 @@ interface ConversationRow {
   status: string
   created_at: Date | string
   updated_at: Date | string
+}
+
+/**
+ * Raw row shape for {@link createConversationStore}'s `listConversations`
+ * query — a conversation row plus its correlated `thread_count`. Cast to
+ * `::int` in the query itself (see `THREAD_COUNT_SUBQUERY`), and PGlite
+ * (verified against the installed 0.5.4) returns Postgres `int4` as a plain
+ * JS `number`, matching the existing `count(*)::int` precedent in
+ * `conversations.test.ts`.
+ */
+interface ConversationSummaryRow extends ConversationRow {
+  thread_count: number
 }
 
 /** Raw `threads` row shape, before mapping to {@link StoredThread}. */
@@ -262,9 +361,15 @@ export function createConversationStore(db: Db): ConversationStore {
       })
     },
 
-    async getConversation(conversationId) {
+    async getConversation(conversationId, options) {
+      const includeDeleted = options?.includeDeleted ?? true
+      // When excluding deleted, filter in the CONVERSATION lookup so a deleted
+      // row short-circuits to null here, before the threads query runs — no
+      // work is done proportional to a deleted conversation's size.
       const conversationRows = await db.query<ConversationRow>(
-        'SELECT id, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1',
+        includeDeleted
+          ? 'SELECT id, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1'
+          : "SELECT id, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
         [conversationId],
       )
       const conversationRow = conversationRows[0]
@@ -299,6 +404,51 @@ export function createConversationStore(db: Db): ConversationStore {
           `setThreadDeliveryStatus: no outbound thread with id ${threadId} (wrong id, an inbound thread, or the row was deleted)`,
         )
       }
+    },
+
+    async listConversations(options) {
+      // Built up as parameterized fragments — never string-interpolated
+      // values, only structure (which fragment appears) is decided in JS.
+      // See src/db/client.ts's module doc: parameterization is not optional.
+      const conditions: string[] = []
+      const params: SqlValue[] = []
+
+      if (options.status !== undefined) {
+        params.push(options.status)
+        conditions.push(`c.status = $${params.length}`)
+      } else {
+        // No explicit filter: every status EXCEPT deleted. A `'deleted'`
+        // conversation is never returned by any call to this method,
+        // filtered or not (spec §3a) — this is the "not filtered" branch of
+        // that rule, not an oversight.
+        conditions.push("c.status <> 'deleted'")
+      }
+
+      if (options.cursor !== undefined) {
+        // Postgres row-value comparison: `(a, b) < (x, y)` compares `a` to
+        // `x` first and only consults `b`/`y` on a tie — exactly the
+        // "updated_at DESC, id DESC" ordering this method commits to, in
+        // one expression rather than a hand-rolled `a < x OR (a = x AND b <
+        // y)`. Verified against PGlite's bundled Postgres 18, which
+        // supports row-value comparison natively (a long-standing core
+        // Postgres feature, not a version-specific behavior).
+        params.push(options.cursor.updatedAt, options.cursor.id)
+        conditions.push(`(c.updated_at, c.id) < ($${params.length - 1}, $${params.length})`)
+      }
+
+      params.push(options.limit)
+      const limitParam = params.length
+
+      const rows = await db.query<ConversationSummaryRow>(
+        `SELECT c.id, c.subject, c.customer_email, c.status, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}
+         FROM conversations c
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY c.updated_at DESC, c.id DESC
+         LIMIT $${limitParam}`,
+        params,
+      )
+
+      return rows.map(toConversationSummary)
     },
   }
 }
@@ -387,6 +537,26 @@ function toStoredConversation(row: ConversationRow): StoredConversation {
     subject: row.subject,
     customerEmail: row.customer_email,
     status: row.status as StoredConversation['status'],
+    createdAt: toDate(row.created_at),
+    updatedAt: toDate(row.updated_at),
+  }
+}
+
+/**
+ * Map a {@link ConversationSummaryRow} to the wire-adjacent
+ * {@link ConversationSummary} shape. The `status` cast is safe on the same
+ * grounds as {@link toStoredConversation}'s: `listConversations`'s own WHERE
+ * clause (see above) never lets a `'deleted'` row reach this mapper, so the
+ * narrower `'open' | 'closed'` union always holds in practice even though
+ * the column itself is untyped `text` at the SQL level.
+ */
+function toConversationSummary(row: ConversationSummaryRow): ConversationSummary {
+  return {
+    id: row.id,
+    subject: row.subject,
+    customerEmail: row.customer_email,
+    status: row.status as ConversationSummary['status'],
+    threadCount: row.thread_count,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
   }

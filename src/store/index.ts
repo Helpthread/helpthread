@@ -6,7 +6,10 @@
 
 export type {
   AppendResult,
+  ConversationListCursor,
   ConversationStore,
+  ConversationSummary,
+  ListConversationsOptions,
   NewConversation,
   NewThread,
   StoredConversation,
