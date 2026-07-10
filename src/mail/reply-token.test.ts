@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assertValidKeyring,
+  isReplyTokenShaped,
   type Keyring,
   mintReplyMessageId,
   type SigningKey,
@@ -383,6 +384,35 @@ describe('keyring validation', () => {
     // Deliberately malformed config (simulating an untyped source / bad JSON).
     const ring = { current: KEY_A, retired: {} as unknown as SigningKey[] }
     expect(() => assertValidKeyring(ring)).toThrow(/retired/)
+  })
+})
+
+// --- isReplyTokenShaped: structural check, no signature verification ------
+
+describe('isReplyTokenShaped', () => {
+  it('a genuine, verifiable token → true', () => {
+    const id = mintReplyMessageId(PAYLOAD, ringA)
+    expect(isReplyTokenShaped(id)).toBe(true)
+  })
+
+  it('a shaped-but-forged token (tampered sig) → still true (shape only, no sig check)', () => {
+    const id = mintReplyMessageId(PAYLOAD, ringA)
+    const { parts, domain } = segments(id)
+    parts[4] = flipChar(parts[4], 0)
+    const forged = reassemble(parts, domain)
+    expect(isReplyTokenShaped(forged)).toBe(true)
+    expect(verifyReplyMessageId(forged, ringA)).toBeNull()
+  })
+
+  it('a Gmail-style Message-ID → false', () => {
+    expect(isReplyTokenShaped('<CABc123def456ghi789jkl0mn=someone@mail.gmail.com>')).toBe(false)
+  })
+
+  it('junk / non-token strings → false', () => {
+    expect(isReplyTokenShaped('not-a-message-id')).toBe(false)
+    expect(isReplyTokenShaped('')).toBe(false)
+    expect(isReplyTokenShaped('<>')).toBe(false)
+    expect(isReplyTokenShaped('<ht.k1.c42.t7@mail.example.test>')).toBe(false) // 4 segments
   })
 })
 

@@ -17,6 +17,7 @@
  */
 
 import PostalMime, { type Address, type Attachment, type Header } from 'postal-mime'
+import { extractMessageIds } from './message-id.js'
 
 /** A single email address, decoded. */
 export interface ParsedAddress {
@@ -143,16 +144,16 @@ export async function parseInboundEmail(
 }
 
 /**
- * Extract the individual message-ids from a raw `References` header value.
- * A message-id is an angle-bracketed `<...>` token (RFC 5322 §3.6.4).
- * We match those tokens directly rather than splitting on whitespace, so
- * that CFWS/comments legally interspersed between ids (e.g.
- * `References: (legacy MUA) <a@b> <c@d>`) don't leak in as bogus
- * "message-ids". Order is preserved. This is threading-critical.
+ * Extract the individual message-ids from a raw `References` header value via
+ * the shared RFC 5322-aware {@link extractMessageIds} — comments (`(...)`) and
+ * quoted strings are skipped, so an angle-bracketed token interspersed as
+ * `References: (legacy MUA) <a@b> <c@d>` yields exactly `[<a@b>, <c@d>]`, and a
+ * `<...>` planted inside a comment is not mistaken for a real id. Order is
+ * preserved. This is threading-critical.
  */
 function parseReferences(references: string | undefined): string[] {
   if (!references) return []
-  return references.match(/<[^>]+>/g) ?? []
+  return extractMessageIds(references)
 }
 
 /**

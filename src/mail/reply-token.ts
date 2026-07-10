@@ -217,6 +217,26 @@ export function verifyReplyMessageId(
   return null
 }
 
+/**
+ * Structurally test whether `messageId` is shaped like one of our tokens —
+ * the right `<ht.{keyId}.{conversationId}.{threadId}.{sig}@{domain}>` five-
+ * segment form — WITHOUT verifying the signature.
+ *
+ * This is what lets the threading decision (specs/mail/threading.md §3 rule
+ * 3) distinguish two very different kinds of "not a valid token":
+ * - shaped-but-invalid: a token of ours that failed verification (forged or
+ *   tampered) — a security-relevant event worth counting.
+ * - not shaped at all: not our token to begin with (e.g. a Gmail
+ *   Message-ID) — inert, not evidence of anything.
+ *
+ * Implemented by reusing the same structural parser {@link verifyReplyMessageId}
+ * verifies against, so the two functions can never disagree on what counts as
+ * "shaped like ours". TOTAL: never throws, for any string input.
+ */
+export function isReplyTokenShaped(messageId: string): boolean {
+  return parseToken(messageId) !== null
+}
+
 /** A token's segments after structural parsing, before signature verification. */
 interface ParsedToken {
   keyId: string
