@@ -7,14 +7,14 @@ shaped for a FreeScout-consumer cutover that no longer applies — see the proje
 
 ## 1. Purpose
 
-This is the **agent side**: the surface an agent (today, a single operator) uses to work
+This is the **Agent side**: the surface an Agent (today, a single operator) uses to work
 the inbox — see what has come in, read a conversation, and act on it. It is the API under
-the eventual agent inbox UI (API-first, CHARTER.md §2), and the loop Helpthread is
-dogfooded through: mail lands → agent sees it → agent replies.
+the eventual Agent inbox UI (API-first, CHARTER.md §2), and the loop Helpthread is
+dogfooded through: mail lands → Agent sees it → Agent replies.
 
-v1 is deliberately single-agent: there is no assignment, no per-agent identity, no teams.
+v1 is deliberately single-Agent: there is no assignment, no per-Agent identity, no teams.
 The Bearer token authenticates *the deployment's one operator*, not a user among many.
-Multi-agent identity is a later increment, added when there is a second agent.
+Multi-Agent identity is a later increment, added when there is a second Agent.
 
 This document covers the whole v1 surface; **HT-17 implements §3's read paths and all of
 the conventions below; HT-18 implements §4's write paths.**
@@ -43,7 +43,7 @@ interface ConversationDetail extends ConversationSummary {
 
 interface ThreadView {
   id: string                 // uuid
-  direction: 'inbound' | 'outbound'   // inbound = from the customer; outbound = the agent's sent reply
+  direction: 'inbound' | 'outbound'   // inbound = from the customer; outbound = the Agent's sent reply
   from: string               // the message's From address
   bodyText: string | null
   bodyHtml: string | null    // ⚠ UNTRUSTED, UNSANITIZED — see §5
@@ -112,7 +112,7 @@ is indistinguishable from a nonexistent one to this API, on purpose).
 
 ## 4. Write paths (HT-18 — specified here so reads and writes share one contract)
 
-- **`POST /api/v1/conversations/{id}/replies`** — the agent posts a reply. Body:
+- **`POST /api/v1/conversations/{id}/replies`** — the Agent posts a reply. Body:
   `{ text: string; html?: string }` (text 1–5000 chars, server-enforced). Calls
   `sendReply` (`src/mail/send.ts`): mints the reply token, persists the outbound thread,
   sends. Returns `201` with the created `ThreadView`. A reply to a `closed` conversation
@@ -126,7 +126,7 @@ is indistinguishable from a nonexistent one to this API, on purpose).
 - **`bodyHtml` is untrusted and unsanitized.** The parser stores inbound HTML verbatim,
   `<script>` and all (specs/mail/threading.md §5; a fixture confirmed a stored `<script>`).
   This API returns it as-is — which is safe as JSON, but **any UI that renders it MUST
-  sanitize first** (e.g. DOMPurify), or it is a stored-XSS vector against the agent. This
+  sanitize first** (e.g. DOMPurify), or it is a stored-XSS vector against the Agent. This
   contract MUST carry to the inbox-UI increment; a server-side sanitized variant is a
   candidate hardening. Flagged, not solved, here.
 - **No existence leak.** Not-found and not-authorized are distinct status codes (404 vs
@@ -137,7 +137,7 @@ is indistinguishable from a nonexistent one to this API, on purpose).
 
 ## 6. What v1 is NOT
 
-- No multi-agent identity, assignment, teams, or per-user authorization.
+- No multi-Agent identity, assignment, teams, or per-user authorization.
 - No customer-side / self-service surface (a separate future API, designed native when
   there are customers to serve).
 - No internal notes, no mailbox management, no search, no realtime, no webhooks-out.

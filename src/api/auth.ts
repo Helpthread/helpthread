@@ -3,8 +3,8 @@
  * (specs/api/agent-inbox-v1.md §3, §5).
  *
  * v1 has exactly one credential: a single service token
- * (`HELPTHREAD_API_TOKEN`) that authenticates the deployment's one operator
- * — there is no per-agent identity yet (spec §1). Every request must carry
+ * (`HELPTHREAD_API_TOKEN`) that authenticates the deployment's one Agent
+ * — there is no per-Agent identity yet (spec §1). Every request must carry
  * `Authorization: Bearer <token>` matching it.
  *
  * The comparison mirrors `src/mail/reply-token.ts`'s constant-time pattern

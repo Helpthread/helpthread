@@ -4,8 +4,17 @@
  * §6: "handlers are `Request → Response`; a Vercel/Next adapter is a thin
  * deploy-time wrapper, not part of this spec"). No Next.js import anywhere
  * in `src/api/**` — only the web-standard `Request`/`Response` globals, so
- * this same function can sit behind a Vercel Edge Function, a plain Node
- * HTTP server, or a test harness's direct call, unchanged.
+ * this same function can sit behind a Vercel (Node-runtime) Function, a plain
+ * Node HTTP server, or a test harness's direct call, unchanged.
+ *
+ * Runtime: this targets the Node.js runtime, NOT Vercel's Edge runtime. That
+ * is not a limitation introduced by `auth.ts`'s `node:crypto` import — the
+ * engine's core already requires `node:crypto` (the HMAC reply tokens in
+ * `src/mail/reply-token.ts` use `createHmac`, which has no synchronous Web
+ * Crypto equivalent), so the whole engine is Node-bound regardless. The
+ * framework-agnostic `Request`/`Response` shape keeps it portable across
+ * Node hosts (Vercel Node Functions, a bare Node server, tests) — just not
+ * the Edge runtime, which lacks `node:crypto`.
  *
  * ## Pipeline (every request, in this exact order)
  *
