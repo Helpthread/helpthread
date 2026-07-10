@@ -6,8 +6,8 @@
     {
       "subject": "Completely unrelated subject [HT7-23ad1ec4x-token-authority]",
       "headers": {
-        "In-Reply-To": "<FS_reply-36-8aefc3079fafdbb9@helpdesk.example.test>",
-        "References": "<FS_reply-36-8aefc3079fafdbb9@helpdesk.example.test>"
+        "In-Reply-To": "<FS_reply-36-1111111111111111@helpdesk.example.test>",
+        "References": "<FS_reply-36-1111111111111111@helpdesk.example.test>"
       }
     }
   ],

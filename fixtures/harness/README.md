@@ -79,10 +79,14 @@ scenario.
 
 ## Safety rules (enforced in code, not just convention)
 
-- **Marker-scoped everything.** Every scenario embeds a unique
-  `[HT7-<runId>-<scenarioId>]` marker in every subject it sends. All reads
-  (`listConversations`, `pollForConversation`) filter strictly by that
-  marker, so a run can never observe a conversation it didn't create.
+- **Run-scoped marker isolation.** Every subject the harness sends carries a
+  `[HT7-<runId>-...]` marker, and all reads (`listConversations`,
+  `pollForConversation`) filter strictly by it, so **a run can never observe a
+  conversation from a different run** — the `runId` (from `crypto.randomBytes`)
+  is the isolation boundary. One deliberate exception within a single run:
+  `same-subject-different-customer` reuses the `new-conversation` scenario's
+  exact subject on purpose, so it may observe both same-run conversations that
+  share that subject. Isolation is per *run*, not always per *scenario*.
 - **Marker-gated mutation.** `postAgentReply` (the harness's only write
   against the live helpdesk) fetches the target conversation first and
   refuses to post unless the conversation's subject contains the caller's

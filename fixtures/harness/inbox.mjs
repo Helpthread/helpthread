@@ -143,16 +143,20 @@ export async function waitForMessage({
   let allMailPath = null;
 
   while (Date.now() < deadline) {
-    const client = await openClient();
+    let client;
     try {
+      client = await openClient();
       const found = await searchMailbox(client, 'INBOX', toAddress, subjectContains);
       if (found) return found;
 
       allMailPath ??= await resolveAllMailPath(client);
       const foundAllMail = await searchMailbox(client, allMailPath, toAddress, subjectContains);
       if (foundAllMail) return foundAllMail;
+    } catch {
+      // Transient connect/auth/search failure (network blip, Gmail throttling):
+      // keep polling until the deadline rather than aborting the whole wait.
     } finally {
-      await client.logout().catch(() => {});
+      await client?.logout().catch(() => {});
     }
 
     const remaining = deadline - Date.now();

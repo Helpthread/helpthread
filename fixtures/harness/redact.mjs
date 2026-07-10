@@ -115,7 +115,25 @@ export function redact(value, { smtpUser, helpdeskAddr, identityNames = [] }) {
     .filter(Boolean)
     .map((name) => ({ pattern: new RegExp(escapeRegExp(name), 'g'), replace: 'Redacted Person' }));
 
+  // Reply tokens are a routing capability, not just an identifier: the token
+  // body can be replayed to append mail to a conversation, so the whole token
+  // (not just its domain) is replaced with a deterministic fake that preserves
+  // the observable format. A running counter keeps the real-vs-forged
+  // distinction that the fixtures rely on.
+  let tokenSeq = 0;
+  const tokenMap = new Map();
+  const tokenRule = {
+    pattern: /FS_reply-(\d+)-[0-9a-f]+/gi,
+    replace: (match, threadId) => {
+      if (!tokenMap.has(match)) {
+        tokenMap.set(match, `FS_reply-${threadId}-${String(++tokenSeq).padStart(16, '0')}`);
+      }
+      return tokenMap.get(match);
+    },
+  };
+
   const rules = [
+    tokenRule,
     ...buildAddressRules({ address: smtpUser, kind: 'customer' }),
     ...buildAddressRules({ address: helpdeskAddr, kind: 'helpdesk' }),
     ...buildDomainRules(helpdeskAddr, smtpUser),
@@ -132,6 +150,12 @@ export function redact(value, { smtpUser, helpdeskAddr, identityNames = [] }) {
       for (const [key, val] of Object.entries(node)) {
         if (isPerson && IDENTITY_FIELD_REPLACERS[key]) {
           out[key] = val == null ? val : IDENTITY_FIELD_REPLACERS[key]();
+        } else if (isPerson && key === 'email' && typeof val === 'string') {
+          // Run the string rules first; if a person's email still isn't a
+          // fake example.test address, it escaped the configured domains —
+          // replace it wholesale rather than leak a real address.
+          const scrubbed = redactString(val, rules);
+          out[key] = scrubbed.endsWith('.example.test') ? scrubbed : 'person@example.test';
         } else {
           out[key] = walk(val);
         }

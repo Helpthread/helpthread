@@ -9,16 +9,16 @@
       "step": "customer-reply",
       "subject": "Re: Harness reply-with-reference [HT7-23ad1ec4-reply-with-reference]",
       "headers": {
-        "In-Reply-To": "<FS_reply-36-8aefc3079fafdbb9@helpdesk.example.test>",
-        "References": "<FS_reply-36-8aefc3079fafdbb9@helpdesk.example.test>"
+        "In-Reply-To": "<FS_reply-36-1111111111111111@helpdesk.example.test>",
+        "References": "<FS_reply-36-1111111111111111@helpdesk.example.test>"
       }
     }
   ],
   "observed": {
     "agentReplyEmail": {
-      "messageId": "<FS_reply-36-8aefc3079fafdbb9@helpdesk.example.test>",
+      "messageId": "<FS_reply-36-1111111111111111@helpdesk.example.test>",
       "inReplyTo": "<25454420-276e-5396-0d3e-d846bdafe662@example.test>",
-      "references": "<25454420-276e-5396-0d3e-d846bdafe662@example.test> <FS_reply-31-9cbef04c5307d744@helpdesk.example.test>",
+      "references": "<25454420-276e-5396-0d3e-d846bdafe662@example.test> <FS_reply-31-2222222222222222@helpdesk.example.test>",
       "subject": "Re: Harness reply-with-reference [HT7-23ad1ec4-reply-with-reference]"
     },
     "conversation": {

@@ -61,13 +61,20 @@ export function loadEnv() {
     );
   }
 
+  const fsUserId = Number(process.env.HARNESS_FS_USER_ID ?? OPTIONAL_DEFAULTS.HARNESS_FS_USER_ID);
+  if (!Number.isInteger(fsUserId) || fsUserId <= 0) {
+    throw new Error(
+      `harness: HARNESS_FS_USER_ID must be a positive integer, got "${process.env.HARNESS_FS_USER_ID}"`,
+    );
+  }
+
   const config = {
     smtpUser: process.env.HARNESS_SMTP_USER,
     smtpPass: process.env.HARNESS_SMTP_PASS,
     helpdeskAddr: process.env.HARNESS_HELPDESK_ADDR,
     fsBaseUrl: process.env.HARNESS_FS_BASE_URL.replace(/\/+$/, ''),
     fsApiKey: process.env.HARNESS_FS_API_KEY,
-    fsUserId: Number(process.env.HARNESS_FS_USER_ID ?? OPTIONAL_DEFAULTS.HARNESS_FS_USER_ID),
+    fsUserId,
   };
 
   cached = config;
