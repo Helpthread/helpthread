@@ -30,13 +30,13 @@ export interface BlobStore {
     key: string,
     data: Uint8Array,
     opts: { contentType: string; contentLength?: number },
-  ): Promise<void>;
+  ): Promise<void>
 
   /**
    * Read the full contents of the object at `key`. Rejects if no object
    * exists at that key.
    */
-  get(key: string): Promise<Uint8Array>;
+  get(key: string): Promise<Uint8Array>
 
   /**
    * Mint a time-limited, signed URL for reading the object at `key`. The
@@ -45,14 +45,14 @@ export interface BlobStore {
    * browser rendering an attachment) ever read blob contents — attachments
    * are served via signed URLs, never a public path.
    */
-  getSignedUrl(key: string, expiresInSeconds: number): Promise<string>;
+  getSignedUrl(key: string, expiresInSeconds: number): Promise<string>
 
   /**
    * Delete the object at `key`. Deleting a key that does not exist is a
    * no-op, not an error.
    */
-  delete(key: string): Promise<void>;
+  delete(key: string): Promise<void>
 
   /** Whether an object currently exists at `key`. */
-  exists(key: string): Promise<boolean>;
+  exists(key: string): Promise<boolean>
 }

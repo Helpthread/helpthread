@@ -4,20 +4,17 @@
  * provider file directly, and never from a platform SDK.
  */
 
+export type { BlobStore } from './blob.js'
 export type {
-  EnqueueOptions,
-  QueueMessage,
-  QueueHandlerResult,
-  QueueMessageHandler,
-  QueueProvider,
-} from "./queue";
-
-export type { HandlerRef, SchedulerProvider } from "./scheduler";
-
-export type { BlobStore } from "./blob";
-
-export type {
+  InboundEmailProvider,
   NormalizedInboundAttachment,
   NormalizedInboundEmail,
-  InboundEmailProvider,
-} from "./inbound-email";
+} from './inbound-email.js'
+export type {
+  EnqueueOptions,
+  QueueHandlerResult,
+  QueueMessage,
+  QueueMessageHandler,
+  QueueProvider,
+} from './queue.js'
+export type { HandlerRef, SchedulerProvider } from './scheduler.js'

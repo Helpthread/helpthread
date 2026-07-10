@@ -13,10 +13,10 @@
 
 /** A normalized attachment reference. Bytes live in the `BlobStore`, not inline. */
 export interface NormalizedInboundAttachment {
-  filename: string;
-  contentType: string;
+  filename: string
+  contentType: string
   /** Size in bytes. */
-  size: number;
+  size: number
   /**
    * Key into a `BlobStore` where the attachment's bytes have already been
    * written by the provider adapter. Attachments are never carried inline
@@ -25,7 +25,7 @@ export interface NormalizedInboundAttachment {
    * namespaced key, per `BlobStore`'s key-namespacing contract) before
    * producing this reference.
    */
-  contentRef: string;
+  contentRef: string
 }
 
 /**
@@ -42,27 +42,27 @@ export interface NormalizedInboundAttachment {
  */
 export interface NormalizedInboundEmail {
   /** The `Message-ID` of the inbound message, as received. */
-  messageId: string;
+  messageId: string
 
   /** The `In-Reply-To` header, if present, verbatim. */
-  inReplyTo?: string;
+  inReplyTo?: string
 
   /** The `References` header, split into individual message-ids, verbatim order preserved. */
-  references: string[];
+  references: string[]
 
-  from: string;
-  to: string[];
-  cc: string[];
-  subject: string;
+  from: string
+  to: string[]
+  cc: string[]
+  subject: string
 
   /** When the provider recorded/delivered the message (not a header-parsed date). */
-  receivedAt: Date;
+  receivedAt: Date
 
   /** Plain-text body, if the message provided one. */
-  text?: string;
+  text?: string
 
   /** HTML body, if the message provided one. */
-  html?: string;
+  html?: string
 
   /**
    * Raw headers as received, lower-cased keys, for any header the engine
@@ -71,9 +71,9 @@ export interface NormalizedInboundEmail {
    * exact multi-value semantics should not rely on this bag for those
    * headers.
    */
-  headers: Record<string, string>;
+  headers: Record<string, string>
 
-  attachments: NormalizedInboundAttachment[];
+  attachments: NormalizedInboundAttachment[]
 }
 
 /**
@@ -95,7 +95,7 @@ export interface InboundEmailProvider {
    * Adapters whose check is purely synchronous simply return a resolved
    * promise.
    */
-  verifySignature(request: Request): Promise<boolean>;
+  verifySignature(request: Request): Promise<boolean>
 
   /**
    * Parse and normalize one webhook delivery into a
@@ -105,5 +105,5 @@ export interface InboundEmailProvider {
    * this resolves, so the returned attachments carry `contentRef`s rather
    * than inline bytes.
    */
-  parseWebhook(request: Request): Promise<NormalizedInboundEmail>;
+  parseWebhook(request: Request): Promise<NormalizedInboundEmail>
 }
