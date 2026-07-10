@@ -1,0 +1,18 @@
+{
+  "name": "helpthread",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Helpthread — open-source serverless helpdesk engine (AGPL-3.0 core, Resonant IQ, Inc.)",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "fixtures:run": "node fixtures/harness/run.mjs"
+  },
+  "devDependencies": {
+    "imapflow": "^1.4.6",
+    "nodemailer": "^9.0.3"
+  }
+}
