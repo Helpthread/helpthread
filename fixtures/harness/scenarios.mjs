@@ -98,8 +98,10 @@ async function runReplyWithReference(ctx) {
     subject: replySubject,
     text: `Sure — here's more detail. ${marker}`,
     headers: {
-      'In-Reply-To': outboundAgentReply.messageId,
-      References: referencesHeader,
+      // Guard against a null messageId (inbox parser fallback) becoming the
+      // literal string "null" in the header and corrupting the threading probe.
+      ...(outboundAgentReply.messageId ? { 'In-Reply-To': outboundAgentReply.messageId } : {}),
+      ...(referencesHeader ? { References: referencesHeader } : {}),
     },
   });
 
@@ -228,9 +230,16 @@ async function runSameSubjectDifferentCustomer(ctx) {
   // since scenarios run sequentially and new-conversation runs first.
   const before = await ctx.api.listConversations({ subjectContains: sharedMarker });
   const priorConversationId = before[0]?.id ?? null;
-  const priorThreadCount = priorConversationId
-    ? (await ctx.api.getConversation(priorConversationId)).threads?.length ?? 0
-    : 0;
+  // This scenario reuses new-conversation's subject and depends on it having
+  // run first this session. Run standalone via --only, `before` is empty and
+  // the result would trivially (and misleadingly) read 'own-conversation'.
+  if (!priorConversationId) {
+    throw new Error(
+      'same-subject-different-customer requires new-conversation to have run first this session — run the full suite, not --only for this scenario alone',
+    );
+  }
+  const priorThreadCount =
+    (await ctx.api.getConversation(priorConversationId)).threads?.length ?? 0;
 
   const sentInitial = await ctx.send({
     fromTag: tag,

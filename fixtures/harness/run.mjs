@@ -35,9 +35,15 @@ function parseArgs(argv) {
   let dryRun = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--only') {
-      only = argv[++i];
+      const value = argv[++i];
+      if (!value || value.startsWith('--')) {
+        throw new Error('--only requires a scenario id (e.g. --only reply-with-reference)');
+      }
+      only = value;
     } else if (argv[i] === '--dry-run') {
       dryRun = true;
+    } else {
+      throw new Error(`unknown option "${argv[i]}"`);
     }
   }
   return { only, dryRun };
@@ -178,7 +184,11 @@ async function main() {
       const result = await scenario.run(ctx);
       const redacted = redact(
         { sent: result.sent, observed: result.observed, notes: result.notes },
-        { smtpUser: envConfig.smtpUser, helpdeskAddr: envConfig.helpdeskAddr },
+        {
+          smtpUser: envConfig.smtpUser,
+          helpdeskAddr: envConfig.helpdeskAddr,
+          identityNames: envConfig.identityNames,
+        },
       );
       payload = {
         scenario: scenario.id,
@@ -204,9 +214,16 @@ async function main() {
           outcome: 'timeout-or-error',
           error: err.message,
         },
-        { smtpUser: envConfig.smtpUser, helpdeskAddr: envConfig.helpdeskAddr },
+        {
+          smtpUser: envConfig.smtpUser,
+          helpdeskAddr: envConfig.helpdeskAddr,
+          identityNames: envConfig.identityNames,
+        },
       );
-      console.error(`[harness] ${scenario.id} FAILED after ${Date.now() - startedAt}ms: ${err.message}`);
+      // Log the REDACTED error, never the raw err.message — timeout messages
+      // can carry real addresses, and this reaches terminals/CI logs.
+      console.error(`[harness] ${scenario.id} FAILED after ${Date.now() - startedAt}ms: ${payload.error}`);
+      process.exitCode = 1;
     }
 
     const file = await writeFixture(scenario.id, payload);

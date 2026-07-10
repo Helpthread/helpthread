@@ -155,7 +155,10 @@ export function redact(value, { smtpUser, helpdeskAddr, identityNames = [] }) {
           // fake example.test address, it escaped the configured domains —
           // replace it wholesale rather than leak a real address.
           const scrubbed = redactString(val, rules);
-          out[key] = scrubbed.endsWith('.example.test') ? scrubbed : 'person@example.test';
+          // Accept both bare (support@example.test) and subdomain
+          // (customer-x@example.test / helpdesk.example.test) redacted forms;
+          // anything else escaped the address rules and gets a placeholder.
+          out[key] = /example\.test$/.test(scrubbed) ? scrubbed : 'person@example.test';
         } else {
           out[key] = walk(val);
         }

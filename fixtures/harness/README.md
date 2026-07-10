@@ -34,6 +34,7 @@ Set these in your shell before running (no `.env` support by design — see
 | `HARNESS_FS_BASE_URL` | Base URL of the FreeScout instance, e.g. `https://support.example.com`. |
 | `HARNESS_FS_API_KEY` | FreeScout REST API key, sent as the `X-FreeScout-API-Key` header. |
 | `HARNESS_FS_USER_ID` | *(optional, default `1`)* FreeScout user id to post agent replies as. |
+| `HARNESS_IDENTITY_NAMES` | *(optional)* Comma-separated real display names to scrub from fixtures (e.g. an agent's name that appears verbatim in FreeScout audit-log thread bodies, which structural redaction can't catch). |
 
 Missing variables produce one clear error listing everything that's absent
 — the harness fails fast rather than dying deep inside a scenario.

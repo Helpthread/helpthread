@@ -75,6 +75,13 @@ export function loadEnv() {
     fsBaseUrl: process.env.HARNESS_FS_BASE_URL.replace(/\/+$/, ''),
     fsApiKey: process.env.HARNESS_FS_API_KEY,
     fsUserId,
+    // Optional: comma-separated real display names (e.g. an agent's name that
+    // appears in FreeScout audit-log thread bodies) to scrub from fixtures.
+    // Free-text names can't be caught structurally, so the operator names them.
+    identityNames: (process.env.HARNESS_IDENTITY_NAMES ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
   };
 
   cached = config;
