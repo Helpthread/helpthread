@@ -1,0 +1,369 @@
+{
+  "scenario": "same-subject-different-customer",
+  "title": "Different customer, identical subject to an existing conversation",
+  "expectation": "A new sender using the exact subject of an existing conversation may merge into it or create its own — observed, not assumed.",
+  "runId": "23ad1ec4",
+  "recordedAt": "2026-07-10T04:20:05.411Z",
+  "sent": [
+    {
+      "from": "customer-23ad1ec4-e@example.test",
+      "to": "support@example.test",
+      "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
+      "text": "Different customer, identical subject to scenario A. [HT7-23ad1ec4-new-conversation]",
+      "headers": {},
+      "messageId": "<8738925d-de41-70ae-26ab-d5f3c830b662@gmail.com>",
+      "envelope": {
+        "from": "customer-23ad1ec4-e@example.test",
+        "to": [
+          "support@example.test"
+        ]
+      }
+    }
+  ],
+  "observed": {
+    "priorConversationId": 14,
+    "before": [
+      {
+        "id": 14,
+        "number": 14,
+        "threadsCount": 1,
+        "type": "email",
+        "folderId": 1,
+        "status": "active",
+        "state": "published",
+        "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
+        "preview": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+        "mailboxId": 1,
+        "assignee": null,
+        "createdBy": {
+          "id": 3,
+          "type": "customer",
+          "firstName": "TJ",
+          "lastName": "Baker",
+          "photoUrl": "",
+          "email": "customer@example.test"
+        },
+        "createdAt": "2026-07-10T04:10:55Z",
+        "updatedAt": "2026-07-10T04:10:55Z",
+        "closedBy": null,
+        "closedByUser": null,
+        "closedAt": null,
+        "userUpdatedAt": null,
+        "customerWaitingSince": {
+          "time": "2026-07-10T04:10:55Z",
+          "friendly": "8 min ago",
+          "latestReplyFrom": "customer"
+        },
+        "source": {
+          "type": "email",
+          "via": "customer"
+        },
+        "cc": [],
+        "bcc": [],
+        "customer": {
+          "id": 3,
+          "type": "customer",
+          "firstName": "TJ",
+          "lastName": "Baker",
+          "photoUrl": "",
+          "email": "customer@example.test"
+        },
+        "_embedded": {
+          "threads": []
+        }
+      }
+    ],
+    "result": {
+      "outcome": "own-conversation",
+      "conversations": [
+        {
+          "id": 19,
+          "number": 19,
+          "threadsCount": 1,
+          "type": "email",
+          "folderId": 1,
+          "status": "active",
+          "state": "published",
+          "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
+          "preview": "Different customer, identical subject to scenario A. [HT7-23ad1ec4-new-conversation]",
+          "mailboxId": 1,
+          "assignee": null,
+          "createdBy": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "TJ",
+            "lastName": "Baker",
+            "photoUrl": "",
+            "email": "customer@example.test"
+          },
+          "createdAt": "2026-07-10T04:19:53Z",
+          "updatedAt": "2026-07-10T04:19:53Z",
+          "closedBy": null,
+          "closedByUser": null,
+          "closedAt": null,
+          "userUpdatedAt": null,
+          "customerWaitingSince": {
+            "time": "2026-07-10T04:19:53Z",
+            "friendly": "Just now",
+            "latestReplyFrom": "customer"
+          },
+          "source": {
+            "type": "email",
+            "via": "customer"
+          },
+          "cc": [],
+          "bcc": [],
+          "customer": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "TJ",
+            "lastName": "Baker",
+            "photoUrl": "",
+            "email": "customer@example.test"
+          },
+          "_embedded": {
+            "threads": [
+              {
+                "id": 35,
+                "type": "customer",
+                "status": "active",
+                "state": "published",
+                "action": {
+                  "type": "",
+                  "text": "TJ Baker started a new conversation #19",
+                  "associatedEntities": []
+                },
+                "body": "Different customer, identical subject to scenario A. [HT7-23ad1ec4-new-conversation]",
+                "source": {
+                  "type": "email",
+                  "via": "customer"
+                },
+                "customer": {
+                  "id": 3,
+                  "type": "customer",
+                  "firstName": "TJ",
+                  "lastName": "Baker",
+                  "photoUrl": "",
+                  "email": "customer@example.test"
+                },
+                "createdBy": {
+                  "id": 3,
+                  "type": "customer",
+                  "firstName": "TJ",
+                  "lastName": "Baker",
+                  "photoUrl": "",
+                  "email": "customer@example.test"
+                },
+                "assignedTo": null,
+                "to": [
+                  "support@example.test"
+                ],
+                "cc": [],
+                "bcc": [],
+                "createdAt": "2026-07-10T04:19:53Z",
+                "openedAt": null,
+                "_embedded": {
+                  "attachments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": 14,
+          "number": 14,
+          "threadsCount": 1,
+          "type": "email",
+          "folderId": 1,
+          "status": "active",
+          "state": "published",
+          "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
+          "preview": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+          "mailboxId": 1,
+          "assignee": null,
+          "createdBy": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "TJ",
+            "lastName": "Baker",
+            "photoUrl": "",
+            "email": "customer@example.test"
+          },
+          "createdAt": "2026-07-10T04:10:55Z",
+          "updatedAt": "2026-07-10T04:10:55Z",
+          "closedBy": null,
+          "closedByUser": null,
+          "closedAt": null,
+          "userUpdatedAt": null,
+          "customerWaitingSince": {
+            "time": "2026-07-10T04:10:55Z",
+            "friendly": "9 min ago",
+            "latestReplyFrom": "customer"
+          },
+          "source": {
+            "type": "email",
+            "via": "customer"
+          },
+          "cc": [],
+          "bcc": [],
+          "customer": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "TJ",
+            "lastName": "Baker",
+            "photoUrl": "",
+            "email": "customer@example.test"
+          },
+          "_embedded": {
+            "threads": [
+              {
+                "id": 29,
+                "type": "customer",
+                "status": "active",
+                "state": "published",
+                "action": {
+                  "type": "",
+                  "text": "TJ Baker started a new conversation #14",
+                  "associatedEntities": []
+                },
+                "body": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+                "source": {
+                  "type": "email",
+                  "via": "customer"
+                },
+                "customer": {
+                  "id": 3,
+                  "type": "customer",
+                  "firstName": "TJ",
+                  "lastName": "Baker",
+                  "photoUrl": "",
+                  "email": "customer@example.test"
+                },
+                "createdBy": {
+                  "id": 3,
+                  "type": "customer",
+                  "firstName": "TJ",
+                  "lastName": "Baker",
+                  "photoUrl": "",
+                  "email": "customer@example.test"
+                },
+                "assignedTo": null,
+                "to": [
+                  "support@example.test"
+                ],
+                "cc": [],
+                "bcc": [],
+                "createdAt": "2026-07-10T04:10:55Z",
+                "openedAt": null,
+                "_embedded": {
+                  "attachments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "allMatches": [
+        {
+          "id": 19,
+          "number": 19,
+          "threadsCount": 1,
+          "type": "email",
+          "folderId": 1,
+          "status": "active",
+          "state": "published",
+          "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
+          "preview": "Different customer, identical subject to scenario A. [HT7-23ad1ec4-new-conversation]",
+          "mailboxId": 1,
+          "assignee": null,
+          "createdBy": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "TJ",
+            "lastName": "Baker",
+            "photoUrl": "",
+            "email": "customer@example.test"
+          },
+          "createdAt": "2026-07-10T04:19:53Z",
+          "updatedAt": "2026-07-10T04:19:53Z",
+          "closedBy": null,
+          "closedByUser": null,
+          "closedAt": null,
+          "userUpdatedAt": null,
+          "customerWaitingSince": {
+            "time": "2026-07-10T04:19:53Z",
+            "friendly": "Just now",
+            "latestReplyFrom": "customer"
+          },
+          "source": {
+            "type": "email",
+            "via": "customer"
+          },
+          "cc": [],
+          "bcc": [],
+          "customer": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "TJ",
+            "lastName": "Baker",
+            "photoUrl": "",
+            "email": "customer@example.test"
+          },
+          "_embedded": {
+            "threads": []
+          }
+        },
+        {
+          "id": 14,
+          "number": 14,
+          "threadsCount": 1,
+          "type": "email",
+          "folderId": 1,
+          "status": "active",
+          "state": "published",
+          "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
+          "preview": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+          "mailboxId": 1,
+          "assignee": null,
+          "createdBy": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "TJ",
+            "lastName": "Baker",
+            "photoUrl": "",
+            "email": "customer@example.test"
+          },
+          "createdAt": "2026-07-10T04:10:55Z",
+          "updatedAt": "2026-07-10T04:10:55Z",
+          "closedBy": null,
+          "closedByUser": null,
+          "closedAt": null,
+          "userUpdatedAt": null,
+          "customerWaitingSince": {
+            "time": "2026-07-10T04:10:55Z",
+            "friendly": "9 min ago",
+            "latestReplyFrom": "customer"
+          },
+          "source": {
+            "type": "email",
+            "via": "customer"
+          },
+          "cc": [],
+          "bcc": [],
+          "customer": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "TJ",
+            "lastName": "Baker",
+            "photoUrl": "",
+            "email": "customer@example.test"
+          },
+          "_embedded": {
+            "threads": []
+          }
+        }
+      ]
+    }
+  },
+  "notes": "Created its own conversation, distinct from scenario A's (id 14)."
+}

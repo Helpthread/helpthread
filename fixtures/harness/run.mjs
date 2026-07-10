@@ -192,15 +192,20 @@ async function main() {
       console.log(`[harness] ${scenario.id} recorded OK in ${Date.now() - startedAt}ms`);
     } catch (err) {
       outcome = 'timeout-or-error';
-      payload = {
-        scenario: scenario.id,
-        title: scenario.title,
-        expectation: scenario.expectation,
-        runId,
-        recordedAt: new Date().toISOString(),
-        outcome: 'timeout-or-error',
-        error: err.message,
-      };
+      // Error messages can embed real addresses (e.g. waitForMessage timeouts) —
+      // the failure path gets redacted exactly like the success path.
+      payload = redact(
+        {
+          scenario: scenario.id,
+          title: scenario.title,
+          expectation: scenario.expectation,
+          runId,
+          recordedAt: new Date().toISOString(),
+          outcome: 'timeout-or-error',
+          error: err.message,
+        },
+        { smtpUser: envConfig.smtpUser, helpdeskAddr: envConfig.helpdeskAddr },
+      );
       console.error(`[harness] ${scenario.id} FAILED after ${Date.now() - startedAt}ms: ${err.message}`);
     }
 

@@ -1,0 +1,122 @@
+{
+  "scenario": "auto-submitted",
+  "title": "Auto-Submitted: auto-replied message handling",
+  "expectation": "An email marked Auto-Submitted: auto-replied may be suppressed (no conversation) or ingested normally — observed, not assumed.",
+  "runId": "23ad1ec4",
+  "recordedAt": "2026-07-10T04:18:57.805Z",
+  "sent": [
+    {
+      "from": "customer-23ad1ec4-d@example.test",
+      "to": "support@example.test",
+      "subject": "Harness auto-submitted [HT7-23ad1ec4-auto-submitted]",
+      "text": "Auto-submitted probe. [HT7-23ad1ec4-auto-submitted]",
+      "headers": {
+        "Auto-Submitted": "auto-replied"
+      },
+      "messageId": "<7bfcf2e0-8a77-93fd-4f0a-8c4daef47ec3@gmail.com>",
+      "envelope": {
+        "from": "customer-23ad1ec4-d@example.test",
+        "to": [
+          "support@example.test"
+        ]
+      }
+    }
+  ],
+  "observed": {
+    "outcome": "created",
+    "conversation": {
+      "id": 18,
+      "number": 18,
+      "threadsCount": 1,
+      "type": "email",
+      "folderId": 1,
+      "status": "active",
+      "state": "published",
+      "subject": "Harness auto-submitted [HT7-23ad1ec4-auto-submitted]",
+      "preview": "Auto-submitted probe. [HT7-23ad1ec4-auto-submitted]",
+      "mailboxId": 1,
+      "assignee": null,
+      "createdBy": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "TJ",
+        "lastName": "Baker",
+        "photoUrl": "",
+        "email": "customer@example.test"
+      },
+      "createdAt": "2026-07-10T04:18:54Z",
+      "updatedAt": "2026-07-10T04:18:54Z",
+      "closedBy": null,
+      "closedByUser": null,
+      "closedAt": null,
+      "userUpdatedAt": null,
+      "customerWaitingSince": {
+        "time": "2026-07-10T04:18:54Z",
+        "friendly": "Just now",
+        "latestReplyFrom": "customer"
+      },
+      "source": {
+        "type": "email",
+        "via": "customer"
+      },
+      "cc": [],
+      "bcc": [],
+      "customer": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "TJ",
+        "lastName": "Baker",
+        "photoUrl": "",
+        "email": "customer@example.test"
+      },
+      "_embedded": {
+        "threads": [
+          {
+            "id": 34,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "TJ Baker started a new conversation #18",
+              "associatedEntities": []
+            },
+            "body": "Auto-submitted probe. [HT7-23ad1ec4-auto-submitted]",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "TJ",
+              "lastName": "Baker",
+              "photoUrl": "",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "TJ",
+              "lastName": "Baker",
+              "photoUrl": "",
+              "email": "customer@example.test"
+            },
+            "assignedTo": null,
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:18:54Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          }
+        ]
+      }
+    }
+  },
+  "notes": "A conversation WAS created for an \"Auto-Submitted: auto-replied\" message (id 18)."
+}
