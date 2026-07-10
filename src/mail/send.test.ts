@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
-import type { EmailSender, OutboundEmail } from '../providers/email-sender.js'
+import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import { type ConversationStore, createConversationStore } from '../store/conversations.js'
 import type { ParsedEmail } from './parse.js'
 import type { Keyring, SigningKey } from './reply-token.js'

@@ -60,7 +60,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { EmailSender } from '../providers/email-sender.js'
+import type { EmailSender } from '../providers/index.js'
 import type { ConversationStore } from '../store/conversations.js'
 import { type Keyring, mintReplyMessageId } from './reply-token.js'
 

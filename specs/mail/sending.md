@@ -97,5 +97,7 @@ Deliberately narrow; each deferral below has a named later home:
 - **`In-Reply-To`/`References` are caller-supplied** (from the inbound message
   being answered). Deriving the full `References` chain from stored threads is a
   later refinement.
-- **A missing or deleted conversation is refused** — nothing is minted or sent
-  (mirrors the store's `appendThread` policy; threading.md §5).
+- **A missing or deleted conversation is refused** — the token is minted first
+  (before `appendThread` resolves) and then discarded on refusal; only
+  persistence and sending are skipped, and the sender is never called (mirrors
+  the store's `appendThread` policy; threading.md §5).
