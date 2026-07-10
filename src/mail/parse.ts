@@ -68,13 +68,13 @@ export interface ParsedEmail {
    * is absent or empty.
    *
    * Threading-critical: postal-mime exposes `References` as a single raw
-   * string (already unfolded — folded continuation lines are merged with
-   * an embedded newline, not collapsed to a header object per id). This
-   * function splits that string on runs of whitespace, which correctly
-   * handles both space-separated and folded/newline-separated ids without
-   * losing or reordering any entry. specs/mail/threading.md §3 rule 1
-   * scans this array most-recent-first — i.e. the CONSUMER reverses it;
-   * this parser preserves wire order and does not reverse.
+   * string. This parser extracts the angle-bracketed `<...>` message-id
+   * tokens (RFC 5322 §3.6.4) via regex, so any CFWS/comments legally
+   * interspersed between ids are ignored rather than emitted as bogus
+   * "ids", and folded/space-separated ids are handled uniformly. Order is
+   * preserved (oldest-first, as written on the wire). specs/mail/threading.md
+   * §3 rule 1 scans this array most-recent-first — i.e. the CONSUMER
+   * reverses it; this parser preserves wire order and does not reverse.
    */
   references: string[]
 
