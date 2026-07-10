@@ -1,0 +1,12 @@
+# gitleaks configuration.
+# Extends the default ruleset; adds an allowlist for test files, which
+# legitimately contain hardcoded FAKE secrets (e.g. HMAC token test fixtures),
+# never real credentials. Real config secrets live in gitignored .env files.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test files use fake fixture secrets, not real credentials."
+paths = [
+  '''.*\.test\.ts$''',
+]

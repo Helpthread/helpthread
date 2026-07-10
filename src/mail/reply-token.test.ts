@@ -369,15 +369,19 @@ describe('keyring validation', () => {
   it('a leaked old secret cannot be revived under a live keyId', () => {
     // Rotating correctly (new keyId) means a token forged with the old, leaked
     // secret carries the OLD keyId — which is no longer in the ring → null.
-    const leaked: Keyring = { current: { keyId: 'old', secret: 'leaked-secret-0123456789abcdefghijkl' } }
+    const leaked: Keyring = {
+      current: { keyId: 'old', secret: 'leaked-secret-0123456789abcdefghijkl' },
+    }
     const forged = mintReplyMessageId(PAYLOAD, leaked)
-    const rotated: Keyring = { current: { keyId: 'new', secret: 'fresh-secret-0123456789abcdefghijklmn' } }
+    const rotated: Keyring = {
+      current: { keyId: 'new', secret: 'fresh-secret-0123456789abcdefghijklmn' },
+    }
     expect(verifyReplyMessageId(forged, rotated)).toBeNull()
   })
 
   it('retired is not an array → throws', () => {
-    // biome-ignore lint/suspicious/noExplicitAny: deliberately malformed config
-    const ring = { current: KEY_A, retired: {} as any }
+    // Deliberately malformed config (simulating an untyped source / bad JSON).
+    const ring = { current: KEY_A, retired: {} as unknown as SigningKey[] }
     expect(() => assertValidKeyring(ring)).toThrow(/retired/)
   })
 })
@@ -386,12 +390,13 @@ describe('keyring validation', () => {
 
 describe('non-string mint inputs are rejected', () => {
   it('non-string conversationId → throws (not silently coerced)', () => {
-    // biome-ignore lint/suspicious/noExplicitAny: simulating an untyped JS caller
-    expect(() => mintReplyMessageId({ ...PAYLOAD, conversationId: undefined as any }, ringA)).toThrow(
-      /conversationId/,
-    )
-    // biome-ignore lint/suspicious/noExplicitAny: simulating an untyped JS caller
-    expect(() => mintReplyMessageId({ ...PAYLOAD, threadId: 42 as any }, ringA)).toThrow(/threadId/)
+    // Simulate an untyped JS caller passing a non-string id.
+    expect(() =>
+      mintReplyMessageId({ ...PAYLOAD, conversationId: undefined as unknown as string }, ringA),
+    ).toThrow(/conversationId/)
+    expect(() =>
+      mintReplyMessageId({ ...PAYLOAD, threadId: 42 as unknown as string }, ringA),
+    ).toThrow(/threadId/)
   })
 })
 
