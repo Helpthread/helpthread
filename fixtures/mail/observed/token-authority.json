@@ -1,0 +1,314 @@
+{
+  "scenario": "token-authority",
+  "title": "Reply with a REAL token but an unrelated subject",
+  "expectation": "Does the signed token alone decide threading, regardless of subject? Observed.",
+  "sent": [
+    {
+      "subject": "Completely unrelated subject [HT7-23ad1ec4x-token-authority]",
+      "headers": {
+        "In-Reply-To": "<FS_reply-36-1111111111111111@helpdesk.example.test>",
+        "References": "<FS_reply-36-1111111111111111@helpdesk.example.test>"
+      }
+    }
+  ],
+  "observed": {
+    "appendedToRealConversation": true,
+    "conversationAfter": {
+      "id": 15,
+      "number": 15,
+      "threadsCount": 5,
+      "type": "email",
+      "folderId": 3,
+      "status": "active",
+      "state": "published",
+      "subject": "Harness reply-with-reference [HT7-23ad1ec4-reply-with-reference]",
+      "preview": "Reply with the REAL token but an unrelated subject. [HT7-23ad1ec4x-token-authority]",
+      "mailboxId": 1,
+      "assignee": {
+        "id": 1,
+        "type": "user",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "agent@example.test"
+      },
+      "createdBy": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "createdAt": "2026-07-10T04:11:54Z",
+      "updatedAt": "2026-07-10T04:59:54Z",
+      "closedBy": null,
+      "closedByUser": null,
+      "closedAt": null,
+      "userUpdatedAt": "2026-07-10T04:37:23Z",
+      "customerWaitingSince": {
+        "time": "2026-07-10T04:43:54Z",
+        "friendly": "16 min ago",
+        "latestReplyFrom": "customer"
+      },
+      "source": {
+        "type": "email",
+        "via": "customer"
+      },
+      "cc": [],
+      "bcc": [],
+      "customer": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "_embedded": {
+        "threads": [
+          {
+            "id": 39,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person replied to conversation #15",
+              "associatedEntities": []
+            },
+            "body": "Reply with the REAL token but an unrelated subject. [HT7-23ad1ec4x-token-authority]",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "assignedTo": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:59:54Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          },
+          {
+            "id": 37,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person replied to conversation #15",
+              "associatedEntities": []
+            },
+            "body": "Customer reply threading against the agent reply. [HT7-23ad1ec4-reply-with-reference]",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "assignedTo": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:43:54Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          },
+          {
+            "id": 36,
+            "type": "message",
+            "status": "pending",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person replied to conversation #15",
+              "associatedEntities": []
+            },
+            "body": "<div>Here’s a reply</div>",
+            "source": {
+              "type": "web",
+              "via": "user"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "assignedTo": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "to": [
+              "customer@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:37:23Z",
+            "openedAt": "2026-07-10T04:37:51Z",
+            "_embedded": {
+              "attachments": []
+            }
+          },
+          {
+            "id": 31,
+            "type": "message",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person replied to conversation #15",
+              "associatedEntities": []
+            },
+            "body": "Thanks — can you share more detail?",
+            "source": {
+              "type": "api",
+              "via": "user"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "assignedTo": null,
+            "to": [
+              "customer@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:11:56Z",
+            "openedAt": "2026-07-10T04:16:47Z",
+            "_embedded": {
+              "attachments": []
+            }
+          },
+          {
+            "id": 30,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person started a new conversation #15",
+              "associatedEntities": []
+            },
+            "body": "Initial message for reply-with-reference. [HT7-23ad1ec4-reply-with-reference]",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "assignedTo": null,
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:11:54Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          }
+        ]
+      }
+    },
+    "newConversation": null
+  },
+  "notes": "Uses the genuine FS_reply Message-ID captured in the base run; only the subject differs.",
+  "runId": "23ad1ec4x",
+  "recordedAt": "2026-07-10T05:01:08.943Z"
+}

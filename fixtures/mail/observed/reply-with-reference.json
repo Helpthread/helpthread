@@ -1,0 +1,275 @@
+{
+  "scenario": "reply-with-reference",
+  "title": "Customer reply with In-Reply-To/References threads correctly",
+  "expectation": "A customer reply whose In-Reply-To/References point at the helpdesk reply Message-ID is appended to the same conversation.",
+  "runId": "23ad1ec4",
+  "recordedAt": "2026-07-10T04:44:11.829Z",
+  "sent": [
+    {
+      "step": "customer-reply",
+      "subject": "Re: Harness reply-with-reference [HT7-23ad1ec4-reply-with-reference]",
+      "headers": {
+        "In-Reply-To": "<FS_reply-36-1111111111111111@helpdesk.example.test>",
+        "References": "<FS_reply-36-1111111111111111@helpdesk.example.test>"
+      }
+    }
+  ],
+  "observed": {
+    "agentReplyEmail": {
+      "messageId": "<FS_reply-36-1111111111111111@helpdesk.example.test>",
+      "inReplyTo": "<25454420-276e-5396-0d3e-d846bdafe662@example.test>",
+      "references": "<25454420-276e-5396-0d3e-d846bdafe662@example.test> <FS_reply-31-2222222222222222@helpdesk.example.test>",
+      "subject": "Re: Harness reply-with-reference [HT7-23ad1ec4-reply-with-reference]"
+    },
+    "conversation": {
+      "id": 15,
+      "number": 15,
+      "threadsCount": 4,
+      "type": "email",
+      "folderId": 3,
+      "status": "active",
+      "state": "published",
+      "subject": "Harness reply-with-reference [HT7-23ad1ec4-reply-with-reference]",
+      "preview": "Customer reply threading against the agent reply. [HT7-23ad1ec4-reply-with-reference]",
+      "mailboxId": 1,
+      "assignee": {
+        "id": 1,
+        "type": "user",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "agent@example.test"
+      },
+      "createdBy": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "createdAt": "2026-07-10T04:11:54Z",
+      "updatedAt": "2026-07-10T04:43:54Z",
+      "closedBy": null,
+      "closedByUser": null,
+      "closedAt": null,
+      "userUpdatedAt": "2026-07-10T04:37:23Z",
+      "customerWaitingSince": {
+        "time": "2026-07-10T04:43:54Z",
+        "friendly": "Just now",
+        "latestReplyFrom": "customer"
+      },
+      "source": {
+        "type": "email",
+        "via": "customer"
+      },
+      "cc": [],
+      "bcc": [],
+      "customer": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "_embedded": {
+        "threads": [
+          {
+            "id": 37,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person replied to conversation #15",
+              "associatedEntities": []
+            },
+            "body": "Customer reply threading against the agent reply. [HT7-23ad1ec4-reply-with-reference]",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "assignedTo": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:43:54Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          },
+          {
+            "id": 36,
+            "type": "message",
+            "status": "pending",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person replied to conversation #15",
+              "associatedEntities": []
+            },
+            "body": "<div>Here’s a reply</div>",
+            "source": {
+              "type": "web",
+              "via": "user"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "assignedTo": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "to": [
+              "customer@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:37:23Z",
+            "openedAt": "2026-07-10T04:37:51Z",
+            "_embedded": {
+              "attachments": []
+            }
+          },
+          {
+            "id": 31,
+            "type": "message",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person replied to conversation #15",
+              "associatedEntities": []
+            },
+            "body": "Thanks — can you share more detail?",
+            "source": {
+              "type": "api",
+              "via": "user"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 1,
+              "type": "user",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "agent@example.test"
+            },
+            "assignedTo": null,
+            "to": [
+              "customer@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:11:56Z",
+            "openedAt": "2026-07-10T04:16:47Z",
+            "_embedded": {
+              "attachments": []
+            }
+          },
+          {
+            "id": 30,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person started a new conversation #15",
+              "associatedEntities": []
+            },
+            "body": "Initial message for reply-with-reference. [HT7-23ad1ec4-reply-with-reference]",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "assignedTo": null,
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:11:54Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          }
+        ]
+      }
+    },
+    "appendedToSameConversation": true
+  },
+  "notes": [
+    "Deviation from the scripted scenario: the agent reply posted via the REST API (thread type \"message\") was created in the helpdesk but NEVER dispatched as an email — confirmed absent from the customer mailbox 25+ minutes later. The observable agent reply below was sent manually from the helpdesk UI instead. Recorded as an observation: API-created message threads do not (or at least did not here) trigger outbound mail; UI-sent replies do.",
+    "The outbound reply subject preserves the inbound subject with a Re: prefix, and its body carries a \"-- Please reply above this line --\" separator plus a satisfaction-rating footer.",
+    "Gmail SMTP rewrites plus-addressed From values to the canonical account address, so every \"customer\" in run 23ad1ec4 is a single customer identity. Multi-customer scenarios need distinct sending identities (Gmail send-as aliases or a second account).",
+    "The customer reply threaded into the same conversation via In-Reply-To/References against the helpdesk Message-ID."
+  ]
+}

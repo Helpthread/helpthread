@@ -1,0 +1,115 @@
+{
+  "scenario": "forged-reply-token",
+  "title": "Reply whose In-Reply-To carries a tampered FS_reply token",
+  "expectation": "A forged token must not thread into the real conversation — new conversation or rejection, observed.",
+  "sent": [
+    {
+      "subject": "Re: Harness reply-with-reference [HT7-23ad1ec4x-forged-reply-token]",
+      "headers": {
+        "In-Reply-To": "<FS_reply-36-3333333333333333@helpdesk.example.test>",
+        "References": "<FS_reply-36-3333333333333333@helpdesk.example.test>"
+      }
+    }
+  ],
+  "observed": {
+    "newConversation": {
+      "id": 20,
+      "number": 20,
+      "threadsCount": 1,
+      "type": "email",
+      "folderId": 1,
+      "status": "active",
+      "state": "published",
+      "subject": "Re: Harness reply-with-reference [HT7-23ad1ec4x-forged-reply-token]",
+      "preview": "Reply carrying a FORGED token. [HT7-23ad1ec4x-forged-reply-token]",
+      "mailboxId": 1,
+      "assignee": null,
+      "createdBy": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "createdAt": "2026-07-10T04:58:53Z",
+      "updatedAt": "2026-07-10T04:58:53Z",
+      "closedBy": null,
+      "closedByUser": null,
+      "closedAt": null,
+      "userUpdatedAt": null,
+      "customerWaitingSince": {
+        "time": "2026-07-10T04:58:53Z",
+        "friendly": "Just now",
+        "latestReplyFrom": "customer"
+      },
+      "source": {
+        "type": "email",
+        "via": "customer"
+      },
+      "cc": [],
+      "bcc": [],
+      "customer": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "_embedded": {
+        "threads": [
+          {
+            "id": 38,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person started a new conversation #20",
+              "associatedEntities": []
+            },
+            "body": "Reply carrying a FORGED token. [HT7-23ad1ec4x-forged-reply-token]",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "assignedTo": null,
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:58:53Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          }
+        ]
+      }
+    },
+    "appendedToRealConversation": false,
+    "conv15ThreadsBefore": 4,
+    "conv15ThreadsAfter": 4
+  },
+  "notes": "Forgery = token segment character-reversed inside a real FS_reply Message-ID from the base run.",
+  "runId": "23ad1ec4x",
+  "recordedAt": "2026-07-10T05:01:08.938Z"
+}

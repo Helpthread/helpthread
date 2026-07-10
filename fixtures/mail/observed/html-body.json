@@ -1,0 +1,115 @@
+{
+  "scenario": "html-body",
+  "title": "HTML email with formatting, link, image, and a script tag",
+  "expectation": "What survives ingestion/sanitization into the stored thread body — observed.",
+  "sent": [
+    {
+      "subject": "Harness html body [HT7-23ad1ec4x-html-body]",
+      "html": true,
+      "includes": [
+        "strong",
+        "a href",
+        "img",
+        "script"
+      ]
+    }
+  ],
+  "observed": {
+    "conversation": {
+      "id": 21,
+      "number": 21,
+      "threadsCount": 1,
+      "type": "email",
+      "folderId": 1,
+      "status": "active",
+      "state": "published",
+      "subject": "Harness html body [HT7-23ad1ec4x-html-body]",
+      "preview": "HTML body with bold, a link, an inline and a script tag. [HT7-23ad1ec4x-html-body]",
+      "mailboxId": 1,
+      "assignee": null,
+      "createdBy": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "createdAt": "2026-07-10T05:00:56Z",
+      "updatedAt": "2026-07-10T05:00:56Z",
+      "closedBy": null,
+      "closedByUser": null,
+      "closedAt": null,
+      "userUpdatedAt": null,
+      "customerWaitingSince": {
+        "time": "2026-07-10T05:00:56Z",
+        "friendly": "Just now",
+        "latestReplyFrom": "customer"
+      },
+      "source": {
+        "type": "email",
+        "via": "customer"
+      },
+      "cc": [],
+      "bcc": [],
+      "customer": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "_embedded": {
+        "threads": [
+          {
+            "id": 40,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person started a new conversation #21",
+              "associatedEntities": []
+            },
+            "body": "<p>HTML body with <strong>bold</strong>, a <a href=\"https://example.com\">link</a>, an inline <img src=\"https://example.com/x.png\" alt=\"img\"> and a <script>alert(1)</script> script tag. [HT7-23ad1ec4x-html-body]</p>",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "assignedTo": null,
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T05:00:56Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          }
+        ]
+      }
+    }
+  },
+  "notes": "Script tag included deliberately to observe sanitization behavior on the stored body.",
+  "runId": "23ad1ec4x",
+  "recordedAt": "2026-07-10T05:01:08.946Z"
+}

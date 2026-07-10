@@ -1,0 +1,232 @@
+{
+  "scenario": "reply-subject-only",
+  "title": "Customer reply with only a \"Re:\" subject (no reference headers)",
+  "expectation": "A \"Re:\" reply with no In-Reply-To/References may or may not thread correctly by subject alone — observed, not assumed.",
+  "runId": "23ad1ec4",
+  "recordedAt": "2026-07-10T04:18:08.397Z",
+  "sent": [
+    {
+      "from": "customer-23ad1ec4-c@example.test",
+      "to": "support@example.test",
+      "subject": "Harness reply-subject-only [HT7-23ad1ec4-reply-subject-only]",
+      "text": "Initial message for reply-subject-only. [HT7-23ad1ec4-reply-subject-only]",
+      "headers": {},
+      "messageId": "<816fe947-b04d-fd20-b15b-d5e8ab308569@example.test>",
+      "envelope": {
+        "from": "customer-23ad1ec4-c@example.test",
+        "to": [
+          "support@example.test"
+        ]
+      }
+    },
+    {
+      "from": "customer-23ad1ec4-c@example.test",
+      "to": "support@example.test",
+      "subject": "Re: Harness reply-subject-only [HT7-23ad1ec4-reply-subject-only]",
+      "text": "Follow-up with no In-Reply-To/References. [HT7-23ad1ec4-reply-subject-only]",
+      "headers": {},
+      "messageId": "<26e928f6-a407-ed1e-46d4-6adeea587555@example.test>",
+      "envelope": {
+        "from": "customer-23ad1ec4-c@example.test",
+        "to": [
+          "support@example.test"
+        ]
+      }
+    }
+  ],
+  "observed": {
+    "conversationId": 16,
+    "result": {
+      "outcome": "split",
+      "conversations": [
+        {
+          "id": 17,
+          "number": 17,
+          "threadsCount": 1,
+          "type": "email",
+          "folderId": 1,
+          "status": "active",
+          "state": "published",
+          "subject": "Re: Harness reply-subject-only [HT7-23ad1ec4-reply-subject-only]",
+          "preview": "Follow-up with no In-Reply-To/References. [HT7-23ad1ec4-reply-subject-only]",
+          "mailboxId": 1,
+          "assignee": null,
+          "createdBy": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+            "email": "customer@example.test"
+          },
+          "createdAt": "2026-07-10T04:17:54Z",
+          "updatedAt": "2026-07-10T04:17:54Z",
+          "closedBy": null,
+          "closedByUser": null,
+          "closedAt": null,
+          "userUpdatedAt": null,
+          "customerWaitingSince": {
+            "time": "2026-07-10T04:17:54Z",
+            "friendly": "Just now",
+            "latestReplyFrom": "customer"
+          },
+          "source": {
+            "type": "email",
+            "via": "customer"
+          },
+          "cc": [],
+          "bcc": [],
+          "customer": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+            "email": "customer@example.test"
+          },
+          "_embedded": {
+            "threads": [
+              {
+                "id": 33,
+                "type": "customer",
+                "status": "active",
+                "state": "published",
+                "action": {
+                  "type": "",
+                  "text": "Redacted Person started a new conversation #17",
+                  "associatedEntities": []
+                },
+                "body": "Follow-up with no In-Reply-To/References. [HT7-23ad1ec4-reply-subject-only]",
+                "source": {
+                  "type": "email",
+                  "via": "customer"
+                },
+                "customer": {
+                  "id": 3,
+                  "type": "customer",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+                  "email": "customer@example.test"
+                },
+                "createdBy": {
+                  "id": 3,
+                  "type": "customer",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+                  "email": "customer@example.test"
+                },
+                "assignedTo": null,
+                "to": [
+                  "support@example.test"
+                ],
+                "cc": [],
+                "bcc": [],
+                "createdAt": "2026-07-10T04:17:54Z",
+                "openedAt": null,
+                "_embedded": {
+                  "attachments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": 16,
+          "number": 16,
+          "threadsCount": 1,
+          "type": "email",
+          "folderId": 1,
+          "status": "active",
+          "state": "published",
+          "subject": "Harness reply-subject-only [HT7-23ad1ec4-reply-subject-only]",
+          "preview": "Initial message for reply-subject-only. [HT7-23ad1ec4-reply-subject-only]",
+          "mailboxId": 1,
+          "assignee": null,
+          "createdBy": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+            "email": "customer@example.test"
+          },
+          "createdAt": "2026-07-10T04:16:54Z",
+          "updatedAt": "2026-07-10T04:16:54Z",
+          "closedBy": null,
+          "closedByUser": null,
+          "closedAt": null,
+          "userUpdatedAt": null,
+          "customerWaitingSince": {
+            "time": "2026-07-10T04:16:54Z",
+            "friendly": "1 min ago",
+            "latestReplyFrom": "customer"
+          },
+          "source": {
+            "type": "email",
+            "via": "customer"
+          },
+          "cc": [],
+          "bcc": [],
+          "customer": {
+            "id": 3,
+            "type": "customer",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+            "email": "customer@example.test"
+          },
+          "_embedded": {
+            "threads": [
+              {
+                "id": 32,
+                "type": "customer",
+                "status": "active",
+                "state": "published",
+                "action": {
+                  "type": "",
+                  "text": "Redacted Person started a new conversation #16",
+                  "associatedEntities": []
+                },
+                "body": "Initial message for reply-subject-only. [HT7-23ad1ec4-reply-subject-only]",
+                "source": {
+                  "type": "email",
+                  "via": "customer"
+                },
+                "customer": {
+                  "id": 3,
+                  "type": "customer",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+                  "email": "customer@example.test"
+                },
+                "createdBy": {
+                  "id": 3,
+                  "type": "customer",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+                  "email": "customer@example.test"
+                },
+                "assignedTo": null,
+                "to": [
+                  "support@example.test"
+                ],
+                "cc": [],
+                "bcc": [],
+                "createdAt": "2026-07-10T04:16:54Z",
+                "openedAt": null,
+                "_embedded": {
+                  "attachments": []
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "notes": "Subject-only \"Re:\" reply created a separate conversation from 16."
+}

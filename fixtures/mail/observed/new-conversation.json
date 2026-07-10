@@ -1,0 +1,119 @@
+{
+  "scenario": "new-conversation",
+  "title": "Fresh email creates a new conversation",
+  "expectation": "A brand-new, uniquely-marked email creates exactly one new conversation visible via the API.",
+  "runId": "23ad1ec4",
+  "recordedAt": "2026-07-10T04:11:05.939Z",
+  "sent": [
+    {
+      "from": "customer-23ad1ec4-a@example.test",
+      "to": "support@example.test",
+      "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
+      "text": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+      "headers": {},
+      "messageId": "<2ae092e6-48d3-2eb5-e640-5cc2fb3896c4@example.test>",
+      "envelope": {
+        "from": "customer-23ad1ec4-a@example.test",
+        "to": [
+          "support@example.test"
+        ]
+      }
+    }
+  ],
+  "observed": {
+    "conversation": {
+      "id": 14,
+      "number": 14,
+      "threadsCount": 1,
+      "type": "email",
+      "folderId": 1,
+      "status": "active",
+      "state": "published",
+      "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
+      "preview": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+      "mailboxId": 1,
+      "assignee": null,
+      "createdBy": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "createdAt": "2026-07-10T04:10:55Z",
+      "updatedAt": "2026-07-10T04:10:55Z",
+      "closedBy": null,
+      "closedByUser": null,
+      "closedAt": null,
+      "userUpdatedAt": null,
+      "customerWaitingSince": {
+        "time": "2026-07-10T04:10:55Z",
+        "friendly": "Just now",
+        "latestReplyFrom": "customer"
+      },
+      "source": {
+        "type": "email",
+        "via": "customer"
+      },
+      "cc": [],
+      "bcc": [],
+      "customer": {
+        "id": 3,
+        "type": "customer",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+        "email": "customer@example.test"
+      },
+      "_embedded": {
+        "threads": [
+          {
+            "id": 29,
+            "type": "customer",
+            "status": "active",
+            "state": "published",
+            "action": {
+              "type": "",
+              "text": "Redacted Person started a new conversation #14",
+              "associatedEntities": []
+            },
+            "body": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+            "source": {
+              "type": "email",
+              "via": "customer"
+            },
+            "customer": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "createdBy": {
+              "id": 3,
+              "type": "customer",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
+              "email": "customer@example.test"
+            },
+            "assignedTo": null,
+            "to": [
+              "support@example.test"
+            ],
+            "cc": [],
+            "bcc": [],
+            "createdAt": "2026-07-10T04:10:55Z",
+            "openedAt": null,
+            "_embedded": {
+              "attachments": []
+            }
+          }
+        ]
+      }
+    }
+  },
+  "notes": "Created conversation id=14 with unknown thread(s)."
+}
