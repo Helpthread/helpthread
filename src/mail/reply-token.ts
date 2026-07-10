@@ -51,9 +51,15 @@
  *
  * ## Security invariants
  *
- * - {@link verifyReplyMessageId} is TOTAL: it never throws, for any input.
- *   A hostile inbound header must yield `null`, never crash the ingest path
- *   (charter invariant #1: never lose or corrupt customer mail).
+ * - {@link verifyReplyMessageId} is TOTAL over the `messageId` — the untrusted
+ *   input: for ANY `messageId` string, given a valid keyring, it returns a
+ *   payload or `null`, never throws. A hostile inbound header must never crash
+ *   the ingest path (charter invariant #1: never lose or corrupt customer
+ *   mail). A malformed KEYRING is different — that is trusted configuration, a
+ *   deploy-time bug, and is rejected loudly by {@link assertValidKeyring}.
+ * - Secrets are validated: HMAC's security is only as good as its key, so an
+ *   empty/short secret is rejected ({@link MIN_SECRET_LENGTH}), and keyIds must
+ *   be unique so a retired secret can't be revived under a live keyId.
  * - Signature comparison is constant-time ({@link https://nodejs.org/api/crypto.html#cryptotimingsafeequala-b | crypto.timingSafeEqual}),
  *   with an explicit length guard first (timingSafeEqual throws on
  *   unequal-length buffers — that is treated as "invalid", not an error).
@@ -107,8 +113,22 @@ const SEGMENT_COUNT = 5
  */
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/
 
-/** Plausible mail domain: letters, digits, dots, hyphens. Not signed — validated only to keep the minted Message-ID well-formed. */
-const DOMAIN_PATTERN = /^[A-Za-z0-9.-]+$/
+/**
+ * A single DNS label inside the mail domain: 1–63 chars, alphanumeric, with
+ * internal (not leading/trailing) hyphens. The full domain is one or more of
+ * these joined by dots — so `..`, `a..b`, `-x.test`, and `x-.test` are all
+ * rejected. The domain is not signed; this only keeps the minted Message-ID
+ * syntactically sane so mail infrastructure doesn't reject or rewrite it.
+ */
+const DOMAIN_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/
+
+/**
+ * Minimum secret length (characters). HMAC-SHA256's security rests entirely on
+ * the key: an empty or short secret makes forgery trivial. Secrets should be
+ * high-entropy random strings (e.g. `openssl rand -base64 32`); this is a floor,
+ * not a guarantee of entropy.
+ */
+const MIN_SECRET_LENGTH = 32
 
 /**
  * The exact bytes signed by the HMAC: `keyId.conversationId.threadId`.
@@ -144,17 +164,13 @@ export function mintReplyMessageId(
   payload: Omit<ReplyTokenPayload, 'keyId'> & { mailDomain: string },
   keyring: Keyring,
 ): string {
+  assertValidKeyring(keyring)
   const { conversationId, threadId, mailDomain } = payload
   const { keyId, secret } = keyring.current
 
-  assertIdField('keyring.current.keyId', keyId)
   assertIdField('conversationId', conversationId)
   assertIdField('threadId', threadId)
-  if (!DOMAIN_PATTERN.test(mailDomain)) {
-    throw new Error(
-      `mintReplyMessageId: mailDomain must match ${DOMAIN_PATTERN} (got ${JSON.stringify(mailDomain)})`,
-    )
-  }
+  assertValidDomain('mailDomain', mailDomain)
 
   const sig = sign(secret, canonicalString(keyId, conversationId, threadId))
   return `<${TOKEN_PREFIX}.${keyId}.${conversationId}.${threadId}.${sig}@${mailDomain}>`
@@ -182,6 +198,11 @@ export function verifyReplyMessageId(
   messageId: string,
   keyring: Keyring,
 ): ReplyTokenPayload | null {
+  // Trusted config: a malformed keyring is a deploy bug, so fail loud here.
+  // This does NOT weaken totality over the messageId, which is the untrusted
+  // input — see the doc note.
+  assertValidKeyring(keyring)
+
   const parsed = parseToken(messageId)
   if (parsed === null) return null
 
@@ -269,10 +290,63 @@ function signatureMatches(secret: string, canonical: string, providedSig: string
 }
 
 /** Throw a clear, field-named error if `value` isn't a non-empty id-charset string. */
-function assertIdField(field: string, value: string): void {
-  if (!ID_PATTERN.test(value)) {
+function assertIdField(field: string, value: unknown): void {
+  // Explicit string check first: RegExp.test() coerces its argument, so a
+  // non-string (undefined, a number) would otherwise be silently stringified
+  // and could pass — minting a token with a bogus identifier.
+  if (typeof value !== 'string' || !ID_PATTERN.test(value)) {
     throw new Error(
-      `mintReplyMessageId: ${field} must match ${ID_PATTERN} (got ${JSON.stringify(value)})`,
+      `mintReplyMessageId: ${field} must be a string matching ${ID_PATTERN} (got ${JSON.stringify(value)})`,
     )
+  }
+}
+
+/** Throw unless `value` is a syntactically valid mail domain (dot-joined DNS labels). */
+function assertValidDomain(field: string, value: unknown): void {
+  const ok =
+    typeof value === 'string' &&
+    value.length <= 253 &&
+    value.split('.').every((label) => DOMAIN_LABEL.test(label))
+  if (!ok) {
+    throw new Error(
+      `mintReplyMessageId: ${field} must be a valid mail domain (got ${JSON.stringify(value)})`,
+    )
+  }
+}
+
+/**
+ * Validate a {@link Keyring} — this is trusted configuration, so a malformed
+ * ring is a deploy-time bug that must fail loudly (it is NOT hostile input).
+ * Enforces: every secret is a string of at least {@link MIN_SECRET_LENGTH}
+ * chars; every keyId is a valid id string; and — critically — all keyIds are
+ * UNIQUE. Uniqueness makes rotation safe by construction: a new key must use a
+ * new keyId, so a retired/leaked secret can never be revived under a keyId that
+ * a current token would match. Revoke a compromised key by dropping it from the
+ * ring entirely.
+ *
+ * @throws {Error} on any malformed or unsafe keyring.
+ */
+export function assertValidKeyring(keyring: Keyring): void {
+  if (keyring?.current == null) {
+    throw new Error('reply-token: keyring.current is required')
+  }
+  if (keyring.retired !== undefined && !Array.isArray(keyring.retired)) {
+    throw new Error('reply-token: keyring.retired must be an array when present')
+  }
+  const keys = keyring.retired ? [keyring.current, ...keyring.retired] : [keyring.current]
+  const seen = new Set<string>()
+  for (const key of keys) {
+    if (typeof key?.keyId !== 'string' || !ID_PATTERN.test(key.keyId)) {
+      throw new Error(`reply-token: invalid keyId ${JSON.stringify(key?.keyId)}`)
+    }
+    if (typeof key.secret !== 'string' || key.secret.length < MIN_SECRET_LENGTH) {
+      throw new Error(
+        `reply-token: secret for keyId ${JSON.stringify(key.keyId)} must be a string of at least ${MIN_SECRET_LENGTH} chars`,
+      )
+    }
+    if (seen.has(key.keyId)) {
+      throw new Error(`reply-token: duplicate keyId ${JSON.stringify(key.keyId)} in keyring`)
+    }
+    seen.add(key.keyId)
   }
 }

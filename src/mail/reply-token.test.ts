@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  assertValidKeyring,
   type Keyring,
   mintReplyMessageId,
   type SigningKey,
@@ -7,6 +8,9 @@ import {
 } from './reply-token.js'
 
 // --- fixtures -------------------------------------------------------------
+
+/** A generic valid (≥32-char) secret for tests not exercising secret strength. */
+const VALID_SECRET = 'valid-secret-0123456789abcdefghijklmno'
 
 const KEY_A: SigningKey = { keyId: 'k1', secret: 'secret-A-high-entropy-0123456789abcdef' }
 const KEY_B: SigningKey = { keyId: 'k2', secret: 'secret-B-high-entropy-fedcba9876543210' }
@@ -122,7 +126,9 @@ describe('tampering returns null', () => {
 describe('key handling', () => {
   it('wrong secret (same keyId, different secret) → null', () => {
     const id = mintReplyMessageId(PAYLOAD, ringA)
-    const imposter: Keyring = { current: { keyId: 'k1', secret: 'a-completely-different-secret' } }
+    const imposter: Keyring = {
+      current: { keyId: 'k1', secret: 'a-completely-different-secret-0123456789' },
+    }
     expect(verifyReplyMessageId(id, imposter)).toBeNull()
   })
 
@@ -151,7 +157,7 @@ describe('key handling', () => {
     // Defensive: multiple keys may match a keyId; the matching secret wins.
     const id = mintReplyMessageId(PAYLOAD, ringA)
     const ring: Keyring = {
-      current: { keyId: 'k9', secret: 'unrelated' },
+      current: { keyId: 'k9', secret: 'k9-current-secret-0123456789abcdefghij' },
       retired: [KEY_A],
     }
     expect(verifyReplyMessageId(id, ring)).not.toBeNull()
@@ -280,12 +286,12 @@ describe('mint input validation throws', () => {
   })
 
   it('keyId containing . → throws', () => {
-    const badRing: Keyring = { current: { keyId: 'k.1', secret: 's' } }
+    const badRing: Keyring = { current: { keyId: 'k.1', secret: VALID_SECRET } }
     expect(() => mintReplyMessageId(PAYLOAD, badRing)).toThrow(/keyId/)
   })
 
   it('empty keyId → throws', () => {
-    const badRing: Keyring = { current: { keyId: '', secret: 's' } }
+    const badRing: Keyring = { current: { keyId: '', secret: VALID_SECRET } }
     expect(() => mintReplyMessageId(PAYLOAD, badRing)).toThrow(/keyId/)
   })
 
@@ -318,8 +324,14 @@ describe('determinism & distinctness', () => {
   })
 
   it('different key → different sig for the same payload', () => {
-    const a = mintReplyMessageId({ ...PAYLOAD }, { current: { keyId: 'k1', secret: 's-one' } })
-    const b = mintReplyMessageId({ ...PAYLOAD }, { current: { keyId: 'k1', secret: 's-two' } })
+    const a = mintReplyMessageId(
+      { ...PAYLOAD },
+      { current: { keyId: 'k1', secret: 'secret-one-0123456789abcdefghijklmno' } },
+    )
+    const b = mintReplyMessageId(
+      { ...PAYLOAD },
+      { current: { keyId: 'k1', secret: 'secret-two-0123456789abcdefghijklmno' } },
+    )
     expect(segments(a).parts[4]).not.toBe(segments(b).parts[4])
   })
 
@@ -327,5 +339,74 @@ describe('determinism & distinctness', () => {
     const a = mintReplyMessageId(PAYLOAD, ringA)
     const b = mintReplyMessageId({ ...PAYLOAD, mailDomain: 'other.example.test' }, ringA)
     expect(segments(a).parts[4]).toBe(segments(b).parts[4])
+  })
+})
+
+// --- keyring validation (Codex/CodeRabbit adversarial findings) -----------
+
+describe('keyring validation', () => {
+  it('duplicate keyId in the ring → throws (rotation must use a new keyId)', () => {
+    const ring: Keyring = {
+      current: { keyId: 'k1', secret: VALID_SECRET },
+      retired: [{ keyId: 'k1', secret: 'a-different-old-secret-0123456789abcd' }],
+    }
+    expect(() => assertValidKeyring(ring)).toThrow(/duplicate keyId/)
+    // and the entry points that consume a keyring reject it too
+    expect(() => mintReplyMessageId(PAYLOAD, ring)).toThrow(/duplicate keyId/)
+    expect(() => verifyReplyMessageId('<ht.k1.c.t.AAA@x.test>', ring)).toThrow(/duplicate keyId/)
+  })
+
+  it('empty secret → throws (HMAC key must be strong)', () => {
+    const ring: Keyring = { current: { keyId: 'k1', secret: '' } }
+    expect(() => mintReplyMessageId(PAYLOAD, ring)).toThrow(/secret/)
+  })
+
+  it('short secret (< 32 chars) → throws', () => {
+    const ring: Keyring = { current: { keyId: 'k1', secret: 'too-short' } }
+    expect(() => mintReplyMessageId(PAYLOAD, ring)).toThrow(/secret/)
+  })
+
+  it('a leaked old secret cannot be revived under a live keyId', () => {
+    // Rotating correctly (new keyId) means a token forged with the old, leaked
+    // secret carries the OLD keyId — which is no longer in the ring → null.
+    const leaked: Keyring = { current: { keyId: 'old', secret: 'leaked-secret-0123456789abcdefghijkl' } }
+    const forged = mintReplyMessageId(PAYLOAD, leaked)
+    const rotated: Keyring = { current: { keyId: 'new', secret: 'fresh-secret-0123456789abcdefghijklmn' } }
+    expect(verifyReplyMessageId(forged, rotated)).toBeNull()
+  })
+
+  it('retired is not an array → throws', () => {
+    // biome-ignore lint/suspicious/noExplicitAny: deliberately malformed config
+    const ring = { current: KEY_A, retired: {} as any }
+    expect(() => assertValidKeyring(ring)).toThrow(/retired/)
+  })
+})
+
+// --- non-string mint inputs (CodeRabbit: RegExp.test coerces) -------------
+
+describe('non-string mint inputs are rejected', () => {
+  it('non-string conversationId → throws (not silently coerced)', () => {
+    // biome-ignore lint/suspicious/noExplicitAny: simulating an untyped JS caller
+    expect(() => mintReplyMessageId({ ...PAYLOAD, conversationId: undefined as any }, ringA)).toThrow(
+      /conversationId/,
+    )
+    // biome-ignore lint/suspicious/noExplicitAny: simulating an untyped JS caller
+    expect(() => mintReplyMessageId({ ...PAYLOAD, threadId: 42 as any }, ringA)).toThrow(/threadId/)
+  })
+})
+
+// --- malformed mail domains (Codex/CodeRabbit) ---------------------------
+
+describe('malformed mail domains → throw', () => {
+  for (const bad of ['..', '.', 'a..b', '-x.test', 'x-.test', 'a.', '.a']) {
+    it(`rejects mailDomain ${JSON.stringify(bad)}`, () => {
+      expect(() => mintReplyMessageId({ ...PAYLOAD, mailDomain: bad }, ringA)).toThrow(/mailDomain/)
+    })
+  }
+
+  it('accepts a normal domain', () => {
+    expect(() =>
+      mintReplyMessageId({ ...PAYLOAD, mailDomain: 'mail.helpthread.dev' }, ringA),
+    ).not.toThrow()
   })
 })
