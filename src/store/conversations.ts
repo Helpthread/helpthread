@@ -60,6 +60,16 @@ import type { Db, Queryable } from '../db/client.js'
 
 /** One message to be persisted as a new thread — inbound customer mail, or outbound agent/assistant mail. */
 export interface NewThread {
+  /**
+   * Caller-supplied thread id (a v4 UUID), for outbound threads whose id
+   * must be known BEFORE the row is inserted — the outbound `Message-ID`
+   * embeds a signed token over `{conversationId, threadId}`
+   * (specs/mail/sending.md §2's "id/token knot"), so `mintReplyMessageId`
+   * must run before this insert, not after it. When omitted, the database's
+   * `gen_random_uuid()` default generates the id (the inbound path, which
+   * has no such circularity).
+   */
+  id?: string
   direction: 'inbound' | 'outbound'
   /**
    * The RFC `Message-ID` of this message, verbatim. For an inbound
@@ -75,6 +85,14 @@ export interface NewThread {
   fromAddress: string
   bodyText?: string | null
   bodyHtml?: string | null
+  /**
+   * Outbox status for an OUTBOUND thread: `'pending'` immediately after
+   * mint-and-persist, `'sent'`/`'failed'` once the send attempt resolves
+   * (specs/mail/sending.md §3). Inbound threads leave this `null` (or
+   * omitted) — delivery status is not a meaningful concept for mail we
+   * received, and the column stays `NULL` for those rows.
+   */
+  deliveryStatus?: 'pending' | 'sent' | 'failed' | null
 }
 
 /** Input to {@link ConversationStore.createConversation}: a new conversation plus its first thread. */
@@ -94,6 +112,8 @@ export interface StoredThread {
   fromAddress: string
   bodyText: string | null
   bodyHtml: string | null
+  /** Outbox status — `null` for inbound threads, `'pending'|'sent'|'failed'` for outbound ones. See {@link NewThread.deliveryStatus}. */
+  deliveryStatus: 'pending' | 'sent' | 'failed' | null
   createdAt: Date
 }
 
@@ -148,6 +168,16 @@ export interface ConversationStore {
   getConversation(
     conversationId: string,
   ): Promise<(StoredConversation & { threads: StoredThread[] }) | null>
+
+  /**
+   * Update an outbound thread's outbox status in place (specs/mail/sending.md
+   * §3's persist→send→mark ordering — this is the "mark" step). Callers
+   * (`src/mail/send.ts`) invoke this AFTER the send attempt resolves, moving
+   * a thread from `'pending'` to `'sent'` or `'failed'`. Not transactional
+   * with anything else — this is a single-row status flip by primary key,
+   * and the row was already durably persisted before the send was attempted.
+   */
+  setThreadDeliveryStatus(threadId: string, status: 'pending' | 'sent' | 'failed'): Promise<void>
 }
 
 /** Raw `conversations` row shape, before mapping to {@link StoredConversation}. */
@@ -170,11 +200,12 @@ interface ThreadRow {
   from_address: string
   body_text: string | null
   body_html: string | null
+  delivery_status: string | null
   created_at: Date | string
 }
 
 const THREAD_COLUMNS =
-  'id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, created_at'
+  'id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, created_at'
 
 /**
  * Create a {@link ConversationStore} backed by `db`. Every operation opens
@@ -251,18 +282,76 @@ export function createConversationStore(db: Db): ConversationStore {
         threads: threadRows.map(toStoredThread),
       }
     },
+
+    async setThreadDeliveryStatus(threadId, status) {
+      // Scope to outbound rows and confirm exactly one was updated. Without
+      // `direction = 'outbound'` an inbound thread id could be marked
+      // 'sent'/'failed' (violating the direction↔status invariant the schema
+      // now enforces); without `RETURNING`, a wrong id or a row deleted
+      // between send and mark would no-op silently and let a caller believe a
+      // send was recorded when it wasn't. Both surface loudly instead.
+      const updated = await db.query<{ id: string }>(
+        "UPDATE threads SET delivery_status = $1 WHERE id = $2 AND direction = 'outbound' RETURNING id",
+        [status, threadId],
+      )
+      if (updated.length === 0) {
+        throw new Error(
+          `setThreadDeliveryStatus: no outbound thread with id ${threadId} (wrong id, an inbound thread, or the row was deleted)`,
+        )
+      }
+    },
   }
 }
 
-/** Shared insert used by both `createConversation`'s first thread and `appendThread`. */
+/**
+ * Shared insert used by both `createConversation`'s first thread and
+ * `appendThread`.
+ *
+ * When `thread.id` is supplied (the outbound-send path, specs/mail/sending.md
+ * §2), the `id` column is set explicitly to that caller-generated UUID. When
+ * omitted (the inbound path), the `id` column is left out of the INSERT
+ * entirely so the schema's `gen_random_uuid()` default fires — passing an
+ * explicit `id` in every case would either require the caller to always
+ * generate one (defeating the point of a DB default) or special-case a
+ * `null`/`undefined` id column value, which is not what "no id supplied"
+ * means here.
+ */
 async function insertThread(
   tx: Queryable,
   conversationId: string,
   thread: NewThread,
 ): Promise<string> {
+  // Derive delivery_status from direction so the row always satisfies the
+  // schema's direction↔status CHECK (migration 002): an outbound thread
+  // defaults to 'pending' (its outbox starting state) unless the caller set a
+  // status; an inbound thread is forced to NULL regardless of any status
+  // passed, since delivery status is meaningless for received mail.
+  const deliveryStatus =
+    thread.direction === 'outbound' ? (thread.deliveryStatus ?? 'pending') : null
+
+  if (thread.id !== undefined) {
+    const [row] = await tx.query<{ id: string }>(
+      `INSERT INTO threads (id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        thread.id,
+        conversationId,
+        thread.direction,
+        thread.messageId,
+        thread.inReplyTo ?? null,
+        thread.fromAddress,
+        thread.bodyText ?? null,
+        thread.bodyHtml ?? null,
+        deliveryStatus,
+      ],
+    )
+    return row.id
+  }
+
   const [row] = await tx.query<{ id: string }>(
-    `INSERT INTO threads (conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO threads (conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id`,
     [
       conversationId,
@@ -272,6 +361,7 @@ async function insertThread(
       thread.fromAddress,
       thread.bodyText ?? null,
       thread.bodyHtml ?? null,
+      deliveryStatus,
     ],
   )
   return row.id
@@ -312,6 +402,7 @@ function toStoredThread(row: ThreadRow): StoredThread {
     fromAddress: row.from_address,
     bodyText: row.body_text,
     bodyHtml: row.body_html,
+    deliveryStatus: row.delivery_status as StoredThread['deliveryStatus'],
     createdAt: toDate(row.created_at),
   }
 }

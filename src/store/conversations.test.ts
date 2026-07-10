@@ -217,4 +217,38 @@ describe('createConversationStore', () => {
     )
     expect(tables).toHaveLength(1)
   })
+
+  it('setThreadDeliveryStatus flips an outbound thread from pending to sent', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await store.createConversation(newConversation())
+    const appended = await store.appendThread(conversationId, newThread())
+    expect(appended.ok).toBe(true)
+    const threadId = (appended as { threadId: string }).threadId
+
+    // Outbound threads default to 'pending' on insert.
+    let conversation = await store.getConversation(conversationId)
+    expect(conversation?.threads.find((t) => t.id === threadId)?.deliveryStatus).toBe('pending')
+
+    await store.setThreadDeliveryStatus(threadId, 'sent')
+
+    conversation = await store.getConversation(conversationId)
+    expect(conversation?.threads.find((t) => t.id === threadId)?.deliveryStatus).toBe('sent')
+  })
+
+  it('setThreadDeliveryStatus throws for a nonexistent thread id (no silent no-op)', async () => {
+    const { store } = await freshStore()
+    await expect(store.setThreadDeliveryStatus(RANDOM_UUID, 'sent')).rejects.toThrow()
+  })
+
+  it('setThreadDeliveryStatus refuses to mark an INBOUND thread (direction-scoped)', async () => {
+    const { store } = await freshStore()
+    // createConversation's first thread is inbound; its id must not be markable.
+    const { conversationId, threadId } = await store.createConversation(newConversation())
+    const inboundThreadId = threadId
+    await expect(store.setThreadDeliveryStatus(inboundThreadId, 'sent')).rejects.toThrow()
+
+    // And it really wasn't touched.
+    const conversation = await store.getConversation(conversationId)
+    expect(conversation?.threads.find((t) => t.id === inboundThreadId)?.deliveryStatus).toBeNull()
+  })
 })
