@@ -28,4 +28,4 @@ Reference hierarchy (charter §3): permissive sources first (e.g. Chatwoot's MIT
 
 - **This repo**: engineering truth — charter, specs, ADRs, provenance, code.
 - **Confluence (Helpthread space)**: business layer — decision log, counsel checklist, status for stakeholders (Tito reads here).
-- **Quarantine**: lives in the `resonant-help` repo, never here. Nothing in this repo's history may trace to a source-visible session.
+- **Quarantine**: lives in the `resonant-help` repo, never here. No engine code in this repo may trace to a source-visible session; spec sessions commit specs and fixtures only. Full procedure: `docs/clean-room-protocol.md`.

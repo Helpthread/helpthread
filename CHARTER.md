@@ -28,7 +28,7 @@ The line between the AGPL core and commercial modules must be an engineered arti
 
 ### Clean-room provenance policy
 
-Helpthread contains no FreeScout code. FreeScout is AGPL and is used strictly as a *behavioral* reference, never as a source of copied implementation.
+Helpthread contains no FreeScout code. FreeScout is AGPL and is used strictly as a *behavioral* reference, never as a source of copied implementation. (FreeScout is named alone here deliberately: it is the one reference whose license makes copying fatal to this project's model, and the one with which prior ported code exists — see the quarantine below. Permissively-licensed references are governed by the hierarchy that follows, which allows adaptation with attribution.)
 
 **Reference hierarchy**, in order of preference — the strongest legal posture is the code you never had to defend:
 
@@ -73,7 +73,7 @@ The founding public API surface is six conversation operations: list conversatio
 
 No dates; phases are ordered by dependency, not calendar.
 
-- **Phase 0 — Foundations.** Name, domains, GitHub org, and npm org secured (done). This charter. A written clean-room protocol doc. A public-ready engine repo with clean history — nothing checked in that traces back to a FreeScout-source-visible session.
+- **Phase 0 — Foundations.** Name, domains, GitHub org, and npm org secured (done). This charter. A written clean-room protocol doc. A public-ready engine repo with clean history — no code checked in that traces back to a FreeScout-source-visible session (spec-side sessions commit only specs and fixtures, per the protocol).
 - **Phase 1 — Core engine, dogfooded.** Clean-room mail engine: event-driven ingestion (bounded reconciliation fetches, never a long-running poller), parsing, threading, sending, signed reply tokens, auto-responder handling, bounce handling, HTML sanitization. The six-operation conversation API. An agent inbox UI. Gmail push for inbound. This runs as Resonant IQ's actual production support desk before it runs as anyone else's.
 - **Phase 2 — Production cutover.** Resonant IQ retires its FreeScout instance and switches to Helpthread at the config level — a clean cutover with no legacy data requiring migration.
 - **Phase 3 — Public launch.** Deploy-to-Vercel button, public docs site, the operator-facing knowledge base, and the start of a community. The marketplace — license keys, module registry, first paid modules — follows once there's demand to justify it; AI-powered modules (draft-reply suggestions, auto-triage, knowledge-base-grounded auto-answers in the widget) are the leading candidates for those first commercial offerings.
