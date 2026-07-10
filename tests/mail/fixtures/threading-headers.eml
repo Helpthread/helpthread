@@ -1,0 +1,11 @@
+From: Grace Thread <grace@example.test>
+To: Henry Recipient <henry@example.test>
+Subject: Re: Threading test
+Message-ID: <msg-d-0004@example.test>
+In-Reply-To: <msg-d-0003@example.test>
+References: <msg-d-0001@example.test> <msg-d-0002@example.test>
+ <msg-d-0003@example.test>
+Date: Thu, 04 Jun 2026 11:45:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+This is a threaded reply.

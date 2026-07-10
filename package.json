@@ -17,8 +17,12 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
+  "dependencies": {
+    "postal-mime": "^2.7.5"
+  },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
+    "@types/node": "^20.19.43",
     "@vitest/coverage-v8": "4.1.10",
     "typescript": "7.0.2",
     "vitest": "4.1.10"
