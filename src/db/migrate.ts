@@ -99,35 +99,69 @@ function splitStatements(sql: string): string[] {
 }
 
 /**
+ * A fixed key for the Postgres advisory lock `migrate()` holds while it runs
+ * (see the concurrency note on {@link migrate}). Arbitrary but STABLE — every
+ * caller must use the same key to serialize against each other. Chosen larger
+ * than `int4`'s max (2^31-1) so it binds unambiguously to
+ * `pg_advisory_xact_lock`'s `bigint` overload rather than its `(int, int)`
+ * one.
+ */
+const MIGRATION_ADVISORY_LOCK_KEY = 4_137_231_984
+
+/**
  * Apply every not-yet-applied migration in `MIGRATIONS`, in ascending `id`
  * order. Idempotent: safe to call on every boot/test-setup — a migration
  * already recorded in `_migrations` is skipped, so a second call with no
  * new migrations is a clean no-op.
  *
- * Each migration runs inside its own transaction alongside the
- * `_migrations` bookkeeping insert, so a migration that fails partway never
- * leaves a half-applied schema change recorded as done (or a fully-applied
- * change left unrecorded, which would cause it to be reapplied and fail on
- * `CREATE TABLE` next run).
+ * ## One locked transaction
+ *
+ * The whole run — take the lock, ensure `_migrations`, read what's applied,
+ * apply what's pending, record it — happens inside a SINGLE transaction, so
+ * a migration that fails partway rolls back entirely: never a half-applied
+ * schema change recorded as done, never a fully-applied change left
+ * unrecorded (which would be reapplied and fail on `CREATE TABLE` next run).
+ *
+ * ## Concurrency
+ *
+ * The transaction first takes a transaction-scoped Postgres advisory lock on
+ * {@link MIGRATION_ADVISORY_LOCK_KEY}. On real multi-connection Postgres
+ * (Supabase) two serverless instances can cold-start and call `migrate()` at
+ * the same moment; without the lock both could read `_migrations`, both see
+ * the same migration as pending, and race on the same `CREATE TABLE`. The
+ * lock makes the second caller WAIT until the first commits, at which point
+ * it reads the now-updated `_migrations` and finds nothing to do. The lock
+ * releases automatically when the transaction commits or rolls back.
+ *
+ * (Under the single-connection, in-process PGlite used in tests and local
+ * dev this lock is an uncontended no-op — the cross-process race it guards is
+ * only reproducible against a real multi-connection server, so it is not
+ * unit-testable here. The idempotency test covers the apply-once bookkeeping;
+ * true concurrent-migrate coverage waits for the Supabase-backed `Db`.)
  */
 export async function migrate(db: Db): Promise<void> {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS _migrations (
-      id integer PRIMARY KEY,
-      name text NOT NULL,
-      applied_at timestamptz NOT NULL DEFAULT now()
+  await db.transaction(async (tx) => {
+    // Serialize concurrent migrate() runs before touching any state. A bare
+    // integer key needs no table, so this is safe to take before `_migrations`
+    // even exists. Cast to bigint so the bigint overload is chosen explicitly.
+    await tx.query('SELECT pg_advisory_xact_lock($1::bigint)', [MIGRATION_ADVISORY_LOCK_KEY])
+
+    await tx.query(`
+      CREATE TABLE IF NOT EXISTS _migrations (
+        id integer PRIMARY KEY,
+        name text NOT NULL,
+        applied_at timestamptz NOT NULL DEFAULT now()
+      )
+    `)
+
+    const applied = await tx.query<{ id: number }>('SELECT id FROM _migrations')
+    const appliedIds = new Set(applied.map((row) => row.id))
+
+    const pending = MIGRATIONS.filter((migration) => !appliedIds.has(migration.id)).sort(
+      (a, b) => a.id - b.id,
     )
-  `)
 
-  const applied = await db.query<{ id: number }>('SELECT id FROM _migrations')
-  const appliedIds = new Set(applied.map((row) => row.id))
-
-  const pending = MIGRATIONS.filter((migration) => !appliedIds.has(migration.id)).sort(
-    (a, b) => a.id - b.id,
-  )
-
-  for (const migration of pending) {
-    await db.transaction(async (tx) => {
+    for (const migration of pending) {
       for (const statement of splitStatements(migration.sql)) {
         await tx.query(statement)
       }
@@ -135,6 +169,6 @@ export async function migrate(db: Db): Promise<void> {
         migration.id,
         migration.name,
       ])
-    })
-  }
+    }
+  })
 }

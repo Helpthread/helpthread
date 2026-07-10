@@ -17,7 +17,8 @@
  *
  * ## Why PGlite
  *
- * PGlite (`@electric-sql/pglite`, Apache-2.0) is a WASM build of real
+ * PGlite (`@electric-sql/pglite`, dual-licensed Apache-2.0 or the PostgreSQL
+ * License — either may be used) is a WASM build of real
  * Postgres packaged as an in-process Node/browser library — not a mock, not
  * SQLite-with-a-Postgres-flavored-dialect. Tests and local dev run against
  * the genuine Postgres engine (see the version note on {@link createPgliteDb}),
@@ -139,8 +140,20 @@ export class PgliteDb implements Db {
  * filesystem backend — no `memory://`/`idb://` URL prefix needed on either
  * path in Node (those prefixes are for selecting a filesystem backend in a
  * browser, where Node's plain directory semantics don't apply).
+ *
+ * The in-memory-vs-file choice branches on whether `dataDir` was *provided*
+ * (`!== undefined`), not on its truthiness — an explicitly passed empty
+ * string is a misconfiguration (a persistence path was intended but is
+ * blank), so it is rejected loudly rather than silently degrading to an
+ * ephemeral in-memory database that would drop data on restart.
  */
 export async function createPgliteDb(options?: { dataDir?: string }): Promise<Db> {
-  const pglite = options?.dataDir ? await PGlite.create(options.dataDir) : await PGlite.create()
+  const dataDir = options?.dataDir
+  if (dataDir !== undefined && dataDir.trim() === '') {
+    throw new Error(
+      'createPgliteDb: `dataDir` was provided but empty — pass a real directory path for a file-backed database, or omit `dataDir` entirely for an in-memory one.',
+    )
+  }
+  const pglite = dataDir !== undefined ? await PGlite.create(dataDir) : await PGlite.create()
   return new PgliteDb(pglite)
 }

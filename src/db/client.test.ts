@@ -25,6 +25,7 @@ describe('createPgliteDb', () => {
       await db.query('CREATE TABLE t (id serial PRIMARY KEY, name text)')
       await db.query('INSERT INTO t (name) VALUES ($1)', ['persisted'])
       await db.close()
+      db = undefined
 
       // A second, independent Db instance pointed at the same dataDir sees
       // the first instance's writes — proves this is real on-disk
@@ -34,6 +35,11 @@ describe('createPgliteDb', () => {
       const rows = await db.query<{ name: string }>('SELECT name FROM t')
       expect(rows).toEqual([{ name: 'persisted' }])
     } finally {
+      // Close the open handle before removing its directory — on platforms
+      // that refuse to unlink open files, an rm with the DB still open would
+      // fail teardown.
+      await db?.close()
+      db = undefined
       await rm(dataDir, { recursive: true, force: true })
     }
   })
