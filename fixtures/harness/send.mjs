@@ -56,7 +56,7 @@ export function plusAddress(tag) {
  *   (In-Reply-To, References, Auto-Submitted, ...)
  * @returns {Promise<{from: string, to: string, subject: string, messageId: string, envelope: object}>}
  */
-export async function sendMail({ fromTag, subject, text, to, headers }) {
+export async function sendMail({ fromTag, subject, text, html, to, headers }) {
   if (!fromTag) throw new Error('harness: sendMail requires fromTag');
   if (!subject) throw new Error('harness: sendMail requires subject');
 
@@ -69,6 +69,7 @@ export async function sendMail({ fromTag, subject, text, to, headers }) {
     to: recipient,
     subject,
     text: text ?? '',
+    ...(html ? { html } : {}),
     headers: headers ?? {},
   });
 

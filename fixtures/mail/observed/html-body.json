@@ -1,36 +1,30 @@
 {
-  "scenario": "new-conversation",
-  "title": "Fresh email creates a new conversation",
-  "expectation": "A brand-new, uniquely-marked email creates exactly one new conversation visible via the API.",
-  "runId": "23ad1ec4",
-  "recordedAt": "2026-07-10T04:11:05.939Z",
+  "scenario": "html-body",
+  "title": "HTML email with formatting, link, image, and a script tag",
+  "expectation": "What survives ingestion/sanitization into the stored thread body — observed.",
   "sent": [
     {
-      "from": "customer-23ad1ec4-a@example.test",
-      "to": "support@example.test",
-      "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
-      "text": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
-      "headers": {},
-      "messageId": "<2ae092e6-48d3-2eb5-e640-5cc2fb3896c4@example.test>",
-      "envelope": {
-        "from": "customer-23ad1ec4-a@example.test",
-        "to": [
-          "support@example.test"
-        ]
-      }
+      "subject": "Harness html body [HT7-23ad1ec4x-html-body]",
+      "html": true,
+      "includes": [
+        "strong",
+        "a href",
+        "img",
+        "script"
+      ]
     }
   ],
   "observed": {
     "conversation": {
-      "id": 14,
-      "number": 14,
+      "id": 21,
+      "number": 21,
       "threadsCount": 1,
       "type": "email",
       "folderId": 1,
       "status": "active",
       "state": "published",
-      "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
-      "preview": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+      "subject": "Harness html body [HT7-23ad1ec4x-html-body]",
+      "preview": "HTML body with bold, a link, an inline and a script tag. [HT7-23ad1ec4x-html-body]",
       "mailboxId": 1,
       "assignee": null,
       "createdBy": {
@@ -41,14 +35,14 @@
         "photoUrl": "https://helpdesk.example.test/avatar.jpg",
         "email": "customer@example.test"
       },
-      "createdAt": "2026-07-10T04:10:55Z",
-      "updatedAt": "2026-07-10T04:10:55Z",
+      "createdAt": "2026-07-10T05:00:56Z",
+      "updatedAt": "2026-07-10T05:00:56Z",
       "closedBy": null,
       "closedByUser": null,
       "closedAt": null,
       "userUpdatedAt": null,
       "customerWaitingSince": {
-        "time": "2026-07-10T04:10:55Z",
+        "time": "2026-07-10T05:00:56Z",
         "friendly": "Just now",
         "latestReplyFrom": "customer"
       },
@@ -69,16 +63,16 @@
       "_embedded": {
         "threads": [
           {
-            "id": 29,
+            "id": 40,
             "type": "customer",
             "status": "active",
             "state": "published",
             "action": {
               "type": "",
-              "text": "Redacted Person started a new conversation #14",
+              "text": "Redacted Person started a new conversation #21",
               "associatedEntities": []
             },
-            "body": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
+            "body": "<p>HTML body with <strong>bold</strong>, a <a href=\"https://example.com\">link</a>, an inline <img src=\"https://example.com/x.png\" alt=\"img\"> and a <script>alert(1)</script> script tag. [HT7-23ad1ec4x-html-body]</p>",
             "source": {
               "type": "email",
               "via": "customer"
@@ -105,7 +99,7 @@
             ],
             "cc": [],
             "bcc": [],
-            "createdAt": "2026-07-10T04:10:55Z",
+            "createdAt": "2026-07-10T05:00:56Z",
             "openedAt": null,
             "_embedded": {
               "attachments": []
@@ -115,5 +109,7 @@
       }
     }
   },
-  "notes": "Created conversation id=14 with unknown thread(s)."
+  "notes": "Script tag included deliberately to observe sanitization behavior on the stored body.",
+  "runId": "23ad1ec4x",
+  "recordedAt": "2026-07-10T05:01:08.946Z"
 }

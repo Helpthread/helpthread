@@ -69,28 +69,72 @@ function redactString(str, rules) {
   return out;
 }
 
+// Person-identity fields on FreeScout user/customer objects that must never
+// reach a committed fixture. The acceptance suite asserts on structure, thread
+// type, status, ids, and the token FORMAT — never on who a person actually is.
+const IDENTITY_FIELD_REPLACERS = {
+  firstName: () => 'Redacted',
+  lastName: () => 'Person',
+  photoUrl: () => 'https://helpdesk.example.test/avatar.jpg',
+  photo_url: () => 'https://helpdesk.example.test/avatar.jpg',
+};
+
+/** Domain-level rules: scrub the real helpdesk/customer domains out of any
+ * remaining free text — reply-token Message-IDs (<FS_reply-…@domain>), avatar
+ * URLs (help.<domain>/storage/…), and bare domain mentions. */
+function buildDomainRules(...addresses) {
+  const rules = [];
+  const seen = new Set();
+  for (const address of addresses) {
+    const parsed = splitAddress(address);
+    if (!parsed || seen.has(parsed.domain)) continue;
+    seen.add(parsed.domain);
+    rules.push({
+      pattern: new RegExp(`([a-z0-9._-]+\\.)?${escapeRegExp(parsed.domain)}`, 'gi'),
+      replace: (_m, sub) => (sub ? 'helpdesk.example.test' : 'example.test'),
+    });
+  }
+  return rules;
+}
+
 /**
- * Recursively redact every string in `value` using the address rules
- * derived from {smtpUser, helpdeskAddr}. Non-string primitives, array
- * structure, and object shape are all left exactly as-is.
+ * Recursively redact `value`. String rules scrub the harness's own addresses
+ * and the helpdesk/customer domains; a structural pass neutralizes person
+ * identity fields (name, avatar) wherever a person-shaped object appears.
+ * IDs, timestamps, statuses, thread types, and structure are left untouched.
  */
-export function redact(value, { smtpUser, helpdeskAddr }) {
+export function redact(value, { smtpUser, helpdeskAddr, identityNames = [] }) {
   if (!smtpUser || !helpdeskAddr) {
     throw new Error('harness: redact requires { smtpUser, helpdeskAddr }');
   }
 
+  // Real display names appear in free-text audit-log thread bodies
+  // ("<Name> started a new conversation #N") where structural person-field
+  // redaction can't reach them. Callers pass any known real names to scrub.
+  const nameRules = identityNames
+    .filter(Boolean)
+    .map((name) => ({ pattern: new RegExp(escapeRegExp(name), 'g'), replace: 'Redacted Person' }));
+
   const rules = [
     ...buildAddressRules({ address: smtpUser, kind: 'customer' }),
     ...buildAddressRules({ address: helpdeskAddr, kind: 'helpdesk' }),
+    ...buildDomainRules(helpdeskAddr, smtpUser),
+    ...nameRules,
   ];
 
   const walk = (node) => {
     if (typeof node === 'string') return redactString(node, rules);
     if (Array.isArray(node)) return node.map(walk);
     if (node && typeof node === 'object') {
+      // A person-shaped object is anything carrying an `email` field.
+      const isPerson = Object.prototype.hasOwnProperty.call(node, 'email');
       const out = {};
       for (const [key, val] of Object.entries(node)) {
-        out[key] = walk(val);
+        if (isPerson && IDENTITY_FIELD_REPLACERS[key]) {
+          out[key] = val == null ? val : IDENTITY_FIELD_REPLACERS[key]();
+        } else {
+          out[key] = walk(val);
+        }
       }
       return out;
     }

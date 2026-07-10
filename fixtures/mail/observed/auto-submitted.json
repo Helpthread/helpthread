@@ -13,7 +13,7 @@
       "headers": {
         "Auto-Submitted": "auto-replied"
       },
-      "messageId": "<7bfcf2e0-8a77-93fd-4f0a-8c4daef47ec3@gmail.com>",
+      "messageId": "<7bfcf2e0-8a77-93fd-4f0a-8c4daef47ec3@example.test>",
       "envelope": {
         "from": "customer-23ad1ec4-d@example.test",
         "to": [
@@ -39,9 +39,9 @@
       "createdBy": {
         "id": 3,
         "type": "customer",
-        "firstName": "TJ",
-        "lastName": "Baker",
-        "photoUrl": "",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
         "email": "customer@example.test"
       },
       "createdAt": "2026-07-10T04:18:54Z",
@@ -64,9 +64,9 @@
       "customer": {
         "id": 3,
         "type": "customer",
-        "firstName": "TJ",
-        "lastName": "Baker",
-        "photoUrl": "",
+        "firstName": "Redacted",
+        "lastName": "Person",
+        "photoUrl": "https://helpdesk.example.test/avatar.jpg",
         "email": "customer@example.test"
       },
       "_embedded": {
@@ -78,7 +78,7 @@
             "state": "published",
             "action": {
               "type": "",
-              "text": "TJ Baker started a new conversation #18",
+              "text": "Redacted Person started a new conversation #18",
               "associatedEntities": []
             },
             "body": "Auto-submitted probe. [HT7-23ad1ec4-auto-submitted]",
@@ -89,17 +89,17 @@
             "customer": {
               "id": 3,
               "type": "customer",
-              "firstName": "TJ",
-              "lastName": "Baker",
-              "photoUrl": "",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
               "email": "customer@example.test"
             },
             "createdBy": {
               "id": 3,
               "type": "customer",
-              "firstName": "TJ",
-              "lastName": "Baker",
-              "photoUrl": "",
+              "firstName": "Redacted",
+              "lastName": "Person",
+              "photoUrl": "https://helpdesk.example.test/avatar.jpg",
               "email": "customer@example.test"
             },
             "assignedTo": null,

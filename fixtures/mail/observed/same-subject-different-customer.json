@@ -11,7 +11,7 @@
       "subject": "Harness fresh conversation [HT7-23ad1ec4-new-conversation]",
       "text": "Different customer, identical subject to scenario A. [HT7-23ad1ec4-new-conversation]",
       "headers": {},
-      "messageId": "<8738925d-de41-70ae-26ab-d5f3c830b662@gmail.com>",
+      "messageId": "<8738925d-de41-70ae-26ab-d5f3c830b662@example.test>",
       "envelope": {
         "from": "customer-23ad1ec4-e@example.test",
         "to": [
@@ -38,9 +38,9 @@
         "createdBy": {
           "id": 3,
           "type": "customer",
-          "firstName": "TJ",
-          "lastName": "Baker",
-          "photoUrl": "",
+          "firstName": "Redacted",
+          "lastName": "Person",
+          "photoUrl": "https://helpdesk.example.test/avatar.jpg",
           "email": "customer@example.test"
         },
         "createdAt": "2026-07-10T04:10:55Z",
@@ -63,9 +63,9 @@
         "customer": {
           "id": 3,
           "type": "customer",
-          "firstName": "TJ",
-          "lastName": "Baker",
-          "photoUrl": "",
+          "firstName": "Redacted",
+          "lastName": "Person",
+          "photoUrl": "https://helpdesk.example.test/avatar.jpg",
           "email": "customer@example.test"
         },
         "_embedded": {
@@ -91,9 +91,9 @@
           "createdBy": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "createdAt": "2026-07-10T04:19:53Z",
@@ -116,9 +116,9 @@
           "customer": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "_embedded": {
@@ -130,7 +130,7 @@
                 "state": "published",
                 "action": {
                   "type": "",
-                  "text": "TJ Baker started a new conversation #19",
+                  "text": "Redacted Person started a new conversation #19",
                   "associatedEntities": []
                 },
                 "body": "Different customer, identical subject to scenario A. [HT7-23ad1ec4-new-conversation]",
@@ -141,17 +141,17 @@
                 "customer": {
                   "id": 3,
                   "type": "customer",
-                  "firstName": "TJ",
-                  "lastName": "Baker",
-                  "photoUrl": "",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
                   "email": "customer@example.test"
                 },
                 "createdBy": {
                   "id": 3,
                   "type": "customer",
-                  "firstName": "TJ",
-                  "lastName": "Baker",
-                  "photoUrl": "",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
                   "email": "customer@example.test"
                 },
                 "assignedTo": null,
@@ -184,9 +184,9 @@
           "createdBy": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "createdAt": "2026-07-10T04:10:55Z",
@@ -209,9 +209,9 @@
           "customer": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "_embedded": {
@@ -223,7 +223,7 @@
                 "state": "published",
                 "action": {
                   "type": "",
-                  "text": "TJ Baker started a new conversation #14",
+                  "text": "Redacted Person started a new conversation #14",
                   "associatedEntities": []
                 },
                 "body": "Hello, this is a fresh test conversation. [HT7-23ad1ec4-new-conversation]",
@@ -234,17 +234,17 @@
                 "customer": {
                   "id": 3,
                   "type": "customer",
-                  "firstName": "TJ",
-                  "lastName": "Baker",
-                  "photoUrl": "",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
                   "email": "customer@example.test"
                 },
                 "createdBy": {
                   "id": 3,
                   "type": "customer",
-                  "firstName": "TJ",
-                  "lastName": "Baker",
-                  "photoUrl": "",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
                   "email": "customer@example.test"
                 },
                 "assignedTo": null,
@@ -279,9 +279,9 @@
           "createdBy": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "createdAt": "2026-07-10T04:19:53Z",
@@ -304,9 +304,9 @@
           "customer": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "_embedded": {
@@ -328,9 +328,9 @@
           "createdBy": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "createdAt": "2026-07-10T04:10:55Z",
@@ -353,9 +353,9 @@
           "customer": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "_embedded": {

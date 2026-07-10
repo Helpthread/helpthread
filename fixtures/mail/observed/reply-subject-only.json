@@ -11,7 +11,7 @@
       "subject": "Harness reply-subject-only [HT7-23ad1ec4-reply-subject-only]",
       "text": "Initial message for reply-subject-only. [HT7-23ad1ec4-reply-subject-only]",
       "headers": {},
-      "messageId": "<816fe947-b04d-fd20-b15b-d5e8ab308569@gmail.com>",
+      "messageId": "<816fe947-b04d-fd20-b15b-d5e8ab308569@example.test>",
       "envelope": {
         "from": "customer-23ad1ec4-c@example.test",
         "to": [
@@ -25,7 +25,7 @@
       "subject": "Re: Harness reply-subject-only [HT7-23ad1ec4-reply-subject-only]",
       "text": "Follow-up with no In-Reply-To/References. [HT7-23ad1ec4-reply-subject-only]",
       "headers": {},
-      "messageId": "<26e928f6-a407-ed1e-46d4-6adeea587555@gmail.com>",
+      "messageId": "<26e928f6-a407-ed1e-46d4-6adeea587555@example.test>",
       "envelope": {
         "from": "customer-23ad1ec4-c@example.test",
         "to": [
@@ -54,9 +54,9 @@
           "createdBy": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "createdAt": "2026-07-10T04:17:54Z",
@@ -79,9 +79,9 @@
           "customer": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "_embedded": {
@@ -93,7 +93,7 @@
                 "state": "published",
                 "action": {
                   "type": "",
-                  "text": "TJ Baker started a new conversation #17",
+                  "text": "Redacted Person started a new conversation #17",
                   "associatedEntities": []
                 },
                 "body": "Follow-up with no In-Reply-To/References. [HT7-23ad1ec4-reply-subject-only]",
@@ -104,17 +104,17 @@
                 "customer": {
                   "id": 3,
                   "type": "customer",
-                  "firstName": "TJ",
-                  "lastName": "Baker",
-                  "photoUrl": "",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
                   "email": "customer@example.test"
                 },
                 "createdBy": {
                   "id": 3,
                   "type": "customer",
-                  "firstName": "TJ",
-                  "lastName": "Baker",
-                  "photoUrl": "",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
                   "email": "customer@example.test"
                 },
                 "assignedTo": null,
@@ -147,9 +147,9 @@
           "createdBy": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "createdAt": "2026-07-10T04:16:54Z",
@@ -172,9 +172,9 @@
           "customer": {
             "id": 3,
             "type": "customer",
-            "firstName": "TJ",
-            "lastName": "Baker",
-            "photoUrl": "",
+            "firstName": "Redacted",
+            "lastName": "Person",
+            "photoUrl": "https://helpdesk.example.test/avatar.jpg",
             "email": "customer@example.test"
           },
           "_embedded": {
@@ -186,7 +186,7 @@
                 "state": "published",
                 "action": {
                   "type": "",
-                  "text": "TJ Baker started a new conversation #16",
+                  "text": "Redacted Person started a new conversation #16",
                   "associatedEntities": []
                 },
                 "body": "Initial message for reply-subject-only. [HT7-23ad1ec4-reply-subject-only]",
@@ -197,17 +197,17 @@
                 "customer": {
                   "id": 3,
                   "type": "customer",
-                  "firstName": "TJ",
-                  "lastName": "Baker",
-                  "photoUrl": "",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
                   "email": "customer@example.test"
                 },
                 "createdBy": {
                   "id": 3,
                   "type": "customer",
-                  "firstName": "TJ",
-                  "lastName": "Baker",
-                  "photoUrl": "",
+                  "firstName": "Redacted",
+                  "lastName": "Person",
+                  "photoUrl": "https://helpdesk.example.test/avatar.jpg",
                   "email": "customer@example.test"
                 },
                 "assignedTo": null,
