@@ -8,20 +8,20 @@ Threading authority lives on the outbound side (charter §2). `In-Reply-To` and 
 
 ## 2. The reply token
 
-Every outbound message (agent reply, auto-response, and any future first-party auto-reply) embeds a signed token in its `Message-ID`. Proposed format:
+Every outbound message (agent reply, auto-response, and any future first-party auto-reply) embeds a signed token in its `Message-ID`. Format (implemented in `src/mail/reply-token.ts`):
 
 ```
-<ht.{conversationId}.{threadId}.{sig}@{mailDomain}>
+<ht.{keyId}.{conversationId}.{threadId}.{sig}@{mailDomain}>
 ```
 
-where `sig = HMAC(secret, canonical(conversationId, threadId))`, truncated and hex/base32-encoded. This is Helpthread's own design, not derived from any observed system's internals — we only observed a black-box Message-ID *shape*, never a secret or algorithm.
+where `sig = base64url( HMAC-SHA256( secret, "{keyId}.{conversationId}.{threadId}" ) )` — the full 32-byte HMAC, base64url-encoded, unpadded (not truncated; the extra bytes are trivial inside a Message-ID and full length is the safest choice). The `keyId` names the signing key and is itself part of the signed payload, so a token's key cannot be swapped without invalidating it. `mailDomain` is not signed (it is not part of threading identity). The id fields are constrained at mint time to `[A-Za-z0-9_-]` (the base64url alphabet, excluding the `.` delimiter), so a well-formed local part splits unambiguously into five segments. This is Helpthread's own design, not derived from any observed system's internals — we only observed a black-box Message-ID *shape*, never a secret or algorithm.
 
 The properties that ARE the spec, independent of encoding:
 
 - **(a) Unguessable without the secret** — not forgeable by an attacker who has seen valid tokens (cf. §3 rule 3).
 - **(b) Verifiable offline** — no DB round-trip to detect tampering; pure computation against the signing secret(s).
 - **(c) Carries the conversation+thread identity** — a verified token deterministically identifies its conversation/thread; no lookup table of issued tokens required.
-- **(d) Rotation-tolerant** — the signing secret must be rotatable without invalidating outstanding tokens, implying a `keyId` alongside the signature. **OPEN QUESTION:** does `keyId` ship in v1, or wait for the first rotation?
+- **(d) Rotation-tolerant** — the signing secret must be rotatable without invalidating outstanding tokens. **RESOLVED (HT-12): `keyId` ships in v1.** A keyring has one `current` key (mints and verifies) and zero or more `retired` keys (verify only); rotating means retiring the old key and promoting a new `current`, which never invalidates tokens already in customers' mailboxes. Dropping a key from the ring entirely stops its tokens from verifying.
 
 **Contrast with the observed reference format.** The fixtures show a reference helpdesk emitting Message-IDs shaped like `<FS_reply-{threadId}-{token}@{domain}>` — e.g. `<FS_reply-36-{token}@helpdesk.example.test>` (reply-with-reference.json, `agentReplyEmail.messageId`; the token value in the committed fixtures is a redacted placeholder — the real capability token is never published). Notably `{threadId}` there is a *thread* id (36), not the conversation id (15) — conversation is resolved via the thread's parent, not encoded directly. This is cited only as evidence the "signed token in the outbound Message-ID" pattern works in production (charter §2); Helpthread's `sig` derivation, secret, and truncation are unrelated to whatever that system does internally, which was never observed.
 
