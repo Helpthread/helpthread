@@ -253,4 +253,12 @@ describe('tokenized In-Reply-To (RFC 5322 CFWS / multiple ids)', () => {
     const result = decideThreading(email({ inReplyTo: 'garbage no brackets here' }), ring)
     expect(result).toEqual({ kind: 'new', forgedTokenCount: 0 })
   })
+
+  it('a valid token INSIDE a comment is ignored; the real reference wins (no wrong-conversation)', () => {
+    // CodeRabbit: a <...> in a comment must not be treated as a reference.
+    const commented = mint('c-in-comment', 't9')
+    const real = mint('c-real', 't1')
+    const result = decideThreading(email({ inReplyTo: `(${commented}) ${real}` }), ring)
+    expect(result).toMatchObject({ kind: 'append', conversationId: 'c-real', threadId: 't1' })
+  })
 })

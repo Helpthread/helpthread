@@ -19,6 +19,7 @@
  * `Keyring` is required — `verifyReplyMessageId` already asserts that).
  */
 
+import { extractMessageIds } from './message-id.js'
 import type { ParsedEmail } from './parse.js'
 import { isReplyTokenShaped, type Keyring, verifyReplyMessageId } from './reply-token.js'
 
@@ -108,25 +109,20 @@ export function decideThreading(email: ParsedEmail, keyring: Keyring): Threading
   return { kind: 'new', forgedTokenCount }
 }
 
-/** Extract every angle-bracketed `<...>` message-id from a raw header value, in order. */
-function extractMessageIds(headerValue: string): string[] {
-  return headerValue.match(/<[^>]+>/g) ?? []
-}
-
 /**
  * Build the ordered candidate list per specs/mail/threading.md §3 rule 1:
  * `In-Reply-To` first, then `References` most-recent-first (wire order is
  * oldest-first, so it is reversed here).
  *
- * Both headers are TOKENIZED — we extract the angle-bracketed `<...>`
- * message-ids from each, rather than treating the raw header string as a
- * single candidate. RFC 5322 §3.6.4 permits CFWS/comments between (and
- * around) message-ids and more than one id in `In-Reply-To`, so a verbatim
- * header like `In-Reply-To: (client note) <ht-token@domain>` would never
- * match a token if compared whole — the valid reply would be mis-threaded to
- * a NEW conversation. `references` entries are already single tokens from the
- * parser, but tokenizing them here too is idempotent and keeps the two paths
- * symmetric. A header carrying no `<...>` id contributes no candidate.
+ * Both headers are TOKENIZED via the RFC 5322-aware {@link extractMessageIds}
+ * — rather than treating the raw header string as a single candidate — because
+ * these headers legally carry CFWS/comments and multiple ids. A verbatim
+ * `In-Reply-To: (client note) <ht-token@domain>` compared whole would never
+ * match (mis-threading a real reply to a NEW conversation), and a `<...>`
+ * sitting inside a comment must NOT be treated as a real reference (it could
+ * route a reply to the wrong conversation). The extractor handles both.
+ * `references` entries are already single tokens from the parser, but running
+ * them through the same extractor is idempotent and keeps the paths symmetric.
  */
 function buildCandidates(email: ParsedEmail): string[] {
   const fromInReplyTo = email.inReplyTo ? extractMessageIds(email.inReplyTo) : []
