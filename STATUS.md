@@ -39,7 +39,6 @@
 
 ## Not yet / deferred
 
-- Live Vercel + Supabase deployment — deferred to the first deployable milestone; the inbound and outbound provider seams exist and concrete adapters (Gmail send, Postgres) are now built, so what's left is deployment wiring, not a missing adapter.
 - A customer-side / self-service API (a separate future surface, designed native when there are customers to serve).
 - Marketplace (paid modules, license keys, module registry).
 
