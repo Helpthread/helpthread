@@ -1,0 +1,142 @@
+/**
+ * `createGmailEmailSender` against a FAKE `fetchImpl` — no real network
+ * call, no real Google credentials. Exercises the HTTP-transport contract:
+ * correct endpoint/method/headers/body, the raw MIME (with its verbatim
+ * `Message-ID`) reaching the request body, success/failure translation, and
+ * that the access token is fetched per send and never leaked in errors.
+ */
+
+import { describe, expect, it, vi } from 'vitest'
+import type { OutboundEmail } from '../../email-sender.js'
+import { createGmailEmailSender } from './sender.js'
+
+const email: OutboundEmail = {
+  messageId: '<ht.k1.c1.t1.deadbeefsig@mail.example.test>',
+  from: 'support@example.test',
+  to: ['customer@example.test'],
+  subject: 'Re: Help with my order',
+  text: 'body text',
+}
+
+interface RecordedCall {
+  url: string
+  init: RequestInit
+}
+
+/** A fake `fetch` that records every call and always resolves with `status`/`body`. */
+function fakeFetch(status: number, body: unknown) {
+  const calls: RecordedCall[] = []
+  const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init: init ?? {} })
+    return new Response(JSON.stringify(body), { status })
+  }) as unknown as typeof fetch
+  return { fetchImpl, calls }
+}
+
+describe('createGmailEmailSender', () => {
+  it('happy path: POSTs the encoded raw MIME to the send endpoint and returns providerMessageId', async () => {
+    const { fetchImpl, calls } = fakeFetch(200, { id: 'gmail-123' })
+    const getAccessToken = vi.fn(async () => 'token-abc-123')
+    const sender = createGmailEmailSender({ getAccessToken, fetchImpl })
+
+    const result = await sender.send(email)
+
+    expect(result).toEqual({ providerMessageId: 'gmail-123' })
+    expect(calls).toHaveLength(1)
+
+    const { url, init } = calls[0]
+    expect(url).toBe('https://gmail.googleapis.com/gmail/v1/users/me/messages/send')
+    expect(init.method).toBe('POST')
+
+    const headers = new Headers(init.headers)
+    expect(headers.get('Authorization')).toBe('Bearer token-abc-123')
+    expect(headers.get('Content-Type')).toBe('application/json')
+
+    const parsedBody = JSON.parse(String(init.body)) as { raw: string }
+    const decodedRaw = Buffer.from(parsedBody.raw, 'base64url').toString('utf8')
+    expect(decodedRaw).toContain(`Message-ID: ${email.messageId}`)
+  })
+
+  it('uses the given userId in the endpoint URL instead of the default "me"', async () => {
+    const { fetchImpl, calls } = fakeFetch(200, { id: 'gmail-456' })
+    const sender = createGmailEmailSender({
+      getAccessToken: async () => 'token',
+      fetchImpl,
+      userId: 'mailbox@example.test',
+    })
+
+    await sender.send(email)
+
+    expect(calls[0].url).toBe(
+      'https://gmail.googleapis.com/gmail/v1/users/mailbox%40example.test/messages/send',
+    )
+  })
+
+  it('calls getAccessToken for every send (so a refreshed token is used each time)', async () => {
+    const { fetchImpl } = fakeFetch(200, { id: 'gmail-1' })
+    let n = 0
+    const getAccessToken = vi.fn(async () => `token-${++n}`)
+    const sender = createGmailEmailSender({ getAccessToken, fetchImpl })
+
+    await sender.send(email)
+    await sender.send(email)
+
+    expect(getAccessToken).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    401, 500,
+  ])('throws on a non-2xx (%d) response, and never leaks the access token in the error', async (status) => {
+    const { fetchImpl } = fakeFetch(status, { error: { message: 'nope, rejected' } })
+    const secretToken = 'super-secret-access-token-do-not-leak'
+    const getAccessToken = vi.fn(async () => secretToken)
+    const sender = createGmailEmailSender({ getAccessToken, fetchImpl })
+
+    let caught: unknown
+    try {
+      await sender.send(email)
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as Error).message).toContain(String(status))
+    expect(String(caught)).not.toContain(secretToken)
+  })
+
+  it('a rejection is a real thrown Error, never mistaken for a resolved send', async () => {
+    const { fetchImpl } = fakeFetch(500, {})
+    const sender = createGmailEmailSender({ getAccessToken: async () => 'token', fetchImpl })
+
+    await expect(sender.send(email)).rejects.toThrow(/500/)
+  })
+
+  it('throws with just the status when the error response body is empty', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('', { status: 503 }),
+    ) as unknown as typeof fetch
+    const sender = createGmailEmailSender({ getAccessToken: async () => 'token', fetchImpl })
+
+    await expect(sender.send(email)).rejects.toThrow(/503/)
+  })
+
+  it('redacts a reply-token echoed in the error body (never leaks the threading token to logs)', async () => {
+    // A bad-request body (from Gmail or an intermediary) that echoes our raw
+    // MIME would carry the outbound Message-ID token. It must not reach the
+    // thrown error / logs.
+    const echoed = `Bad request for message with Message-ID ${email.messageId}`
+    const fetchImpl = vi.fn(
+      async () => new Response(echoed, { status: 400 }),
+    ) as unknown as typeof fetch
+    const sender = createGmailEmailSender({ getAccessToken: async () => 'token', fetchImpl })
+
+    const err = await sender.send(email).then(
+      () => null,
+      (e: unknown) => e as Error,
+    )
+    expect(err).not.toBeNull()
+    const message = String(err)
+    expect(message).not.toContain(email.messageId)
+    expect(message).toContain('<ht.REDACTED>')
+  })
+})

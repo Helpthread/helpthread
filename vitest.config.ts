@@ -16,7 +16,14 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
       reportsDirectory: './coverage',
       include: ['src/**'],
-      exclude: ['src/**/*.test.ts', 'src/**/*.d.ts', 'src/providers/**'],
+      // `src/providers/*.ts` (top-level only, NOT `/**`) are pure interface/
+      // type files with no runtime code to instrument — excluded so they
+      // don't dilute the report with meaningless 0-statement entries. Real
+      // adapters under `src/providers/adapters/**` (e.g. the Gmail
+      // `EmailSender`, HT-19) DO have executable logic and must stay covered
+      // — a narrower `**` glob here would silently hide them from every
+      // future coverage report.
+      exclude: ['src/**/*.test.ts', 'src/**/*.d.ts', 'src/**/*.md', 'src/providers/*.ts'],
     },
   },
 })
