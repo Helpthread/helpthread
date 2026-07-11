@@ -456,6 +456,15 @@ describe('sendReply idempotency (HT-16)', () => {
     expect(outbound?.deliveryStatus).toBe('sent')
   })
 
+  // (Runs against the single-connection, in-process PGlite used in tests —
+  // the sender gate below deterministically interleaves the two `sendReply`
+  // calls at the application level, but the underlying `claimThreadForDelivery`
+  // UPDATE is still executed by a single DB connection, never by two
+  // genuinely concurrent ones. This proves the sequential claim-while-held
+  // logic — a second caller sees the first's lease and backs off — but NOT
+  // true multi-connection atomicity of the row-locked `UPDATE`. Real-race
+  // coverage waits for a multi-connection backend, same caveat as
+  // migrate.ts's advisory-lock note.)
   it('concurrency: a second same-key sendReply call made while the first is still in flight observes the lease and never sends', async () => {
     const { store } = await freshStore()
     const { conversationId } = await seedConversation(store)

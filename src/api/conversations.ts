@@ -35,6 +35,15 @@ const MIN_REPLY_TEXT_LENGTH = 1
 /** Maximum length of a reply's `text` field, server-enforced (spec §4a). */
 const MAX_REPLY_TEXT_LENGTH = 5000
 
+/**
+ * Maximum length (after trimming) of the `Idempotency-Key` header, server-
+ * enforced (spec §4a). The key is stored in a DB column and used as half of
+ * a unique index (`(conversation_id, idempotency_key)`, migration 003) — an
+ * unbounded caller-supplied string is an unnecessary storage/index-bloat
+ * surface for a value that only ever needs to be a short opaque token.
+ */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255
+
 /** The wire shape of one `ThreadView` (specs/api/agent-inbox-v1.md §2) — `StoredThread` with `Date` fields as ISO strings and `fromAddress` renamed to `from`. */
 interface ThreadViewJson {
   id: string
@@ -198,12 +207,17 @@ export async function handleGetConversation(
  * Every call MUST carry a non-empty `Idempotency-Key` header — its absence
  * is `400 validation_failed`, checked before the body is even parsed. This
  * endpoint is dogfood-only today (CHARTER.md's "dogfooded first"), so
- * tightening its contract has no external consumer to break. A replay of the
- * SAME key on the SAME conversation is treated as the SAME logical send —
- * never re-diffed against the body — and returns the ORIGINAL outcome
- * (`sendReply`'s own replay handling, `src/mail/send.ts`): `201` with the
- * original `ThreadView` if that attempt already succeeded, without touching
- * the sender again.
+ * tightening its contract has no external consumer to break. The header is
+ * TRIMMED before every other check or use: leading/trailing whitespace never
+ * makes two callers' "same" key look different, and the TRIMMED value is
+ * what is checked for emptiness, checked against
+ * {@link MAX_IDEMPOTENCY_KEY_LENGTH} (255 chars — `400 validation_failed` if
+ * exceeded), stored, and passed to `sendReply`. A replay of the SAME
+ * (trimmed) key on the SAME conversation is treated as the SAME logical
+ * send — never re-diffed against the body — and returns the ORIGINAL
+ * outcome (`sendReply`'s own replay handling, `src/mail/send.ts`): `201`
+ * with the original `ThreadView` if that attempt already succeeded, without
+ * touching the sender again.
  *
  * Outcomes (spec §4a): `201` with the created `ThreadView` on success (a
  * reply to a `closed` conversation reopens it, via `sendReply` →
@@ -237,9 +251,17 @@ export async function handleReply(
     return apiError(404, 'not_found', 'No conversation with that id.')
   }
 
-  const idempotencyKey = request.headers.get('Idempotency-Key')
-  if (idempotencyKey === null || idempotencyKey.trim() === '') {
+  const rawIdempotencyKey = request.headers.get('Idempotency-Key')
+  const idempotencyKey = rawIdempotencyKey?.trim() ?? ''
+  if (idempotencyKey === '') {
     return apiError(400, 'validation_failed', 'Idempotency-Key header is required.')
+  }
+  if (idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+    return apiError(
+      400,
+      'validation_failed',
+      `Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters.`,
+    )
   }
 
   const parsedBody = await parseJsonBody(request)

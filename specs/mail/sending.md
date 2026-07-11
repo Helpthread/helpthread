@@ -107,7 +107,35 @@ claim means someone else already holds it; the caller does not send and
 reports back accordingly rather than retrying the claim itself. A successful
 attempt releases the lease as it marks `sent`/`failed`. This is what makes
 "exactly one send in flight per row" hold even when a caller retries the
-same key concurrently with the delivery worker sweeping the same row.
+same key concurrently with the delivery worker sweeping the same row —
+**but only if the lease strictly outlives the send it is protecting.** The
+lease duration (`DEFAULT_LEASE_MS`, `src/mail/send.ts`) MUST strictly exceed
+the worst-case duration of the configured `EmailSender`'s `send()` call; a
+send that outlives its own lease can be re-claimed and retried by another
+attempt while the original call is still in flight — a genuine concurrent
+double-send, not merely a race over which of two callers marks the outcome.
+Every `EmailSender` used behind these retry paths must therefore bound its
+own call time well below this lease (see §4).
+
+**Delivery is at-least-once, not at-most-once — and nothing above changes
+that.** The idempotency key, the envelope snapshot, and the lease all close
+off *spurious* re-sends — a retry racing another retry, or a caller
+deliberately replaying — but none of them lets the engine observe what the
+provider actually did with a send it already accepted. The residual case
+(§3's "sent but unmarked" asymmetry, sharpened): the provider accepts the
+message — the customer's mailbox already has it — and then the write that
+marks the row `'sent'` fails, so the row remains `pending` with a live,
+already-delivered envelope on it. If nothing revisits that row for a while,
+it goes stale; once it is stale (and its lease has freed), the delivery
+worker's sweep or a keyed replay's claim will find it eligible and re-send
+an already-delivered message. The engine has no way to distinguish "crashed
+before the provider was ever called" from "the provider was called and
+succeeded, but the mark-sent write failed" — both leave the identical
+stale `pending` row with a stored envelope, and both are, correctly,
+retried. So: **at-least-once is the actual guarantee this system provides.
+At-most-once is not something the engine can produce on its own — it holds
+only to the extent the `EmailSender` provider de-duplicates on the outbound
+`Message-ID`** (§4).
 
 **The delivery worker (`src/mail/delivery-worker.ts`) is a plain, invocable
 sweep function** — `runDeliveryWorker(deps, options?)` — not built on a
@@ -139,6 +167,26 @@ silently rewrites `Message-ID` would pass `sendReply` (the thread is marked
 accept raw MIME; reject any that will not carry `Message-ID` unaltered. The
 in-repo fake used by the engine tests proves only that `sendReply` *passes* the
 value to the seam — not that any given adapter preserves it on the wire.
+
+**Precondition: a provider SHOULD de-duplicate on `Message-ID` (HT-16).** This
+is not an aside — it is the one thing standing between this system's
+structural at-least-once delivery (§3a) and true at-most-once delivery from
+the operator's point of view. Where a provider does not de-duplicate on the
+`Message-ID` it is handed verbatim, the operator is knowingly accepting
+at-least-once delivery: the residual "accepted, then unmarked, then
+re-sent" case (§3a) will occasionally reach the customer's mailbox twice,
+identical down to the `Message-ID`, and nothing in the engine can prevent
+that without provider-side dedup. A provider adapter's wire-level contract
+test (above) should note whether the provider is known to de-dupe, so this
+gap is a documented, deliberate property of a given deployment rather than
+a surprise discovered in production.
+
+**A lease that outlives the provider's `send()` call is a precondition
+too.** §3a's lease only holds "at most one attempt in flight per row" if the
+provider's `send()` reliably returns well inside the lease window — an
+adapter whose HTTP call has no timeout (or one comparable to or longer than
+the lease) can outlive its own claim and collide with a re-claimed retry.
+See each adapter's own timeout documentation for its bound.
 
 ## 5. Scope
 

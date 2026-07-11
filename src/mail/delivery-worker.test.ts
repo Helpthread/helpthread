@@ -242,6 +242,15 @@ describe('runDeliveryWorker', () => {
 
   // --- cross-path race: worker vs. a keyed sendReply replay -------------------
 
+  // (Runs against the single-connection, in-process PGlite used in tests —
+  // the sender gate below deterministically interleaves the worker sweep and
+  // the keyed replay at the application level, but both still execute their
+  // `claimThreadForDelivery` UPDATE against the same single DB connection,
+  // never two genuinely concurrent ones. This proves the sequential
+  // claim-while-held logic — whichever caller claims second sees the lease
+  // and backs off — but NOT true multi-connection atomicity of the
+  // row-locked `UPDATE`. Real-race coverage waits for a multi-connection
+  // backend, same caveat as migrate.ts's advisory-lock note.)
   it('cross-path race: a stale pending row is contended between runDeliveryWorker and a keyed sendReply replay — exactly one of them sends, the other observes the lease', async () => {
     const { db: rawDb, store } = await freshStore()
     const { conversationId } = await seedConversation(store)

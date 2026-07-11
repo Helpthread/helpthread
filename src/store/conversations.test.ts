@@ -541,6 +541,15 @@ describe('createConversationStore', () => {
       expect(a.threadId).not.toBe(b.threadId)
     })
 
+    // (Runs against the single-connection, in-process PGlite used in tests —
+    // see createPgliteDb above. A single connection serializes the two
+    // `appendThread` transactions below rather than truly overlapping them,
+    // so this proves the sequential claim-while-held logic — the later
+    // `Promise.all` caller observes the earlier one's conflict correctly —
+    // but NOT true multi-connection atomicity of the underlying `INSERT ...
+    // ON CONFLICT`. Real-race coverage (two genuinely concurrent Postgres
+    // connections racing the same unique index) waits for a multi-connection
+    // backend in tests, same caveat as migrate.ts's advisory-lock note.)
     it('concurrent appendThread calls with the SAME key resolve to exactly one created row', async () => {
       const { store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())

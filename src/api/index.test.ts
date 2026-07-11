@@ -667,6 +667,64 @@ describe('createInboxApi', () => {
       expect(sent).toHaveLength(0)
     })
 
+    it('an Idempotency-Key over 255 characters (after trimming) is 400 validation_failed; the sender is never called', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'Hi' },
+          { idempotencyKey: `  ${'a'.repeat(256)}  ` },
+        ),
+      )
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+      expect(sent).toHaveLength(0)
+    })
+
+    it('leading/trailing whitespace in Idempotency-Key is trimmed before comparison — a whitespace-padded key and its trimmed twin replay the SAME send (one send only)', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      const trimmedKey = 'padded-key-replay'
+      // U+00A0 (NO-BREAK SPACE), not a plain ASCII space/tab: the WHATWG
+      // `Headers` implementation already strips ORDINARY HTTP optional
+      // whitespace (space/tab) from a header value before this handler ever
+      // sees it, so padding with plain spaces would pass even without our
+      // own `.trim()`. NBSP is whitespace to JS's `String.prototype.trim()`
+      // but NOT stripped by `Headers`, so this specifically exercises the
+      // application-level trim this fix adds.
+      const paddedKey = `\u00A0${trimmedKey}\u00A0`
+
+      const first = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'On it!' },
+          { idempotencyKey: paddedKey },
+        ),
+      )
+      expect(first.status).toBe(201)
+      const firstBody = await first.json()
+
+      // The replay supplies the SAME logical key with no padding at all — it
+      // must be recognized as the identical key, not a distinct one, so the
+      // sender is not invoked a second time.
+      const second = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'A completely different message' },
+          { idempotencyKey: trimmedKey },
+        ),
+      )
+      expect(second.status).toBe(201)
+      const secondBody = await second.json()
+
+      expect(secondBody).toEqual(firstBody)
+      expect(sent).toHaveLength(1) // the sender was invoked exactly once, for the FIRST call
+    })
+
     it('replay of a sent reply: SAME key on the SAME conversation returns 201 with the ORIGINAL ThreadView, sender not re-invoked', async () => {
       const { store, api, sent } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())

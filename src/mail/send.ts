@@ -102,15 +102,35 @@ import type { ConversationStore, SendEnvelope, StoredThread } from '../store/con
 import { type Keyring, mintReplyMessageId } from './reply-token.js'
 
 /**
- * Default lease duration for a delivery attempt (claim → send → mark): long
- * enough to cover a real provider call plus the mark-back write, short
- * enough that a crashed attempt's lease expires and becomes retryable again
- * within a reasonable window. Shared as the default for both `sendReply`'s
- * own inline retry-claim and `runDeliveryWorker`'s `leaseMs` option
- * (`src/mail/delivery-worker.ts`) — one number, one place, rather than two
- * independently-tuned constants for what is conceptually the same lease.
+ * Default lease duration for a delivery attempt (claim → send → mark).
+ * Shared as the default for both `sendReply`'s own inline retry-claim and
+ * `runDeliveryWorker`'s `leaseMs` option (`src/mail/delivery-worker.ts`) —
+ * one number, one place, rather than two independently-tuned constants for
+ * what is conceptually the same lease.
+ *
+ * ## The invariant this number exists to hold
+ *
+ * The lease MUST strictly exceed the worst-case duration of whatever
+ * `EmailSender.send()` call it is protecting (specs/mail/sending.md §3a,
+ * §4). A send that outlives its own lease can have its row re-claimed and
+ * retried by a concurrent caller — a keyed replay, or the delivery worker —
+ * while the original call is STILL in flight: a genuine double-send, with
+ * no DB write, crash, or failure anywhere in the picture. This is a
+ * different (and worse) hole than the "mark-sent write fails" case §3
+ * already documents — that one is a single already-delivered send racing a
+ * *later* retry of a row gone stale; this one is two live `send()` calls
+ * for the same row overlapping in real time.
+ *
+ * `120_000` is chosen to comfortably clear a real provider HTTP call
+ * (seconds, not minutes) with a wide margin — not tuned against any
+ * measured worst case, because none has been measured here. Any
+ * `EmailSender` used behind these retry paths (§4) MUST bound its own
+ * `send()` call well below this lease — via its own request timeout — so
+ * this margin is never actually spent. Raising this constant without also
+ * checking every adapter's timeout against it re-opens the hole it exists
+ * to close.
  */
-export const DEFAULT_LEASE_MS = 30_000
+export const DEFAULT_LEASE_MS = 120_000
 
 /** Dependencies `sendReply` needs, injected so it stays testable against fakes/in-memory stores. */
 export interface SendReplyDeps {
@@ -410,8 +430,19 @@ export async function attemptDeliveryOfClaimedThread(
   try {
     await store.releaseThreadLease(thread.id, 'sent')
   } catch (markErr) {
+    // The row stays claimed (lease held) rather than released, but that is
+    // NOT meaningful protection against a resend — the lease is a fraction
+    // of `staleAfterMs` (delivery-worker.ts's default: 5 minutes vs.
+    // `DEFAULT_LEASE_MS`'s 2), so it will have expired long before the
+    // delivery worker would otherwise reconsider this stale-`pending` row
+    // anyway. Staying claimed buys, at best, a small head start. The actual
+    // backstop against double-delivering an already-sent message is the
+    // `EmailSender` provider de-duplicating on `Message-ID`
+    // (specs/mail/sending.md §3a, §4) — this log line exists purely so the
+    // "sent but unmarked" case is observable, not because the claimed state
+    // meaningfully delays anything.
     console.error(
-      '[attemptDeliveryOfClaimedThread] message was sent but marking it sent failed; row left claimed (delivery still happened)',
+      '[attemptDeliveryOfClaimedThread] message was sent but marking it sent failed; row left claimed (delivery still happened; see comment above — this is not a meaningful resend delay)',
       markErr,
     )
   }

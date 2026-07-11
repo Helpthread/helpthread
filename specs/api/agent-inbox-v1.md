@@ -123,8 +123,13 @@ is indistinguishable from a nonexistent one to this API, on purpose).
 caller-chosen string, scoped per-conversation. This is a deliberate breaking change from
 the HT-15 shape of this endpoint; it has no external consumer yet (this API is
 dogfood-only — CHARTER.md "dogfooded first"), so tightening the contract here has no
-compatibility cost. A missing or empty header is `400 validation_failed`, checked before
-the body is parsed.
+compatibility cost. The header is **trimmed of leading/trailing whitespace before any
+other check**, so `" key "` and `"key"` are the same idempotency key — a caller whose
+client or proxy adds incidental whitespace does not silently get a second send. The
+**trimmed** value is what is validated, stored, and passed through to `sendReply`: it
+must be non-empty and **at most 255 characters** after trimming. A missing header, a
+header that is empty (or all whitespace) after trimming, or a trimmed value over 255
+characters is `400 validation_failed`, checked before the body is parsed.
 
 Body: `{ text: string; html?: string }` — `text` 1–5000 chars, server-enforced; `html`
 optional. The Agent supplies only the message; every mail header is DERIVED server-side
@@ -168,7 +173,12 @@ Outcomes:
 - **`400 validation_failed`** on a missing/empty `Idempotency-Key` header, or a body that
   violates the limits.
 - **`404 not_found`** if the conversation is missing or `deleted` — no message is sent; a
-  reply token minted before the append resolves is simply discarded (mirrors §3b).
+  reply token minted before the append resolves is simply discarded (mirrors §3b). This
+  applies even to a KEYED REPLAY of a key whose original attempt already succeeded: if the
+  conversation has since been deleted, the replay call returns `404`, not the original
+  `201`. Replay-of-original-outcome does not survive a conversation delete — there is no
+  mail-safety impact, since the original send already happened regardless of what a later
+  replay call observes.
 - **`409 retry_in_progress`** (HT-16) — the delivery lease for this `Idempotency-Key` is
   currently held by another in-flight attempt; nothing was sent by this call. The caller
   should retry the SAME key later, not mint a new one (a new key would create an
