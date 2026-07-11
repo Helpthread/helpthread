@@ -1,10 +1,10 @@
 # Helpthread — Status
 
-**Current state:** the mail engine's full loop is built and behind a native HTTP API — an inbound reply is parsed, threaded, and stored; an Agent can list the inbox, read a conversation, and reply; the reply is sent through a real Gmail adapter with a signed token in its Message-ID that a future customer reply threads back on, and the store now runs on either PGlite (local) or Postgres (Supabase-ready, pooler-safe) behind the same seam. Everything from the wire up (parse → thread → store → read → reply → send) exists and is tested against real in-process Postgres, the real `pg` wire protocol, and real `Request`/`Response` objects. What's left to run it *live* is send idempotency and a deployment. All work lands through a guarded pipeline: every PR runs typecheck, lint, tests-with-coverage, secret scanning, and CodeQL, plus AI review (CodeRabbit) and — for security-, auth-, and threading-critical code — an independent Codex pass.
+**Current state:** the mail engine's full loop is built and behind a native HTTP API — an inbound reply is parsed, threaded, and stored; an Agent can list the inbox, read a conversation, and reply; the reply is sent through a real Gmail adapter with a signed token in its Message-ID that a future customer reply threads back on, and the store now runs on either PGlite (local) or Postgres (Supabase-ready, pooler-safe) behind the same seam. Everything from the wire up (parse → thread → store → read → reply → send) exists and is tested against real in-process Postgres, the real `pg` wire protocol, and real `Request`/`Response` objects. What's left to run it *live* is a deployment. All work lands through a guarded pipeline: every PR runs typecheck, lint, tests-with-coverage, secret scanning, and CodeQL, plus AI review (CodeRabbit) and — for security-, auth-, and threading-critical code — an independent Codex pass.
 
 ## Now
 
-**Phase 1 — Core engine, dogfooded.** Both provider adapters (Gmail send, Postgres) are done; building send idempotency + a delivery worker ([HT-16](https://resonantiq.atlassian.net/browse/HT-16)) — retrying failed/pending outbound without double-sending, the last piece before a live retrying caller can sit in front of `sendReply`. Design is in progress.
+**Phase 1 — Core engine, dogfooded.** Both provider adapters (Gmail send, Postgres) are done, and send idempotency + the delivery worker ([HT-16](https://resonantiq.atlassian.net/browse/HT-16)) now guard `sendReply` against double-sends. What's left is the live deployment — a thin Vercel/Node route wrapping `createInboxApi`, a real Gmail inbound webhook, and Supabase.
 
 ## Done
 
@@ -22,6 +22,7 @@
 - **Threading decision** (`src/mail/thread.ts`) — the 5-rule algorithm: a verified token routes a reply to its conversation; no valid token starts a new one; subject is never used.
 - **Conversation/thread store** (`src/store/`, `src/db/`) — persistence on a thin, portable raw-SQL layer over PGlite (in-process Postgres) locally, the same SQL destined for Supabase. Keyset-paginated listing; a valid token to a closed conversation reopens it, to a deleted one the caller starts fresh.
 - **Outbound send** (`src/mail/send.ts`) — mints the reply token into the outbound Message-ID, persists the outbound thread as an outbox item (`pending`→`sent`/`failed`), and hands it to an `EmailSender`. Returns typed outcomes (a delivered message is never reported as failed). A round-trip test proves a sent reply threads back to the right conversation.
+- **Send idempotency + delivery worker** (`src/mail/send.ts`, `src/mail/delivery-worker.ts`, [HT-16](https://resonantiq.atlassian.net/browse/HT-16)) — a required `Idempotency-Key` on the reply endpoint, an envelope snapshot, and a delivery lease guard `sendReply` against double-sends; a delivery-worker sweep retries failed/pending outbound on the same lease. Delivery is at-least-once, with provider Message-ID dedup as the recommended backstop.
 
 **Agent Inbox API v1** (`src/api/`) — native, framework-agnostic `Request → Response` (a Vercel/Node adapter is a later thin wrapper; Node runtime, since the engine's HMAC uses `node:crypto`).
 - Constant-time Bearer auth that runs *before* routing; native `{ error: { code, message } }` envelope; `Cache-Control: no-store` on every response; UUID-shape guards; a top-level catch so nothing leaks as an uncontrolled 500.
@@ -33,7 +34,6 @@
 
 ## Next
 
-- **A deployment** — a thin Vercel/Node route wrapping `createInboxApi`, a real Gmail inbound webhook, and Supabase — both provider adapters it needs now exist.
 - **An Agent inbox UI** over the API (API-first, per the charter).
 - **HT-5 counsel work** — plugin exception text, board consent memo, and trademark policy (charter §3/§7, per the DCO amendment) — gates opening the project to external contributions.
 
