@@ -115,7 +115,13 @@ send that outlives its own lease can be re-claimed and retried by another
 attempt while the original call is still in flight — a genuine concurrent
 double-send, not merely a race over which of two callers marks the outcome.
 Every `EmailSender` used behind these retry paths must therefore bound its
-own call time well below this lease (see §4).
+own call time well below this lease (see §4). This is enforced mechanically,
+not by convention: the `EmailSender` contract requires each implementation to
+declare the bound it itself enforces (`maxSendMs`,
+`src/providers/email-sender.ts`), and both retry paths assert
+`maxSendMs < leaseMs` before claiming a row
+(`assertLeaseExceedsSenderBound`, `src/mail/send.ts`) — a violating
+lease/timeout combination throws up front, claiming and sending nothing.
 
 **Delivery is at-least-once, not at-most-once — and nothing above changes
 that.** The idempotency key, the envelope snapshot, and the lease all close
@@ -188,7 +194,12 @@ too.** §3a's lease only holds "at most one attempt in flight per row" if the
 provider's `send()` reliably returns well inside the lease window — an
 adapter whose HTTP call has no timeout (or one comparable to or longer than
 the lease) can outlive its own claim and collide with a re-claimed retry.
-See each adapter's own timeout documentation for its bound.
+The contract makes this precondition checkable: every `EmailSender` declares
+`maxSendMs` — the bound it really enforces (a mechanical timeout on its own
+call, e.g. the Gmail adapter's `timeoutMs` feeding `AbortSignal.timeout`),
+not an estimate — and the retry paths refuse to claim under a lease that
+does not strictly exceed it (§3a). See each adapter's own timeout
+documentation for its bound.
 
 ## 5. Scope
 

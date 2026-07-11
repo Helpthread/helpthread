@@ -40,7 +40,11 @@
 
 import type { EmailSender } from '../providers/index.js'
 import type { ConversationStore } from '../store/conversations.js'
-import { attemptDeliveryOfClaimedThread, DEFAULT_LEASE_MS } from './send.js'
+import {
+  assertLeaseExceedsSenderBound,
+  attemptDeliveryOfClaimedThread,
+  DEFAULT_LEASE_MS,
+} from './send.js'
 
 /** Default age a `'pending'` row must reach before this worker considers it stuck rather than merely in flight. */
 const DEFAULT_STALE_AFTER_MS = 5 * 60_000
@@ -58,7 +62,13 @@ export interface DeliveryWorkerDeps {
 export interface DeliveryWorkerOptions {
   /** How old a `'pending'` row must be before it's a retry candidate (default {@link DEFAULT_STALE_AFTER_MS}). */
   staleAfterMs?: number
-  /** Lease duration held while a candidate is being attempted (default {@link DEFAULT_LEASE_MS}, shared with `sendReply`'s own retry-claim). */
+  /**
+   * Lease duration held while a candidate is being attempted (default
+   * {@link DEFAULT_LEASE_MS}, shared with `sendReply`'s own retry-claim).
+   * Must strictly exceed the sender's enforced per-`send()` bound
+   * (`EmailSender.maxSendMs`) — asserted up front, before anything is
+   * claimed (see `assertLeaseExceedsSenderBound`, `src/mail/send.ts`).
+   */
   leaseMs?: number
   /** Hard cap on rows attempted in this one call (default {@link DEFAULT_BATCH_SIZE}). */
   batchSize?: number
@@ -90,6 +100,10 @@ export async function runDeliveryWorker(
   const staleAfterMs = options?.staleAfterMs ?? DEFAULT_STALE_AFTER_MS
   const leaseMs = options?.leaseMs ?? DEFAULT_LEASE_MS
   const batchSize = options?.batchSize ?? DEFAULT_BATCH_SIZE
+
+  // Fail loudly on a lease/sender-timeout misconfiguration BEFORE listing or
+  // claiming anything — see this helper's doc comment in send.ts.
+  assertLeaseExceedsSenderBound(deps.sender, leaseMs)
 
   const candidates = await deps.store.listDeliverableThreads({ staleAfterMs, batchSize })
 

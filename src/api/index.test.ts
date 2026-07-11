@@ -21,6 +21,7 @@ function createFakeSender(): { sender: EmailSender; sent: OutboundEmail[] } {
   const sent: OutboundEmail[] = []
   return {
     sender: {
+      maxSendMs: 30_000,
       async send(email) {
         sent.push(email)
         return {}
@@ -33,6 +34,7 @@ function createFakeSender(): { sender: EmailSender; sent: OutboundEmail[] } {
 /** An `EmailSender` that always rejects — for exercising the `502 send_failed` path. */
 function createThrowingSender(): EmailSender {
   return {
+    maxSendMs: 30_000,
     async send() {
       throw new Error('provider rejected the message (must never leak to the client)')
     },

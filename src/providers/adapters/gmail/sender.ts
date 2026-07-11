@@ -71,6 +71,12 @@ export interface GmailEmailSenderOptions {
    * delivered-but-reported-failed window every network sender has; the
    * HT-16 idempotency work is where retry-safety lands). This is the safe
    * direction: never report a delivery that can't be confirmed.
+   *
+   * This value is also declared as the adapter's `EmailSender.maxSendMs`,
+   * which the engine's retry paths assert is strictly below the delivery
+   * lease (`DEFAULT_LEASE_MS`, `src/mail/send.ts`) before claiming a row —
+   * so raising it to or past the lease makes those paths throw rather than
+   * silently risk a concurrent double-send.
    */
   timeoutMs?: number
 }
@@ -117,6 +123,11 @@ export function createGmailEmailSender(options: GmailEmailSenderOptions): EmailS
   const endpoint = `${GMAIL_API_BASE}/users/${encodeURIComponent(userId)}/messages/send`
 
   return {
+    // The same value that bounds the HTTP call below (`AbortSignal.timeout`)
+    // — one variable, so the declared bound and the enforced one cannot
+    // drift apart. See `EmailSender.maxSendMs`'s doc for what consumes this.
+    maxSendMs: timeoutMs,
+
     async send(email: OutboundEmail): Promise<EmailSendResult> {
       const raw = buildRawMessage(email)
       const encoded = Buffer.from(raw, 'utf8').toString('base64url')

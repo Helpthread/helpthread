@@ -5,7 +5,7 @@ import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import { type ConversationStore, createConversationStore } from '../store/conversations.js'
 import type { ParsedEmail } from './parse.js'
 import type { Keyring, SigningKey } from './reply-token.js'
-import { type SendReplyDeps, sendReply } from './send.js'
+import { DEFAULT_LEASE_MS, type SendReplyDeps, sendReply } from './send.js'
 import { decideThreading } from './thread.js'
 
 // --- fixtures ----------------------------------------------------------------
@@ -21,6 +21,7 @@ function fakeSender(): EmailSender & { sent: OutboundEmail[] } {
   const sent: OutboundEmail[] = []
   return {
     sent,
+    maxSendMs: 30_000,
     async send(email) {
       sent.push(email)
       return { providerMessageId: 'provider-1' }
@@ -31,6 +32,7 @@ function fakeSender(): EmailSender & { sent: OutboundEmail[] } {
 /** Always throws — simulates a provider transport failure. */
 function failingSender(): EmailSender {
   return {
+    maxSendMs: 30_000,
     async send() {
       throw new Error('boom: provider unreachable')
     },
@@ -475,6 +477,7 @@ describe('sendReply idempotency (HT-16)', () => {
     })
     let sendCallCount = 0
     const sender: EmailSender = {
+      maxSendMs: 30_000,
       async send() {
         sendCallCount++
         await sendGate
@@ -561,5 +564,74 @@ describe('sendReply idempotency (HT-16)', () => {
     if (!result.ok) throw new Error('unreachable')
     expect(result.delivery).toBe('sent')
     expect(sender.sent).toHaveLength(0) // never re-sent — already delivered
+  })
+})
+
+describe('lease / sender-bound coupling', () => {
+  let db: Db | undefined
+
+  afterEach(async () => {
+    await db?.close()
+    db = undefined
+  })
+
+  async function freshStore(): Promise<{ db: Db; store: ConversationStore }> {
+    db = await createPgliteDb()
+    await migrate(db)
+    return { db, store: createConversationStore(db) }
+  }
+
+  async function seedConversation(store: ConversationStore) {
+    return store.createConversation({
+      subject: 'Help with my order',
+      customerEmail: 'customer@example.test',
+      firstMessage: {
+        direction: 'inbound',
+        messageId: '<inbound-1@customer.example.test>',
+        fromAddress: 'customer@example.test',
+        bodyText: 'Where is my order?',
+      },
+    })
+  }
+
+  const input = (conversationId: string) => ({
+    conversationId,
+    from: 'support@example.test',
+    to: ['customer@example.test'],
+    subject: 'Re: Help with my order',
+    text: "We're looking into it!",
+  })
+
+  it('keyed path: a sender whose maxSendMs does not stay strictly below the lease throws BEFORE claiming or sending', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    // Equality is deliberately a violation too — the lease must STRICTLY
+    // exceed the bound (specs/mail/sending.md §3a).
+    const sender = { ...fakeSender(), maxSendMs: DEFAULT_LEASE_MS }
+    const sendSpy = vi.spyOn(sender, 'send')
+    const claimSpy = vi.spyOn(store, 'claimThreadForDelivery')
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    await expect(
+      sendReply({ ...input(conversationId), idempotencyKey: 'k-violating' }, deps),
+    ).rejects.toThrow(/must strictly exceed/)
+
+    expect(claimSpy).not.toHaveBeenCalled()
+    expect(sendSpy).not.toHaveBeenCalled()
+  })
+
+  it('no-key path: the assertion does not apply — there is no lease to violate', async () => {
+    // A fresh no-key send never claims a lease, so a sender whose bound
+    // exceeds DEFAULT_LEASE_MS is not a misconfiguration ON THIS PATH; the
+    // retry paths (keyed claim above, worker sweep — see
+    // delivery-worker.test.ts) are where the invariant is enforced.
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = { ...fakeSender(), maxSendMs: DEFAULT_LEASE_MS * 2 }
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    const result = await sendReply(input(conversationId), deps)
+    expect(result).toMatchObject({ ok: true, delivery: 'sent' })
+    expect(sender.sent).toHaveLength(1)
   })
 })
