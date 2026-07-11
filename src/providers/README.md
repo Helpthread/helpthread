@@ -23,6 +23,13 @@ Concrete implementations — **adapters** — live in `src/providers/adapters/<n
 (e.g. `src/providers/adapters/vercel-queues/`). This task defines the
 contracts only; no adapters are built here.
 
+The first real adapter is `src/providers/adapters/gmail/` (HT-19): a Node-runtime
+`EmailSender` for `users.messages.send`, built on `mimetext` for raw-MIME
+construction (see its `mime.ts` for the verbatim-`Message-ID` contract and a
+mimetext EOL gotcha) with OAuth2 token acquisition injected via a
+`getAccessToken` callback — token refresh/rotation is the composition root's
+concern, not the adapter's.
+
 An adapter is **selected at the composition root** — the small amount of
 top-level wiring code (API route handlers, cron entry points, app
 bootstrap) that constructs concrete provider instances from env/config and
