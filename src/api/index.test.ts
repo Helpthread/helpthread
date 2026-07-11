@@ -114,6 +114,37 @@ function patchRaw(path: string, rawBody: string, ...tokenArg: [string | undefine
   return withJsonBody('PATCH', path, rawBody, tokenArg)
 }
 
+/** The `Idempotency-Key` most `replyPost` calls use, unless a test overrides it. */
+const DEFAULT_IDEMPOTENCY_KEY = 'test-idempotency-key'
+
+/**
+ * Like {@link post}, but for `POST .../replies` (HT-16 requires an
+ * `Idempotency-Key` header on every call to that route). Defaults to
+ * {@link DEFAULT_IDEMPOTENCY_KEY}; pass `idempotencyKey: null` to omit the
+ * header entirely (for exercising the "missing header" 400), or a specific
+ * string to control replay/collision scenarios.
+ */
+function replyPost(
+  path: string,
+  body: unknown,
+  options: { idempotencyKey?: string | null } = {},
+): Request {
+  const key =
+    options.idempotencyKey === undefined ? DEFAULT_IDEMPOTENCY_KEY : options.idempotencyKey
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${TOKEN}`,
+  }
+  if (key !== null) {
+    headers['Idempotency-Key'] = key
+  }
+  return new Request(`https://x.example.test${path}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  })
+}
+
 describe('createInboxApi', () => {
   let db: Db | undefined
 
@@ -408,7 +439,7 @@ describe('createInboxApi', () => {
       const { conversationId } = await store.createConversation(newConversation())
 
       const res = await api(
-        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
       )
       expect(res.status).toBe(201)
       expect(res.headers.get('Cache-Control')).toBe('no-store')
@@ -466,7 +497,7 @@ describe('createInboxApi', () => {
       })
 
       const res = await api(
-        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
       )
       expect(res.status).toBe(201) // delivered → success, NOT a 502 that would invite a resend
       expect(sent).toHaveLength(1) // the email really went out
@@ -480,7 +511,7 @@ describe('createInboxApi', () => {
       )
 
       const res = await api(
-        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Following up.' }),
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'Following up.' }),
       )
       expect(res.status).toBe(201)
       expect(sent[0].subject).toBe('Re: Already replied')
@@ -492,7 +523,7 @@ describe('createInboxApi', () => {
       await setStatus(db, conversationId, 'closed')
 
       const res = await api(
-        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Reopening.' }),
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'Reopening.' }),
       )
       expect(res.status).toBe(201)
 
@@ -502,7 +533,9 @@ describe('createInboxApi', () => {
 
     it('404s for a missing conversation id; the sender is never called', async () => {
       const { api, sent } = await freshApi()
-      const res = await api(post(`/api/v1/conversations/${RANDOM_UUID}/replies`, { text: 'Hi' }))
+      const res = await api(
+        replyPost(`/api/v1/conversations/${RANDOM_UUID}/replies`, { text: 'Hi' }),
+      )
       expect(res.status).toBe(404)
       expect(await res.json()).toEqual({
         error: { code: 'not_found', message: expect.any(String) },
@@ -515,14 +548,16 @@ describe('createInboxApi', () => {
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'deleted')
 
-      const res = await api(post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Hi' }))
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'Hi' }),
+      )
       expect(res.status).toBe(404)
       expect(sent).toHaveLength(0)
     })
 
     it('404s for a non-UUID-shaped id — never reaches the uuid column', async () => {
       const { api, sent } = await freshApi()
-      const res = await api(post('/api/v1/conversations/not-a-uuid/replies', { text: 'Hi' }))
+      const res = await api(replyPost('/api/v1/conversations/not-a-uuid/replies', { text: 'Hi' }))
       expect(res.status).toBe(404)
       expect(sent).toHaveLength(0)
     })
@@ -551,7 +586,9 @@ describe('createInboxApi', () => {
         supportAddress: SUPPORT_ADDRESS,
       })
 
-      const res = await api(post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Hi' }))
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'Hi' }),
+      )
       expect(res.status).toBe(404)
       expect(sent).toHaveLength(0)
 
@@ -562,7 +599,7 @@ describe('createInboxApi', () => {
       const { store, api, sent } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
 
-      const res = await api(post(`/api/v1/conversations/${conversationId}/replies`, {}))
+      const res = await api(replyPost(`/api/v1/conversations/${conversationId}/replies`, {}))
       expect(res.status).toBe(400)
       expect(await res.json()).toEqual({
         error: { code: 'validation_failed', message: expect.any(String) },
@@ -575,7 +612,7 @@ describe('createInboxApi', () => {
       const { conversationId } = await store.createConversation(newConversation())
 
       const res = await api(
-        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'a'.repeat(5001) }),
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'a'.repeat(5001) }),
       )
       expect(res.status).toBe(400)
       expect(sent).toHaveLength(0)
@@ -585,10 +622,184 @@ describe('createInboxApi', () => {
       const { store, api, sent } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
 
-      const res = await api(postRaw(`/api/v1/conversations/${conversationId}/replies`, 'not json{'))
+      // A valid Idempotency-Key header is present so this test isolates the
+      // JSON-parse failure specifically, not the header check.
+      const req = postRaw(`/api/v1/conversations/${conversationId}/replies`, 'not json{')
+      req.headers.set('Idempotency-Key', DEFAULT_IDEMPOTENCY_KEY)
+      const res = await api(req)
       expect(res.status).toBe(400)
       expect(await res.json()).toEqual({
         error: { code: 'validation_failed', message: expect.any(String) },
+      })
+      expect(sent).toHaveLength(0)
+    })
+
+    it('missing Idempotency-Key header is 400 validation_failed; the sender is never called', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'Hi' },
+          { idempotencyKey: null },
+        ),
+      )
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+      expect(sent).toHaveLength(0)
+    })
+
+    it('an empty Idempotency-Key header is also 400 validation_failed', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'Hi' },
+          { idempotencyKey: '' },
+        ),
+      )
+      expect(res.status).toBe(400)
+      expect(sent).toHaveLength(0)
+    })
+
+    it('an Idempotency-Key over 255 characters (after trimming) is 400 validation_failed; the sender is never called', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'Hi' },
+          { idempotencyKey: `  ${'a'.repeat(256)}  ` },
+        ),
+      )
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+      expect(sent).toHaveLength(0)
+    })
+
+    it('leading/trailing whitespace in Idempotency-Key is trimmed before comparison — a whitespace-padded key and its trimmed twin replay the SAME send (one send only)', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      const trimmedKey = 'padded-key-replay'
+      // U+00A0 (NO-BREAK SPACE), not a plain ASCII space/tab: the WHATWG
+      // `Headers` implementation already strips ORDINARY HTTP optional
+      // whitespace (space/tab) from a header value before this handler ever
+      // sees it, so padding with plain spaces would pass even without our
+      // own `.trim()`. NBSP is whitespace to JS's `String.prototype.trim()`
+      // but NOT stripped by `Headers`, so this specifically exercises the
+      // application-level trim this fix adds.
+      const paddedKey = `\u00A0${trimmedKey}\u00A0`
+
+      const first = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'On it!' },
+          { idempotencyKey: paddedKey },
+        ),
+      )
+      expect(first.status).toBe(201)
+      const firstBody = await first.json()
+
+      // The replay supplies the SAME logical key with no padding at all — it
+      // must be recognized as the identical key, not a distinct one, so the
+      // sender is not invoked a second time.
+      const second = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'A completely different message' },
+          { idempotencyKey: trimmedKey },
+        ),
+      )
+      expect(second.status).toBe(201)
+      const secondBody = await second.json()
+
+      expect(secondBody).toEqual(firstBody)
+      expect(sent).toHaveLength(1) // the sender was invoked exactly once, for the FIRST call
+    })
+
+    it('replay of a sent reply: SAME key on the SAME conversation returns 201 with the ORIGINAL ThreadView, sender not re-invoked', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      const key = 'reply-replay-key'
+
+      const first = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'On it!' },
+          { idempotencyKey: key },
+        ),
+      )
+      expect(first.status).toBe(201)
+      const firstBody = await first.json()
+
+      // The replay deliberately supplies a DIFFERENT body — same key, same
+      // conversation is treated as the SAME logical send; the body is never
+      // re-diffed.
+      const second = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'A completely different message' },
+          { idempotencyKey: key },
+        ),
+      )
+      expect(second.status).toBe(201)
+      const secondBody = await second.json()
+
+      expect(secondBody).toEqual(firstBody)
+      expect(sent).toHaveLength(1) // the sender was invoked exactly once, for the FIRST call
+    })
+
+    it('replay while a delivery attempt for the same key is in progress is 409 retry_in_progress', async () => {
+      db = await createPgliteDb()
+      await migrate(db)
+      const realStore = createConversationStore(db)
+      const { conversationId } = await realStore.createConversation(newConversation())
+      const key = 'leased-key'
+
+      // Seed a 'failed' row under this key directly via the store, then hold
+      // its delivery lease — simulating another in-flight attempt (a worker
+      // sweep, or a concurrent request) currently sending it.
+      const seeded = await realStore.appendThread(conversationId, {
+        id: '11111111-1111-4111-8111-111111111111',
+        direction: 'outbound',
+        messageId: '<ht.k1.leased.sig@mail.example.test>',
+        fromAddress: SUPPORT_ADDRESS,
+        bodyText: 'On it!',
+        deliveryStatus: 'failed',
+        idempotencyKey: key,
+        sendEnvelope: { to: ['customer@example.test'], subject: 'Re: Help with my order' },
+      })
+      if (!seeded.ok) throw new Error('unreachable')
+      await realStore.claimThreadForDelivery(seeded.threadId, 30_000)
+
+      const { sender, sent } = createFakeSender()
+      const api = createInboxApi({
+        store: realStore,
+        apiToken: TOKEN,
+        sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+      })
+
+      const res = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'On it!' },
+          { idempotencyKey: key },
+        ),
+      )
+      expect(res.status).toBe(409)
+      expect(await res.json()).toEqual({
+        error: { code: 'retry_in_progress', message: expect.any(String) },
       })
       expect(sent).toHaveLength(0)
     })
@@ -598,7 +809,7 @@ describe('createInboxApi', () => {
       const { conversationId } = await store.createConversation(newConversation())
 
       const res = await api(
-        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
       )
       expect(res.status).toBe(502)
       const body = await res.json()

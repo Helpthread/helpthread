@@ -103,6 +103,76 @@ ALTER TABLE threads ADD CONSTRAINT threads_delivery_status_by_direction CHECK (
 `
 
 /**
+ * Migration 003 — send idempotency + delivery leasing (HT-16).
+ *
+ * Three new nullable columns on `threads`, all outbound-only:
+ *
+ * - `idempotency_key` — the caller-supplied dedup key (`SendReplyInput.idempotencyKey`,
+ *   `src/mail/send.ts`). A retry that supplies the SAME key on the SAME
+ *   conversation must find the row `appendThread` already created for the
+ *   first attempt — never mint a second thread/`Message-ID` for one logical
+ *   send. `threads_conversation_idempotency_key_idx` is what makes that
+ *   lookup atomic: a PARTIAL unique index (predicate `idempotency_key IS NOT
+ *   NULL`) so it only constrains rows that opted into dedup — every row
+ *   with a `NULL` key (every inbound thread, and any outbound thread sent
+ *   without a key) is invisible to it and never collides with another
+ *   `NULL`. `src/store/conversations.ts`'s `appendThread` targets this exact
+ *   index with `INSERT ... ON CONFLICT (conversation_id, idempotency_key)
+ *   WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *`, then falls
+ *   back to a `SELECT` of the pre-existing row on a conflict (0 rows
+ *   returned) — the "atomic get-or-insert" the store module doc describes.
+ * - `send_envelope` — a `jsonb` snapshot of `{ to, cc?, subject, references?
+ *   }`, written ONCE at insert and read back verbatim on every retry
+ *   (worker-driven or caller-replayed). **This is deliberately a snapshot,
+ *   not a recomputation.** A retry must resend the EXACT envelope the first
+ *   attempt would have sent — recomputing `references` from the
+ *   conversation's CURRENT thread list would let mail that arrived *between*
+ *   the original attempt and the retry silently change what the retry
+ *   sends, which is exactly the kind of silent mail-semantics drift
+ *   CHARTER.md invariant #5 forbids. Persisted for every outbound send
+ *   (keyed or not) so the delivery worker (`src/mail/delivery-worker.ts`)
+ *   can rebuild any eligible row's `OutboundEmail` uniformly, without caring
+ *   whether the original call carried a dedup key.
+ * - `claimed_until` — a lease: a worker or a keyed-retry `sendReply` call
+ *   "claims" a row by setting this to a near-future timestamp (`UPDATE ...
+ *   WHERE claimed_until IS NULL OR claimed_until < now()`, an ordinary
+ *   Postgres row-level-locked `UPDATE`, so two concurrent claimants can
+ *   never both win), attempts delivery, then clears it back to `NULL` when
+ *   marking `sent`/`failed`. Kept as its own nullable column, separate from
+ *   `delivery_status`, precisely so the existing three-value
+ *   `delivery_status` contract (`StoredThread`, the wire `ThreadView`,
+ *   specs/api/agent-inbox-v1.md §2) is untouched — a lease is a NEW axis
+ *   ("is anyone attempting this right now"), not a fourth delivery state.
+ *
+ * No backfill step is needed here (unlike migration 002): all three columns
+ * are nullable with no `NOT NULL`/CHECK that a pre-existing row could
+ * violate by defaulting to `NULL` — an inbound row and a pre-HT-16 outbound
+ * row both get `NULL` for all three and satisfy every constraint below
+ * as-is.
+ *
+ * The two CHECK constraints below mirror migration 002's cross-column style
+ * and its NULL-semantics care: `(direction = 'outbound') OR (<column> IS
+ * NULL)` is TRUE for every inbound row with a NULL column (the only legal
+ * inbound state) and for every outbound row regardless of the column's value
+ * (outbound may or may not carry one) — and, critically, is a plain boolean
+ * OR of two independently-evaluable booleans, so there is no "NULL makes the
+ * whole CHECK vacuously pass" trap the way an un-guarded `IN (...)` has
+ * (migration 002's comment explains that trap in full).
+ */
+const MIGRATION_003_SEND_IDEMPOTENCY = `
+ALTER TABLE threads ADD COLUMN idempotency_key text;
+ALTER TABLE threads ADD COLUMN send_envelope jsonb;
+ALTER TABLE threads ADD COLUMN claimed_until timestamptz;
+ALTER TABLE threads ADD CONSTRAINT threads_idempotency_key_outbound_only CHECK (
+  (direction = 'outbound') OR (idempotency_key IS NULL)
+);
+ALTER TABLE threads ADD CONSTRAINT threads_send_envelope_outbound_only CHECK (
+  (direction = 'outbound') OR (send_envelope IS NULL)
+);
+CREATE UNIQUE INDEX threads_conversation_idempotency_key_idx ON threads (conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -113,6 +183,11 @@ const MIGRATIONS: Migration[] = [
     id: 2,
     name: 'add_thread_delivery_status',
     sql: MIGRATION_002_ADD_THREAD_DELIVERY_STATUS,
+  },
+  {
+    id: 3,
+    name: 'add_thread_send_idempotency',
+    sql: MIGRATION_003_SEND_IDEMPOTENCY,
   },
 ]
 

@@ -35,6 +35,15 @@ const MIN_REPLY_TEXT_LENGTH = 1
 /** Maximum length of a reply's `text` field, server-enforced (spec §4a). */
 const MAX_REPLY_TEXT_LENGTH = 5000
 
+/**
+ * Maximum length (after trimming) of the `Idempotency-Key` header, server-
+ * enforced (spec §4a). The key is stored in a DB column and used as half of
+ * a unique index (`(conversation_id, idempotency_key)`, migration 003) — an
+ * unbounded caller-supplied string is an unnecessary storage/index-bloat
+ * surface for a value that only ever needs to be a short opaque token.
+ */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255
+
 /** The wire shape of one `ThreadView` (specs/api/agent-inbox-v1.md §2) — `StoredThread` with `Date` fields as ISO strings and `fromAddress` renamed to `from`. */
 interface ThreadViewJson {
   id: string
@@ -193,18 +202,39 @@ export async function handleGetConversation(
  * derived server-side from the conversation (see {@link deriveReplyHeaders})
  * so the client can never set recipients or threading headers.
  *
+ * ## `Idempotency-Key` is REQUIRED (HT-16, a deliberate breaking change)
+ *
+ * Every call MUST carry a non-empty `Idempotency-Key` header — its absence
+ * is `400 validation_failed`, checked before the body is even parsed. This
+ * endpoint is dogfood-only today (CHARTER.md's "dogfooded first"), so
+ * tightening its contract has no external consumer to break. The header is
+ * TRIMMED before every other check or use: leading/trailing whitespace never
+ * makes two callers' "same" key look different, and the TRIMMED value is
+ * what is checked for emptiness, checked against
+ * {@link MAX_IDEMPOTENCY_KEY_LENGTH} (255 chars — `400 validation_failed` if
+ * exceeded), stored, and passed to `sendReply`. A replay of the SAME
+ * (trimmed) key on the SAME conversation is treated as the SAME logical
+ * send — never re-diffed against the body — and returns the ORIGINAL
+ * outcome (`sendReply`'s own replay handling, `src/mail/send.ts`): `201`
+ * with the original `ThreadView` if that attempt already succeeded, without
+ * touching the sender again.
+ *
  * Outcomes (spec §4a): `201` with the created `ThreadView` on success (a
  * reply to a `closed` conversation reopens it, via `sendReply` →
  * `ConversationStore.appendThread`'s existing policy); `404 not_found` if
  * the conversation is missing or `deleted` (checked BEFORE minting/sending,
  * and again as a race check on `sendReply`'s own result — see below);
- * `400 validation_failed` on a body that violates the limits; `502
- * send_failed` if the provider rejects the message — `sendReply` returns a
- * `send-failed` result (it does not throw), the outbound thread is left
- * `failed` OR, if even that mark failed, stuck `pending` (`persistedStatus`),
- * and nothing was delivered — so the response says only that the reply could
- * not be delivered, never a specific persisted state and never a raw provider
- * error (spec §4a, §5's user-safe-message rule).
+ * `400 validation_failed` on a missing `Idempotency-Key` header or a body
+ * that violates the limits; `409 retry_in_progress` if another attempt with
+ * the SAME key is already in flight and holds the delivery lease (HT-16;
+ * `sendReply`'s `retry-in-progress` result) — nothing was sent by THIS
+ * request; `502 send_failed` if the provider rejects the message —
+ * `sendReply` returns a `send-failed` result (it does not throw), the
+ * outbound thread is left `failed` OR, if even that mark failed, stuck
+ * `pending` (`persistedStatus`), and nothing was delivered — so the response
+ * says only that the reply could not be delivered, never a specific
+ * persisted state and never a raw provider error (spec §4a, §5's
+ * user-safe-message rule).
  */
 export async function handleReply(
   id: string,
@@ -219,6 +249,19 @@ export async function handleReply(
 ): Promise<Response> {
   if (!isUuid(id)) {
     return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  const rawIdempotencyKey = request.headers.get('Idempotency-Key')
+  const idempotencyKey = rawIdempotencyKey?.trim() ?? ''
+  if (idempotencyKey === '') {
+    return apiError(400, 'validation_failed', 'Idempotency-Key header is required.')
+  }
+  if (idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+    return apiError(
+      400,
+      'validation_failed',
+      `Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters.`,
+    )
   }
 
   const parsedBody = await parseJsonBody(request)
@@ -263,6 +306,7 @@ export async function handleReply(
       html: replyBody.html,
       inReplyTo,
       references,
+      idempotencyKey,
     },
     {
       store: deps.store,
@@ -280,6 +324,17 @@ export async function handleReply(
       // be persisted 'failed' OR stuck 'pending' (result.persistedStatus), so
       // this message claims only what is always true: it wasn't delivered.
       return apiError(502, 'send_failed', 'The reply could not be delivered.')
+    }
+    if (result.reason === 'retry-in-progress') {
+      // Another attempt with the SAME Idempotency-Key already holds the
+      // delivery lease (HT-16) — nothing was sent by THIS request. The
+      // in-flight attempt is expected to resolve the row on its own; the
+      // caller should retry the SAME key again later, not mint a new one.
+      return apiError(
+        409,
+        'retry_in_progress',
+        'A delivery attempt for this Idempotency-Key is already in progress.',
+      )
     }
     // conversation-not-found / conversation-deleted — a race: the conversation
     // went missing/deleted between the header-fetch above and appendThread's

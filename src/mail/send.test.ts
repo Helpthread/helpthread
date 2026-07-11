@@ -297,3 +297,269 @@ describe('sendReply', () => {
     expect(sendSpy).not.toHaveBeenCalled()
   })
 })
+
+// --- idempotency (HT-16) -----------------------------------------------------
+
+describe('sendReply idempotency (HT-16)', () => {
+  let db: Db | undefined
+
+  afterEach(async () => {
+    await db?.close()
+    db = undefined
+  })
+
+  async function freshStore(): Promise<{ db: Db; store: ConversationStore }> {
+    db = await createPgliteDb()
+    await migrate(db)
+    return { db, store: createConversationStore(db) }
+  }
+
+  async function seedConversation(store: ConversationStore) {
+    return store.createConversation({
+      subject: 'Help with my order',
+      customerEmail: 'customer@example.test',
+      firstMessage: {
+        direction: 'inbound',
+        messageId: '<inbound-1@customer.example.test>',
+        fromAddress: 'customer@example.test',
+        bodyText: 'Where is my order?',
+      },
+    })
+  }
+
+  it('regression pin: two sendReply calls with NO idempotencyKey are two independent sends with distinct threadIds — by design, permanent', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+    const input = {
+      conversationId,
+      from: 'support@example.test',
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      text: "We're looking into it!",
+    }
+
+    const first = await sendReply(input, deps)
+    const second = await sendReply(input, deps)
+
+    expect(first.ok).toBe(true)
+    expect(second.ok).toBe(true)
+    if (!first.ok || !second.ok) throw new Error('unreachable')
+    expect(second.threadId).not.toBe(first.threadId)
+    expect(second.messageId).not.toBe(first.messageId)
+    expect(sender.sent).toHaveLength(2)
+  })
+
+  it('two sendReply calls with the SAME idempotencyKey result in exactly ONE sender.send() call', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+    const input = {
+      conversationId,
+      from: 'support@example.test',
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      text: "We're looking into it!",
+      idempotencyKey: 'same-key',
+    }
+
+    await sendReply(input, deps)
+    await sendReply(input, deps)
+
+    expect(sender.sent).toHaveLength(1)
+  })
+
+  it('replay after success: the SAME threadId/messageId is returned and the sender is not re-invoked', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+    const input = {
+      conversationId,
+      from: 'support@example.test',
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      text: "We're looking into it!",
+      idempotencyKey: 'replay-key',
+    }
+
+    const first = await sendReply(input, deps)
+    const second = await sendReply(input, deps)
+
+    expect(first).toEqual(second)
+    expect(sender.sent).toHaveLength(1)
+  })
+
+  it('replay after failure: failed → sent, messageId byte-identical, and the RESENT envelope matches the ORIGINAL attempt even when the retry call supplies different to/subject/references and a new inbound message arrived in between', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const deps1: SendReplyDeps = { store, sender: failingSender(), keyring, mailDomain }
+
+    const first = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+        references: ['<inbound-1@customer.example.test>'],
+        idempotencyKey: 'retry-key-1',
+      },
+      deps1,
+    )
+    expect(first).toMatchObject({ ok: false, reason: 'send-failed', persistedStatus: 'failed' })
+    if (first.ok || first.reason !== 'send-failed') throw new Error('unreachable')
+
+    // A new inbound message lands on the conversation BETWEEN the failed
+    // attempt and the retry — a caller that recomputed References from the
+    // conversation's current state would now see a longer chain.
+    await store.appendThread(conversationId, {
+      direction: 'inbound',
+      messageId: '<inbound-2@customer.example.test>',
+      fromAddress: 'customer@example.test',
+      bodyText: 'Any update?',
+    })
+
+    const sender = fakeSender()
+    const deps2: SendReplyDeps = { store, sender, keyring, mailDomain }
+    // The retry deliberately supplies DIFFERENT to/subject/references — this
+    // must be ignored in favor of the stored snapshot from the first attempt.
+    const second = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['someone-else@example.test'],
+        subject: 'A totally different subject',
+        text: 'different body',
+        references: ['<inbound-1@customer.example.test>', '<inbound-2@customer.example.test>'],
+        idempotencyKey: 'retry-key-1',
+      },
+      deps2,
+    )
+    expect(second).toMatchObject({ ok: true, delivery: 'sent' })
+    if (!second.ok) throw new Error('unreachable')
+    expect(second.messageId).toBe(first.messageId)
+    expect(second.threadId).toBe(first.threadId)
+
+    expect(sender.sent).toHaveLength(1)
+    expect(sender.sent[0]).toMatchObject({
+      messageId: first.messageId,
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      references: ['<inbound-1@customer.example.test>'],
+    })
+
+    const conversation = await store.getConversation(conversationId)
+    const outbound = conversation?.threads.find((t) => t.id === first.threadId)
+    expect(outbound?.deliveryStatus).toBe('sent')
+  })
+
+  // (Runs against the single-connection, in-process PGlite used in tests —
+  // the sender gate below deterministically interleaves the two `sendReply`
+  // calls at the application level, but the underlying `claimThreadForDelivery`
+  // UPDATE is still executed by a single DB connection, never by two
+  // genuinely concurrent ones. This proves the sequential claim-while-held
+  // logic — a second caller sees the first's lease and backs off — but NOT
+  // true multi-connection atomicity of the row-locked `UPDATE`. Real-race
+  // coverage waits for a multi-connection backend, same caveat as
+  // migrate.ts's advisory-lock note.)
+  it('concurrency: a second same-key sendReply call made while the first is still in flight observes the lease and never sends', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+
+    let releaseSend: () => void = () => {}
+    const sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve
+    })
+    let sendCallCount = 0
+    const sender: EmailSender = {
+      async send() {
+        sendCallCount++
+        await sendGate
+        return {}
+      },
+    }
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+    const input = {
+      conversationId,
+      from: 'support@example.test',
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      text: "We're looking into it!",
+      idempotencyKey: 'concurrent-key',
+    }
+
+    const firstPromise = sendReply(input, deps)
+    // Wait until the first call has actually reached the (blocked) sender —
+    // i.e. it has persisted, claimed the lease, and is mid-send.
+    await vi.waitFor(() => expect(sendCallCount).toBe(1))
+
+    const second = await sendReply(input, deps)
+    expect(second).toEqual({ ok: false, reason: 'retry-in-progress' })
+    expect(sendCallCount).toBe(1) // the second call never reached the sender
+
+    releaseSend()
+    const first = await firstPromise
+    expect(first).toMatchObject({ ok: true, delivery: 'sent' })
+
+    const conversation = await store.getConversation(conversationId)
+    expect(conversation?.threads.filter((t) => t.direction === 'outbound')).toHaveLength(1)
+  })
+
+  // --- HT-16 CodeRabbit fix: sent-row reclaim double-send ---------------------
+  //
+  // CodeRabbit (Major): claimThreadForDelivery's WHERE clause checked only the
+  // lease, not delivery_status. Interleaving: a keyed sendReply's get-or-insert
+  // snapshot observes a row as 'pending'/'failed', but by the time it calls
+  // claimThreadForDelivery, a concurrent attempt has already delivered the
+  // message and released the lease with 'sent' — the lease is free, so the
+  // (unfixed) claim would succeed again and attemptDeliveryOfClaimedThread
+  // would resend an already-delivered message. The fix adds `AND
+  // delivery_status IN ('pending', 'failed')` to the claim's WHERE clause
+  // (src/store/conversations.ts) and, on the client side, re-reads the row on
+  // a failed claim so a genuinely-'sent' row resolves to the same
+  // success-replay result as the early 'sent' check, not 'retry-in-progress'.
+  it('reclaim-after-sent: a keyed row that turns "sent" between the get-or-insert snapshot and the claim call resolves as a success replay, not a resend', async () => {
+    const { store: realStore, db: rawDb } = await freshStore()
+    const { conversationId } = await seedConversation(realStore)
+    const sender = fakeSender()
+
+    // A store double whose appendThread behaves exactly like the real one,
+    // except that — simulating a concurrent same-key attempt (or the
+    // delivery worker) completing delivery in the gap between this
+    // get-or-insert snapshot and sendReply's later claim call — it flips the
+    // row to 'sent' (lease already free) immediately after returning the
+    // ORIGINAL (still 'pending') snapshot to the caller.
+    const store: ConversationStore = {
+      ...realStore,
+      async appendThread(convId, thread) {
+        const result = await realStore.appendThread(convId, thread)
+        if (result.ok) {
+          await rawDb.query(
+            "UPDATE threads SET delivery_status = 'sent', claimed_until = NULL WHERE id = $1",
+            [result.threadId],
+          )
+        }
+        return result
+      },
+    }
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+    const input = {
+      conversationId,
+      from: 'support@example.test',
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      text: "We're looking into it!",
+      idempotencyKey: 'toctou-key',
+    }
+
+    const result = await sendReply(input, deps)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.delivery).toBe('sent')
+    expect(sender.sent).toHaveLength(0) // never re-sent — already delivered
+  })
+})
