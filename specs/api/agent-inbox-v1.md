@@ -73,9 +73,11 @@ appears, not preemptively.
   interface ApiError { error: { code: string; message: string } }
   ```
   `code` is a machine-readable slug (`unauthorized`, `not_found`, `validation_failed`,
-  `server_error`); `message` is user-safe and MUST NEVER contain an internal detail — no
-  stack, no SQL, no upstream body, no id it wasn't given. HTTP status pairs with `code`:
-  400 validation, 401 auth, 404 not-found, 405 method-not-allowed, 500 server error.
+  `method_not_allowed`, `send_failed`, `server_error`); `message` is user-safe and MUST
+  NEVER contain an internal detail — no stack, no SQL, no upstream body, no id it wasn't
+  given. HTTP status pairs with `code`: 400 `validation_failed`, 401 `unauthorized`, 404
+  `not_found`, 405 `method_not_allowed`, 500 `server_error`, 502 `send_failed` (§4a, the
+  provider rejected an outbound reply).
 - **Unknown routes / methods:** an unmatched path is `404 not_found`; a known path with an
   unsupported method is `405` (with an `Allow` header). Both still require auth first — an
   unauthenticated request gets `401` before routing details leak.
@@ -120,8 +122,8 @@ from the conversation, so the client never sets recipients or threading headers:
 
 - **`to`** = the conversation's `customerEmail`.
 - **`from`** = the deployment's configured support address (`supportAddress` dep).
-- **`subject`** = the conversation's `subject`, prefixed `Re: ` if it isn't already
-  (case-insensitive check — never double-prefix `Re: Re:`).
+- **`subject`** = the conversation's `subject`, prefixed with `Re:` plus a space if it
+  isn't already (case-insensitive check — never double-prefix to `Re: Re:`).
 - **`In-Reply-To`** = the `messageId` of the conversation's most-recent INBOUND thread (the
   customer message being answered), if it has one; **`References`** = the `messageId`s of
   all prior threads in chronological order that have one. These are for the customer's mail
@@ -136,14 +138,19 @@ and sends via the injected `EmailSender`.
 Outcomes:
 - **`201`** with the created `ThreadView` on success. A reply to a `closed` conversation
   **reopens** it (the store's existing append policy).
-- **`404 not_found`** if the conversation is missing or `deleted` — nothing is minted or
-  sent (mirrors §3b; the token, minted before the append resolves, is discarded).
+- **`404 not_found`** if the conversation is missing or `deleted` — no message is sent; a
+  reply token minted before the append resolves is simply discarded (mirrors §3b).
 - **`400 validation_failed`** on a body that violates the limits.
-- **`502 send_failed`** if the `EmailSender` fails: the reply IS persisted (as
-  `delivery_status = 'failed'` — a future delivery worker, HT-16, retries it with the same
-  Message-ID), so the message is *"saved but not yet delivered; it will be retried,"* never
-  a raw provider error. This is the one place a persisted-but-not-sent state is surfaced to
-  the caller distinctly from an internal error.
+- **`502 send_failed`** if the provider rejects the message — nothing was delivered.
+  `sendReply` returns a `send-failed` result (it does not throw): the outbound thread is
+  left `delivery_status = 'failed'` (a future delivery worker, HT-16, retries it with the
+  same Message-ID) — or, if even that mark fails, stuck `pending`. The response therefore
+  says only that the reply *could not be delivered* — never a specific persisted state,
+  never a raw provider error. This is the one outcome where an undelivered reply is
+  surfaced to the caller distinctly from an internal error. (Note the asymmetry: once the
+  provider ACCEPTS the message it is delivered, so a subsequent failure to record `'sent'`
+  is NOT a `send_failed` — it resolves to `201`, since reporting a delivered message as
+  failed would invite a resend.)
 
 ### 4b. `PATCH /api/v1/conversations/{id}` — close or reopen
 
