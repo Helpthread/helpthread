@@ -139,4 +139,30 @@ describe('createGmailEmailSender', () => {
     expect(message).not.toContain(email.messageId)
     expect(message).toContain('<ht.REDACTED>')
   })
+
+  it('redacts an echoed base64url raw body (the token is decodable inside it)', async () => {
+    // A bad-request body that echoes our base64url-encoded `raw` request carries
+    // the token INSIDE the base64 blob, past the literal-token redaction. The
+    // long-base64url-run redaction must catch it.
+    // A real echoed `raw` is the whole base64url MIME (thousands of chars); pad
+    // so the run exceeds the redaction threshold, as it would in practice.
+    const rawEcho = Buffer.from(
+      `From: support@example.test\r\nMessage-ID: ${email.messageId}\r\n\r\n${'body '.repeat(40)}`,
+      'utf8',
+    ).toString('base64url')
+    const fetchImpl = vi.fn(
+      async () => new Response(`Rejected raw=${rawEcho}`, { status: 400 }),
+    ) as unknown as typeof fetch
+    const sender = createGmailEmailSender({ getAccessToken: async () => 'token', fetchImpl })
+
+    const err = await sender.send(email).then(
+      () => null,
+      (e: unknown) => e as Error,
+    )
+    const message = String(err)
+    // Neither the token nor the base64url blob that decodes to it survives.
+    expect(message).not.toContain(email.messageId)
+    expect(message).not.toContain(rawEcho)
+    expect(message).toContain('[REDACTED-BASE64]')
+  })
 })

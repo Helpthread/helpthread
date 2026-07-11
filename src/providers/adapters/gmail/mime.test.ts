@@ -167,15 +167,34 @@ describe('buildRawMessage', () => {
   describe('header-injection guard', () => {
     const CRLF_INJECTION = 'x@example.test\r\nBcc: attacker@evil.test'
 
+    const MSGID_INJECTION = '<a@x.test>\r\nBcc: attacker@evil.test'
+
+    // REQUIRED headers (from/to/cc/messageId) THROW on a CR/LF — a malformed one
+    // of these is a genuine can't-send.
     it.each([
       ['from', { from: CRLF_INJECTION }],
       ['to', { to: [CRLF_INJECTION] }],
       ['cc', { cc: [CRLF_INJECTION] }],
-      ['messageId', { messageId: '<a@x.test>\r\nBcc: attacker@evil.test' }],
-      ['inReplyTo', { inReplyTo: '<a@x.test>\r\nBcc: attacker@evil.test' }],
-      ['references', { references: ['<a@x.test>\r\nBcc: attacker@evil.test'] }],
-    ])('throws when %s carries a CR/LF (no header can be injected)', (_label, override) => {
+      ['messageId', { messageId: MSGID_INJECTION }],
+    ])('throws when a REQUIRED header (%s) carries a CR/LF', (_label, override) => {
       expect(() => buildRawMessage({ ...base, text: 'body', ...override })).toThrow(/injection/i)
+    })
+
+    // ADVISORY headers (In-Reply-To/References) DROP a poisoned atom instead of
+    // throwing — throwing would let one crafted stored msg-id DoS every reply to
+    // that conversation. The header is omitted; nothing injects onto the wire.
+    it('drops (does not throw on) an In-Reply-To with a CR/LF; injects nothing', () => {
+      const raw = buildRawMessage({ ...base, text: 'body', inReplyTo: MSGID_INJECTION })
+      expect(raw).not.toContain('In-Reply-To:')
+      expect(raw).not.toContain('Bcc:')
+    })
+
+    it('drops only the poisoned References atom, keeps the clean one, injects nothing', () => {
+      const good = '<clean@customer.example.test>'
+      const raw = buildRawMessage({ ...base, text: 'body', references: [good, MSGID_INJECTION] })
+      expect(raw).not.toContain('Bcc:')
+      expect(raw).not.toContain('attacker@evil.test')
+      expect(unfold(raw)).toContain(`References: ${good}`)
     })
 
     it('also rejects a bare control character (e.g. NUL) in a header atom', () => {
@@ -183,6 +202,26 @@ describe('buildRawMessage', () => {
         buildRawMessage({ ...base, text: 'body', from: 'x@example.test\u0000' }),
       ).toThrow(/injection/i)
     })
+  })
+
+  // --- msg-id length bound (Codex confirm: one overlong atom can't be folded) --
+
+  it('drops an absurdly long In-Reply-To / References atom so no line exceeds 998', () => {
+    const huge = `<${'a'.repeat(5000)}@x.test>`
+    const raw = buildRawMessage({
+      ...base,
+      text: 'body',
+      inReplyTo: huge,
+      references: [huge, '<ok@x.test>'],
+    })
+    expect(maxLineLength(raw)).toBeLessThanOrEqual(998)
+    expect(raw).not.toContain('In-Reply-To:') // the huge inReplyTo was dropped
+    expect(unfold(raw)).toContain('References: <ok@x.test>') // only the sane ref survives
+  })
+
+  it('throws on an absurdly long messageId (our own token — over-long is an internal bug)', () => {
+    const huge = `<${'a'.repeat(5000)}@x.test>`
+    expect(() => buildRawMessage({ ...base, text: 'body', messageId: huge })).toThrow(/limit/i)
   })
 
   // --- line-length safety (Codex High) ---------------------------------------

@@ -97,18 +97,27 @@ export function buildRawMessage(email: OutboundEmail): string {
     )
   }
 
-  // HEADER-INJECTION GUARD (see module doc §3). mimetext writes address and
-  // custom-header values LITERALLY, so a value containing a CR/LF — reachable
-  // via a stored inbound Message-ID or a customer address — would emit a
-  // second header line (`\r\nBcc: attacker@…`). Reject any control/newline in
-  // every externally-influenced header atom BEFORE it reaches mimetext.
-  // (`subject` is exempt: mimetext RFC-2047-encodes it, neutralizing CRLF.)
+  // HEADER-INJECTION GUARD (module doc §3). mimetext writes address and
+  // custom-header values LITERALLY, so a value with a CR/LF would emit a second
+  // header line (`\r\nBcc: attacker@…`). The REQUIRED headers below (from/to/
+  // cc/messageId) must be clean — a malformed one is a genuine can't-send, so
+  // reject it. (`subject` is exempt: mimetext RFC-2047-encodes it.) `from` is
+  // our config, `messageId` our own token, `to`/`cc` deliverable addresses.
   assertHeaderSafe('from', email.from)
   for (const to of email.to) assertHeaderSafe('to', to)
   for (const cc of email.cc ?? []) assertHeaderSafe('cc', cc)
   assertHeaderSafe('messageId', email.messageId)
-  if (email.inReplyTo) assertHeaderSafe('inReplyTo', email.inReplyTo)
-  for (const ref of email.references ?? []) assertHeaderSafe('references[]', ref)
+  assertMaxLength('messageId', email.messageId)
+
+  // ADVISORY threading headers (In-Reply-To/References) carry ATTACKER-
+  // INFLUENCED inbound msg-ids. Rejecting a bad one would let one crafted
+  // stored Message-ID (a control char, or an absurd length that can't be folded
+  // under RFC 5322's 998-octet line limit) block EVERY future reply to that
+  // conversation — a denial of service. Since these are advisory (Helpthread's
+  // own threading is token-anchored, not References-based; specs/mail/threading.md
+  // §2), we SANITIZE by DROPPING unsafe atoms rather than throwing.
+  const safeInReplyTo = isSafeMsgId(email.inReplyTo) ? email.inReplyTo : undefined
+  const safeReferences = (email.references ?? []).filter(isSafeMsgId)
 
   const msg = createMimeMessage()
 
@@ -124,15 +133,15 @@ export function buildRawMessage(email: OutboundEmail): string {
   // mimetext's random-id generator from ever firing.
   msg.setHeader('Message-ID', email.messageId)
 
-  if (email.inReplyTo) {
-    msg.setHeader('In-Reply-To', email.inReplyTo)
+  if (safeInReplyTo) {
+    msg.setHeader('In-Reply-To', safeInReplyTo)
   }
-  if (email.references && email.references.length > 0) {
-    // FOLDED (module doc §3): a long References chain (dozens of msg-ids) on
-    // one line would exceed RFC 5322's 998-octet limit. mimetext does not
-    // fold custom headers, but it DOES preserve CRLF+WSP folds we insert, so
-    // fold at WSP between ids ourselves. Unfolding recovers `join(' ')`.
-    msg.setHeader('References', foldHeaderAtoms(email.references))
+  if (safeReferences.length > 0) {
+    // FOLDED (module doc §3): a long References chain would exceed RFC 5322's
+    // 998-octet line limit. mimetext doesn't fold custom headers but DOES
+    // preserve CRLF+WSP folds we insert. Every atom is already ≤ MAX_MSGID_LENGTH
+    // (isSafeMsgId), so no single atom can overflow a folded line either.
+    msg.setHeader('References', foldHeaderAtoms(safeReferences))
   }
 
   // BASE64 bodies (module doc §3): mimetext writes body `data` VERBATIM after
@@ -204,4 +213,26 @@ function foldHeaderAtoms(atoms: string[]): string {
     }
   }
   return value
+}
+
+/**
+ * Generous upper bound on a single msg-id atom. Real Message-IDs are well under
+ * 100 chars; this exists only so one pathological/hostile stored id cannot
+ * produce a header line over RFC 5322's 998-octet limit (a single atom has no
+ * internal WSP to fold at, so folding between atoms cannot rescue an overlong one).
+ */
+const MAX_MSGID_LENGTH = 512
+
+/** Throw if a REQUIRED header atom exceeds the length bound (used for our own `messageId` — over-long there is an internal bug). */
+function assertMaxLength(label: string, value: string): void {
+  if (value.length > MAX_MSGID_LENGTH) {
+    throw new Error(
+      `buildRawMessage: ${label} is ${value.length} chars, over the ${MAX_MSGID_LENGTH}-char limit`,
+    )
+  }
+}
+
+/** True iff `value` is a present, injection-safe, length-bounded msg-id atom — the drop filter for ADVISORY headers (In-Reply-To/References). */
+function isSafeMsgId(value: string | undefined): value is string {
+  return value !== undefined && !CONTROL_OR_NEWLINE.test(value) && value.length <= MAX_MSGID_LENGTH
 }

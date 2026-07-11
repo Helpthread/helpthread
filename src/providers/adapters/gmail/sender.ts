@@ -82,7 +82,16 @@ const MAX_ERROR_BODY_CHARS = 500
  * token is already never included).
  */
 function redactReplyTokens(text: string): string {
-  return text.replace(/<ht\.[^>]*>/g, '<ht.REDACTED>')
+  return (
+    text
+      // The literal token, if echoed as-is.
+      .replace(/<ht\.[^>]*>/g, '<ht.REDACTED>')
+      // AND any long base64url run: a bad-request body could echo our
+      // base64url-encoded `raw` request (the whole MIME — which contains the
+      // token decodably). No human-readable error message has an unbroken
+      // 100-char base64url run, so this only ever strips our own payload.
+      .replace(/[A-Za-z0-9_-]{100,}/g, '[REDACTED-BASE64]')
+  )
 }
 
 /**
