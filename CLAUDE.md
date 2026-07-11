@@ -1,6 +1,6 @@
 # Helpthread — engine repo
 
-Helpthread is an open-source serverless helpdesk (AGPL-3.0 core, owned by Resonant IQ, Inc.). **CHARTER.md is the constitution** — read it before substantive work.
+Helpthread is an open-source serverless helpdesk (AGPL-3.0 core; a Resonant IQ, Inc. product). **CHARTER.md is the constitution** — read it before substantive work.
 
 ## References & provenance
 
@@ -12,7 +12,7 @@ Helpthread is an open-source serverless helpdesk (AGPL-3.0 core, owned by Resona
   - Modern TS/AI helpdesks (e.g. antiwork/helper) may be *looked at* for UX/AI patterns, but **their code is not adapted unless a permissive LICENSE is confirmed** — as of 2026-07-10 helper's and cossistant's licenses did not resolve on GitHub, so: look-only.
 - **FreeScout's role: a window into the Help Scout experience, nothing more.** Help Scout (closed SaaS) is the ease-of-use North Star; FreeScout is the open, self-hostable pane of glass we use to *model the interface* toward that bar. It is a UX/experience reference, never a code source. Its AGPL source is never read in a Helpthread session (the operating habit lives in `CLAUDE.local.md`).
 - Behavior is specified from RFCs, public documentation, and — where already captured — the black-box fixtures; we do not observe FreeScout further.
-- Every substantive change gets real human review before merge — ordinary PR review, preserved in git history. This is also what keeps AI-assisted work copyrightable and thus dual-licensable; a rubber stamp doesn't meet that bar.
+- Every substantive change gets real human review before merge — ordinary PR review, preserved in git history. This is also what keeps AI-assisted work copyrightable; a rubber stamp doesn't meet that bar.
 
 ## Coding discipline
 
