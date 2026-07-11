@@ -204,6 +204,24 @@ export interface ConversationStore {
    * store method only knows how to fetch a page.
    */
   listConversations(options: ListConversationsOptions): Promise<ConversationSummary[]>
+
+  /**
+   * Set a conversation's `status` to `'open'` or `'closed'` — the write path
+   * behind `PATCH /api/v1/conversations/{id}` (specs/api/agent-inbox-v1.md
+   * §4b). A single `UPDATE ... RETURNING` statement, scoped to `status <>
+   * 'deleted'` so a deleted conversation is NOT reopenable through this
+   * method — the spec's explicit carve-out (§4b: "a deleted conversation is
+   * not reopenable through this endpoint"). Returns the updated
+   * {@link ConversationSummary} on success, or `null` when no row matched
+   * (the id doesn't exist, or names a `deleted` conversation) — the same
+   * "missing or deleted, indistinguishable" shape {@link getConversation}'s
+   * `includeDeleted: false` uses, so the HTTP layer can map both to a single
+   * generic `404` without an extra existence check.
+   */
+  setConversationStatus(
+    conversationId: string,
+    status: 'open' | 'closed',
+  ): Promise<ConversationSummary | null>
 }
 
 /**
@@ -449,6 +467,19 @@ export function createConversationStore(db: Db): ConversationStore {
       )
 
       return rows.map(toConversationSummary)
+    },
+
+    async setConversationStatus(conversationId, status) {
+      const rows = await db.query<ConversationSummaryRow>(
+        `UPDATE conversations
+         SET status = $1, updated_at = now()
+         WHERE id = $2 AND status <> 'deleted'
+         RETURNING id, subject, customer_email, status, created_at, updated_at,
+           (SELECT count(*)::int FROM threads WHERE conversation_id = $2) AS thread_count`,
+        [status, conversationId],
+      )
+      const row = rows[0]
+      return row === undefined ? null : toConversationSummary(row)
     },
   }
 }

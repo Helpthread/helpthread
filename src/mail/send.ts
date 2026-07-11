@@ -29,14 +29,21 @@
  *
  * ## Retries reuse, never re-mint (specs/mail/sending.md §3)
  *
- * When the provider `send()` call throws, this function marks the thread
- * `'failed'` and RE-THROWS — it does not swallow the error, retry inline, or
- * mint a fresh token. A `failed` (or crash-orphaned `pending`) thread is
- * meant to be retried later by a queue worker (not built in this increment
- * — specs/mail/sending.md §5) using the SAME `threadId`/`messageId` already
- * on the row. Minting a new token per attempt would spray multiple valid
+ * When the provider `send()` call fails, this function marks the thread
+ * `'failed'` and returns a `{ reason: 'send-failed' }` result (it does NOT
+ * throw — a rejected send is an expected outcome the caller must handle, not
+ * an exception) — it does not swallow the failure, retry inline, or mint a
+ * fresh token. A `failed` (or crash-orphaned `pending`) thread is meant to be
+ * retried later by a queue worker (not built in this increment —
+ * specs/mail/sending.md §5) using the SAME `threadId`/`messageId` already on
+ * the row. Minting a new token per attempt would spray multiple valid
  * threading handles for one logical message and risk a provider that
  * de-dupes on `Message-ID` failing to catch a double-send.
+ *
+ * Conversely, once the provider ACCEPTS the message, the delivery has
+ * happened — so a subsequent failure to record `'sent'` resolves to a
+ * SUCCESS result, not a failure. Reporting an already-delivered message as
+ * failed would be worse than a stale status row: it would invite a resend.
  *
  * ## Caller responsibility: idempotency is NOT yet handled here (HT-16)
  *
@@ -89,18 +96,38 @@ export interface SendReplyInput {
 }
 
 /**
- * The outcome of {@link sendReply}. Modeled as an explicit discriminated
- * result rather than throw/catch for the REFUSAL cases (missing/deleted
- * conversation) — mirroring `ConversationStore.appendThread`'s `AppendResult`
- * — because a reply aimed at a conversation that no longer accepts mail is
- * expected, not exceptional. A provider SEND failure is different: that
- * throws (see the module doc's "retries reuse, never re-mint" note), because
- * by that point the thread is already durably persisted and the failure is
- * the caller's problem to react to, not a routine control-flow branch.
+ * The outcome of {@link sendReply}. Every expected outcome is an explicit
+ * discriminated result — including a provider SEND failure — so a caller can
+ * respond precisely and never has to infer "what went wrong" from a thrown
+ * error. `sendReply` only throws on a genuinely UNEXPECTED fault (e.g. the
+ * initial `appendThread` DB write itself failing), which a caller should let
+ * surface as an internal error.
+ *
+ * Critically, the three failure shapes are DISTINCT so the caller does not
+ * conflate them:
+ * - `conversation-not-found` / `conversation-deleted` — refused; nothing was
+ *   minted, persisted, or sent.
+ * - `send-failed` — the outbound thread was persisted (`pending`) but the
+ *   provider rejected the message, so nothing was delivered. `persistedStatus`
+ *   says whether the row was successfully moved to `'failed'` (retryable by a
+ *   delivery worker) or is stuck `'pending'` because even that mark failed —
+ *   so a caller never over-claims a durable `'failed'` state.
+ *
+ * There is deliberately NO failure result for "sent but couldn't record it":
+ * once the provider accepts the message it IS delivered, so that path resolves
+ * to `ok: true` (see {@link sendReply}) — reporting it as a failure would
+ * invite a resend of an already-delivered message.
  */
 export type SendReplyResult =
   | { ok: true; threadId: string; messageId: string; delivery: 'sent' }
   | { ok: false; reason: 'conversation-not-found' | 'conversation-deleted' }
+  | {
+      ok: false
+      reason: 'send-failed'
+      threadId: string
+      messageId: string
+      persistedStatus: 'failed' | 'pending'
+    }
 
 /**
  * Send a reply to an existing conversation, per the persist→send→mark
@@ -155,23 +182,40 @@ export async function sendReply(
       text: input.text,
       html: input.html,
     })
-  } catch (sendErr) {
-    // Mark 'failed' best-effort, but never let a failure of the MARK bury the
-    // original send failure — its cause is what a caller/operator needs to
-    // act on. If the mark ALSO throws (e.g. a transient DB error right after
-    // the provider rejected), surface both rather than silently swapping one
-    // for the other.
+  } catch {
+    // The provider REJECTED the message — nothing was delivered. Move the
+    // thread to 'failed' so a delivery worker (HT-16) can retry it with the
+    // SAME threadId/messageId (never re-mint). If even that mark fails, the
+    // row is stuck 'pending'; report which, so the caller doesn't claim a
+    // durable 'failed' state that isn't there. Either way delivery did not
+    // happen, so a caller retry is safe.
+    let persistedStatus: 'failed' | 'pending' = 'pending'
     try {
       await store.setThreadDeliveryStatus(threadId, 'failed')
+      persistedStatus = 'failed'
     } catch (markErr) {
-      throw new AggregateError(
-        [sendErr, markErr],
-        'send failed, and marking the outbound thread failed also failed',
+      console.error(
+        '[sendReply] provider send failed AND marking the thread failed also failed; row left pending',
+        markErr,
       )
     }
-    throw sendErr
+    return { ok: false, reason: 'send-failed', threadId, messageId, persistedStatus }
   }
 
-  await store.setThreadDeliveryStatus(threadId, 'sent')
+  // The provider ACCEPTED the message — it is delivered. Recording 'sent' is
+  // best-effort from here: if the mark throws, the email still went out, so we
+  // MUST NOT report a delivery failure (that would prompt a resend of an
+  // already-delivered message — the double-send hole). The row stays 'pending';
+  // reconciling that stale status is a delivery-worker concern (HT-16), which
+  // treats the stable Message-ID as the idempotency anchor rather than blindly
+  // re-sending a 'pending' row.
+  try {
+    await store.setThreadDeliveryStatus(threadId, 'sent')
+  } catch (markErr) {
+    console.error(
+      '[sendReply] message was sent but marking it sent failed; row left pending (delivery still happened)',
+      markErr,
+    )
+  }
   return { ok: true, threadId, messageId, delivery: 'sent' }
 }

@@ -29,9 +29,16 @@
  * 3. **Dispatch** to the matched handler (`src/api/conversations.ts`).
  */
 
+import type { Keyring } from '../mail/reply-token.js'
+import type { EmailSender } from '../providers/index.js'
 import type { ConversationStore } from '../store/conversations.js'
 import { authenticateRequest } from './auth.js'
-import { handleGetConversation, handleListConversations } from './conversations.js'
+import {
+  handleGetConversation,
+  handleListConversations,
+  handlePatchConversation,
+  handleReply,
+} from './conversations.js'
 import type { ApiError } from './responses.js'
 import { apiError } from './responses.js'
 import { matchRoute } from './router.js'
@@ -45,11 +52,26 @@ import { matchRoute } from './router.js'
  */
 const MIN_API_TOKEN_LENGTH = 16
 
-/** Dependencies `createInboxApi` closes over — today just the store and the service token; grows in HT-18 (e.g. a mail sender for replies). */
+/**
+ * Dependencies `createInboxApi` closes over: the HT-17 read paths need only
+ * `store` + `apiToken`; the HT-18 write paths (specs/api/agent-inbox-v1.md
+ * §4a's `POST .../replies`) additionally need everything `sendReply`
+ * (`src/mail/send.ts`) requires — `sender`, `keyring`, `mailDomain` — plus
+ * `supportAddress`, the deployment's configured `from` address for outgoing
+ * replies.
+ */
 export interface InboxApiDeps {
   store: ConversationStore
   /** The configured service Bearer token (`HELPTHREAD_API_TOKEN`) every request is checked against. Must be at least {@link MIN_API_TOKEN_LENGTH} chars. */
   apiToken: string
+  /** The outbound mail transport a reply is sent through (spec §4a). */
+  sender: EmailSender
+  /** Signing keys for minting the outbound `Message-ID` reply token (spec §4a; `src/mail/reply-token.ts`). */
+  keyring: Keyring
+  /** Domain minted into the outbound `Message-ID`'s `@domain` part (spec §4a). */
+  mailDomain: string
+  /** The deployment's configured support address — the `from` on every Agent reply (spec §4a). */
+  supportAddress: string
 }
 
 /**
@@ -118,6 +140,18 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
 
         case 'conversation-item':
           return await handleGetConversation(route.id, { store: deps.store })
+
+        case 'conversation-patch':
+          return await handlePatchConversation(route.id, request, { store: deps.store })
+
+        case 'conversation-reply':
+          return await handleReply(route.id, request, {
+            store: deps.store,
+            sender: deps.sender,
+            keyring: deps.keyring,
+            mailDomain: deps.mailDomain,
+            supportAddress: deps.supportAddress,
+          })
       }
     } catch (err) {
       console.error('[inbox-api] unhandled error handling request', err)

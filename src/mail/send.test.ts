@@ -157,34 +157,42 @@ describe('sendReply', () => {
     })
   })
 
-  it('send failure: sendReply re-throws and the outbound thread is left failed', async () => {
+  it('send failure: returns { send-failed, persistedStatus: failed } and leaves the thread failed', async () => {
     const { store } = await freshStore()
     const { conversationId } = await seedConversation(store)
     const deps: SendReplyDeps = { store, sender: failingSender(), keyring, mailDomain }
 
-    await expect(
-      sendReply(
-        {
-          conversationId,
-          from: 'support@example.test',
-          to: ['customer@example.test'],
-          subject: 'Re: Help with my order',
-          text: "We're looking into it!",
-        },
-        deps,
-      ),
-    ).rejects.toThrow('boom: provider unreachable')
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'send-failed',
+      persistedStatus: 'failed',
+      threadId: expect.any(String),
+      messageId: expect.any(String),
+    })
 
     const conversation = await store.getConversation(conversationId)
     const outbound = conversation?.threads.find((t) => t.direction === 'outbound')
     expect(outbound).toMatchObject({ deliveryStatus: 'failed' })
   })
 
-  it('send failure AND mark failure: both errors surface via AggregateError; the send cause is not lost', async () => {
+  it('send failure AND mark-failed failure: returns { send-failed, persistedStatus: pending } (no throw)', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { store: realStore } = await freshStore()
     const { conversationId } = await seedConversation(realStore)
-    // Wrap the real store so the 'failed' mark itself throws — the worst case
-    // where a DB blip lands right after the provider rejected.
+    // Provider rejects, then the 'failed' mark ALSO throws — the row is stuck
+    // 'pending'. sendReply must report that honestly, not throw and not claim a
+    // durable 'failed' state.
     const store: ConversationStore = {
       ...realStore,
       async setThreadDeliveryStatus() {
@@ -193,28 +201,52 @@ describe('sendReply', () => {
     }
     const deps: SendReplyDeps = { store, sender: failingSender(), keyring, mailDomain }
 
-    let caught: unknown
-    try {
-      await sendReply(
-        {
-          conversationId,
-          from: 'support@example.test',
-          to: ['customer@example.test'],
-          subject: 'Re: Help with my order',
-          text: "We're looking into it!",
-        },
-        deps,
-      )
-      throw new Error('unreachable: sendReply should have thrown')
-    } catch (err) {
-      caught = err
-    }
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
 
-    expect(caught).toBeInstanceOf(AggregateError)
-    const messages = (caught as AggregateError).errors.map((e) => (e as Error).message)
-    // The ORIGINAL provider failure is preserved, not swapped for the DB error.
-    expect(messages.some((m) => m.includes('boom: provider unreachable'))).toBe(true)
-    expect(messages.some((m) => m.includes('db down: cannot mark thread failed'))).toBe(true)
+    expect(result).toMatchObject({ ok: false, reason: 'send-failed', persistedStatus: 'pending' })
+    errorSpy.mockRestore()
+  })
+
+  it('sent-but-mark-sent-fails: still returns ok (the message WAS delivered — must not report failure)', async () => {
+    // The double-send hole: provider ACCEPTS the message, then recording 'sent'
+    // throws. The email went out, so sendReply must resolve ok — reporting a
+    // failure here would make a caller resend an already-delivered message.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { store: realStore } = await freshStore()
+    const { conversationId } = await seedConversation(realStore)
+    const sender = fakeSender()
+    const store: ConversationStore = {
+      ...realStore,
+      async setThreadDeliveryStatus() {
+        throw new Error('db blip right after a successful send')
+      },
+    }
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+
+    expect(result).toMatchObject({ ok: true, delivery: 'sent' })
+    // And the message really was handed to the provider.
+    expect(sender.sent).toHaveLength(1)
+    errorSpy.mockRestore()
   })
 
   it('refused: a deleted conversation is refused, the sender is never called, and nothing is added', async () => {

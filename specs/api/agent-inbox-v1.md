@@ -73,9 +73,11 @@ appears, not preemptively.
   interface ApiError { error: { code: string; message: string } }
   ```
   `code` is a machine-readable slug (`unauthorized`, `not_found`, `validation_failed`,
-  `server_error`); `message` is user-safe and MUST NEVER contain an internal detail — no
-  stack, no SQL, no upstream body, no id it wasn't given. HTTP status pairs with `code`:
-  400 validation, 401 auth, 404 not-found, 405 method-not-allowed, 500 server error.
+  `method_not_allowed`, `send_failed`, `server_error`); `message` is user-safe and MUST
+  NEVER contain an internal detail — no stack, no SQL, no upstream body, no id it wasn't
+  given. HTTP status pairs with `code`: 400 `validation_failed`, 401 `unauthorized`, 404
+  `not_found`, 405 `method_not_allowed`, 500 `server_error`, 502 `send_failed` (§4a, the
+  provider rejected an outbound reply).
 - **Unknown routes / methods:** an unmatched path is `404 not_found`; a known path with an
   unsupported method is `405` (with an `Allow` header). Both still require auth first — an
   unauthenticated request gets `401` before routing details leak.
@@ -110,16 +112,57 @@ Returns a `ConversationDetail` — the conversation plus its `threads`, oldest-f
 not_found` if `{id}` is not a conversation (or is a `deleted` one — a deleted conversation
 is indistinguishable from a nonexistent one to this API, on purpose).
 
-## 4. Write paths (HT-18 — specified here so reads and writes share one contract)
+## 4. Write paths (HT-18)
 
-- **`POST /api/v1/conversations/{id}/replies`** — the Agent posts a reply. Body:
-  `{ text: string; html?: string }` (text 1–5000 chars, server-enforced). Calls
-  `sendReply` (`src/mail/send.ts`): mints the reply token, persists the outbound thread,
-  sends. Returns `201` with the created `ThreadView`. A reply to a `closed` conversation
-  reopens it (the store's existing policy); to a `deleted`/missing one is `404`.
-- **`PATCH /api/v1/conversations/{id}`** — `{ status: 'open' | 'closed' }` to close or
-  reopen. Returns the updated `ConversationSummary`. Needs `setConversationStatus` on the
-  store. `deleted` is not settable through this endpoint.
+### 4a. `POST /api/v1/conversations/{id}/replies` — the Agent replies
+
+Body: `{ text: string; html?: string }` — `text` 1–5000 chars, server-enforced; `html`
+optional. The Agent supplies only the message; every mail header is DERIVED server-side
+from the conversation, so the client never sets recipients or threading headers:
+
+- **`to`** = the conversation's `customerEmail`.
+- **`from`** = the deployment's configured support address (`supportAddress` dep).
+- **`subject`** = the conversation's `subject`, prefixed with `Re:` plus a space if it
+  isn't already (case-insensitive check — never double-prefix to `Re: Re:`).
+- **`In-Reply-To`** = the `messageId` of the conversation's most-recent INBOUND thread (the
+  customer message being answered), if it has one; **`References`** = the `messageId`s of
+  all prior threads in chronological order that have one. These are for the customer's mail
+  client to thread the reply in THEIR inbox — Helpthread's own threading never depends on
+  them (it is outbound-token-anchored; threading.md §2). Omitted when no prior message-id
+  exists (e.g. an inbound message that arrived without a `Message-ID`).
+
+The handler then calls `sendReply` (`src/mail/send.ts`), which mints the reply token into
+the outbound `Message-ID`, persists the outbound thread (`delivery_status` `pending`→`sent`),
+and sends via the injected `EmailSender`.
+
+Outcomes:
+- **`201`** with the created `ThreadView` on success. A reply to a `closed` conversation
+  **reopens** it (the store's existing append policy).
+- **`404 not_found`** if the conversation is missing or `deleted` — no message is sent; a
+  reply token minted before the append resolves is simply discarded (mirrors §3b).
+- **`400 validation_failed`** on a body that violates the limits.
+- **`502 send_failed`** if the provider rejects the message — nothing was delivered.
+  `sendReply` returns a `send-failed` result (it does not throw): the outbound thread is
+  left `delivery_status = 'failed'` (a future delivery worker, HT-16, retries it with the
+  same Message-ID) — or, if even that mark fails, stuck `pending`. The response therefore
+  says only that the reply *could not be delivered* — never a specific persisted state,
+  never a raw provider error. This is the one outcome where an undelivered reply is
+  surfaced to the caller distinctly from an internal error. (Note the asymmetry: once the
+  provider ACCEPTS the message it is delivered, so a subsequent failure to record `'sent'`
+  is NOT a `send_failed` — it resolves to `201`, since reporting a delivered message as
+  failed would invite a resend.)
+
+### 4b. `PATCH /api/v1/conversations/{id}` — close or reopen
+
+Body: `{ status: 'open' | 'closed' }`. Returns the updated `ConversationSummary` (`200`).
+Needs a store `setConversationStatus(id, status)` that **excludes `deleted`** (a deleted
+conversation is not reopenable through this endpoint): missing or deleted → `404 not_found`;
+a body whose `status` is neither `open` nor `closed` (notably `deleted`, which is not
+settable here) → `400 validation_failed`.
+
+Both write paths grow `InboxApiDeps` with what `sendReply` needs — `sender` (`EmailSender`),
+`keyring`, `mailDomain`, and `supportAddress` — injected at deploy time alongside `store`
+and `apiToken`.
 
 ## 5. Security notes
 

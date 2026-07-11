@@ -13,6 +13,20 @@ describe('matchRoute', () => {
     })
   })
 
+  it('matches PATCH /api/v1/conversations/{id}, extracting the id', () => {
+    expect(matchRoute('PATCH', '/api/v1/conversations/abc-123')).toEqual({
+      kind: 'conversation-patch',
+      id: 'abc-123',
+    })
+  })
+
+  it('matches POST /api/v1/conversations/{id}/replies, extracting the id', () => {
+    expect(matchRoute('POST', '/api/v1/conversations/abc-123/replies')).toEqual({
+      kind: 'conversation-reply',
+      id: 'abc-123',
+    })
+  })
+
   it('returns method-not-allowed for a wrong method on the list route, naming its supported methods', () => {
     expect(matchRoute('DELETE', '/api/v1/conversations')).toEqual({
       kind: 'method-not-allowed',
@@ -22,12 +36,27 @@ describe('matchRoute', () => {
       kind: 'method-not-allowed',
       allow: ['GET'],
     })
-  })
-
-  it('returns method-not-allowed for a wrong method on the item route', () => {
-    expect(matchRoute('DELETE', '/api/v1/conversations/abc-123')).toEqual({
+    expect(matchRoute('PATCH', '/api/v1/conversations')).toEqual({
       kind: 'method-not-allowed',
       allow: ['GET'],
+    })
+  })
+
+  it('returns method-not-allowed for a wrong method on the item route, naming GET and PATCH', () => {
+    expect(matchRoute('DELETE', '/api/v1/conversations/abc-123')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET', 'PATCH'],
+    })
+  })
+
+  it('returns method-not-allowed for a wrong method on the replies route, naming POST', () => {
+    expect(matchRoute('GET', '/api/v1/conversations/abc-123/replies')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+    expect(matchRoute('DELETE', '/api/v1/conversations/abc-123/replies')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
     })
   })
 
@@ -36,8 +65,8 @@ describe('matchRoute', () => {
     expect(matchRoute('GET', '/')).toEqual({ kind: 'not-found' })
   })
 
-  it('does not match a conversation item path with a trailing segment', () => {
-    expect(matchRoute('GET', '/api/v1/conversations/abc-123/replies')).toEqual({
+  it('does not match a conversation item path with an unrecognized trailing segment', () => {
+    expect(matchRoute('GET', '/api/v1/conversations/abc-123/nope')).toEqual({
       kind: 'not-found',
     })
   })

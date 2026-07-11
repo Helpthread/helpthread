@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
+import type { Keyring } from '../mail/reply-token.js'
+import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import {
   type ConversationStore,
   createConversationStore,
@@ -10,6 +12,32 @@ import { createInboxApi } from './index.js'
 
 const TOKEN = 'test-token-used-across-the-inbox-api-suite'
 const RANDOM_UUID = '00000000-0000-4000-8000-000000000000'
+const SUPPORT_ADDRESS = 'support@example.test'
+const MAIL_DOMAIN = 'mail.example.test'
+const KEYRING: Keyring = { current: { keyId: 'k1', secret: 'a'.repeat(32) } }
+
+/** A fake `EmailSender` that records every `OutboundEmail` it's asked to send, never fails. */
+function createFakeSender(): { sender: EmailSender; sent: OutboundEmail[] } {
+  const sent: OutboundEmail[] = []
+  return {
+    sender: {
+      async send(email) {
+        sent.push(email)
+        return {}
+      },
+    },
+    sent,
+  }
+}
+
+/** An `EmailSender` that always rejects — for exercising the `502 send_failed` path. */
+function createThrowingSender(): EmailSender {
+  return {
+    async send() {
+      throw new Error('provider rejected the message (must never leak to the client)')
+    },
+  }
+}
 
 function newConversation(overrides: Partial<NewConversation> = {}): NewConversation {
   return {
@@ -53,6 +81,39 @@ function get(path: string, ...tokenArg: [string | undefined] | []): Request {
   return new Request(`https://x.example.test${path}`, { headers })
 }
 
+/** Same `token`-omission convention as {@link get}, for `POST`/`PATCH` requests with a JSON body. */
+function withJsonBody(
+  method: string,
+  path: string,
+  body: string,
+  tokenArg: [string | undefined] | [],
+): Request {
+  const token = tokenArg.length > 0 ? tokenArg[0] : TOKEN
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token !== undefined) {
+    headers.Authorization = `Bearer ${token}`
+  }
+  return new Request(`https://x.example.test${path}`, { method, headers, body })
+}
+
+function post(path: string, body: unknown, ...tokenArg: [string | undefined] | []): Request {
+  return withJsonBody('POST', path, JSON.stringify(body), tokenArg)
+}
+
+/** Like {@link post}, but sends `rawBody` verbatim — for exercising a malformed/non-JSON body. */
+function postRaw(path: string, rawBody: string, ...tokenArg: [string | undefined] | []): Request {
+  return withJsonBody('POST', path, rawBody, tokenArg)
+}
+
+function patch(path: string, body: unknown, ...tokenArg: [string | undefined] | []): Request {
+  return withJsonBody('PATCH', path, JSON.stringify(body), tokenArg)
+}
+
+/** Like {@link patch}, but sends `rawBody` verbatim — for exercising a malformed/non-JSON body. */
+function patchRaw(path: string, rawBody: string, ...tokenArg: [string | undefined] | []): Request {
+  return withJsonBody('PATCH', path, rawBody, tokenArg)
+}
+
 describe('createInboxApi', () => {
   let db: Db | undefined
 
@@ -61,16 +122,26 @@ describe('createInboxApi', () => {
     db = undefined
   })
 
-  async function freshApi(): Promise<{
+  async function freshApi(overrides: { sender?: EmailSender } = {}): Promise<{
     db: Db
     store: ConversationStore
     api: (request: Request) => Promise<Response>
+    /** Emails recorded by the default fake sender (empty if `overrides.sender` was supplied instead). */
+    sent: OutboundEmail[]
   }> {
     db = await createPgliteDb()
     await migrate(db)
     const store = createConversationStore(db)
-    const api = createInboxApi({ store, apiToken: TOKEN })
-    return { db, store, api }
+    const { sender: defaultSender, sent } = createFakeSender()
+    const api = createInboxApi({
+      store,
+      apiToken: TOKEN,
+      sender: overrides.sender ?? defaultSender,
+      keyring: KEYRING,
+      mailDomain: MAIL_DOMAIN,
+      supportAddress: SUPPORT_ADDRESS,
+    })
+    return { db, store, api, sent }
   }
 
   // --- auth ------------------------------------------------------------------
@@ -329,6 +400,355 @@ describe('createInboxApi', () => {
     })
   })
 
+  // --- reply -------------------------------------------------------------------
+
+  describe('reply', () => {
+    it('happy path: 201 with the outbound ThreadView; the fake sender received the derived headers verbatim; getConversation shows the outbound thread', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+      )
+      expect(res.status).toBe(201)
+      expect(res.headers.get('Cache-Control')).toBe('no-store')
+      const body = (await res.json()) as {
+        id: string
+        direction: string
+        bodyText: string | null
+        deliveryStatus: string | null
+      }
+      expect(body).toMatchObject({
+        direction: 'outbound',
+        bodyText: 'On it!',
+        deliveryStatus: 'sent',
+      })
+
+      expect(sent).toHaveLength(1)
+      expect(sent[0]).toMatchObject({
+        to: ['customer@example.test'],
+        from: SUPPORT_ADDRESS,
+        subject: 'Re: Help with my order',
+        inReplyTo: '<inbound-1@customer.example.test>',
+        references: ['<inbound-1@customer.example.test>'],
+      })
+
+      const updated = await store.getConversation(conversationId, { includeDeleted: false })
+      const outboundThread = updated?.threads.find((t) => t.id === body.id)
+      expect(outboundThread).toBeDefined()
+      expect(outboundThread?.direction).toBe('outbound')
+      expect(outboundThread?.deliveryStatus).toBe('sent')
+      // The engine-minted Message-ID is transmitted verbatim (providers/email-sender.ts's contract).
+      expect(sent[0].messageId).toBe(outboundThread?.messageId)
+    })
+
+    it('sent-but-mark-sent-fails still returns 201, not 502 (the message WAS delivered — never prompt a resend)', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      db = await createPgliteDb()
+      await migrate(db)
+      const realStore = createConversationStore(db)
+      const { conversationId } = await realStore.createConversation(newConversation())
+      const { sender, sent } = createFakeSender()
+      // Provider accepts, then recording the status throws — the double-send trap.
+      const store: ConversationStore = {
+        ...realStore,
+        async setThreadDeliveryStatus() {
+          throw new Error('db blip right after a successful send')
+        },
+      }
+      const api = createInboxApi({
+        store,
+        apiToken: TOKEN,
+        sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+      })
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+      )
+      expect(res.status).toBe(201) // delivered → success, NOT a 502 that would invite a resend
+      expect(sent).toHaveLength(1) // the email really went out
+      errorSpy.mockRestore()
+    })
+
+    it('does not double-prefix a subject that already starts with "Re: "', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(
+        newConversation({ subject: 'Re: Already replied' }),
+      )
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Following up.' }),
+      )
+      expect(res.status).toBe(201)
+      expect(sent[0].subject).toBe('Re: Already replied')
+    })
+
+    it('a reply reopens a closed conversation', async () => {
+      const { db, store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'closed')
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Reopening.' }),
+      )
+      expect(res.status).toBe(201)
+
+      const updated = await store.getConversation(conversationId, { includeDeleted: false })
+      expect(updated?.status).toBe('open')
+    })
+
+    it('404s for a missing conversation id; the sender is never called', async () => {
+      const { api, sent } = await freshApi()
+      const res = await api(post(`/api/v1/conversations/${RANDOM_UUID}/replies`, { text: 'Hi' }))
+      expect(res.status).toBe(404)
+      expect(await res.json()).toEqual({
+        error: { code: 'not_found', message: expect.any(String) },
+      })
+      expect(sent).toHaveLength(0)
+    })
+
+    it('404s for a deleted conversation; the sender is never called', async () => {
+      const { db, store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'deleted')
+
+      const res = await api(post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Hi' }))
+      expect(res.status).toBe(404)
+      expect(sent).toHaveLength(0)
+    })
+
+    it('404s for a non-UUID-shaped id — never reaches the uuid column', async () => {
+      const { api, sent } = await freshApi()
+      const res = await api(post('/api/v1/conversations/not-a-uuid/replies', { text: 'Hi' }))
+      expect(res.status).toBe(404)
+      expect(sent).toHaveLength(0)
+    })
+
+    it('404s when the conversation is deleted between the initial fetch and the append (race)', async () => {
+      const db = await createPgliteDb()
+      await migrate(db)
+      const realStore = createConversationStore(db)
+      const { conversationId } = await realStore.createConversation(newConversation())
+
+      // Simulate appendThread discovering the conversation gone (deleted/missing)
+      // AFTER handleReply's own getConversation already found it present —
+      // the narrow race window the spec's 404 branch exists for.
+      const racedStore: ConversationStore = {
+        ...realStore,
+        appendThread: async () => ({ ok: false, reason: 'not-found' }),
+      }
+
+      const { sender, sent } = createFakeSender()
+      const api = createInboxApi({
+        store: racedStore,
+        apiToken: TOKEN,
+        sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+      })
+
+      const res = await api(post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Hi' }))
+      expect(res.status).toBe(404)
+      expect(sent).toHaveLength(0)
+
+      await db.close()
+    })
+
+    it('400s on a missing text field; the sender is never called', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(post(`/api/v1/conversations/${conversationId}/replies`, {}))
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+      expect(sent).toHaveLength(0)
+    })
+
+    it('400s on text over 5000 chars; the sender is never called', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'a'.repeat(5001) }),
+      )
+      expect(res.status).toBe(400)
+      expect(sent).toHaveLength(0)
+    })
+
+    it('400s on a non-JSON body; the sender is never called', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(postRaw(`/api/v1/conversations/${conversationId}/replies`, 'not json{'))
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+      expect(sent).toHaveLength(0)
+    })
+
+    it('502s when the EmailSender throws; the outbound thread persists with deliveryStatus "failed"', async () => {
+      const { store, api } = await freshApi({ sender: createThrowingSender() })
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+      )
+      expect(res.status).toBe(502)
+      const body = await res.json()
+      expect(body).toEqual({ error: { code: 'send_failed', message: expect.any(String) } })
+      expect(JSON.stringify(body)).not.toContain('provider rejected')
+
+      const updated = await store.getConversation(conversationId, { includeDeleted: false })
+      const outboundThread = updated?.threads.find((t) => t.direction === 'outbound')
+      expect(outboundThread).toBeDefined()
+      expect(outboundThread?.deliveryStatus).toBe('failed')
+    })
+
+    it('401s without a token, before any routing/handler logic runs', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/replies`, { text: 'Hi' }, undefined),
+      )
+      expect(res.status).toBe(401)
+      expect(sent).toHaveLength(0)
+    })
+  })
+
+  // --- patch (status) -----------------------------------------------------------
+
+  describe('patch status', () => {
+    it('closes an open conversation: 200 with the updated summary', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status: 'closed' }))
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Cache-Control')).toBe('no-store')
+      const body = (await res.json()) as { id: string; status: string }
+      expect(body.id).toBe(conversationId)
+      expect(body.status).toBe('closed')
+    })
+
+    it('reopens a closed conversation: 200 with the updated summary', async () => {
+      const { db, store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'closed')
+
+      const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status: 'open' }))
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { status: string }
+      expect(body.status).toBe('open')
+    })
+
+    it('404s for a missing conversation id', async () => {
+      const { api } = await freshApi()
+      const res = await api(patch(`/api/v1/conversations/${RANDOM_UUID}`, { status: 'open' }))
+      expect(res.status).toBe(404)
+      expect(await res.json()).toEqual({
+        error: { code: 'not_found', message: expect.any(String) },
+      })
+    })
+
+    it('404s for a non-UUID-shaped id — never reaches the uuid column', async () => {
+      const { api } = await freshApi()
+      const res = await api(patch('/api/v1/conversations/not-a-uuid', { status: 'open' }))
+      expect(res.status).toBe(404)
+    })
+
+    it('404s for a deleted conversation — not reopenable through this endpoint', async () => {
+      const { db, store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'deleted')
+
+      const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status: 'open' }))
+      expect(res.status).toBe(404)
+    })
+
+    it('400s on status "deleted" — not settable through this endpoint', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status: 'deleted' }))
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+    })
+
+    it('400s on a nonsense status value', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        patch(`/api/v1/conversations/${conversationId}`, { status: 'nonsense' }),
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it('400s on a non-JSON body', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(patchRaw(`/api/v1/conversations/${conversationId}`, 'not json{'))
+      expect(res.status).toBe(400)
+    })
+
+    it('401s without a token', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        patch(`/api/v1/conversations/${conversationId}`, { status: 'closed' }, undefined),
+      )
+      expect(res.status).toBe(401)
+    })
+  })
+
+  // --- method routing (HT-18 additions) ------------------------------------------
+
+  describe('method routing', () => {
+    it('PATCH on the collection route is 405 with Allow: GET', async () => {
+      const { api } = await freshApi()
+      const res = await api(
+        new Request('https://x.example.test/api/v1/conversations', {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${TOKEN}` },
+        }),
+      )
+      expect(res.status).toBe(405)
+      expect(res.headers.get('Allow')).toBe('GET')
+      expect(res.headers.get('Cache-Control')).toBe('no-store')
+    })
+
+    it('DELETE on the item route is 405 with Allow: GET, PATCH', async () => {
+      const { api } = await freshApi()
+      const res = await api(
+        new Request(`https://x.example.test/api/v1/conversations/${RANDOM_UUID}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${TOKEN}` },
+        }),
+      )
+      expect(res.status).toBe(405)
+      expect(res.headers.get('Allow')).toBe('GET, PATCH')
+    })
+
+    it('GET on the replies route is 405 with Allow: POST', async () => {
+      const { api } = await freshApi()
+      const res = await api(get(`/api/v1/conversations/${RANDOM_UUID}/replies`))
+      expect(res.status).toBe(405)
+      expect(res.headers.get('Allow')).toBe('POST')
+    })
+  })
+
   // --- conventions -------------------------------------------------------------
 
   describe('conventions', () => {
@@ -385,17 +805,24 @@ describe('createInboxApi', () => {
 
 describe('createInboxApi — hardening (Codex review)', () => {
   const dummyStore = {} as unknown as ConversationStore
+  const dummySender = createThrowingSender()
+  const dummyDeps = {
+    sender: dummySender,
+    keyring: KEYRING,
+    mailDomain: MAIL_DOMAIN,
+    supportAddress: SUPPORT_ADDRESS,
+  }
 
   it('throws at construction on an empty apiToken (fail closed — an empty token would authenticate every request)', () => {
-    expect(() => createInboxApi({ store: dummyStore, apiToken: '' })).toThrow()
+    expect(() => createInboxApi({ store: dummyStore, apiToken: '', ...dummyDeps })).toThrow()
   })
 
   it('throws at construction on a too-short apiToken', () => {
-    expect(() => createInboxApi({ store: dummyStore, apiToken: 'short' })).toThrow()
+    expect(() => createInboxApi({ store: dummyStore, apiToken: 'short', ...dummyDeps })).toThrow()
   })
 
   it('a non-UUID conversation id is 404 — it never reaches the uuid column, so no invalid-uuid 500', async () => {
-    const api = createInboxApi({ store: dummyStore, apiToken: TOKEN })
+    const api = createInboxApi({ store: dummyStore, apiToken: TOKEN, ...dummyDeps })
     const res = await api(get('/api/v1/conversations/not-a-uuid'))
     expect(res.status).toBe(404)
     expect(res.headers.get('Cache-Control')).toBe('no-store')
@@ -411,7 +838,7 @@ describe('createInboxApi — hardening (Codex review)', () => {
         throw new Error('boom: store internals that must never reach the client')
       },
     } as unknown as ConversationStore
-    const api = createInboxApi({ store: throwingStore, apiToken: TOKEN })
+    const api = createInboxApi({ store: throwingStore, apiToken: TOKEN, ...dummyDeps })
 
     const res = await api(get('/api/v1/conversations'))
     expect(res.status).toBe(500)
