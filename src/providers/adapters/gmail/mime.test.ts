@@ -221,7 +221,24 @@ describe('buildRawMessage', () => {
 
   it('throws on an absurdly long messageId (our own token — over-long is an internal bug)', () => {
     const huge = `<${'a'.repeat(5000)}@x.test>`
-    expect(() => buildRawMessage({ ...base, text: 'body', messageId: huge })).toThrow(/limit/i)
+    expect(() => buildRawMessage({ ...base, text: 'body', messageId: huge })).toThrow(/octet/i)
+  })
+
+  it('throws when a required address (to/from) exceeds the octet bound', () => {
+    const hugeAddr = `${'a'.repeat(600)}@x.test`
+    expect(() => buildRawMessage({ ...base, text: 'body', to: [hugeAddr] })).toThrow(/octet/i)
+  })
+
+  it('bounds atoms in OCTETS, not JS chars: a multibyte References atom over 512 bytes is dropped', () => {
+    // 300 × the 3-byte "☕" is ~908 octets but only ~309 JS chars — a char-based
+    // bound (<= 512) would wrongly admit it and blow the 998-OCTET line limit.
+    const multibyte = `<${'☕'.repeat(300)}@x.test>`
+    expect(multibyte.length).toBeLessThanOrEqual(512)
+    const raw = buildRawMessage({ ...base, text: 'body', references: [multibyte, '<ok@x.test>'] })
+
+    const maxOctets = Math.max(...raw.split('\r\n').map((l) => Buffer.byteLength(l, 'utf8')))
+    expect(maxOctets).toBeLessThanOrEqual(998)
+    expect(unfold(raw)).toContain('References: <ok@x.test>') // multibyte dropped, clean kept
   })
 
   // --- line-length safety (Codex High) ---------------------------------------

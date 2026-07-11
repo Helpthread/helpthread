@@ -104,10 +104,17 @@ export function buildRawMessage(email: OutboundEmail): string {
   // reject it. (`subject` is exempt: mimetext RFC-2047-encodes it.) `from` is
   // our config, `messageId` our own token, `to`/`cc` deliverable addresses.
   assertHeaderSafe('from', email.from)
-  for (const to of email.to) assertHeaderSafe('to', to)
-  for (const cc of email.cc ?? []) assertHeaderSafe('cc', cc)
+  assertMaxOctets('from', email.from)
+  for (const to of email.to) {
+    assertHeaderSafe('to', to)
+    assertMaxOctets('to', to)
+  }
+  for (const cc of email.cc ?? []) {
+    assertHeaderSafe('cc', cc)
+    assertMaxOctets('cc', cc)
+  }
   assertHeaderSafe('messageId', email.messageId)
-  assertMaxLength('messageId', email.messageId)
+  assertMaxOctets('messageId', email.messageId)
 
   // ADVISORY threading headers (In-Reply-To/References) carry ATTACKER-
   // INFLUENCED inbound msg-ids. Rejecting a bad one would let one crafted
@@ -139,7 +146,7 @@ export function buildRawMessage(email: OutboundEmail): string {
   if (safeReferences.length > 0) {
     // FOLDED (module doc §3): a long References chain would exceed RFC 5322's
     // 998-octet line limit. mimetext doesn't fold custom headers but DOES
-    // preserve CRLF+WSP folds we insert. Every atom is already ≤ MAX_MSGID_LENGTH
+    // preserve CRLF+WSP folds we insert. Every atom is already octet-bounded
     // (isSafeMsgId), so no single atom can overflow a folded line either.
     msg.setHeader('References', foldHeaderAtoms(safeReferences))
   }
@@ -216,23 +223,36 @@ function foldHeaderAtoms(atoms: string[]): string {
 }
 
 /**
- * Generous upper bound on a single msg-id atom. Real Message-IDs are well under
- * 100 chars; this exists only so one pathological/hostile stored id cannot
- * produce a header line over RFC 5322's 998-octet limit (a single atom has no
- * internal WSP to fold at, so folding between atoms cannot rescue an overlong one).
+ * Generous upper bound, in UTF-8 OCTETS, on a single header atom (an address or
+ * a msg-id). Real values are well under 100 octets; this exists only so one
+ * pathological/hostile value cannot produce a header line over RFC 5322's
+ * 998-OCTET limit — a single atom has no internal WSP to fold at, so folding
+ * between atoms cannot rescue an overlong one. Measured in octets, not JS
+ * chars: `.length` counts UTF-16 code units, so a 512-char multibyte value can
+ * be ~2 KB on the wire; the 998-octet limit is about bytes.
  */
-const MAX_MSGID_LENGTH = 512
+const MAX_HEADER_ATOM_OCTETS = 512
 
-/** Throw if a REQUIRED header atom exceeds the length bound (used for our own `messageId` — over-long there is an internal bug). */
-function assertMaxLength(label: string, value: string): void {
-  if (value.length > MAX_MSGID_LENGTH) {
+/** UTF-8 byte length — what RFC 5322's octet-based line limit actually counts (not `String.length`). */
+function octetLength(value: string): number {
+  return Buffer.byteLength(value, 'utf8')
+}
+
+/** Throw if a REQUIRED header atom exceeds the octet bound (from/to/cc addresses and our own messageId — over-long is a genuine can't-send / internal bug). */
+function assertMaxOctets(label: string, value: string): void {
+  const octets = octetLength(value)
+  if (octets > MAX_HEADER_ATOM_OCTETS) {
     throw new Error(
-      `buildRawMessage: ${label} is ${value.length} chars, over the ${MAX_MSGID_LENGTH}-char limit`,
+      `buildRawMessage: ${label} is ${octets} octets, over the ${MAX_HEADER_ATOM_OCTETS}-octet limit`,
     )
   }
 }
 
-/** True iff `value` is a present, injection-safe, length-bounded msg-id atom — the drop filter for ADVISORY headers (In-Reply-To/References). */
+/** True iff `value` is a present, injection-safe, octet-bounded msg-id atom — the drop filter for ADVISORY headers (In-Reply-To/References). */
 function isSafeMsgId(value: string | undefined): value is string {
-  return value !== undefined && !CONTROL_OR_NEWLINE.test(value) && value.length <= MAX_MSGID_LENGTH
+  return (
+    value !== undefined &&
+    !CONTROL_OR_NEWLINE.test(value) &&
+    octetLength(value) <= MAX_HEADER_ATOM_OCTETS
+  )
 }
