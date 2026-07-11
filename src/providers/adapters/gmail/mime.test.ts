@@ -241,6 +241,14 @@ describe('buildRawMessage', () => {
     expect(unfold(raw)).toContain('References: <ok@x.test>') // multibyte dropped, clean kept
   })
 
+  it('truncates a pathologically long subject so its (single, unfolded) line stays within 998 octets', () => {
+    const raw = buildRawMessage({ ...base, subject: 'A'.repeat(5000), text: 'body' })
+
+    const subjectLine = raw.split('\r\n').find((l) => l.startsWith('Subject:')) ?? ''
+    expect(subjectLine).not.toBe('')
+    expect(Buffer.byteLength(subjectLine, 'utf8')).toBeLessThanOrEqual(998)
+  })
+
   // --- line-length safety (Codex High) ---------------------------------------
 
   it('a very long body line stays within the RFC 5322 998-octet limit (base64 wraps it)', () => {

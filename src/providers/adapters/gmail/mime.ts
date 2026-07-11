@@ -133,7 +133,13 @@ export function buildRawMessage(email: OutboundEmail): string {
   if (email.cc && email.cc.length > 0) {
     msg.setCc(email.cc)
   }
-  msg.setSubject(email.subject)
+  // mimetext emits the subject as a SINGLE RFC-2047 base64 encoded-word line
+  // and does not fold it, so an unbounded subject (the inbound Subject is
+  // attacker-influenced) could push that line past RFC 5322's 998-octet limit.
+  // Truncate to a budget that stays safe after base64 (~1.37x) + encoded-word
+  // overhead. A real subject is a few dozen chars; this only ever clips a
+  // pathological one.
+  msg.setSubject(truncateToOctets(email.subject, MAX_SUBJECT_OCTETS))
 
   // VERBATIM — see the module doc's point (1). This MUST run after
   // createMimeMessage() (which pre-declares the field) and is what prevents
@@ -232,6 +238,32 @@ function foldHeaderAtoms(atoms: string[]): string {
  * be ~2 KB on the wire; the 998-octet limit is about bytes.
  */
 const MAX_HEADER_ATOM_OCTETS = 512
+
+/**
+ * Octet budget for the subject source text. mimetext base64-encodes the whole
+ * subject into one non-folded encoded-word line (`Subject: =?UTF-8?B?…?=`);
+ * base64 inflates ~1.37x, so 600 source octets → a ~820-octet line, safely
+ * under RFC 5322's 998-octet limit with margin for the encoded-word overhead.
+ */
+const MAX_SUBJECT_OCTETS = 600
+
+/** Truncate `value` to at most `maxOctets` UTF-8 octets, never splitting a multibyte char. */
+function truncateToOctets(value: string, maxOctets: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= maxOctets) {
+    return value
+  }
+  let out = ''
+  let octets = 0
+  for (const ch of value) {
+    const chOctets = Buffer.byteLength(ch, 'utf8')
+    if (octets + chOctets > maxOctets) {
+      break
+    }
+    out += ch
+    octets += chOctets
+  }
+  return out
+}
 
 /** UTF-8 byte length — what RFC 5322's octet-based line limit actually counts (not `String.length`). */
 function octetLength(value: string): number {
