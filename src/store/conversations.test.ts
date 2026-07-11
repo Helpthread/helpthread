@@ -663,10 +663,6 @@ describe('createConversationStore', () => {
       const thread = conversation?.threads.find((t) => t.id === appended.threadId)
       expect(thread?.deliveryStatus).toBe('sent')
       expect(thread?.claimedUntil).toBeNull()
-
-      // The lease being cleared means a fresh claim succeeds again.
-      const reclaimed = await store.claimThreadForDelivery(appended.threadId, 30_000)
-      expect(reclaimed).not.toBeNull()
     })
 
     it('releaseThreadLease throws for a nonexistent thread id', async () => {
@@ -678,6 +674,45 @@ describe('createConversationStore', () => {
       const { store } = await freshStore()
       const { threadId } = await store.createConversation(newConversation())
       expect(await store.claimThreadForDelivery(threadId, 30_000)).toBeNull()
+    })
+
+    // --- HT-16 CodeRabbit fix: claim re-checks delivery_status, not just the lease ---
+
+    it('claimThreadForDelivery returns null for a row already marked "sent", even with a free lease (closes the sent-row reclaim double-send)', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, newThread())
+      if (!appended.ok) throw new Error('unreachable')
+      await store.claimThreadForDelivery(appended.threadId, 30_000)
+      // releaseThreadLease clears claimed_until in the SAME write that
+      // records 'sent' — the lease is free, but the row is delivered.
+      await store.releaseThreadLease(appended.threadId, 'sent')
+
+      const reclaimed = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(reclaimed).toBeNull()
+    })
+
+    it('claimThreadForDelivery still succeeds for a "failed" row with a free lease (retries remain claimable)', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, newThread())
+      if (!appended.ok) throw new Error('unreachable')
+      await store.claimThreadForDelivery(appended.threadId, 30_000)
+      await store.releaseThreadLease(appended.threadId, 'failed')
+
+      const reclaimed = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(reclaimed).not.toBeNull()
+    })
+
+    it('claimThreadForDelivery still succeeds for a "pending" row with a free lease (a fresh, never-claimed row remains claimable)', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, newThread())
+      if (!appended.ok) throw new Error('unreachable')
+
+      const claimed = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(claimed).not.toBeNull()
+      expect(claimed?.deliveryStatus).toBe('pending')
     })
   })
 

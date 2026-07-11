@@ -253,19 +253,34 @@ export interface ConversationStore {
   /**
    * Claim `threadId` for delivery: an atomic `UPDATE ... SET claimed_until =
    * now() + leaseMs WHERE id = $1 AND (claimed_until IS NULL OR
-   * claimed_until < now()) RETURNING *`, scoped to outbound rows. Ordinary
-   * Postgres row-level locking on the `UPDATE` is what makes "at most one
-   * claimant wins" hold even under true concurrency (two overlapping calls
-   * for the same `threadId`, from two processes or two `Promise.all`-ed
-   * calls in one) — no advisory lock or explicit transaction is needed
-   * here, a single `UPDATE` is already atomic with respect to itself.
+   * claimed_until < now()) AND delivery_status IN ('pending', 'failed')
+   * RETURNING *`, scoped to outbound rows. Ordinary Postgres row-level
+   * locking on the `UPDATE` is what makes "at most one claimant wins" hold
+   * even under true concurrency (two overlapping calls for the same
+   * `threadId`, from two processes or two `Promise.all`-ed calls in one) —
+   * no advisory lock or explicit transaction is needed here, a single
+   * `UPDATE` is already atomic with respect to itself.
+   *
+   * The `delivery_status` re-check is not redundant with the lease check: it
+   * closes a TOCTOU where a row reaches `'sent'` (via `releaseThreadLease`,
+   * which clears `claimed_until` in the SAME write that records the
+   * outcome) between whenever a caller last observed it as `'pending'`/
+   * `'failed'` and this claim call. Without it, that now-`'sent'` row still
+   * has a free lease and would be claimed again, and the caller (a keyed
+   * `sendReply` replay, or `src/mail/delivery-worker.ts`'s sweep) would
+   * re-send an already-delivered message. Because both checks ride the same
+   * row-locked `UPDATE`, a row can never be claimed once it is `'sent'` —
+   * there is no window where the lease is free but the status check hasn't
+   * "caught up" yet.
    *
    * Returns the freshly-claimed {@link StoredThread} (with the new
    * `claimedUntil`) on success, or `null` if the row is missing, not
-   * outbound, or already claimed by someone else whose lease hasn't expired
-   * — the caller (`src/mail/send.ts`'s retry path, or
-   * `src/mail/delivery-worker.ts`'s sweep) must treat `null` as "someone
-   * else has this; don't send," never retry the claim itself.
+   * outbound, already `'sent'`, or already claimed by someone else whose
+   * lease hasn't expired — the caller (`src/mail/send.ts`'s retry path, or
+   * `src/mail/delivery-worker.ts`'s sweep) must treat `null` as "don't send
+   * this row right now" and, if it needs to distinguish "already delivered"
+   * from "genuinely in flight," re-read the row's `delivery_status` itself
+   * (see `sendReply`'s honest-409 handling).
    */
   claimThreadForDelivery(threadId: string, leaseMs: number): Promise<StoredThread | null>
 
@@ -596,10 +611,20 @@ export function createConversationStore(db: Db): ConversationStore {
       // re-evaluated against the FIRST call's committed result — so at most
       // one of them ever sees `claimed_until IS NULL OR claimed_until <
       // now()` as true and gets a row back. No explicit transaction needed.
+      //
+      // `delivery_status IN ('pending', 'failed')` re-checks the OUTCOME on
+      // the same locked row, not just the lease: a row that reached 'sent'
+      // (via releaseThreadLease, which clears claimed_until in the same
+      // write that records the status) between a caller last observing it
+      // as pending/failed and this claim call must never be reclaimed —
+      // that would resend an already-delivered message. See this method's
+      // doc comment on the interface for the full TOCTOU it closes.
       const rows = await db.query<ThreadRow>(
         `UPDATE threads
          SET claimed_until = now() + ($2::double precision * interval '1 millisecond')
-         WHERE id = $1 AND direction = 'outbound' AND (claimed_until IS NULL OR claimed_until < now())
+         WHERE id = $1 AND direction = 'outbound'
+           AND (claimed_until IS NULL OR claimed_until < now())
+           AND delivery_status IN ('pending', 'failed')
          RETURNING ${THREAD_COLUMNS}`,
         [threadId, leaseMs],
       )

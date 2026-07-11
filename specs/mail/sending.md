@@ -168,11 +168,13 @@ accept raw MIME; reject any that will not carry `Message-ID` unaltered. The
 in-repo fake used by the engine tests proves only that `sendReply` *passes* the
 value to the seam — not that any given adapter preserves it on the wire.
 
-**Precondition: a provider SHOULD de-duplicate on `Message-ID` (HT-16).** This
-is not an aside — it is the one thing standing between this system's
-structural at-least-once delivery (§3a) and true at-most-once delivery from
-the operator's point of view. Where a provider does not de-duplicate on the
-`Message-ID` it is handed verbatim, the operator is knowingly accepting
+**Recommended: a provider SHOULD de-duplicate on `Message-ID` (HT-16).** This
+is not a precondition the engine requires — at-least-once delivery (§3a) holds
+with or without it — but it is not an aside either: it is the one thing
+standing between this system's structural at-least-once delivery (§3a) and
+true at-most-once delivery from the operator's point of view. Where a
+provider does not de-duplicate on the `Message-ID` it is handed verbatim,
+the operator is knowingly accepting
 at-least-once delivery: the residual "accepted, then unmarked, then
 re-sent" case (§3a) will occasionally reach the customer's mailbox twice,
 identical down to the `Message-ID`, and nothing in the engine can prevent

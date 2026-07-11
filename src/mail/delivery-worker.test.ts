@@ -191,6 +191,49 @@ describe('runDeliveryWorker', () => {
     expect(sender.sent).toHaveLength(0)
   })
 
+  // HT-16 CodeRabbit fix: claimThreadForDelivery now re-checks delivery_status
+  // (src/store/conversations.ts), not just the lease — this is the worker-level
+  // regression for that fix, using the REAL claim (not a mocked always-null
+  // one, unlike the TOCTOU test above) so it actually exercises the store's
+  // WHERE clause.
+  it('a row eligible at listing time but delivered (marked "sent") by a concurrent keyed retry before this worker claims it is skipped, never re-sent', async () => {
+    const { db: rawDb, store: realStore } = await freshStore()
+    const { conversationId } = await seedConversation(realStore)
+    const raced = await realStore.appendThread(conversationId, {
+      direction: 'outbound',
+      messageId: '<ht.k1.raced-sent.sig@mail.example.test>',
+      fromAddress: 'support@example.test',
+      bodyText: 'retry me',
+      deliveryStatus: 'failed',
+      sendEnvelope: envelope(),
+    })
+    if (!raced.ok) throw new Error('unreachable')
+
+    // Listing behaves normally (the row IS eligible — still 'failed' and
+    // unleased when the sweep starts). Immediately after, simulate a
+    // concurrent keyed sendReply replay completing delivery of this exact
+    // row before this worker gets to its own claim call. claimThreadForDelivery
+    // is the REAL implementation here — the fix, not a mock, is what must
+    // make this row unclaimable now that it is 'sent'.
+    const store: ConversationStore = {
+      ...realStore,
+      async listDeliverableThreads(options) {
+        const rows = await realStore.listDeliverableThreads(options)
+        await rawDb.query(
+          "UPDATE threads SET delivery_status = 'sent', claimed_until = NULL WHERE id = $1",
+          [raced.threadId],
+        )
+        return rows
+      },
+    }
+
+    const sender = fakeSender()
+    const report = await runDeliveryWorker({ store, sender })
+
+    expect(report).toEqual({ attempted: 0, sent: 0, failed: 0, skipped: 1 })
+    expect(sender.sent).toHaveLength(0)
+  })
+
   it('respects batchSize', async () => {
     const { store } = await freshStore()
     const { conversationId } = await seedConversation(store)

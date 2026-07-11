@@ -507,4 +507,59 @@ describe('sendReply idempotency (HT-16)', () => {
     const conversation = await store.getConversation(conversationId)
     expect(conversation?.threads.filter((t) => t.direction === 'outbound')).toHaveLength(1)
   })
+
+  // --- HT-16 CodeRabbit fix: sent-row reclaim double-send ---------------------
+  //
+  // CodeRabbit (Major): claimThreadForDelivery's WHERE clause checked only the
+  // lease, not delivery_status. Interleaving: a keyed sendReply's get-or-insert
+  // snapshot observes a row as 'pending'/'failed', but by the time it calls
+  // claimThreadForDelivery, a concurrent attempt has already delivered the
+  // message and released the lease with 'sent' — the lease is free, so the
+  // (unfixed) claim would succeed again and attemptDeliveryOfClaimedThread
+  // would resend an already-delivered message. The fix adds `AND
+  // delivery_status IN ('pending', 'failed')` to the claim's WHERE clause
+  // (src/store/conversations.ts) and, on the client side, re-reads the row on
+  // a failed claim so a genuinely-'sent' row resolves to the same
+  // success-replay result as the early 'sent' check, not 'retry-in-progress'.
+  it('reclaim-after-sent: a keyed row that turns "sent" between the get-or-insert snapshot and the claim call resolves as a success replay, not a resend', async () => {
+    const { store: realStore, db: rawDb } = await freshStore()
+    const { conversationId } = await seedConversation(realStore)
+    const sender = fakeSender()
+
+    // A store double whose appendThread behaves exactly like the real one,
+    // except that — simulating a concurrent same-key attempt (or the
+    // delivery worker) completing delivery in the gap between this
+    // get-or-insert snapshot and sendReply's later claim call — it flips the
+    // row to 'sent' (lease already free) immediately after returning the
+    // ORIGINAL (still 'pending') snapshot to the caller.
+    const store: ConversationStore = {
+      ...realStore,
+      async appendThread(convId, thread) {
+        const result = await realStore.appendThread(convId, thread)
+        if (result.ok) {
+          await rawDb.query(
+            "UPDATE threads SET delivery_status = 'sent', claimed_until = NULL WHERE id = $1",
+            [result.threadId],
+          )
+        }
+        return result
+      },
+    }
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+    const input = {
+      conversationId,
+      from: 'support@example.test',
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      text: "We're looking into it!",
+      idempotencyKey: 'toctou-key',
+    }
+
+    const result = await sendReply(input, deps)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.delivery).toBe('sent')
+    expect(sender.sent).toHaveLength(0) // never re-sent — already delivered
+  })
 })

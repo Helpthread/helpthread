@@ -67,13 +67,19 @@
  *    here). The row is CLAIMED (`ConversationStore.claimThreadForDelivery`)
  *    before any send is attempted, so a concurrent duplicate call with the
  *    SAME key — or the delivery worker sweeping the same row — cannot also
- *    send it while this attempt is in flight. If the claim fails (someone
- *    else already holds the lease), this resolves to `{ reason:
- *    'retry-in-progress' }` — nothing is sent, nothing is re-attempted here.
- *    If the claim succeeds, delivery is attempted using the row's ALREADY-
- *    PERSISTED `messageId` and `sendEnvelope` (never re-minted, never
- *    recomputed — see below), via {@link attemptDeliveryOfClaimedThread},
- *    which is the exact helper the delivery worker also calls.
+ *    send it while this attempt is in flight. If the claim fails, the row is
+ *    re-read to tell WHY: if it is now `'sent'` (someone else's concurrent
+ *    attempt delivered it between this call's get-or-insert snapshot and the
+ *    claim — the same TOCTOU `claimThreadForDelivery`'s `delivery_status`
+ *    re-check closes at the store layer), this resolves to the same
+ *    success-replay result as case 2 above, never a resend. Otherwise
+ *    (someone else genuinely still holds the lease) this resolves to
+ *    `{ reason: 'retry-in-progress' }` — nothing is sent, nothing is
+ *    re-attempted here. If the claim succeeds, delivery is attempted using
+ *    the row's ALREADY-PERSISTED `messageId` and `sendEnvelope` (never
+ *    re-minted, never recomputed — see below), via
+ *    {@link attemptDeliveryOfClaimedThread}, which is the exact helper the
+ *    delivery worker also calls.
  *
  * The `sendEnvelope` snapshot (`{ to, cc?, subject, references? }`,
  * persisted once at insert, `src/store/conversations.ts`'s `SendEnvelope`)
@@ -175,10 +181,14 @@ export interface SendReplyInput {
  * - `conversation-not-found` / `conversation-deleted` — refused; nothing was
  *   minted, persisted, or sent.
  * - `retry-in-progress` (HT-16) — a keyed call found a `pending`/`failed` row
- *   but could not claim its delivery lease (someone else already holds it —
- *   another concurrent call with the same key, or the delivery worker).
- *   Nothing was sent by THIS call; the in-flight attempt is expected to
- *   resolve the row on its own.
+ *   but could not claim its delivery lease, AND, on re-reading the row, it is
+ *   genuinely still `pending`/`failed` (someone else already holds the
+ *   lease — another concurrent call with the same key, or the delivery
+ *   worker). Nothing was sent by THIS call; the in-flight attempt is
+ *   expected to resolve the row on its own. If the re-read instead finds the
+ *   row `'sent'`, that is NOT this reason — it resolves to `ok: true`
+ *   instead (see {@link sendReply}'s claim-failure handling), because the
+ *   message already went out.
  * - `send-failed` — the outbound thread was persisted (`pending`) but the
  *   provider rejected the message, so nothing was delivered. `persistedStatus`
  *   says whether the row was successfully moved to `'failed'` (retryable by a
@@ -285,6 +295,35 @@ export async function sendReply(
   // or the delivery worker cannot also be sending this row right now.
   const claimed = await store.claimThreadForDelivery(thread.id, DEFAULT_LEASE_MS)
   if (claimed === null) {
+    // The claim can fail for two different reasons, and conflating them
+    // would resurrect the double-send hole the claim's `delivery_status`
+    // re-check (`ConversationStore.claimThreadForDelivery`'s doc comment)
+    // exists to close:
+    //
+    // (a) someone else genuinely holds the lease right now — the row is
+    //     still `pending`/`failed`, `claimed_until` is in the future. This
+    //     IS `retry-in-progress`.
+    // (b) the row reached `'sent'` between the snapshot captured above (this
+    //     call's own `appended.thread`) and this claim call — e.g. a
+    //     concurrent same-key call, or the delivery worker, already
+    //     delivered it. The lease is free, but the claim's status re-check
+    //     correctly refuses it. This is NOT "in progress" — it already
+    //     succeeded — so reporting `retry-in-progress` would be a lie that
+    //     could prompt a caller to retry a message that already went out.
+    //
+    // Re-reading the thread is the only way to tell these apart; a `'sent'`
+    // reading resolves to the same success-replay result the early check
+    // above returns.
+    const current = await store.getConversation(input.conversationId)
+    const currentThread = current?.threads.find((t) => t.id === thread.id)
+    if (currentThread?.deliveryStatus === 'sent') {
+      return {
+        ok: true,
+        threadId: currentThread.id,
+        messageId: currentThread.messageId as string,
+        delivery: 'sent',
+      }
+    }
     return { ok: false, reason: 'retry-in-progress' }
   }
 
