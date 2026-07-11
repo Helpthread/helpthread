@@ -199,10 +199,12 @@ export async function handleGetConversation(
  * the conversation is missing or `deleted` (checked BEFORE minting/sending,
  * and again as a race check on `sendReply`'s own result — see below);
  * `400 validation_failed` on a body that violates the limits; `502
- * send_failed` if the `EmailSender` throws — the reply is already durably
- * persisted (as `delivery_status: 'failed'`) by that point, so the message
- * is "saved but not yet delivered," never a raw provider error (spec §4a,
- * §5's user-safe-message rule).
+ * send_failed` if the provider rejects the message — `sendReply` returns a
+ * `send-failed` result (it does not throw), the outbound thread is left
+ * `failed` OR, if even that mark failed, stuck `pending` (`persistedStatus`),
+ * and nothing was delivered — so the response says only that the reply could
+ * not be delivered, never a specific persisted state and never a raw provider
+ * error (spec §4a, §5's user-safe-message rule).
  */
 export async function handleReply(
   id: string,
