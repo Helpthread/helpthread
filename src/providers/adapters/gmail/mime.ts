@@ -101,8 +101,12 @@ export function buildRawMessage(email: OutboundEmail): string {
   // custom-header values LITERALLY, so a value with a CR/LF would emit a second
   // header line (`\r\nBcc: attacker@…`). The REQUIRED headers below (from/to/
   // cc/messageId) must be clean — a malformed one is a genuine can't-send, so
-  // reject it. (`subject` is exempt: mimetext RFC-2047-encodes it.) `from` is
-  // our config, `messageId` our own token, `to`/`cc` deliverable addresses.
+  // reject it. `from` is our config, `messageId` our own token, `to`/`cc`
+  // deliverable addresses. (`subject` is handled differently: it is
+  // attacker-influenced — derived from the INBOUND subject — so throwing here
+  // would let one crafted subject block every reply to its conversation, the
+  // same DoS shape the advisory-header sanitization below avoids. It is
+  // SANITIZED instead, at the setSubject call site.)
   assertHeaderSafe('from', email.from)
   assertMaxOctets('from', email.from)
   for (const to of email.to) {
@@ -139,7 +143,15 @@ export function buildRawMessage(email: OutboundEmail): string {
   // Truncate to a budget that stays safe after base64 (~1.37x) + encoded-word
   // overhead. A real subject is a few dozen chars; this only ever clips a
   // pathological one.
-  msg.setSubject(truncateToOctets(email.subject, MAX_SUBJECT_OCTETS))
+  //
+  // Control chars (incl. CR/LF) are stripped to spaces FIRST — our own
+  // injection defense, not left to the library. The installed mimetext does
+  // encode EVERY subject (ASCII included) as a base64 encoded-word, which
+  // would neutralize a CRLF by itself — verified empirically and locked by a
+  // regression test — but that is a library behavior an upgrade could change;
+  // this line keeps the invariant ours. Stripping never throws, so a hostile
+  // inbound subject can never block replies to its conversation.
+  msg.setSubject(truncateToOctets(email.subject.replace(CONTROL_ALL, ' '), MAX_SUBJECT_OCTETS))
 
   // VERBATIM — see the module doc's point (1). This MUST run after
   // createMimeMessage() (which pre-declares the field) and is what prevents
@@ -175,6 +187,10 @@ export function buildRawMessage(email: OutboundEmail): string {
 /** Any C0 control char (incl. CR/LF/TAB) or DEL — the header-injection vector. */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: control chars are the MATCH TARGET -- this is the header-injection guard (assertHeaderSafe); the rule catches accidental control chars, these are deliberate.
 const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/
+
+/** Global twin of {@link CONTROL_OR_NEWLINE} for replace() — separate constant because a shared global regex is stateful under test(). */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control chars are the MATCH TARGET -- subject sanitization strips them (see buildRawMessage); deliberate, not accidental.
+const CONTROL_ALL = /[\u0000-\u001f\u007f]/g
 
 /**
  * Throw if `value` carries a control or newline character — the header-

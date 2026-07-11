@@ -59,6 +59,20 @@ export interface GmailEmailSenderOptions {
    * specific mailbox address. Defaults to `'me'`.
    */
   userId?: string
+
+  /**
+   * Milliseconds before the Gmail HTTP call (request AND response-body read
+   * — the abort signal covers both) is abandoned. Defaults to 30 000. Without
+   * a bound, a stalled Gmail API or intermediary would hang `send()` — and
+   * whatever serverless invocation is paying for the wait — indefinitely.
+   *
+   * A timeout REJECTS, so `sendReply` records the outbound thread as
+   * `'failed'` — but the request may in fact have reached Gmail (the
+   * delivered-but-reported-failed window every network sender has; the
+   * HT-16 idempotency work is where retry-safety lands). This is the safe
+   * direction: never report a delivery that can't be confirmed.
+   */
+  timeoutMs?: number
 }
 
 /** Shape of a successful `users.messages.send` response body we care about. */
@@ -99,7 +113,7 @@ function redactReplyTokens(text: string): string {
  * the token-injection and error-handling contracts.
  */
 export function createGmailEmailSender(options: GmailEmailSenderOptions): EmailSender {
-  const { getAccessToken, fetchImpl = fetch, userId = 'me' } = options
+  const { getAccessToken, fetchImpl = fetch, userId = 'me', timeoutMs = 30_000 } = options
   const endpoint = `${GMAIL_API_BASE}/users/${encodeURIComponent(userId)}/messages/send`
 
   return {
@@ -118,6 +132,10 @@ export function createGmailEmailSender(options: GmailEmailSenderOptions): EmailS
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ raw: encoded }),
+        // Bounds the whole exchange — connection, response headers, AND the
+        // body reads below (an aborted signal cancels the response stream
+        // too). See the `timeoutMs` option doc for the failure semantics.
+        signal: AbortSignal.timeout(timeoutMs),
       })
 
       if (!response.ok) {

@@ -162,7 +162,7 @@ describe('buildRawMessage', () => {
     expect(raw).not.toMatch(/(?<!\r)\n/)
   })
 
-  // --- header-injection guard (Codex Critical) -------------------------------
+  // --- header-injection guard (CR/LF in a header value would forge extra header lines) -------------------------------
 
   describe('header-injection guard', () => {
     const CRLF_INJECTION = 'x@example.test\r\nBcc: attacker@evil.test'
@@ -202,9 +202,32 @@ describe('buildRawMessage', () => {
         buildRawMessage({ ...base, text: 'body', from: 'x@example.test\u0000' }),
       ).toThrow(/injection/i)
     })
+
+    // SUBJECT is attacker-influenced (derived from the inbound Subject), so it
+    // is SANITIZED (control chars stripped to spaces), never thrown on — a
+    // throw would let one crafted subject block every reply to its
+    // conversation. Defense in depth: mimetext also RFC-2047-encodes EVERY
+    // subject (ASCII included) into a single base64 encoded-word, which this
+    // test locks — if a mimetext upgrade ever stops encoding ASCII subjects,
+    // the encoded-word assertion below fails and flags the changed behavior.
+    it('sanitizes (does not throw on) a subject with CR/LF; injects nothing', () => {
+      const subject = 'evil\r\nBcc: attacker@evil.test'
+      const raw = buildRawMessage({ ...base, text: 'body', subject })
+
+      // No forged header line anywhere in the output...
+      expect(raw).not.toContain('Bcc:')
+      // ...the Subject went out as a single RFC-2047 encoded-word...
+      const match = raw.match(/^Subject: =\?utf-8\?B\?([A-Za-z0-9+/=]+)\?=$/m)
+      expect(match).not.toBeNull()
+      // ...whose decoded content carries spaces where the CR/LF was — the
+      // attack text survives only as inert literal characters INSIDE the
+      // encoded subject, never as wire-level structure.
+      const decoded = Buffer.from((match as RegExpMatchArray)[1], 'base64').toString('utf8')
+      expect(decoded).toBe('evil  Bcc: attacker@evil.test')
+    })
   })
 
-  // --- msg-id length bound (Codex confirm: one overlong atom can't be folded) --
+  // --- msg-id length bound (an overlong atom cannot be folded under the 998-octet line limit) --
 
   it('drops an absurdly long In-Reply-To / References atom so no line exceeds 998', () => {
     const huge = `<${'a'.repeat(5000)}@x.test>`
@@ -249,7 +272,7 @@ describe('buildRawMessage', () => {
     expect(Buffer.byteLength(subjectLine, 'utf8')).toBeLessThanOrEqual(998)
   })
 
-  // --- line-length safety (Codex High) ---------------------------------------
+  // --- line-length safety (RFC 5322 998-octet line limit) ---------------------------------------
 
   it('a very long body line stays within the RFC 5322 998-octet limit (base64 wraps it)', () => {
     const longLine = `https://example.test/${'a'.repeat(3000)}`

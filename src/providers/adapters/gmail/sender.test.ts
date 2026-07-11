@@ -34,6 +34,26 @@ function fakeFetch(status: number, body: unknown) {
 }
 
 describe('createGmailEmailSender', () => {
+  it('passes an abort signal to fetch and rejects when the call outlives timeoutMs', async () => {
+    // A fetch that never resolves on its own — it settles ONLY via the abort
+    // signal, exactly like a stalled Gmail API/intermediary would.
+    const fetchImpl = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal
+          expect(signal).toBeDefined()
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+        }),
+    ) as unknown as typeof fetch
+    const sender = createGmailEmailSender({
+      getAccessToken: async () => 'token',
+      fetchImpl,
+      timeoutMs: 20,
+    })
+
+    await expect(sender.send(email)).rejects.toThrow(/timeout|timed out|aborted/i)
+  })
+
   it('happy path: POSTs the encoded raw MIME to the send endpoint and returns providerMessageId', async () => {
     const { fetchImpl, calls } = fakeFetch(200, { id: 'gmail-123' })
     const getAccessToken = vi.fn(async () => 'token-abc-123')
