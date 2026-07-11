@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
-import { createConversationStore, type NewConversation, type NewThread } from './conversations.js'
+import {
+  createConversationStore,
+  type NewConversation,
+  type NewThread,
+  type SendEnvelope,
+} from './conversations.js'
 
 // --- fixtures ----------------------------------------------------------------
 
@@ -103,7 +108,7 @@ describe('createConversationStore', () => {
       conversationId,
       newThread({ messageId: '<outbound-1@mail.example.test>' }),
     )
-    expect(result).toEqual({ ok: true, threadId: expect.any(String) })
+    expect(result).toMatchObject({ ok: true, threadId: expect.any(String), created: true })
 
     const conversation = await store.getConversation(conversationId)
     expect(conversation?.threads).toHaveLength(2)
@@ -410,6 +415,360 @@ describe('createConversationStore', () => {
       // No overlap, no gap across all three pages.
       const walked = [...page1, ...page2, ...page3].map((c) => c.id)
       expect(walked).toEqual(expectedOrder)
+    })
+  })
+
+  // --- send idempotency + delivery leasing (HT-16) ---------------------------
+
+  function newEnvelope(overrides: Partial<SendEnvelope> = {}): SendEnvelope {
+    return {
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      ...overrides,
+    }
+  }
+
+  /** Directly rewinds a thread's claimed_until into the past — for exercising lease-expiry without a real sleep. */
+  async function expireLease(db: Db, threadId: string) {
+    await db.query("UPDATE threads SET claimed_until = now() - interval '1 second' WHERE id = $1", [
+      threadId,
+    ])
+  }
+
+  /** Directly rewinds a thread's created_at — for exercising the delivery worker's "stale pending" window without a real sleep. */
+  async function setCreatedAt(db: Db, threadId: string, createdAt: Date) {
+    await db.query('UPDATE threads SET created_at = $1 WHERE id = $2', [createdAt, threadId])
+  }
+
+  describe('appendThread idempotency key (get-or-insert)', () => {
+    it('a fresh idempotencyKey inserts a new row (created: true) and persists the envelope', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const result = await store.appendThread(
+        conversationId,
+        newThread({ idempotencyKey: 'send-key-1', sendEnvelope: newEnvelope() }),
+      )
+      expect(result).toMatchObject({ ok: true, created: true })
+      if (!result.ok) throw new Error('unreachable')
+      expect(result.thread.idempotencyKey).toBe('send-key-1')
+      expect(result.thread.sendEnvelope).toEqual(newEnvelope())
+      expect(result.thread.claimedUntil).toBeNull()
+    })
+
+    it('a repeated idempotencyKey on the SAME conversation finds the existing row (created: false); inserts nothing new', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const first = await store.appendThread(
+        conversationId,
+        newThread({
+          messageId: '<ht.k1.c1.t1.sig@mail.example.test>',
+          idempotencyKey: 'send-key-1',
+          sendEnvelope: newEnvelope(),
+        }),
+      )
+      expect(first).toMatchObject({ ok: true, created: true })
+
+      // A "retry": same key, deliberately DIFFERENT messageId/envelope to
+      // prove the store returns the ORIGINAL row rather than the retry's
+      // (a real caller would never actually vary these, but this is the
+      // sharpest way to prove get-or-insert never re-inserts or overwrites).
+      const second = await store.appendThread(
+        conversationId,
+        newThread({
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          idempotencyKey: 'send-key-1',
+          sendEnvelope: newEnvelope({ subject: 'A different subject entirely' }),
+        }),
+      )
+      expect(second).toMatchObject({ ok: true, created: false })
+      if (!first.ok || !second.ok) throw new Error('unreachable')
+      expect(second.threadId).toBe(first.threadId)
+      expect(second.thread.messageId).toBe('<ht.k1.c1.t1.sig@mail.example.test>')
+      expect(second.thread.sendEnvelope).toEqual(newEnvelope())
+
+      const conversation = await store.getConversation(conversationId)
+      const outboundThreads = conversation?.threads.filter((t) => t.direction === 'outbound')
+      expect(outboundThreads).toHaveLength(1)
+    })
+
+    it('a replay (created: false) does not bump updated_at or reopen a closed conversation', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await store.appendThread(
+        conversationId,
+        newThread({ idempotencyKey: 'send-key-1', sendEnvelope: newEnvelope() }),
+      )
+      await setStatus(db, conversationId, 'closed')
+      await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+
+      const replay = await store.appendThread(
+        conversationId,
+        newThread({ idempotencyKey: 'send-key-1', sendEnvelope: newEnvelope() }),
+      )
+      expect(replay).toMatchObject({ ok: true, created: false })
+
+      const conversation = await store.getConversation(conversationId)
+      // Still closed, still the old updated_at — a replay is not new activity.
+      expect(conversation?.status).toBe('closed')
+      expect(conversation?.updatedAt.getTime()).toBe(new Date('2020-01-01T00:00:00.000Z').getTime())
+    })
+
+    it('DIFFERENT idempotencyKeys on the same conversation each insert their own row', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const a = await store.appendThread(
+        conversationId,
+        newThread({
+          messageId: '<a@mail.example.test>',
+          idempotencyKey: 'key-A',
+          sendEnvelope: newEnvelope(),
+        }),
+      )
+      const b = await store.appendThread(
+        conversationId,
+        newThread({
+          messageId: '<b@mail.example.test>',
+          idempotencyKey: 'key-B',
+          sendEnvelope: newEnvelope(),
+        }),
+      )
+      expect(a).toMatchObject({ created: true })
+      expect(b).toMatchObject({ created: true })
+      if (!a.ok || !b.ok) throw new Error('unreachable')
+      expect(a.threadId).not.toBe(b.threadId)
+    })
+
+    it('concurrent appendThread calls with the SAME key resolve to exactly one created row', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const [a, b] = await Promise.all([
+        store.appendThread(
+          conversationId,
+          newThread({
+            messageId: '<a@mail.example.test>',
+            idempotencyKey: 'concurrent-key',
+            sendEnvelope: newEnvelope(),
+          }),
+        ),
+        store.appendThread(
+          conversationId,
+          newThread({
+            messageId: '<b@mail.example.test>',
+            idempotencyKey: 'concurrent-key',
+            sendEnvelope: newEnvelope(),
+          }),
+        ),
+      ])
+      expect(a.ok && b.ok).toBe(true)
+      if (!a.ok || !b.ok) throw new Error('unreachable')
+      expect(a.threadId).toBe(b.threadId)
+      // Exactly one of the two calls actually created the row.
+      expect([a.created, b.created].sort()).toEqual([false, true])
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.threads.filter((t) => t.direction === 'outbound')).toHaveLength(1)
+    })
+
+    it('an idempotencyKey is scoped PER CONVERSATION — the same key on a different conversation inserts its own row', async () => {
+      const { store } = await freshStore()
+      const { conversationId: convA } = await store.createConversation(newConversation())
+      const { conversationId: convB } = await store.createConversation(newConversation())
+
+      const a = await store.appendThread(
+        convA,
+        newThread({
+          messageId: '<a@mail.example.test>',
+          idempotencyKey: 'shared-key',
+          sendEnvelope: newEnvelope(),
+        }),
+      )
+      const b = await store.appendThread(
+        convB,
+        newThread({
+          messageId: '<b@mail.example.test>',
+          idempotencyKey: 'shared-key',
+          sendEnvelope: newEnvelope(),
+        }),
+      )
+      expect(a).toMatchObject({ created: true })
+      expect(b).toMatchObject({ created: true })
+    })
+  })
+
+  describe('claimThreadForDelivery / releaseThreadLease', () => {
+    it('claims an unclaimed outbound thread, setting claimedUntil in the future', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, newThread())
+      if (!appended.ok) throw new Error('unreachable')
+
+      const before = new Date()
+      const claimed = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(claimed).not.toBeNull()
+      if (claimed === null) throw new Error('unreachable')
+      expect(claimed.claimedUntil).not.toBeNull()
+      expect((claimed.claimedUntil as Date).getTime()).toBeGreaterThan(before.getTime())
+    })
+
+    it('a second claim attempt while the lease is held returns null', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, newThread())
+      if (!appended.ok) throw new Error('unreachable')
+
+      const first = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(first).not.toBeNull()
+
+      const second = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(second).toBeNull()
+    })
+
+    it('claiming succeeds again once the previous lease has expired', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, newThread())
+      if (!appended.ok) throw new Error('unreachable')
+
+      const first = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(first).not.toBeNull()
+      await expireLease(db, appended.threadId)
+
+      const second = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(second).not.toBeNull()
+    })
+
+    it('releaseThreadLease sets delivery_status and clears claimedUntil', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, newThread())
+      if (!appended.ok) throw new Error('unreachable')
+      await store.claimThreadForDelivery(appended.threadId, 30_000)
+
+      await store.releaseThreadLease(appended.threadId, 'sent')
+
+      const conversation = await store.getConversation(conversationId)
+      const thread = conversation?.threads.find((t) => t.id === appended.threadId)
+      expect(thread?.deliveryStatus).toBe('sent')
+      expect(thread?.claimedUntil).toBeNull()
+
+      // The lease being cleared means a fresh claim succeeds again.
+      const reclaimed = await store.claimThreadForDelivery(appended.threadId, 30_000)
+      expect(reclaimed).not.toBeNull()
+    })
+
+    it('releaseThreadLease throws for a nonexistent thread id', async () => {
+      const { store } = await freshStore()
+      await expect(store.releaseThreadLease(RANDOM_UUID, 'sent')).rejects.toThrow()
+    })
+
+    it('claimThreadForDelivery returns null for an inbound thread id (direction-scoped)', async () => {
+      const { store } = await freshStore()
+      const { threadId } = await store.createConversation(newConversation())
+      expect(await store.claimThreadForDelivery(threadId, 30_000)).toBeNull()
+    })
+  })
+
+  describe('listDeliverableThreads', () => {
+    it('returns a failed row regardless of age', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(
+        conversationId,
+        newThread({ deliveryStatus: 'failed', sendEnvelope: newEnvelope() }),
+      )
+      if (!appended.ok) throw new Error('unreachable')
+
+      const eligible = await store.listDeliverableThreads({
+        staleAfterMs: 5 * 60_000,
+        batchSize: 50,
+      })
+      expect(eligible.map((t) => t.id)).toContain(appended.threadId)
+    })
+
+    it('excludes a fresh pending row but includes a STALE pending row', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const fresh = await store.appendThread(
+        conversationId,
+        newThread({ messageId: '<fresh@mail.example.test>', sendEnvelope: newEnvelope() }),
+      )
+      const stale = await store.appendThread(
+        conversationId,
+        newThread({ messageId: '<stale@mail.example.test>', sendEnvelope: newEnvelope() }),
+      )
+      if (!fresh.ok || !stale.ok) throw new Error('unreachable')
+      await setCreatedAt(db, stale.threadId, new Date(Date.now() - 10 * 60_000))
+
+      const eligible = await store.listDeliverableThreads({
+        staleAfterMs: 5 * 60_000,
+        batchSize: 50,
+      })
+      const ids = eligible.map((t) => t.id)
+      expect(ids).toContain(stale.threadId)
+      expect(ids).not.toContain(fresh.threadId)
+    })
+
+    it('excludes a row whose lease is currently held', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(
+        conversationId,
+        newThread({ deliveryStatus: 'failed', sendEnvelope: newEnvelope() }),
+      )
+      if (!appended.ok) throw new Error('unreachable')
+      await store.claimThreadForDelivery(appended.threadId, 30_000)
+
+      const eligible = await store.listDeliverableThreads({
+        staleAfterMs: 5 * 60_000,
+        batchSize: 50,
+      })
+      expect(eligible.map((t) => t.id)).not.toContain(appended.threadId)
+    })
+
+    it('excludes a row with no stored send_envelope (pre-HT-16 data) even if otherwise eligible', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(
+        conversationId,
+        newThread({ deliveryStatus: 'failed' }), // no sendEnvelope
+      )
+      if (!appended.ok) throw new Error('unreachable')
+
+      const eligible = await store.listDeliverableThreads({
+        staleAfterMs: 5 * 60_000,
+        batchSize: 50,
+      })
+      expect(eligible.map((t) => t.id)).not.toContain(appended.threadId)
+    })
+
+    it('respects batchSize as a hard cap, ordered oldest-created_at-first', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const ids: string[] = []
+      for (let i = 0; i < 3; i++) {
+        const appended = await store.appendThread(
+          conversationId,
+          newThread({
+            messageId: `<failed-${i}@mail.example.test>`,
+            deliveryStatus: 'failed',
+            sendEnvelope: newEnvelope(),
+          }),
+        )
+        if (!appended.ok) throw new Error('unreachable')
+        await setCreatedAt(db, appended.threadId, new Date(2026, 0, i + 1))
+        ids.push(appended.threadId)
+      }
+
+      const eligible = await store.listDeliverableThreads({
+        staleAfterMs: 5 * 60_000,
+        batchSize: 2,
+      })
+      expect(eligible).toHaveLength(2)
+      expect(eligible.map((t) => t.id)).toEqual([ids[0], ids[1]])
     })
   })
 })

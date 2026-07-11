@@ -30,30 +30,60 @@
  * ## Retries reuse, never re-mint (specs/mail/sending.md §3)
  *
  * When the provider `send()` call fails, this function marks the thread
- * `'failed'` and returns a `{ reason: 'send-failed' }` result (it does NOT
+ * `'failed'` and returns a `{ reason: 'send-failed' }` result (it does not
  * throw — a rejected send is an expected outcome the caller must handle, not
  * an exception) — it does not swallow the failure, retry inline, or mint a
  * fresh token. A `failed` (or crash-orphaned `pending`) thread is meant to be
- * retried later by a queue worker (not built in this increment —
- * specs/mail/sending.md §5) using the SAME `threadId`/`messageId` already on
- * the row. Minting a new token per attempt would spray multiple valid
- * threading handles for one logical message and risk a provider that
- * de-dupes on `Message-ID` failing to catch a double-send.
+ * retried later using the SAME `threadId`/`messageId` already on the row —
+ * either by a caller replaying the SAME `Idempotency-Key` (below), or by the
+ * delivery worker's sweep (`src/mail/delivery-worker.ts`). Minting a fresh
+ * token per attempt would spray multiple valid threading handles for one
+ * logical message and risk a provider that de-dupes on `Message-ID` failing
+ * to catch a double-send.
  *
  * Conversely, once the provider ACCEPTS the message, the delivery has
  * happened — so a subsequent failure to record `'sent'` resolves to a
  * SUCCESS result, not a failure. Reporting an already-delivered message as
  * failed would be worse than a stale status row: it would invite a resend.
  *
- * ## Caller responsibility: idempotency is NOT yet handled here (HT-16)
+ * ## Send idempotency (HT-16)
  *
- * This increment has no idempotency key and no "retry an existing pending/
- * failed thread" path: each `sendReply` call mints a FRESH `threadId`/
- * `Message-ID` and sends. So a caller that retries the same logical reply
- * (an HTTP timeout, a double-clicked UI, a queue redelivery) will send a
- * SECOND email. Until the delivery-worker increment adds a real dedup key
- * (HT-16), callers MUST guarantee at-most-once invocation themselves —
- * `sendReply` must not be wired directly behind a retrying transport.
+ * `SendReplyInput.idempotencyKey` is an OPTIONAL caller-supplied dedup key,
+ * scoped per-conversation (`ConversationStore.appendThread`'s partial-unique-
+ * index get-or-insert — see its doc comment and migration 003's). What
+ * happens next depends on whether one was given and what it finds:
+ *
+ * 1. **No key.** The original, pre-HT-16 flow, UNCHANGED: mint, persist
+ *    fresh, send, mark via `setThreadDeliveryStatus`. Two calls with no key
+ *    are two independent sends — this is a deliberate "no key ⇒ no dedup
+ *    protection" contract (see the regression-pinning test in
+ *    `send.test.ts`), not an oversight; callers that need at-most-once
+ *    semantics must supply a key.
+ * 2. **Key matches a row already `delivery_status: 'sent'`.** A replay after
+ *    success: return that row's original `threadId`/`messageId` as a SUCCESS
+ *    result, WITHOUT calling the sender again.
+ * 3. **Key matches a `pending`/`failed` row** (freshly inserted by THIS call,
+ *    or found pre-existing from an earlier attempt — both cases converge
+ *    here). The row is CLAIMED (`ConversationStore.claimThreadForDelivery`)
+ *    before any send is attempted, so a concurrent duplicate call with the
+ *    SAME key — or the delivery worker sweeping the same row — cannot also
+ *    send it while this attempt is in flight. If the claim fails (someone
+ *    else already holds the lease), this resolves to `{ reason:
+ *    'retry-in-progress' }` — nothing is sent, nothing is re-attempted here.
+ *    If the claim succeeds, delivery is attempted using the row's ALREADY-
+ *    PERSISTED `messageId` and `sendEnvelope` (never re-minted, never
+ *    recomputed — see below), via {@link attemptDeliveryOfClaimedThread},
+ *    which is the exact helper the delivery worker also calls.
+ *
+ * The `sendEnvelope` snapshot (`{ to, cc?, subject, references? }`,
+ * persisted once at insert, `src/store/conversations.ts`'s `SendEnvelope`)
+ * is what makes a retry's mail byte-identical to the original attempt: it is
+ * READ BACK verbatim, never recomputed from the conversation's current
+ * thread list. Recomputing `references` on a retry could silently absorb an
+ * inbound message that arrived between the original attempt and the retry —
+ * exactly the kind of undocumented mail-semantics drift CHARTER.md invariant
+ * #5 forbids. See migration 003's doc comment (`src/db/migrate.ts`) for the
+ * full argument.
  *
  * ## Assumption: ids are canonical
  *
@@ -68,8 +98,19 @@
 
 import { randomUUID } from 'node:crypto'
 import type { EmailSender } from '../providers/index.js'
-import type { ConversationStore } from '../store/conversations.js'
+import type { ConversationStore, SendEnvelope, StoredThread } from '../store/conversations.js'
 import { type Keyring, mintReplyMessageId } from './reply-token.js'
+
+/**
+ * Default lease duration for a delivery attempt (claim → send → mark): long
+ * enough to cover a real provider call plus the mark-back write, short
+ * enough that a crashed attempt's lease expires and becomes retryable again
+ * within a reasonable window. Shared as the default for both `sendReply`'s
+ * own inline retry-claim and `runDeliveryWorker`'s `leaseMs` option
+ * (`src/mail/delivery-worker.ts`) — one number, one place, rather than two
+ * independently-tuned constants for what is conceptually the same lease.
+ */
+export const DEFAULT_LEASE_MS = 30_000
 
 /** Dependencies `sendReply` needs, injected so it stays testable against fakes/in-memory stores. */
 export interface SendReplyDeps {
@@ -93,6 +134,12 @@ export interface SendReplyInput {
   inReplyTo?: string
   /** `References` chain of the inbound message being answered — caller-supplied (specs/mail/sending.md §5). */
   references?: string[]
+  /**
+   * Optional caller-supplied dedup key (HT-16), scoped per-conversation. See
+   * the module doc's "Send idempotency" section for the full contract.
+   * Omitted entirely means no dedup protection — a fresh send every call.
+   */
+  idempotencyKey?: string
 }
 
 /**
@@ -103,10 +150,15 @@ export interface SendReplyInput {
  * initial `appendThread` DB write itself failing), which a caller should let
  * surface as an internal error.
  *
- * Critically, the three failure shapes are DISTINCT so the caller does not
+ * Critically, the failure shapes are DISTINCT so the caller does not
  * conflate them:
  * - `conversation-not-found` / `conversation-deleted` — refused; nothing was
  *   minted, persisted, or sent.
+ * - `retry-in-progress` (HT-16) — a keyed call found a `pending`/`failed` row
+ *   but could not claim its delivery lease (someone else already holds it —
+ *   another concurrent call with the same key, or the delivery worker).
+ *   Nothing was sent by THIS call; the in-flight attempt is expected to
+ *   resolve the row on its own.
  * - `send-failed` — the outbound thread was persisted (`pending`) but the
  *   provider rejected the message, so nothing was delivered. `persistedStatus`
  *   says whether the row was successfully moved to `'failed'` (retryable by a
@@ -121,6 +173,7 @@ export interface SendReplyInput {
 export type SendReplyResult =
   | { ok: true; threadId: string; messageId: string; delivery: 'sent' }
   | { ok: false; reason: 'conversation-not-found' | 'conversation-deleted' }
+  | { ok: false; reason: 'retry-in-progress' }
   | {
       ok: false
       reason: 'send-failed'
@@ -131,8 +184,8 @@ export type SendReplyResult =
 
 /**
  * Send a reply to an existing conversation, per the persist→send→mark
- * ordering in the module doc. See there for the full ordering and retry
- * rationale.
+ * ordering in the module doc. See there for the full ordering, retry, and
+ * idempotency-key rationale.
  *
  * Refusal (missing or deleted conversation): the token is minted before the
  * `appendThread` call resolves, then discarded when refusal is detected —
@@ -151,6 +204,18 @@ export async function sendReply(
     keyring,
   )
 
+  // The envelope snapshot is built from THIS call's inputs and persisted
+  // verbatim on insert, keyed or not — persisting it unconditionally (not
+  // only when idempotencyKey is set) is what lets the delivery worker
+  // reconstruct ANY eligible outbound row later, regardless of whether its
+  // original send carried a dedup key.
+  const sendEnvelope: SendEnvelope = {
+    to: input.to,
+    ...(input.cc !== undefined ? { cc: input.cc } : {}),
+    subject: input.subject,
+    ...(input.references !== undefined ? { references: input.references } : {}),
+  }
+
   const appended = await store.appendThread(input.conversationId, {
     id: threadId,
     direction: 'outbound',
@@ -160,6 +225,8 @@ export async function sendReply(
     bodyText: input.text ?? null,
     bodyHtml: input.html ?? null,
     deliveryStatus: 'pending',
+    idempotencyKey: input.idempotencyKey,
+    sendEnvelope,
   })
 
   if (!appended.ok) {
@@ -169,6 +236,57 @@ export async function sendReply(
       reason: appended.reason === 'not-found' ? 'conversation-not-found' : 'conversation-deleted',
     }
   }
+
+  if (input.idempotencyKey === undefined) {
+    // No key: byte-identical to the pre-HT-16 flow. `appended.created` is
+    // always `true` here (a NULL key can never conflict — see
+    // ConversationStore.appendThread's doc comment), so there is no
+    // existing-row case to handle; send fresh and mark via
+    // setThreadDeliveryStatus, exactly as before this feature existed.
+    return sendFreshAndMark(threadId, messageId, input, deps)
+  }
+
+  const { thread } = appended
+
+  if (thread.deliveryStatus === 'sent') {
+    // Replay after success: return the ORIGINAL outcome. The sender is never
+    // touched — the message already went out.
+    return {
+      ok: true,
+      threadId: thread.id,
+      messageId: thread.messageId as string,
+      delivery: 'sent',
+    }
+  }
+
+  // `pending` or `failed` — whether just-created by THIS call or found
+  // pre-existing from an earlier attempt, both converge here: claim the
+  // delivery lease before sending, so a concurrent duplicate call (same key)
+  // or the delivery worker cannot also be sending this row right now.
+  const claimed = await store.claimThreadForDelivery(thread.id, DEFAULT_LEASE_MS)
+  if (claimed === null) {
+    return { ok: false, reason: 'retry-in-progress' }
+  }
+
+  return attemptDeliveryOfClaimedThread(claimed, { store, sender })
+}
+
+/**
+ * The original (pre-HT-16) fresh-send flow: send via the provider, then mark
+ * `sent`/`failed` via `setThreadDeliveryStatus`. Used ONLY for the no-key
+ * path — kept as its own function (rather than folded into the claimed-row
+ * helper below) specifically so this code path, and the store method it
+ * calls, stay untouched: `send.test.ts`'s pre-HT-16 tests override
+ * `store.setThreadDeliveryStatus` directly to exercise the mark-failed and
+ * sent-but-mark-fails cases, and must keep working unedited.
+ */
+async function sendFreshAndMark(
+  threadId: string,
+  messageId: string,
+  input: SendReplyInput,
+  deps: SendReplyDeps,
+): Promise<SendReplyResult> {
+  const { store, sender } = deps
 
   try {
     await sender.send({
@@ -184,11 +302,11 @@ export async function sendReply(
     })
   } catch {
     // The provider REJECTED the message — nothing was delivered. Move the
-    // thread to 'failed' so a delivery worker (HT-16) can retry it with the
-    // SAME threadId/messageId (never re-mint). If even that mark fails, the
-    // row is stuck 'pending'; report which, so the caller doesn't claim a
-    // durable 'failed' state that isn't there. Either way delivery did not
-    // happen, so a caller retry is safe.
+    // thread to 'failed' so a later retry (a delivery worker, or a keyed
+    // caller) can retry it with the SAME threadId/messageId (never re-mint).
+    // If even that mark fails, the row is stuck 'pending'; report which, so
+    // the caller doesn't claim a durable 'failed' state that isn't there.
+    // Either way delivery did not happen, so a caller retry is safe.
     let persistedStatus: 'failed' | 'pending' = 'pending'
     try {
       await store.setThreadDeliveryStatus(threadId, 'failed')
@@ -206,8 +324,8 @@ export async function sendReply(
   // best-effort from here: if the mark throws, the email still went out, so we
   // MUST NOT report a delivery failure (that would prompt a resend of an
   // already-delivered message — the double-send hole). The row stays 'pending';
-  // reconciling that stale status is a delivery-worker concern (HT-16), which
-  // treats the stable Message-ID as the idempotency anchor rather than blindly
+  // reconciling that stale status is a delivery-worker concern, which treats
+  // the stable Message-ID as the idempotency anchor rather than blindly
   // re-sending a 'pending' row.
   try {
     await store.setThreadDeliveryStatus(threadId, 'sent')
@@ -218,4 +336,84 @@ export async function sendReply(
     )
   }
   return { ok: true, threadId, messageId, delivery: 'sent' }
+}
+
+/**
+ * Attempt delivery of an ALREADY-CLAIMED outbound row, then mark
+ * `sent`/`failed` and release its lease. Shared by {@link sendReply}'s
+ * keyed-retry path and `runDeliveryWorker`'s sweep
+ * (`src/mail/delivery-worker.ts`) — the one place either caller rebuilds an
+ * `OutboundEmail` from a stored row and calls the sender.
+ *
+ * `thread` must already be claimed (`ConversationStore.claimThreadForDelivery`
+ * having returned it) — this function does not claim it itself, since the
+ * two callers need to distinguish "claim failed" (report `retry-in-progress`
+ * / skip this row) from "claim succeeded, now attempt delivery" differently.
+ *
+ * Throws if `thread.messageId` or `thread.sendEnvelope` is missing — both are
+ * set unconditionally by every `sendReply` insert (keyed or not), so a
+ * legitimately eligible row always has both; a row missing either is not
+ * something this function should guess how to send (a `listDeliverableThreads`
+ * caller already filters out `send_envelope IS NULL` rows for the same
+ * reason — see that store method's doc comment — so this is a defensive
+ * invariant check, not a path either current caller can hit in practice).
+ */
+export async function attemptDeliveryOfClaimedThread(
+  thread: StoredThread,
+  deps: { store: ConversationStore; sender: EmailSender },
+): Promise<
+  | { ok: true; threadId: string; messageId: string; delivery: 'sent' }
+  | {
+      ok: false
+      reason: 'send-failed'
+      threadId: string
+      messageId: string
+      persistedStatus: 'failed' | 'pending'
+    }
+> {
+  const { store, sender } = deps
+
+  if (thread.messageId === null || thread.sendEnvelope === null) {
+    throw new Error(
+      `attemptDeliveryOfClaimedThread: outbound thread ${thread.id} is missing messageId or sendEnvelope — cannot rebuild its OutboundEmail`,
+    )
+  }
+  const messageId = thread.messageId
+  const envelope = thread.sendEnvelope
+
+  try {
+    await sender.send({
+      messageId,
+      inReplyTo: thread.inReplyTo ?? undefined,
+      references: envelope.references,
+      from: thread.fromAddress,
+      to: envelope.to,
+      cc: envelope.cc,
+      subject: envelope.subject,
+      text: thread.bodyText ?? undefined,
+      html: thread.bodyHtml ?? undefined,
+    })
+  } catch {
+    let persistedStatus: 'failed' | 'pending' = 'pending'
+    try {
+      await store.releaseThreadLease(thread.id, 'failed')
+      persistedStatus = 'failed'
+    } catch (markErr) {
+      console.error(
+        '[attemptDeliveryOfClaimedThread] provider send failed AND marking the thread failed also failed; row left claimed',
+        markErr,
+      )
+    }
+    return { ok: false, reason: 'send-failed', threadId: thread.id, messageId, persistedStatus }
+  }
+
+  try {
+    await store.releaseThreadLease(thread.id, 'sent')
+  } catch (markErr) {
+    console.error(
+      '[attemptDeliveryOfClaimedThread] message was sent but marking it sent failed; row left claimed (delivery still happened)',
+      markErr,
+    )
+  }
+  return { ok: true, threadId: thread.id, messageId, delivery: 'sent' }
 }

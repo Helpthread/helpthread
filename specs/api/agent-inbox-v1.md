@@ -1,9 +1,10 @@
 # Agent Inbox API v1
 
-Status: accepted (HT-17 reads, HT-18 writes). Helpthread's first public API, designed
-**native** — on Helpthread's own domain model, not reverse-engineered from any other
-helpdesk's wire format. (It supersedes the earlier `conversations-v1.md` draft, which was
-shaped for a FreeScout-consumer cutover that no longer applies — see the project history.)
+Status: accepted (HT-17 reads, HT-18 writes, HT-16 send idempotency). Helpthread's first
+public API, designed **native** — on Helpthread's own domain model, not reverse-engineered
+from any other helpdesk's wire format. (It supersedes the earlier `conversations-v1.md`
+draft, which was shaped for a FreeScout-consumer cutover that no longer applies — see the
+project history.)
 
 ## 1. Purpose
 
@@ -73,11 +74,13 @@ appears, not preemptively.
   interface ApiError { error: { code: string; message: string } }
   ```
   `code` is a machine-readable slug (`unauthorized`, `not_found`, `validation_failed`,
-  `method_not_allowed`, `send_failed`, `server_error`); `message` is user-safe and MUST
-  NEVER contain an internal detail — no stack, no SQL, no upstream body, no id it wasn't
-  given. HTTP status pairs with `code`: 400 `validation_failed`, 401 `unauthorized`, 404
-  `not_found`, 405 `method_not_allowed`, 500 `server_error`, 502 `send_failed` (§4a, the
-  provider rejected an outbound reply).
+  `method_not_allowed`, `send_failed`, `retry_in_progress`, `server_error`); `message` is
+  user-safe and MUST NEVER contain an internal detail — no stack, no SQL, no upstream body,
+  no id it wasn't given. HTTP status pairs with `code`: 400 `validation_failed`, 401
+  `unauthorized`, 404 `not_found`, 405 `method_not_allowed`, 409 `retry_in_progress` (§4a,
+  HT-16 — a concurrent delivery attempt for the same `Idempotency-Key` already holds the
+  lease), 500 `server_error`, 502 `send_failed` (§4a, the provider rejected an outbound
+  reply).
 - **Unknown routes / methods:** an unmatched path is `404 not_found`; a known path with an
   unsupported method is `405` (with an `Allow` header). Both still require auth first — an
   unauthenticated request gets `401` before routing details leak.
@@ -116,6 +119,13 @@ is indistinguishable from a nonexistent one to this API, on purpose).
 
 ### 4a. `POST /api/v1/conversations/{id}/replies` — the Agent replies
 
+**Header:** `Idempotency-Key` is **REQUIRED** on every call (HT-16) — a non-empty,
+caller-chosen string, scoped per-conversation. This is a deliberate breaking change from
+the HT-15 shape of this endpoint; it has no external consumer yet (this API is
+dogfood-only — CHARTER.md "dogfooded first"), so tightening the contract here has no
+compatibility cost. A missing or empty header is `400 validation_failed`, checked before
+the body is parsed.
+
 Body: `{ text: string; html?: string }` — `text` 1–5000 chars, server-enforced; `html`
 optional. The Agent supplies only the message; every mail header is DERIVED server-side
 from the conversation, so the client never sets recipients or threading headers:
@@ -131,26 +141,48 @@ from the conversation, so the client never sets recipients or threading headers:
   them (it is outbound-token-anchored; threading.md §2). Omitted when no prior message-id
   exists (e.g. an inbound message that arrived without a `Message-ID`).
 
-The handler then calls `sendReply` (`src/mail/send.ts`), which mints the reply token into
-the outbound `Message-ID`, persists the outbound thread (`delivery_status` `pending`→`sent`),
-and sends via the injected `EmailSender`.
+The handler then calls `sendReply` (`src/mail/send.ts`), passing the `Idempotency-Key` value
+through. `sendReply` mints the reply token into the outbound `Message-ID` (on a genuinely
+new send), persists the outbound thread with a snapshot of its envelope
+(`send_envelope`: `to`/`cc`/`subject`/`references`, `sending.md` §3a), and sends via the
+injected `EmailSender`.
+
+**Replay semantics: same key + same conversation = same logical send, never re-diffed
+against the body.** If a call reuses a key already recorded against this conversation, the
+NEW request's body is irrelevant — the response reflects the ORIGINAL attempt's outcome:
+
+- If the original attempt already succeeded (`delivery_status: 'sent'`), this call returns
+  `201` with that SAME `ThreadView` again, WITHOUT invoking the sender a second time.
+- If the original attempt is `pending`/`failed`, this call attempts delivery using the
+  ORIGINAL row's stored `messageId` and `send_envelope` — never the replay call's own
+  `to`/`subject`/`references`, even if they differ (sending.md §3a's snapshot rule) — after
+  first claiming that row's delivery lease.
+- If the lease could not be claimed (another attempt — a concurrent replay, or the delivery
+  worker, sending.md §3a — currently holds it), this call sends nothing and returns
+  `409 retry_in_progress`.
 
 Outcomes:
-- **`201`** with the created `ThreadView` on success. A reply to a `closed` conversation
-  **reopens** it (the store's existing append policy).
+- **`201`** with the created (or, on a replay after success, the ORIGINAL) `ThreadView`. A
+  reply to a `closed` conversation **reopens** it (the store's existing append policy) —
+  only on the call that actually creates the row, not on a replay.
+- **`400 validation_failed`** on a missing/empty `Idempotency-Key` header, or a body that
+  violates the limits.
 - **`404 not_found`** if the conversation is missing or `deleted` — no message is sent; a
   reply token minted before the append resolves is simply discarded (mirrors §3b).
-- **`400 validation_failed`** on a body that violates the limits.
+- **`409 retry_in_progress`** (HT-16) — the delivery lease for this `Idempotency-Key` is
+  currently held by another in-flight attempt; nothing was sent by this call. The caller
+  should retry the SAME key later, not mint a new one (a new key would create an
+  independent send, defeating the point of the dedup key).
 - **`502 send_failed`** if the provider rejects the message — nothing was delivered.
   `sendReply` returns a `send-failed` result (it does not throw): the outbound thread is
-  left `delivery_status = 'failed'` (a future delivery worker, HT-16, retries it with the
-  same Message-ID) — or, if even that mark fails, stuck `pending`. The response therefore
-  says only that the reply *could not be delivered* — never a specific persisted state,
-  never a raw provider error. This is the one outcome where an undelivered reply is
-  surfaced to the caller distinctly from an internal error. (Note the asymmetry: once the
-  provider ACCEPTS the message it is delivered, so a subsequent failure to record `'sent'`
-  is NOT a `send_failed` — it resolves to `201`, since reporting a delivered message as
-  failed would invite a resend.)
+  left `delivery_status = 'failed'` (retryable — by a replay with the same key, or the
+  delivery worker's sweep, sending.md §3a — with the same Message-ID) — or, if even that
+  mark fails, stuck `pending`. The response therefore says only that the reply *could not
+  be delivered* — never a specific persisted state, never a raw provider error. This is the
+  one outcome where an undelivered reply is surfaced to the caller distinctly from an
+  internal error. (Note the asymmetry: once the provider ACCEPTS the message it is
+  delivered, so a subsequent failure to record `'sent'` is NOT a `send_failed` — it resolves
+  to `201`, since reporting a delivered message as failed would invite a resend.)
 
 ### 4b. `PATCH /api/v1/conversations/{id}` — close or reopen
 

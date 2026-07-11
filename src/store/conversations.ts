@@ -54,9 +54,50 @@
  *
  * All three are enforced inside a single transaction per {@link appendThread}
  * call — see its doc comment for the concurrency reasoning.
+ *
+ * ## Send idempotency + delivery leasing (HT-16)
+ *
+ * Migration 003 adds three outbound-only columns this module now exposes:
+ * `idempotency_key`, `send_envelope`, and `claimed_until` (see the migration's
+ * doc comment, `src/db/migrate.ts`, for the full schema-level rationale).
+ * {@link appendThread} implements the "atomic get-or-insert" a caller-supplied
+ * idempotency key needs: `INSERT ... ON CONFLICT (conversation_id,
+ * idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING
+ * *`, falling back to a `SELECT` of the pre-existing row when the insert is
+ * skipped — both inside the SAME transaction that already takes the `FOR
+ * UPDATE` lock on the conversation row, so a concurrent retry with the same
+ * key is fully serialized against the original attempt rather than racing
+ * it. {@link AppendResult}'s `created` flag tells the caller (`src/mail/
+ * send.ts`) which case happened: `true` for a fresh insert (no key, or a key
+ * never seen before), `false` when an existing row was found instead — at
+ * which point `thread` carries that row's ALREADY-PERSISTED `messageId` and
+ * `sendEnvelope`, which a retry must reuse verbatim rather than re-minting or
+ * recomputing (see migration 003's doc comment on why the envelope is a
+ * snapshot).
+ *
+ * {@link ConversationStore.claimThreadForDelivery} and
+ * {@link ConversationStore.releaseThreadLease} are the lease pair a keyed
+ * retry or the delivery worker (`src/mail/delivery-worker.ts`) uses to make
+ * sure at most one in-flight attempt is ever sending a given outbound thread
+ * at a time — see their own doc comments below.
  */
 
 import type { Db, Queryable, SqlValue } from '../db/client.js'
+
+/**
+ * A snapshot of the mail headers an outbound reply was sent with:
+ * recipients, subject, and the `References` chain. Persisted VERBATIM into
+ * `threads.send_envelope` at insert and read back unchanged on every retry —
+ * never recomputed from the conversation's current state (migration 003's
+ * doc comment explains why: recomputing `references` could silently absorb
+ * inbound mail that arrived between the original attempt and the retry).
+ */
+export interface SendEnvelope {
+  to: string[]
+  cc?: string[]
+  subject: string
+  references?: string[]
+}
 
 /** One message to be persisted as a new thread — inbound customer mail, or outbound agent/assistant mail. */
 export interface NewThread {
@@ -93,6 +134,21 @@ export interface NewThread {
    * received, and the column stays `NULL` for those rows.
    */
   deliveryStatus?: 'pending' | 'sent' | 'failed' | null
+  /**
+   * Caller-supplied dedup key for an OUTBOUND thread (HT-16;
+   * `SendReplyInput.idempotencyKey`, `src/mail/send.ts`). Omitted (or
+   * `undefined`) means "no dedup protection for this send" — see
+   * {@link ConversationStore.appendThread}'s doc comment for what that
+   * means at the storage layer. Never set for an inbound thread — migration
+   * 003's CHECK constraint rejects that.
+   */
+  idempotencyKey?: string
+  /**
+   * A snapshot of this OUTBOUND thread's mail envelope, written once at
+   * insert (see {@link SendEnvelope}'s doc comment for why it is a snapshot,
+   * not a live derivation). Never set for an inbound thread.
+   */
+  sendEnvelope?: SendEnvelope
 }
 
 /** Input to {@link ConversationStore.createConversation}: a new conversation plus its first thread. */
@@ -114,6 +170,17 @@ export interface StoredThread {
   bodyHtml: string | null
   /** Outbox status — `null` for inbound threads, `'pending'|'sent'|'failed'` for outbound ones. See {@link NewThread.deliveryStatus}. */
   deliveryStatus: 'pending' | 'sent' | 'failed' | null
+  /** Dedup key this OUTBOUND thread was sent with, or `null` if it was sent (or received) without one. See {@link NewThread.idempotencyKey}. */
+  idempotencyKey: string | null
+  /** This OUTBOUND thread's persisted envelope snapshot, or `null` for an inbound thread. See {@link SendEnvelope}. */
+  sendEnvelope: SendEnvelope | null
+  /**
+   * The delivery lease: non-`null` while a `sendReply` retry or the
+   * delivery worker is actively attempting this OUTBOUND thread, `null`
+   * otherwise (never attempted, or the last attempt already released it).
+   * See {@link ConversationStore.claimThreadForDelivery}.
+   */
+  claimedUntil: Date | null
   createdAt: Date
 }
 
@@ -136,7 +203,7 @@ export interface StoredConversation {
  * callers should handle it as ordinary control flow.
  */
 export type AppendResult =
-  | { ok: true; threadId: string }
+  | { ok: true; threadId: string; created: boolean; thread: StoredThread }
   | { ok: false; reason: 'not-found' | 'deleted' }
 
 /** Persistence operations for conversations and their threads. See the module doc for the storage-layer policy this implements. */
@@ -154,10 +221,90 @@ export interface ConversationStore {
    * closed/deleted/missing policy documented at the top of this module.
    * See that doc for the full behavior; summarized: missing → `not-found`,
    * deleted → `deleted` (nothing inserted), closed → inserted AND
-   * reopened, open → inserted. Any successful insert also bumps the
-   * conversation's `updated_at`.
+   * reopened, open → inserted. A genuinely NEW row (`created: true`) also
+   * bumps the conversation's `updated_at` (and reopens a closed one, per
+   * the above); a REPLAY that found an existing row instead (`created:
+   * false`) touches the conversation row not at all — nothing new
+   * happened, so nothing about the conversation should look like it did.
+   *
+   * ## The `idempotencyKey` case: atomic get-or-insert
+   *
+   * When `thread.idempotencyKey` is set, this is NOT a plain insert: it is
+   * `INSERT ... ON CONFLICT (conversation_id, idempotency_key) WHERE
+   * idempotency_key IS NOT NULL DO NOTHING RETURNING *`, and on a conflict
+   * (0 rows — this exact key already exists on this conversation) a
+   * `SELECT` of that pre-existing row, all inside the same transaction that
+   * takes the `FOR UPDATE` lock on the conversation row above. That lock is
+   * what makes this safe under concurrency: two callers racing with the
+   * SAME key on the SAME conversation are serialized by it, so the second
+   * one's `INSERT ... ON CONFLICT` always sees the first one's already-committed
+   * row rather than racing its own insert against it. `created` tells the
+   * caller which happened; `thread` is the row either way — for a replay,
+   * `thread.messageId` and `thread.sendEnvelope` are the ORIGINAL attempt's,
+   * never regenerated (see the module doc and migration 003's doc comment).
+   *
+   * When `thread.idempotencyKey` is omitted, this behaves exactly as before
+   * HT-16: a plain insert, `created` is always `true`. This is the "no key ⇒
+   * no dedup protection" contract `src/mail/send.ts`'s module doc names
+   * explicitly — deliberate, and covered by a permanent regression test.
    */
   appendThread(conversationId: string, thread: NewThread): Promise<AppendResult>
+
+  /**
+   * Claim `threadId` for delivery: an atomic `UPDATE ... SET claimed_until =
+   * now() + leaseMs WHERE id = $1 AND (claimed_until IS NULL OR
+   * claimed_until < now()) RETURNING *`, scoped to outbound rows. Ordinary
+   * Postgres row-level locking on the `UPDATE` is what makes "at most one
+   * claimant wins" hold even under true concurrency (two overlapping calls
+   * for the same `threadId`, from two processes or two `Promise.all`-ed
+   * calls in one) — no advisory lock or explicit transaction is needed
+   * here, a single `UPDATE` is already atomic with respect to itself.
+   *
+   * Returns the freshly-claimed {@link StoredThread} (with the new
+   * `claimedUntil`) on success, or `null` if the row is missing, not
+   * outbound, or already claimed by someone else whose lease hasn't expired
+   * — the caller (`src/mail/send.ts`'s retry path, or
+   * `src/mail/delivery-worker.ts`'s sweep) must treat `null` as "someone
+   * else has this; don't send," never retry the claim itself.
+   */
+  claimThreadForDelivery(threadId: string, leaseMs: number): Promise<StoredThread | null>
+
+  /**
+   * Release `threadId`'s delivery lease and record the outcome in one
+   * write: `UPDATE ... SET delivery_status = status, claimed_until = NULL
+   * WHERE id = $1 AND direction = 'outbound' RETURNING id`, scoped and
+   * throwing-on-zero-rows exactly like {@link setThreadDeliveryStatus} (see
+   * its doc comment for why a silent no-op would be worse than a throw).
+   * Kept as a SEPARATE method from `setThreadDeliveryStatus` — not a
+   * parameter that also clears the lease — so the ORIGINAL (pre-HT-16,
+   * no-idempotency-key) `sendReply` flow keeps calling
+   * `setThreadDeliveryStatus` completely unchanged, byte-identical to
+   * before this feature existed.
+   */
+  releaseThreadLease(threadId: string, status: 'sent' | 'failed'): Promise<void>
+
+  /**
+   * List OUTBOUND threads eligible for a delivery-worker retry sweep
+   * (`src/mail/delivery-worker.ts`): `delivery_status = 'failed'`, OR
+   * `delivery_status = 'pending'` AND `created_at` older than
+   * `options.staleAfterMs` (a `'pending'` row younger than that may simply
+   * be a normal send still in flight — not yet a candidate); AND the lease
+   * is free (`claimed_until IS NULL OR claimed_until < now()`); AND
+   * `send_envelope IS NOT NULL` — a row with no stored envelope (only
+   * possible for a `threads` row written before migration 003 shipped)
+   * cannot be safely retried: rebuilding its `to`/`subject`/`references`
+   * from the conversation's CURRENT state would be exactly the silent
+   * mail-semantics drift migration 003's envelope snapshot exists to
+   * prevent, so such a row is left for manual/administrative handling
+   * instead of a worker guessing at it. Ordered oldest-`created_at`-first,
+   * capped at `options.batchSize` — the worker's own batch limit, not an
+   * over-fetch-by-one pagination trick (there is no pagination here; a
+   * skipped row is simply picked up on the NEXT sweep).
+   */
+  listDeliverableThreads(options: {
+    staleAfterMs: number
+    batchSize: number
+  }): Promise<StoredThread[]>
 
   /**
    * Read one conversation with all of its threads, ordered oldest-first
@@ -307,7 +454,15 @@ interface ConversationSummaryRow extends ConversationRow {
   thread_count: number
 }
 
-/** Raw `threads` row shape, before mapping to {@link StoredThread}. */
+/**
+ * Raw `threads` row shape, before mapping to {@link StoredThread}. `send_envelope`
+ * is typed `unknown` at this layer (not `SendEnvelope | null`) because it
+ * arrives already-parsed from a `jsonb` column (PGlite, verified against the
+ * installed 0.5.4, decodes `jsonb` to a plain JS value automatically — no
+ * `JSON.parse` needed on read), but nothing here has actually validated its
+ * shape; {@link toStoredThread} does the one authoritative cast, since this
+ * codebase controls every writer of the column (see {@link insertThread}).
+ */
 interface ThreadRow {
   id: string
   conversation_id: string
@@ -318,11 +473,14 @@ interface ThreadRow {
   body_text: string | null
   body_html: string | null
   delivery_status: string | null
+  idempotency_key: string | null
+  send_envelope: unknown
+  claimed_until: Date | string | null
   created_at: Date | string
 }
 
 const THREAD_COLUMNS =
-  'id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, created_at'
+  'id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope, claimed_until, created_at'
 
 /**
  * Create a {@link ConversationStore} backed by `db`. Every operation opens
@@ -337,7 +495,7 @@ export function createConversationStore(db: Db): ConversationStore {
           'INSERT INTO conversations (subject, customer_email) VALUES ($1, $2) RETURNING id',
           [input.subject, input.customerEmail],
         )
-        const threadId = await insertThread(tx, conversation.id, input.firstMessage)
+        const { threadId } = await insertThread(tx, conversation.id, input.firstMessage)
         return { conversationId: conversation.id, threadId }
       })
     },
@@ -349,7 +507,9 @@ export function createConversationStore(db: Db): ConversationStore {
         // conversation can't race between this status check and the insert
         // below (e.g. two replies arriving for the same closed conversation
         // at once should both observe-and-reopen deterministically, not
-        // interleave into an inconsistent status).
+        // interleave into an inconsistent status). This same lock is what
+        // makes the idempotency-key get-or-insert below safe under
+        // concurrency — see the interface doc comment above.
         const rows = await tx.query<{ status: string }>(
           'SELECT status FROM conversations WHERE id = $1 FOR UPDATE',
           [conversationId],
@@ -362,20 +522,25 @@ export function createConversationStore(db: Db): ConversationStore {
           return { ok: false, reason: 'deleted' }
         }
 
-        const threadId = await insertThread(tx, conversationId, thread)
+        const { threadId, created, row: threadRow } = await insertThread(tx, conversationId, thread)
 
-        if (row.status === 'closed') {
-          await tx.query(
-            "UPDATE conversations SET status = 'open', updated_at = now() WHERE id = $1",
-            [conversationId],
-          )
-        } else {
-          await tx.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [
-            conversationId,
-          ])
+        // A REPLAY (an existing row was found, nothing new inserted) touches
+        // the conversation not at all — no reopen, no updated_at bump. Only
+        // a genuinely new row counts as new activity on the conversation.
+        if (created) {
+          if (row.status === 'closed') {
+            await tx.query(
+              "UPDATE conversations SET status = 'open', updated_at = now() WHERE id = $1",
+              [conversationId],
+            )
+          } else {
+            await tx.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [
+              conversationId,
+            ])
+          }
         }
 
-        return { ok: true, threadId }
+        return { ok: true, threadId, created, thread: toStoredThread(threadRow) }
       })
     },
 
@@ -422,6 +587,59 @@ export function createConversationStore(db: Db): ConversationStore {
           `setThreadDeliveryStatus: no outbound thread with id ${threadId} (wrong id, an inbound thread, or the row was deleted)`,
         )
       }
+    },
+
+    async claimThreadForDelivery(threadId, leaseMs) {
+      // A single UPDATE is already atomic with respect to itself under
+      // Postgres row-level locking: two overlapping calls for the same
+      // threadId serialize on the row, and the second one's WHERE clause is
+      // re-evaluated against the FIRST call's committed result — so at most
+      // one of them ever sees `claimed_until IS NULL OR claimed_until <
+      // now()` as true and gets a row back. No explicit transaction needed.
+      const rows = await db.query<ThreadRow>(
+        `UPDATE threads
+         SET claimed_until = now() + ($2::double precision * interval '1 millisecond')
+         WHERE id = $1 AND direction = 'outbound' AND (claimed_until IS NULL OR claimed_until < now())
+         RETURNING ${THREAD_COLUMNS}`,
+        [threadId, leaseMs],
+      )
+      return rows.length === 0 ? null : toStoredThread(rows[0])
+    },
+
+    async releaseThreadLease(threadId, status) {
+      // Same scoping and throw-on-zero-rows contract as setThreadDeliveryStatus
+      // (see its doc comment) — kept as a separate method rather than a
+      // parameter there so the pre-HT-16 no-idempotency-key send path keeps
+      // calling setThreadDeliveryStatus completely unchanged.
+      const updated = await db.query<{ id: string }>(
+        "UPDATE threads SET delivery_status = $1, claimed_until = NULL WHERE id = $2 AND direction = 'outbound' RETURNING id",
+        [status, threadId],
+      )
+      if (updated.length === 0) {
+        throw new Error(
+          `releaseThreadLease: no outbound thread with id ${threadId} (wrong id, an inbound thread, or the row was deleted)`,
+        )
+      }
+    },
+
+    async listDeliverableThreads(options) {
+      const rows = await db.query<ThreadRow>(
+        `SELECT ${THREAD_COLUMNS} FROM threads
+         WHERE direction = 'outbound'
+           AND send_envelope IS NOT NULL
+           AND (
+             delivery_status = 'failed'
+             OR (
+               delivery_status = 'pending'
+               AND created_at < now() - ($1::double precision * interval '1 millisecond')
+             )
+           )
+           AND (claimed_until IS NULL OR claimed_until < now())
+         ORDER BY created_at
+         LIMIT $2`,
+        [options.staleAfterMs, options.batchSize],
+      )
+      return rows.map(toStoredThread)
     },
 
     async listConversations(options) {
@@ -496,12 +714,27 @@ export function createConversationStore(db: Db): ConversationStore {
  * generate one (defeating the point of a DB default) or special-case a
  * `null`/`undefined` id column value, which is not what "no id supplied"
  * means here.
+ *
+ * ## The idempotency-key get-or-insert (HT-16)
+ *
+ * The INSERT always carries `ON CONFLICT (conversation_id, idempotency_key)
+ * WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING <columns>` — this is
+ * harmless and never triggers when `thread.idempotencyKey` is omitted (a
+ * `NULL` key can never collide with the partial unique index; see migration
+ * 003's doc comment), which is exactly why the no-key path needs no separate
+ * code path here to stay byte-identical to pre-HT-16 behavior. When a key IS
+ * given and the insert is skipped because that `(conversation_id,
+ * idempotency_key)` pair already exists, the `RETURNING` clause comes back
+ * empty and this function falls back to a `SELECT` of that pre-existing row.
+ * The caller (`appendThread`) is what wraps this in the transaction holding
+ * the conversation row's `FOR UPDATE` lock, which is what makes the
+ * conflict-then-select sequence race-free — see that method's doc comment.
  */
 async function insertThread(
   tx: Queryable,
   conversationId: string,
   thread: NewThread,
-): Promise<string> {
+): Promise<{ threadId: string; created: boolean; row: ThreadRow }> {
   // Derive delivery_status from direction so the row always satisfies the
   // schema's direction↔status CHECK (migration 002): an outbound thread
   // defaults to 'pending' (its outbox starting state) unless the caller set a
@@ -509,43 +742,74 @@ async function insertThread(
   // passed, since delivery status is meaningless for received mail.
   const deliveryStatus =
     thread.direction === 'outbound' ? (thread.deliveryStatus ?? 'pending') : null
+  const idempotencyKey = thread.idempotencyKey ?? null
+  // jsonb columns take a caller-serialized string, per src/db/client.ts's
+  // module doc — `SqlValue` deliberately has no "plain object" member, so
+  // this is the one place a `SendEnvelope` is turned into JSON text.
+  const sendEnvelopeJson =
+    thread.sendEnvelope !== undefined ? JSON.stringify(thread.sendEnvelope) : null
 
-  if (thread.id !== undefined) {
-    const [row] = await tx.query<{ id: string }>(
-      `INSERT INTO threads (id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id`,
-      [
-        thread.id,
-        conversationId,
-        thread.direction,
-        thread.messageId,
-        thread.inReplyTo ?? null,
-        thread.fromAddress,
-        thread.bodyText ?? null,
-        thread.bodyHtml ?? null,
-        deliveryStatus,
-      ],
-    )
-    return row.id
+  const rows =
+    thread.id !== undefined
+      ? await tx.query<ThreadRow>(
+          `INSERT INTO threads (id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           ON CONFLICT (conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+           RETURNING ${THREAD_COLUMNS}`,
+          [
+            thread.id,
+            conversationId,
+            thread.direction,
+            thread.messageId,
+            thread.inReplyTo ?? null,
+            thread.fromAddress,
+            thread.bodyText ?? null,
+            thread.bodyHtml ?? null,
+            deliveryStatus,
+            idempotencyKey,
+            sendEnvelopeJson,
+          ],
+        )
+      : await tx.query<ThreadRow>(
+          `INSERT INTO threads (conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+           RETURNING ${THREAD_COLUMNS}`,
+          [
+            conversationId,
+            thread.direction,
+            thread.messageId,
+            thread.inReplyTo ?? null,
+            thread.fromAddress,
+            thread.bodyText ?? null,
+            thread.bodyHtml ?? null,
+            deliveryStatus,
+            idempotencyKey,
+            sendEnvelopeJson,
+          ],
+        )
+
+  if (rows.length === 1) {
+    return { threadId: rows[0].id, created: true, row: rows[0] }
   }
 
-  const [row] = await tx.query<{ id: string }>(
-    `INSERT INTO threads (conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id`,
-    [
-      conversationId,
-      thread.direction,
-      thread.messageId,
-      thread.inReplyTo ?? null,
-      thread.fromAddress,
-      thread.bodyText ?? null,
-      thread.bodyHtml ?? null,
-      deliveryStatus,
-    ],
+  // Conflict: DO NOTHING skipped the insert, which is only possible when
+  // idempotencyKey is non-null (see the doc comment above) — fetch the row
+  // that already holds this (conversationId, idempotencyKey) pair.
+  const existing = await tx.query<ThreadRow>(
+    `SELECT ${THREAD_COLUMNS} FROM threads WHERE conversation_id = $1 AND idempotency_key = $2`,
+    [conversationId, idempotencyKey],
   )
-  return row.id
+  const existingRow = existing[0]
+  if (existingRow === undefined) {
+    // Structurally unreachable: ON CONFLICT only fires against a row that
+    // satisfies this exact WHERE, inside the same transaction. Thrown rather
+    // than silently returning a made-up result if it ever did happen.
+    throw new Error(
+      `insertThread: ON CONFLICT DO NOTHING skipped the insert but no existing row was found for conversation ${conversationId}, idempotency key ${idempotencyKey}`,
+    )
+  }
+  return { threadId: existingRow.id, created: false, row: existingRow }
 }
 
 /**
@@ -604,6 +868,12 @@ function toStoredThread(row: ThreadRow): StoredThread {
     bodyText: row.body_text,
     bodyHtml: row.body_html,
     deliveryStatus: row.delivery_status as StoredThread['deliveryStatus'],
+    idempotencyKey: row.idempotency_key,
+    // Cast, not parsed: this codebase is the only writer of send_envelope
+    // (insertThread, always via JSON.stringify of a SendEnvelope), and the
+    // jsonb column already arrives decoded (see ThreadRow's doc comment).
+    sendEnvelope: row.send_envelope as SendEnvelope | null,
+    claimedUntil: row.claimed_until === null ? null : toDate(row.claimed_until),
     createdAt: toDate(row.created_at),
   }
 }
