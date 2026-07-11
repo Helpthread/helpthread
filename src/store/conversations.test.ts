@@ -36,6 +36,19 @@ async function setStatus(db: Db, conversationId: string, status: 'open' | 'close
   await db.query('UPDATE conversations SET status = $1 WHERE id = $2', [status, conversationId])
 }
 
+/**
+ * Directly sets a conversation's `updated_at` for test setup — `now()`
+ * resolution inside a single fast test run can tie multiple rows to the
+ * same instant, which would make ordering assertions flaky without an
+ * explicit, controlled timestamp per row.
+ */
+async function setUpdatedAt(db: Db, conversationId: string, updatedAt: Date) {
+  await db.query('UPDATE conversations SET updated_at = $1 WHERE id = $2', [
+    updatedAt,
+    conversationId,
+  ])
+}
+
 // --- suite ---------------------------------------------------------------------
 
 describe('createConversationStore', () => {
@@ -250,5 +263,103 @@ describe('createConversationStore', () => {
     // And it really wasn't touched.
     const conversation = await store.getConversation(conversationId)
     expect(conversation?.threads.find((t) => t.id === inboundThreadId)?.deliveryStatus).toBeNull()
+  })
+
+  describe('listConversations', () => {
+    it('defaults to excluding deleted; a deleted conversation never appears under any status filter', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId: openId } = await store.createConversation(newConversation())
+      const { conversationId: closedId } = await store.createConversation(newConversation())
+      const { conversationId: deletedId } = await store.createConversation(newConversation())
+      await setStatus(db, closedId, 'closed')
+      await setStatus(db, deletedId, 'deleted')
+
+      const all = await store.listConversations({ limit: 50 })
+      const ids = all.map((c) => c.id)
+      expect(ids).toContain(openId)
+      expect(ids).toContain(closedId)
+      expect(ids).not.toContain(deletedId)
+
+      const openOnly = await store.listConversations({ status: 'open', limit: 50 })
+      expect(openOnly.map((c) => c.id)).toEqual([openId])
+
+      const closedOnly = await store.listConversations({ status: 'closed', limit: 50 })
+      expect(closedOnly.map((c) => c.id)).toEqual([closedId])
+    })
+
+    it('reports threadCount via the correlated subquery', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await store.appendThread(conversationId, newThread())
+      await store.appendThread(
+        conversationId,
+        newThread({ messageId: '<outbound-2@mail.example.test>' }),
+      )
+
+      const [summary] = await store.listConversations({ limit: 50 })
+      expect(summary.id).toBe(conversationId)
+      expect(summary.threadCount).toBe(3)
+    })
+
+    it('orders updated_at DESC, id DESC (stable tiebreak) and reflects an append bumping updated_at', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId: a } = await store.createConversation(newConversation())
+      const { conversationId: b } = await store.createConversation(newConversation())
+      await setUpdatedAt(db, a, new Date('2026-01-01T00:00:00.000Z'))
+      await setUpdatedAt(db, b, new Date('2026-01-02T00:00:00.000Z'))
+
+      let ordered = await store.listConversations({ limit: 50 })
+      expect(ordered.map((c) => c.id)).toEqual([b, a])
+
+      // Appending to `a` bumps its updated_at (appendThread's own policy) —
+      // it should now sort ahead of `b`.
+      await store.appendThread(a, newThread())
+      ordered = await store.listConversations({ limit: 50 })
+      expect(ordered.map((c) => c.id)).toEqual([a, b])
+    })
+
+    it('limit is respected as an exact fetch count', async () => {
+      const { store } = await freshStore()
+      for (let i = 0; i < 5; i++) {
+        await store.createConversation(newConversation())
+      }
+      const page = await store.listConversations({ limit: 3 })
+      expect(page).toHaveLength(3)
+    })
+
+    it('keyset cursor walks pages with no overlap and no gap', async () => {
+      const { db, store } = await freshStore()
+      const ids: string[] = []
+      for (let i = 0; i < 5; i++) {
+        const { conversationId } = await store.createConversation(newConversation())
+        // Distinct, deterministic updated_at values so ordering is fully
+        // controlled rather than relying on real-clock granularity.
+        await setUpdatedAt(db, conversationId, new Date(2026, 0, i + 1))
+        ids.push(conversationId)
+      }
+      // Most-recently-active first: ids[4] has the latest updated_at, ids[0] the earliest.
+      const expectedOrder = [...ids].reverse()
+
+      const page1 = await store.listConversations({ limit: 2 })
+      expect(page1.map((c) => c.id)).toEqual(expectedOrder.slice(0, 2))
+
+      const last = page1[page1.length - 1]
+      const page2 = await store.listConversations({
+        limit: 2,
+        cursor: { updatedAt: last.updatedAt, id: last.id },
+      })
+      expect(page2.map((c) => c.id)).toEqual(expectedOrder.slice(2, 4))
+
+      const last2 = page2[page2.length - 1]
+      const page3 = await store.listConversations({
+        limit: 2,
+        cursor: { updatedAt: last2.updatedAt, id: last2.id },
+      })
+      expect(page3.map((c) => c.id)).toEqual(expectedOrder.slice(4, 5))
+
+      // No overlap, no gap across all three pages.
+      const walked = [...page1, ...page2, ...page3].map((c) => c.id)
+      expect(walked).toEqual(expectedOrder)
+    })
   })
 })
