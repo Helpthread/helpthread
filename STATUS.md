@@ -25,7 +25,7 @@
 
 **Agent Inbox API v1** (`src/api/`) — native, framework-agnostic `Request → Response` (a Vercel/Node adapter is a later thin wrapper; Node runtime, since the engine's HMAC uses `node:crypto`).
 - Constant-time Bearer auth that runs *before* routing; native `{ error: { code, message } }` envelope; `Cache-Control: no-store` on every response; UUID-shape guards; a top-level catch so nothing leaks as an uncontrolled 500.
-- `GET /conversations` (inbox list, newest-activity-first, status filter, keyset cursor) · `GET /conversations/{id}` (conversation + threads) · `POST /conversations/{id}/replies` (derives the headers, mints + sends) · `PATCH /conversations/{id}` (close/reopen).
+- `GET /api/v1/conversations` (inbox list, newest-activity-first, status filter, keyset cursor) · `GET /api/v1/conversations/{id}` (conversation + threads) · `POST /api/v1/conversations/{id}/replies` (derives the headers, mints + sends) · `PATCH /api/v1/conversations/{id}` (close/reopen).
 
 ## Next
 
@@ -37,7 +37,6 @@
 ## Not yet / deferred
 
 - Live Vercel + Supabase deployment — deferred to the first deployable milestone; the inbound and outbound provider seams exist, concrete adapters are being built now (outbound first).
-- Agent inbox UI.
 - A customer-side / self-service API (a separate future surface, designed native when there are customers to serve).
 - Marketplace (paid modules, license keys, module registry).
 
