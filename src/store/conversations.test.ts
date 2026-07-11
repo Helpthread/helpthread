@@ -265,6 +265,56 @@ describe('createConversationStore', () => {
     expect(conversation?.threads.find((t) => t.id === inboundThreadId)?.deliveryStatus).toBeNull()
   })
 
+  describe('setConversationStatus', () => {
+    it('closes an open conversation and returns the updated summary', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const summary = await store.setConversationStatus(conversationId, 'closed')
+      expect(summary).toMatchObject({ id: conversationId, status: 'closed' })
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('closed')
+    })
+
+    it('reopens a closed conversation', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'closed')
+
+      const summary = await store.setConversationStatus(conversationId, 'open')
+      expect(summary).toMatchObject({ id: conversationId, status: 'open' })
+    })
+
+    it('bumps updated_at', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+
+      const summary = await store.setConversationStatus(conversationId, 'closed')
+      expect(summary?.updatedAt.getTime()).toBeGreaterThan(new Date('2020-01-01').getTime())
+    })
+
+    it('returns null for a nonexistent id — nothing is created or updated', async () => {
+      const { store } = await freshStore()
+      const summary = await store.setConversationStatus(RANDOM_UUID, 'open')
+      expect(summary).toBeNull()
+    })
+
+    it('returns null for a deleted conversation — not reopenable through this method', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'deleted')
+
+      const summary = await store.setConversationStatus(conversationId, 'open')
+      expect(summary).toBeNull()
+
+      // And it really wasn't touched — still deleted.
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('deleted')
+    })
+  })
+
   describe('listConversations', () => {
     it('defaults to excluding deleted; a deleted conversation never appears under any status filter', async () => {
       const { db, store } = await freshStore()
