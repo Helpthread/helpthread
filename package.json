@@ -19,11 +19,14 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
+    "pg": "^8.22.0",
     "postal-mime": "^2.7.5"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
+    "@electric-sql/pglite-socket": "^0.2.7",
     "@types/node": "^20.19.43",
+    "@types/pg": "^8.20.0",
     "@vitest/coverage-v8": "4.1.10",
     "typescript": "7.0.2",
     "vitest": "4.1.10"
