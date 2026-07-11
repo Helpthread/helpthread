@@ -173,6 +173,7 @@ export function buildRawMessage(email: OutboundEmail): string {
 }
 
 /** Any C0 control char (incl. CR/LF/TAB) or DEL — the header-injection vector. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control chars are the MATCH TARGET -- this is the header-injection guard (assertHeaderSafe); the rule catches accidental control chars, these are deliberate.
 const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/
 
 /**
