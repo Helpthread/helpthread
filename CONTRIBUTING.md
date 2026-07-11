@@ -4,7 +4,7 @@ Thanks for your interest this early. **Helpthread is not accepting external code
 
 ## Why not yet
 
-Helpthread is dual-licensed: an AGPL-3.0 core alongside commercially-licensed first-party modules (see [CHARTER.md](CHARTER.md) §3). For that model to work, the project maintainer must hold consolidated copyright over the codebase, which means every contributor signs a Contributor License Agreement (CLA) before their code can be merged. **The CLA isn't finalized yet.** Until it is, we can't accept pull requests — not because your work wouldn't be welcome, but because we can't lawfully merge it without the CLA in place, and we'd rather tell you up front than leave a PR hanging.
+Helpthread's core is AGPL-3.0, and contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/) — you sign off your commits (`git commit -s`), you keep your copyright, and there is no CLA and never will be. Because contributors keep their copyright, the plugin exception that draws the line between the AGPL core and commercial modules (see [CHARTER.md](CHARTER.md) §3) effectively cannot be broadened once outside code lands. **That exception text isn't counsel-final yet.** Until it is, we can't responsibly merge external code — not because your work wouldn't be welcome, but because merging it would freeze legal text we're still getting right, and we'd rather tell you up front than leave a PR hanging.
 
 ## What you can do now
 
@@ -12,6 +12,6 @@ Helpthread is dual-licensed: an AGPL-3.0 core alongside commercially-licensed fi
 - **Start a discussion** — thoughts on the architecture, the roadmap, or the approach.
 - **Watch or star** to follow along; the project is being built in the open.
 
-When the CLA is ready and the project is open for contributions, this file will change and say so. Until then, please don't invest time in a pull request — hold that energy for when we can actually accept it.
+When the exception text is final and the project is open for contributions, this file will change and say so — the requirement then will be a DCO sign-off on your commits and nothing else. Until then, please don't invest time in a pull request — hold that energy for when we can actually accept it.
 
 — Resonant IQ, Inc.
