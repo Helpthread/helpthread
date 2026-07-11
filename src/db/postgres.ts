@@ -1,0 +1,377 @@
+/**
+ * `Db` implementation backed by a real Postgres server over the wire —
+ * the production counterpart to `PgliteDb` (`src/db/client.ts`). Same seam,
+ * same SQL: anything the stores run against PGlite locally runs unmodified
+ * here, which is the whole point of keeping the abstraction at "run this
+ * SQL, get these rows".
+ *
+ * Wraps `pg` (node-postgres, MIT) — the boring, battle-tested driver. A
+ * `pg.Pool` underneath; every parameterized query goes through the extended
+ * query protocol as an UNNAMED prepared statement, which is compatible with
+ * transaction-mode connection poolers (Supabase's Supavisor on port 6543,
+ * PgBouncer) — named prepared statements are not, and this adapter never
+ * creates one.
+ *
+ * ## Deploying against Supabase
+ *
+ * Use the **transaction-mode pooler connection string (port 6543)** — the
+ * serverless-correct choice: many short-lived function instances share a
+ * small set of real backend connections. Direct 5432 connections would
+ * exhaust Postgres's connection slots under serverless fan-out.
+ *
+ * ## The `schema` option — and why it is enforced per-transaction
+ *
+ * With `schema: 'helpthread'`, every table this adapter touches lives in
+ * that Postgres schema instead of `public`, without qualifying a single
+ * store SQL string. That containment is a deployment concern (e.g. renting
+ * a corner of an existing database), so it lives here in deployment config,
+ * not in the product's SQL.
+ *
+ * The mechanism has to survive transaction pooling, which rules out the
+ * obvious approaches: a session-level `SET search_path` on connect does NOT
+ * stick, because a transaction-mode pooler hands each *transaction* —
+ * including each autocommit statement — to whatever backend connection is
+ * free, and session state set on one backend is invisible on the next. Even
+ * two sequential statements on the same client ("SET, then INSERT") can land
+ * on different backends. The only placement the pooler contractually keeps
+ * together is a single transaction. So:
+ *
+ * - `transaction()` pins one pooled client, opens the transaction, and sets
+ *   a transaction-local search_path (`set_config(..., is_local => true)`)
+ *   before running the callback.
+ * - `query()` in schema mode routes through `transaction()` — a
+ *   single-statement transaction. A few extra round trips per query, priced
+ *   in deliberately: correctness under pooling beats saving milliseconds on
+ *   a helpdesk's write volume. Without `schema`, `query()` is a plain
+ *   single-round-trip `pool.query`.
+ *
+ * (The RIQ deployment ALSO sets a role-level default search_path via
+ * `ALTER ROLE ... SET search_path` — belt and braces, and it makes ad-hoc
+ * psql sessions land in the right schema — but this adapter does not rely
+ * on it.)
+ *
+ * Note: the transaction-local search_path is exactly the configured schema
+ * (plus the implicit `pg_catalog`) — `public` is deliberately NOT on it, so
+ * a deployment sharing a database cannot accidentally read or create tables
+ * outside its schema. Everything the engine's SQL needs from core Postgres
+ * (`gen_random_uuid()`, `now()`, ...) lives in `pg_catalog`, which Postgres
+ * always searches.
+ *
+ * `migrate()` (`src/db/migrate.ts`) needs no special handling: its advisory
+ * lock is `pg_advisory_xact_lock` — transaction-scoped, released on
+ * commit/rollback — which is the one advisory-lock flavor that is safe
+ * behind a transaction pooler (a session-scoped lock could be "released"
+ * onto a backend the caller no longer holds).
+ *
+ * ## Caveat: a rejected `transaction()` can be commit-uncertain
+ *
+ * The `Db.transaction` contract ("if fn throws, nothing committed") holds
+ * for every failure the DATABASE reports. One failure mode is inherently
+ * weaker over a network: if the connection dies after `COMMIT` was sent but
+ * before its confirmation arrived, this method rejects even though the
+ * commit may have landed. No wire-protocol client can do better — callers
+ * for whom a phantom-success matters must make the work idempotent (which
+ * is HT-16's territory for outbound sends, the one place the engine cares).
+ * The in-process PGlite adapter has no network, so it never exhibits this.
+ *
+ * ## Caveat: no non-transactional statements in schema mode
+ *
+ * Because schema mode wraps every `query()` in a transaction, statements
+ * Postgres refuses to run inside one (`CREATE INDEX CONCURRENTLY`,
+ * `VACUUM`, ...) cannot go through this adapter with `schema` set. Nothing
+ * in the engine issues any today; if one ever becomes necessary it will
+ * need an explicit, documented side door.
+ */
+
+import pg from 'pg'
+import type { Db, Queryable, Row, SqlValue } from './client.js'
+
+/**
+ * What a configured `schema` name must look like: an unquoted lowercase
+ * Postgres identifier (≤63 bytes), with the `pg_`-reserved namespace
+ * rejected. Deliberately much narrower than what Postgres would accept
+ * quoted — the name is interpolated into `CREATE SCHEMA` DDL (identifiers
+ * cannot be bound as `$n` parameters), so the whitelist IS the injection
+ * boundary. A deployment wanting `"Wéird Schema!"` doesn't get it.
+ */
+const SCHEMA_NAME_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/
+
+/** Postgres error codes the schema-creation race can surface (see `ensureSchema`). */
+const DUPLICATE_SCHEMA = '42P06'
+const UNIQUE_VIOLATION = '23505'
+const INSUFFICIENT_PRIVILEGE = '42501'
+
+export interface PostgresDbOptions {
+  /**
+   * Standard Postgres connection string. For Supabase, use the
+   * transaction-mode pooler string (port 6543) — see the module doc.
+   */
+  connectionString: string
+  /**
+   * Postgres schema to contain every table this `Db` touches (created if
+   * absent, permissions allowing). Omitted, SQL runs against the
+   * connection's default search_path (normally `public`) with no
+   * per-transaction setup. Must match `^[a-z_][a-z0-9_]{0,62}$` and not
+   * start with `pg_`.
+   */
+  schema?: string
+  /**
+   * Max pooled connections. Defaults to 2 — deliberately NOT `pg.Pool`'s
+   * default of 10, which is sized for one long-lived server process. In
+   * serverless, EVERY warm function instance owns its own pool, so the
+   * effective connection count is `max × instances`; 30 warm instances at
+   * pg's default would hold 300 client slots against the pooler before real
+   * load arrives. Excess concurrent queries queue on the pool (correct,
+   * just slower). Raise this only for long-lived deployments.
+   */
+  max?: number
+  /**
+   * TLS settings, passed through to `pg.Pool` verbatim. Prefer expressing
+   * TLS in the connection string (`?sslmode=...`); this override exists for
+   * setups needing an explicit CA bundle or similar.
+   */
+  ssl?: pg.PoolConfig['ssl']
+
+  /**
+   * Milliseconds to wait for a connection to be established/acquired before
+   * failing the query. Defaults to 10 000 — `pg`'s own default is 0 (wait
+   * FOREVER), which against an unreachable or saturated database turns
+   * every request into an unbounded hang instead of an actionable error.
+   */
+  connectionTimeoutMillis?: number
+}
+
+/**
+ * `pg` serializes parameters it doesn't recognize by JSON-stringifying
+ * them — and it recognizes `Buffer`, not `Uint8Array`, so a raw
+ * `Uint8Array` bound to a `bytea` column would be stored as a JSON string
+ * (PGlite, by contrast, handles `Uint8Array` natively). Converting to a
+ * `Buffer` COPY (`Buffer.from(uint8array)` copies; a `.buffer` view would
+ * share memory) keeps the two backends behaviorally identical at the seam
+ * and immunizes the in-flight query against a caller mutating its array
+ * after handing it over.
+ */
+function toPgParams(params: SqlValue[]): SqlValue[] {
+  return params.map((value) =>
+    value instanceof Uint8Array && !Buffer.isBuffer(value) ? Buffer.from(value) : value,
+  )
+}
+
+/** Narrow an unknown thrown value to a `pg` error code, if it carries one. */
+function pgErrorCode(err: unknown): string | undefined {
+  if (typeof err === 'object' && err !== null && 'code' in err) {
+    const code = (err as { code: unknown }).code
+    return typeof code === 'string' ? code : undefined
+  }
+  return undefined
+}
+
+/**
+ * `Db` over a `pg.Pool`. Construct via {@link createPostgresDb} — the
+ * factory validates the schema name and ensures the schema exists before
+ * any store SQL can run.
+ */
+export class PostgresDb implements Db {
+  readonly #pool: pg.Pool
+  readonly #schema: string | undefined
+
+  constructor(pool: pg.Pool, schema?: string) {
+    this.#pool = pool
+    this.#schema = schema
+  }
+
+  async query<T = Row>(sql: string, params: SqlValue[] = []): Promise<T[]> {
+    if (this.#schema === undefined) {
+      const result = await this.#pool.query(sql, toPgParams(params))
+      return result.rows as T[]
+    }
+    // Schema mode: even a single statement must ride inside a transaction so
+    // the transaction-local search_path and the statement reach the SAME
+    // pooled backend — see the module doc.
+    return this.transaction((tx) => tx.query<T>(sql, params))
+  }
+
+  async transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T> {
+    const client = await this.#pool.connect()
+    // pg tolerates neither a double release nor a query on a released
+    // client, so exactly one release must run on every path — tracked
+    // explicitly because the broken-connection path has to release EARLY
+    // (destructively) rather than in `finally`.
+    let released = false
+    try {
+      await client.query('BEGIN')
+      try {
+        if (this.#schema !== undefined) {
+          // is_local => true: scoped to this transaction, gone at
+          // commit/rollback — never leaks onto whatever backend connection
+          // the pooler hands out next.
+          await client.query('SELECT set_config($1, $2, true)', ['search_path', this.#schema])
+        }
+        const tx: Queryable = {
+          query: async <U = Row>(sql: string, params: SqlValue[] = []) => {
+            const result = await client.query(sql, toPgParams(params))
+            return result.rows as U[]
+          },
+        }
+        const result = await fn(tx)
+        await client.query('COMMIT')
+        return result
+      } catch (err) {
+        try {
+          await client.query('ROLLBACK')
+        } catch {
+          // ROLLBACK itself failed — the connection is in an unknown state.
+          // Destroy it (release(true)) instead of returning it to the pool,
+          // and surface the ORIGINAL error (the rollback failure is a
+          // symptom, not the cause).
+          released = true
+          client.release(true)
+        }
+        throw err
+      }
+    } finally {
+      if (!released) {
+        client.release()
+      }
+    }
+  }
+
+  async close(): Promise<void> {
+    await this.#pool.end()
+  }
+}
+
+async function schemaExists(pool: pg.Pool, schema: string): Promise<boolean> {
+  const result = await pool.query('SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1', [
+    schema,
+  ])
+  return result.rows.length > 0
+}
+
+/**
+ * Ensure `schema` exists AND that this role can actually use it, tolerating
+ * the two legitimate "already handled" creation outcomes:
+ *
+ * - **Pre-created by an operator** (the expected production shape: an admin
+ *   creates the schema and grants a scoped app role `USAGE, CREATE` on it —
+ *   such a role typically lacks database-level CREATE, so this function
+ *   checks existence FIRST and never attempts DDL it doesn't need).
+ * - **Concurrent creation race**: two instances cold-start simultaneously,
+ *   both see the schema missing, both CREATE — Postgres reports the loser
+ *   as `duplicate_schema` (or a `pg_namespace` unique violation, a known
+ *   race window even with IF NOT EXISTS). Losing the race is not success by
+ *   itself, though: whoever won might be a different actor whose schema
+ *   excludes this role. So a swallowed race error still falls through to
+ *   the existence recheck and the privilege check below.
+ *
+ * A genuinely missing schema that this role cannot create is a
+ * misconfiguration — rethrown with instructions rather than left to fail
+ * later as a confusing `search_path` miss.
+ *
+ * The final privilege check is load-bearing, not paranoia: a schema the
+ * role lacks `USAGE` on is silently SKIPPED during search_path resolution,
+ * so without this check a mis-granted deployment would boot fine and then
+ * fail its first real query with "relation does not exist" — the least
+ * helpful possible symptom. `CREATE` is checked too because `migrate()`
+ * creates tables. Both surface at construction time with the exact GRANT
+ * to run.
+ */
+async function ensureSchema(pool: pg.Pool, schema: string): Promise<void> {
+  if (!(await schemaExists(pool, schema))) {
+    try {
+      // Identifier, not a value — cannot be a $n parameter. Safe to
+      // interpolate only because SCHEMA_NAME_PATTERN already constrained it
+      // to a plain lowercase identifier; quoted for defense in depth.
+      await pool.query(`CREATE SCHEMA "${schema}"`)
+    } catch (err) {
+      const code = pgErrorCode(err)
+      const expected =
+        code === DUPLICATE_SCHEMA || code === UNIQUE_VIOLATION || code === INSUFFICIENT_PRIVILEGE
+      if (!expected) throw err
+      // Recheck rather than trust the error code: a race loser
+      // (duplicate/unique) should now see the schema; a permission-denied
+      // role might too (someone else created it between our check and our
+      // CREATE). Only "still missing" is a real failure.
+      if (!(await schemaExists(pool, schema))) {
+        if (code === INSUFFICIENT_PRIVILEGE) {
+          throw new Error(
+            `createPostgresDb: schema "${schema}" does not exist and this role may not create it. ` +
+              `Create it as an administrator (CREATE SCHEMA ${schema}; GRANT USAGE, CREATE ON SCHEMA ${schema} TO <app role>;) and retry.`,
+            { cause: err },
+          )
+        }
+        throw err
+      }
+    }
+  }
+
+  const privileges = await pool.query<{ can_usage: boolean; can_create: boolean }>(
+    `SELECT has_schema_privilege($1, 'USAGE') AS can_usage,
+            has_schema_privilege($1, 'CREATE') AS can_create`,
+    [schema],
+  )
+  const { can_usage, can_create } = privileges.rows[0]
+  if (!can_usage || !can_create) {
+    const missing = [!can_usage ? 'USAGE' : null, !can_create ? 'CREATE' : null]
+      .filter((p) => p !== null)
+      .join(', ')
+    throw new Error(
+      `createPostgresDb: schema "${schema}" exists but this role lacks ${missing} on it. ` +
+        `Run as an administrator: GRANT USAGE, CREATE ON SCHEMA ${schema} TO <app role>;`,
+    )
+  }
+}
+
+/**
+ * Create a `Db` backed by a real Postgres server. Validates `schema` (when
+ * given) and ensures it exists before returning, so by the time a store
+ * runs its first unqualified `CREATE TABLE` there is a schema for the
+ * search_path to land it in. Connections themselves are opened lazily by
+ * the pool (schema-less construction touches the network not at all — a
+ * bad connection string surfaces on first query).
+ */
+export async function createPostgresDb(options: PostgresDbOptions): Promise<Db> {
+  const { connectionString, schema, max, ssl, connectionTimeoutMillis } = options
+
+  if (schema !== undefined) {
+    if (!SCHEMA_NAME_PATTERN.test(schema)) {
+      throw new Error(
+        `createPostgresDb: invalid schema name ${JSON.stringify(schema)} — must match ${SCHEMA_NAME_PATTERN} (unquoted lowercase Postgres identifier).`,
+      )
+    }
+    if (schema.startsWith('pg_')) {
+      throw new Error(
+        `createPostgresDb: invalid schema name ${JSON.stringify(schema)} — the "pg_" prefix is reserved by Postgres.`,
+      )
+    }
+  }
+
+  const pool = new pg.Pool({
+    connectionString,
+    max: max ?? 2,
+    connectionTimeoutMillis: connectionTimeoutMillis ?? 10_000,
+    ...(ssl !== undefined ? { ssl } : {}),
+  })
+
+  // An IDLE pooled client that errors (its backend restarted, the pooler
+  // culled it, the network dropped) surfaces on the POOL's 'error' event —
+  // there is no in-flight query to attach it to. With no listener, Node
+  // treats it as an uncaught 'error' event and CRASHES THE PROCESS, which
+  // against a pooler that recycles idle connections is a when-not-if event.
+  // Swallowing is correct here, not lax: pg has already removed the dead
+  // client from the pool, and the next query simply opens a fresh
+  // connection (or fails loudly on its own, actionable, path).
+  pool.on('error', () => {})
+
+  if (schema !== undefined) {
+    try {
+      await ensureSchema(pool, schema)
+    } catch (err) {
+      // Don't leak a live pool on a failed construction.
+      await pool.end().catch(() => {})
+      throw err
+    }
+  }
+
+  return new PostgresDb(pool, schema)
+}
