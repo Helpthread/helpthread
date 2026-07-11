@@ -131,6 +131,14 @@ export interface PostgresDbOptions {
    * setups needing an explicit CA bundle or similar.
    */
   ssl?: pg.PoolConfig['ssl']
+
+  /**
+   * Milliseconds to wait for a connection to be established/acquired before
+   * failing the query. Defaults to 10 000 — `pg`'s own default is 0 (wait
+   * FOREVER), which against an unreachable or saturated database turns
+   * every request into an unbounded hang instead of an actionable error.
+   */
+  connectionTimeoutMillis?: number
 }
 
 /**
@@ -323,7 +331,7 @@ async function ensureSchema(pool: pg.Pool, schema: string): Promise<void> {
  * bad connection string surfaces on first query).
  */
 export async function createPostgresDb(options: PostgresDbOptions): Promise<Db> {
-  const { connectionString, schema, max, ssl } = options
+  const { connectionString, schema, max, ssl, connectionTimeoutMillis } = options
 
   if (schema !== undefined) {
     if (!SCHEMA_NAME_PATTERN.test(schema)) {
@@ -341,8 +349,19 @@ export async function createPostgresDb(options: PostgresDbOptions): Promise<Db> 
   const pool = new pg.Pool({
     connectionString,
     max: max ?? 2,
+    connectionTimeoutMillis: connectionTimeoutMillis ?? 10_000,
     ...(ssl !== undefined ? { ssl } : {}),
   })
+
+  // An IDLE pooled client that errors (its backend restarted, the pooler
+  // culled it, the network dropped) surfaces on the POOL's 'error' event —
+  // there is no in-flight query to attach it to. With no listener, Node
+  // treats it as an uncaught 'error' event and CRASHES THE PROCESS, which
+  // against a pooler that recycles idle connections is a when-not-if event.
+  // Swallowing is correct here, not lax: pg has already removed the dead
+  // client from the pool, and the next query simply opens a fresh
+  // connection (or fails loudly on its own, actionable, path).
+  pool.on('error', () => {})
 
   if (schema !== undefined) {
     try {

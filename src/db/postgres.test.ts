@@ -21,10 +21,11 @@
 
 import { PGlite } from '@electric-sql/pglite'
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
+import pg from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { Db } from './client.js'
 import { migrate } from './migrate.js'
-import { createPostgresDb } from './postgres.js'
+import { createPostgresDb, PostgresDb } from './postgres.js'
 
 let pglite: PGlite
 let server: PGLiteSocketServer
@@ -227,22 +228,36 @@ describe('createPostgresDb with a schema option', () => {
     expect(placed.rows).toEqual([{ n: 1 }])
   })
 
-  it('does not leak search_path onto pooled connections used without schema', async () => {
-    // A schema-mode Db and a schema-less Db against the same server: after
-    // the schema-mode Db has run queries, the schema-less Db must still see
-    // the DEFAULT search_path (i.e. the transaction-local set_config did not
-    // stick to any shared session state).
-    const scoped = await openDb({ schema: 'helpthread' })
-    await scoped.query('CREATE TABLE only_here (id int)')
+  it('does not leak search_path onto the SAME physical connection used without schema', async () => {
+    // The sharpest form of the no-leak property: one pg.Pool with max: 1, so
+    // a schema-mode Db and a schema-less Db are provably multiplexed over the
+    // SAME physical connection/session. (Two separate pools — like openDb()
+    // gives — could never catch a regression from transaction-local to
+    // session-local set_config: the second pool's fresh session would look
+    // clean regardless.) The schema still has to exist for this direct
+    // construction, so a throwaway factory-made Db provisions it first.
+    const provision = await openDb({ schema: 'helpthread' })
+    await provision.query('CREATE TABLE only_here (id int)')
+    await provision.close()
 
-    const plain = await openDb()
-    // Default search_path resolves to public — the scoped table is invisible
-    // unqualified…
-    await expect(plain.query('SELECT * FROM only_here')).rejects.toThrow()
-    // …but exists when qualified, proving the failure above was search_path,
-    // not a missing table.
-    const rows = await plain.query('SELECT * FROM helpthread.only_here')
-    expect(rows).toEqual([])
+    const sharedPool = new pg.Pool({ connectionString, max: 1 })
+    try {
+      const scoped: Db = new PostgresDb(sharedPool, 'helpthread')
+      const plain: Db = new PostgresDb(sharedPool)
+
+      // Run schema-mode traffic first so its set_config would be the thing
+      // that leaks, if anything leaked.
+      expect(await scoped.query('SELECT * FROM only_here')).toEqual([])
+
+      // Same physical session, no schema: the DEFAULT search_path must be
+      // back in force — the scoped table is invisible unqualified…
+      await expect(plain.query('SELECT * FROM only_here')).rejects.toThrow()
+      // …but exists when qualified, proving the failure above was
+      // search_path, not a missing table.
+      expect(await plain.query('SELECT * FROM helpthread.only_here')).toEqual([])
+    } finally {
+      await sharedPool.end()
+    }
   })
 
   it('two Dbs with different schemas are isolated from each other', async () => {

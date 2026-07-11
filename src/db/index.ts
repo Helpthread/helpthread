@@ -13,4 +13,8 @@ export { createPgliteDb, PgliteDb } from './client.js'
 export type { Migration } from './migrate.js'
 export { migrate } from './migrate.js'
 export type { PostgresDbOptions } from './postgres.js'
-export { createPostgresDb, PostgresDb } from './postgres.js'
+// Factory only — deliberately NOT the PostgresDb class: its constructor
+// skips createPostgresDb's schema validation/provisioning, so exposing it
+// would offer an unvalidated side door. (postgres.ts still exports the class
+// for its own tests; nothing above this barrel should touch it.)
+export { createPostgresDb } from './postgres.js'
