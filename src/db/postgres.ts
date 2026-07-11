@@ -63,6 +63,17 @@
  * behind a transaction pooler (a session-scoped lock could be "released"
  * onto a backend the caller no longer holds).
  *
+ * ## Caveat: a rejected `transaction()` can be commit-uncertain
+ *
+ * The `Db.transaction` contract ("if fn throws, nothing committed") holds
+ * for every failure the DATABASE reports. One failure mode is inherently
+ * weaker over a network: if the connection dies after `COMMIT` was sent but
+ * before its confirmation arrived, this method rejects even though the
+ * commit may have landed. No wire-protocol client can do better — callers
+ * for whom a phantom-success matters must make the work idempotent (which
+ * is HT-16's territory for outbound sends, the one place the engine cares).
+ * The in-process PGlite adapter has no network, so it never exhibits this.
+ *
  * ## Caveat: no non-transactional statements in schema mode
  *
  * Because schema mode wraps every `query()` in a transaction, statements
@@ -105,10 +116,13 @@ export interface PostgresDbOptions {
    */
   schema?: string
   /**
-   * Max pooled connections (passed to `pg.Pool`; its default applies when
-   * omitted). Against a transaction-mode pooler these are cheap client
-   * slots, not real backend connections — but serverless functions should
-   * still keep this small (1–2) since each instance opens its own pool.
+   * Max pooled connections. Defaults to 2 — deliberately NOT `pg.Pool`'s
+   * default of 10, which is sized for one long-lived server process. In
+   * serverless, EVERY warm function instance owns its own pool, so the
+   * effective connection count is `max × instances`; 30 warm instances at
+   * pg's default would hold 300 client slots against the pooler before real
+   * load arrives. Excess concurrent queries queue on the pool (correct,
+   * just slower). Raise this only for long-lived deployments.
    */
   max?: number
   /**
@@ -123,15 +137,15 @@ export interface PostgresDbOptions {
  * `pg` serializes parameters it doesn't recognize by JSON-stringifying
  * them — and it recognizes `Buffer`, not `Uint8Array`, so a raw
  * `Uint8Array` bound to a `bytea` column would be stored as a JSON string
- * (PGlite, by contrast, handles `Uint8Array` natively). Wrapping in a
- * `Buffer` view (no copy — same underlying memory) keeps the two backends
- * behaviorally identical at the seam.
+ * (PGlite, by contrast, handles `Uint8Array` natively). Converting to a
+ * `Buffer` COPY (`Buffer.from(uint8array)` copies; a `.buffer` view would
+ * share memory) keeps the two backends behaviorally identical at the seam
+ * and immunizes the in-flight query against a caller mutating its array
+ * after handing it over.
  */
 function toPgParams(params: SqlValue[]): SqlValue[] {
   return params.map((value) =>
-    value instanceof Uint8Array && !Buffer.isBuffer(value)
-      ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-      : value,
+    value instanceof Uint8Array && !Buffer.isBuffer(value) ? Buffer.from(value) : value,
   )
 }
 
@@ -219,9 +233,16 @@ export class PostgresDb implements Db {
   }
 }
 
+async function schemaExists(pool: pg.Pool, schema: string): Promise<boolean> {
+  const result = await pool.query('SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1', [
+    schema,
+  ])
+  return result.rows.length > 0
+}
+
 /**
- * Ensure `schema` exists, tolerating the two legitimate "already handled"
- * outcomes:
+ * Ensure `schema` exists AND that this role can actually use it, tolerating
+ * the two legitimate "already handled" creation outcomes:
  *
  * - **Pre-created by an operator** (the expected production shape: an admin
  *   creates the schema and grants a scoped app role `USAGE, CREATE` on it —
@@ -230,35 +251,66 @@ export class PostgresDb implements Db {
  * - **Concurrent creation race**: two instances cold-start simultaneously,
  *   both see the schema missing, both CREATE — Postgres reports the loser
  *   as `duplicate_schema` (or a `pg_namespace` unique violation, a known
- *   race window even with IF NOT EXISTS). The loser's goal is nonetheless
- *   achieved, so both codes are swallowed.
+ *   race window even with IF NOT EXISTS). Losing the race is not success by
+ *   itself, though: whoever won might be a different actor whose schema
+ *   excludes this role. So a swallowed race error still falls through to
+ *   the existence recheck and the privilege check below.
  *
  * A genuinely missing schema that this role cannot create is a
  * misconfiguration — rethrown with instructions rather than left to fail
  * later as a confusing `search_path` miss.
+ *
+ * The final privilege check is load-bearing, not paranoia: a schema the
+ * role lacks `USAGE` on is silently SKIPPED during search_path resolution,
+ * so without this check a mis-granted deployment would boot fine and then
+ * fail its first real query with "relation does not exist" — the least
+ * helpful possible symptom. `CREATE` is checked too because `migrate()`
+ * creates tables. Both surface at construction time with the exact GRANT
+ * to run.
  */
 async function ensureSchema(pool: pg.Pool, schema: string): Promise<void> {
-  const existing = await pool.query('SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1', [
-    schema,
-  ])
-  if (existing.rows.length > 0) return
-
-  try {
-    // Identifier, not a value — cannot be a $n parameter. Safe to interpolate
-    // only because SCHEMA_NAME_PATTERN already constrained it to a plain
-    // lowercase identifier; quoted for defense in depth.
-    await pool.query(`CREATE SCHEMA "${schema}"`)
-  } catch (err) {
-    const code = pgErrorCode(err)
-    if (code === DUPLICATE_SCHEMA || code === UNIQUE_VIOLATION) return
-    if (code === INSUFFICIENT_PRIVILEGE) {
-      throw new Error(
-        `createPostgresDb: schema "${schema}" does not exist and this role may not create it. ` +
-          `Create it as an administrator (CREATE SCHEMA ${schema}; GRANT USAGE, CREATE ON SCHEMA ${schema} TO <app role>;) and retry.`,
-        { cause: err },
-      )
+  if (!(await schemaExists(pool, schema))) {
+    try {
+      // Identifier, not a value — cannot be a $n parameter. Safe to
+      // interpolate only because SCHEMA_NAME_PATTERN already constrained it
+      // to a plain lowercase identifier; quoted for defense in depth.
+      await pool.query(`CREATE SCHEMA "${schema}"`)
+    } catch (err) {
+      const code = pgErrorCode(err)
+      const expected =
+        code === DUPLICATE_SCHEMA || code === UNIQUE_VIOLATION || code === INSUFFICIENT_PRIVILEGE
+      if (!expected) throw err
+      // Recheck rather than trust the error code: a race loser
+      // (duplicate/unique) should now see the schema; a permission-denied
+      // role might too (someone else created it between our check and our
+      // CREATE). Only "still missing" is a real failure.
+      if (!(await schemaExists(pool, schema))) {
+        if (code === INSUFFICIENT_PRIVILEGE) {
+          throw new Error(
+            `createPostgresDb: schema "${schema}" does not exist and this role may not create it. ` +
+              `Create it as an administrator (CREATE SCHEMA ${schema}; GRANT USAGE, CREATE ON SCHEMA ${schema} TO <app role>;) and retry.`,
+            { cause: err },
+          )
+        }
+        throw err
+      }
     }
-    throw err
+  }
+
+  const privileges = await pool.query<{ can_usage: boolean; can_create: boolean }>(
+    `SELECT has_schema_privilege($1, 'USAGE') AS can_usage,
+            has_schema_privilege($1, 'CREATE') AS can_create`,
+    [schema],
+  )
+  const { can_usage, can_create } = privileges.rows[0]
+  if (!can_usage || !can_create) {
+    const missing = [!can_usage ? 'USAGE' : null, !can_create ? 'CREATE' : null]
+      .filter((p) => p !== null)
+      .join(', ')
+    throw new Error(
+      `createPostgresDb: schema "${schema}" exists but this role lacks ${missing} on it. ` +
+        `Run as an administrator: GRANT USAGE, CREATE ON SCHEMA ${schema} TO <app role>;`,
+    )
   }
 }
 
@@ -288,7 +340,7 @@ export async function createPostgresDb(options: PostgresDbOptions): Promise<Db> 
 
   const pool = new pg.Pool({
     connectionString,
-    ...(max !== undefined ? { max } : {}),
+    max: max ?? 2,
     ...(ssl !== undefined ? { ssl } : {}),
   })
 
