@@ -24,8 +24,13 @@ This document covers the whole v1 surface. **HT-17 implemented §3's read paths 
 conventions below; HT-18 implemented §4a–4b; HT-16 amended §4a with send idempotency.**
 The v1.1 additions land per-ticket: HT-26 (status model), HT-27 (`preview` + `number`),
 HT-28 (notes), HT-29 (tags), HT-30 (delete), HT-31 (assignee), HT-32 (open tracking).
-Until a given increment ships, the deployed surface is the pre-amendment subset; the UI
-is built to degrade per-field (nullable/empty defaults), so partial deployment is safe.
+
+Rollout note: **HT-26 is the one BREAKING increment** — existing status values are
+renamed and the list filter's meaning changes, so backend and UI adopt it together (a
+coordinated rollout, deliberately first in the sequence; dogfood-only means the
+coordination is a single deploy, per HT-16's same reasoning). Every OTHER addition is
+additive with a nullable/empty default, and the UI degrades per-field for those —
+partial deployment of the additive increments is safe.
 
 ## 2. Domain model (native)
 
@@ -98,7 +103,9 @@ added when a real need appears, not preemptively.
 ## 3. Conventions (apply to every endpoint, reads and writes)
 
 - **Base path:** `/api/v1`.
-- **Format:** JSON in and out, `Content-Type: application/json`.
+- **Format:** JSON in and out, `Content-Type: application/json`. (One exception: the
+  open-tracking pixel, §4g, responds `image/gif` — it is fetched by mail clients, not
+  API consumers.)
 - **Auth:** `Authorization: Bearer <token>` on every request, compared against the
   configured service token (`HELPTHREAD_API_TOKEN`) with a **constant-time** comparison
   (length-guarded, as `src/mail/reply-token.ts` already does). A missing, malformed, or
@@ -310,14 +317,20 @@ prove text bodies, headers, and threading unchanged against the existing fixture
 
 When enabled:
 
-- The send path (§4a) injects a pixel URL bound to the outbound thread's id into the
-  outbound **HTML body only** (a text-only reply gets no pixel — never fabricate an HTML
-  part just to track).
-- The pixel endpoint (exact route pinned by HT-32) is the API's one **unauthenticated**
-  surface, fetched by customer mail clients. Its contract: always respond `200` with a
-  1×1 gif whether or not the token is valid (no existence or validity leak); record only
-  the FIRST view's timestamp (idempotent — later hits change nothing); set no cookies and
-  record nothing beyond that single timestamp.
+- The send path (§4a) injects a pixel URL into the outbound **HTML body only** (a
+  text-only reply gets no pixel — never fabricate an HTML part just to track). The URL
+  carries an **unguessable, signed credential bound to the outbound thread** — the same
+  keyring/HMAC pattern reply tokens already use (`src/mail/reply-token.ts`), NEVER the
+  bare thread uuid: a guessable identifier would let anyone who learns (or enumerates)
+  an id forge a "customer viewed" signal. The exact route and token format are pinned by
+  HT-32 against that requirement.
+- The pixel endpoint is the API's one **unauthenticated** surface, fetched by customer
+  mail clients. Its contract: always respond `200` with `Content-Type: image/gif`, a
+  fixed 1×1 gif body, and `Cache-Control: no-store` (a cached pixel would suppress the
+  very fetch it exists to observe) — valid token or not, identical either way (no
+  existence or validity leak); record only the FIRST view's timestamp for a valid token
+  (idempotent — later hits change nothing); set no cookies and record nothing beyond
+  that single timestamp.
 - `customerViewedAt` remains `null` until a view is recorded; it is always `null` for
   inbound threads and notes.
 
