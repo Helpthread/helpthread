@@ -240,6 +240,33 @@ ALTER TABLE conversations ADD CONSTRAINT conversations_number_key UNIQUE (number
 `
 
 /**
+ * Migration 006 — conversation tags + single-Agent assignee (HT-29, HT-31;
+ * specs/api/agent-inbox-v1.md §4e/§4f, v1.1).
+ *
+ * - `tags` is `jsonb NOT NULL DEFAULT '[]'` — a replace-set of short
+ *   lowercase labels, always written whole by `setConversationTags` (the
+ *   same caller-serialized-JSON convention as `threads.send_envelope`).
+ *   jsonb over a normalized tag table on purpose: v1 has no tag-filtered
+ *   listing (spec §4e — "display and organization until a real query need
+ *   appears"), so a side table would be structure with no query to serve.
+ * - `assignee` is nullable text CHECKed to `'me'` — v1 is single-Agent and
+ *   the flag is deliberately not identity (spec §4f); the CHECK keeps any
+ *   future multi-Agent migration honest about widening it explicitly. The
+ *   `IS NULL OR` arm is required, not decorative: a bare `IN ('me')` CHECK
+ *   passes NULL anyway (three-valued logic — see migration 002's comment),
+ *   but spelling it out records that NULL ("Anyone") is a legal state, not
+ *   an accident of SQL semantics.
+ *
+ * No backfill: both defaults (`'[]'`, `NULL`) are the correct value for
+ * every existing row, so ADD COLUMN alone leaves a valid database.
+ */
+const MIGRATION_006_TAGS_AND_ASSIGNEE = `
+ALTER TABLE conversations ADD COLUMN tags jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE conversations ADD COLUMN assignee text;
+ALTER TABLE conversations ADD CONSTRAINT conversations_assignee_check CHECK (assignee IS NULL OR assignee = 'me');
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -265,6 +292,11 @@ const MIGRATIONS: Migration[] = [
     id: 5,
     name: 'conversation_number',
     sql: MIGRATION_005_CONVERSATION_NUMBER,
+  },
+  {
+    id: 6,
+    name: 'tags_and_assignee',
+    sql: MIGRATION_006_TAGS_AND_ASSIGNEE,
   },
 ]
 

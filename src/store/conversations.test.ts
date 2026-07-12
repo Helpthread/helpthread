@@ -994,4 +994,64 @@ describe('createConversationStore', () => {
       expect(await store.deleteConversation(RANDOM_UUID)).toBe(false)
     })
   })
+
+  describe('tags & assignee (HT-29/HT-31, spec §4e/§4f v1.1)', () => {
+    it('defaults: a new conversation has [] tags and null assignee, on summaries and detail alike', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const [summary] = await store.listConversations({ limit: 50 })
+      expect(summary.tags).toEqual([])
+      expect(summary.assignee).toBeNull()
+
+      const detail = await store.getConversation(conversationId)
+      expect(detail?.tags).toEqual([])
+      expect(detail?.assignee).toBeNull()
+    })
+
+    it('setConversationTags replace-set round-trip: set, re-set, clear — persisted verbatim, no updated_at bump', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+
+      const set = await store.setConversationTags(conversationId, ['bug', 'billing'])
+      expect(set?.tags).toEqual(['bug', 'billing'])
+      // Metadata, not activity — the sort key is untouched (spec §4e).
+      expect(set?.updatedAt.getTime()).toBe(new Date('2020-01-01T00:00:00.000Z').getTime())
+
+      const reset = await store.setConversationTags(conversationId, ['import'])
+      expect(reset?.tags).toEqual(['import'])
+
+      const cleared = await store.setConversationTags(conversationId, [])
+      expect(cleared?.tags).toEqual([])
+    })
+
+    it('setConversationAssignee claims and releases, no updated_at bump', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+
+      const claimed = await store.setConversationAssignee(conversationId, 'me')
+      expect(claimed?.assignee).toBe('me')
+      expect(claimed?.updatedAt.getTime()).toBe(new Date('2020-01-01T00:00:00.000Z').getTime())
+
+      const released = await store.setConversationAssignee(conversationId, null)
+      expect(released?.assignee).toBeNull()
+    })
+
+    it('both return null for a missing or deleted conversation — nothing is written', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'deleted')
+
+      expect(await store.setConversationTags(RANDOM_UUID, ['x'])).toBeNull()
+      expect(await store.setConversationTags(conversationId, ['x'])).toBeNull()
+      expect(await store.setConversationAssignee(RANDOM_UUID, 'me')).toBeNull()
+      expect(await store.setConversationAssignee(conversationId, 'me')).toBeNull()
+
+      const raw = await store.getConversation(conversationId)
+      expect(raw?.tags).toEqual([])
+      expect(raw?.assignee).toBeNull()
+    })
+  })
 })

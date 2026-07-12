@@ -1166,6 +1166,121 @@ describe('createInboxApi', () => {
     })
   })
 
+  // --- tags & assignee (HT-29/HT-31, spec §4e/§4f v1.1) ---------------------------
+
+  describe('tags & assignee', () => {
+    function put(path: string, body: unknown, ...tokenArg: [string | undefined] | []): Request {
+      return withJsonBody('PUT', path, JSON.stringify(body), tokenArg)
+    }
+
+    it('PUT tags replaces the set, normalizing: trim, lowercase, dedupe preserving first occurrence', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        put(`/api/v1/conversations/${conversationId}/tags`, {
+          tags: ['  Bug ', 'BILLING', 'bug', 'Billing'],
+        }),
+      )
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { tags: string[] }
+      expect(body.tags).toEqual(['bug', 'billing'])
+
+      // Replace-set: [] clears.
+      const cleared = await api(put(`/api/v1/conversations/${conversationId}/tags`, { tags: [] }))
+      expect(((await cleared.json()) as { tags: string[] }).tags).toEqual([])
+    })
+
+    it('PUT tags 400s on a non-array, a non-string entry, an empty-after-trim entry, and an over-40-char entry', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      for (const bad of [
+        { tags: 'bug' },
+        { tags: [42] },
+        { tags: ['   '] },
+        { tags: ['x'.repeat(41)] },
+        {},
+      ]) {
+        const res = await api(put(`/api/v1/conversations/${conversationId}/tags`, bad))
+        expect(res.status).toBe(400)
+      }
+    })
+
+    it('PUT assignee claims with me, releases with null; 400s otherwise (including a missing property)', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const claimed = await api(
+        put(`/api/v1/conversations/${conversationId}/assignee`, { assignee: 'me' }),
+      )
+      expect(claimed.status).toBe(200)
+      expect(((await claimed.json()) as { assignee: string | null }).assignee).toBe('me')
+
+      const released = await api(
+        put(`/api/v1/conversations/${conversationId}/assignee`, { assignee: null }),
+      )
+      expect(released.status).toBe(200)
+      expect(((await released.json()) as { assignee: string | null }).assignee).toBeNull()
+
+      for (const bad of [{ assignee: 'someone' }, { assignee: 42 }, {}]) {
+        const res = await api(put(`/api/v1/conversations/${conversationId}/assignee`, bad))
+        expect(res.status).toBe(400)
+      }
+    })
+
+    it('both PUT routes 404 for missing, deleted, and non-UUID ids', async () => {
+      const { db, store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'deleted')
+
+      for (const suffix of ['tags', 'assignee'] as const) {
+        const body = suffix === 'tags' ? { tags: ['x'] } : { assignee: 'me' }
+        expect(
+          (await api(put(`/api/v1/conversations/${RANDOM_UUID}/${suffix}`, body))).status,
+        ).toBe(404)
+        expect(
+          (await api(put(`/api/v1/conversations/${conversationId}/${suffix}`, body))).status,
+        ).toBe(404)
+        expect((await api(put(`/api/v1/conversations/not-a-uuid/${suffix}`, body))).status).toBe(
+          404,
+        )
+      }
+    })
+
+    it('list summaries and the detail response carry tags and assignee', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await store.setConversationTags(conversationId, ['bug'])
+      await store.setConversationAssignee(conversationId, 'me')
+
+      const list = await api(get('/api/v1/conversations'))
+      const listBody = (await list.json()) as {
+        conversations: Array<{ tags: string[]; assignee: string | null }>
+      }
+      expect(listBody.conversations[0]).toMatchObject({ tags: ['bug'], assignee: 'me' })
+
+      const detail = await api(get(`/api/v1/conversations/${conversationId}`))
+      const detailBody = (await detail.json()) as { tags: string[]; assignee: string | null }
+      expect(detailBody.tags).toEqual(['bug'])
+      expect(detailBody.assignee).toBe('me')
+    })
+
+    it('GET on the tags route is 405 with Allow: PUT; 401 without a token', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const wrongMethod = await api(get(`/api/v1/conversations/${conversationId}/tags`))
+      expect(wrongMethod.status).toBe(405)
+      expect(wrongMethod.headers.get('Allow')).toBe('PUT')
+
+      const noAuth = await api(
+        put(`/api/v1/conversations/${conversationId}/tags`, { tags: ['x'] }, undefined),
+      )
+      expect(noAuth.status).toBe(401)
+    })
+  })
+
   // --- number & preview on the wire (HT-27, spec §2 v1.1) -----------------------
 
   describe('number & preview', () => {
