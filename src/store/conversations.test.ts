@@ -954,4 +954,44 @@ describe('createConversationStore', () => {
       })
     })
   })
+
+  describe('deleteConversation (HT-30, spec §4d v1.1)', () => {
+    it('soft-deletes a live conversation: true, then invisible to every public path — but the rows survive in storage', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      expect(await store.deleteConversation(conversationId)).toBe(true)
+
+      // Public reads treat it as nonexistent…
+      expect(await store.getConversation(conversationId, { includeDeleted: false })).toBeNull()
+      expect((await store.listConversations({ limit: 50 })).map((c) => c.id)).not.toContain(
+        conversationId,
+      )
+      expect(await store.setConversationStatus(conversationId, 'active')).toBeNull()
+      expect(await store.appendThread(conversationId, newThread())).toEqual({
+        ok: false,
+        reason: 'deleted',
+      })
+
+      // …but the mail itself is still in storage (charter invariant #1) —
+      // soft delete changes visibility, never data.
+      const raw = await store.getConversation(conversationId)
+      expect(raw?.status).toBe('deleted')
+      expect(raw?.threads).toHaveLength(1)
+      const [{ count }] = await db.query<{ count: number }>(
+        'SELECT count(*)::int AS count FROM threads WHERE conversation_id = $1',
+        [conversationId],
+      )
+      expect(count).toBe(1)
+    })
+
+    it('a second delete (and a nonexistent id) return false — indistinguishable misses', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      expect(await store.deleteConversation(conversationId)).toBe(true)
+      expect(await store.deleteConversation(conversationId)).toBe(false)
+      expect(await store.deleteConversation(RANDOM_UUID)).toBe(false)
+    })
+  })
 })

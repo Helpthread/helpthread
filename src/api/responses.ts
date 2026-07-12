@@ -42,6 +42,19 @@ export function json(status: number, body: unknown): Response {
 }
 
 /**
+ * Build an empty `204 No Content` response (spec §4d's successful soft
+ * delete, v1.1 — the one success in this API with no body). Still carries
+ * `Cache-Control: no-store` like every other response; no `Content-Type`,
+ * since there is no content for it to describe.
+ */
+export function noContent(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: { 'Cache-Control': 'no-store' },
+  })
+}
+
+/**
  * Build an error `Response` in the standard envelope (spec §3).
  *
  * `message` MUST be user-safe: never a stack trace, never a raw SQL error,

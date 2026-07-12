@@ -26,7 +26,7 @@ import {
   type StoredThread,
 } from '../store/conversations.js'
 import { decodeCursor, encodeCursor } from './cursor.js'
-import { apiError, json } from './responses.js'
+import { apiError, json, noContent } from './responses.js'
 import { isUuid } from './uuid.js'
 
 /** Default page size when the caller omits `limit` (spec §3a). */
@@ -424,6 +424,34 @@ export async function handlePatchConversation(
   }
 
   return json(200, toConversationSummaryJson(updated))
+}
+
+/**
+ * Handle `DELETE /api/v1/conversations/{id}` — soft delete (spec §4d, v1.1).
+ *
+ * `204` with an empty body on success. `404 not_found` when `{id}` is
+ * missing, already deleted, or not UUID-shaped — all three identical, per
+ * §5's no-existence-leak rule (deleting twice reports the second call as a
+ * plain miss). From this point every endpoint treats the conversation as
+ * nonexistent — including a keyed replay of a previously-successful reply
+ * (§4a's replay-vs-delete rule); the store's existing deleted-handling
+ * covers all of them, so this handler is just the flag flip plus the
+ * spec's response mapping.
+ */
+export async function handleDeleteConversation(
+  id: string,
+  deps: { store: ConversationStore },
+): Promise<Response> {
+  if (!isUuid(id)) {
+    return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  const deleted = await deps.store.deleteConversation(id)
+  if (!deleted) {
+    return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  return noContent()
 }
 
 /**

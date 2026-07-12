@@ -978,6 +978,105 @@ describe('createInboxApi', () => {
     })
   })
 
+  // --- delete (HT-30, spec §4d v1.1) ----------------------------------------------
+
+  describe('delete', () => {
+    /** A `DELETE` request for `path`, Bearer-authenticated unless `token` is explicitly omitted. */
+    function del(path: string, ...tokenArg: [string | undefined] | []): Request {
+      const token = tokenArg.length > 0 ? tokenArg[0] : TOKEN
+      const headers: Record<string, string> = {}
+      if (token !== undefined) {
+        headers.Authorization = `Bearer ${token}`
+      }
+      return new Request(`https://x.example.test${path}`, { method: 'DELETE', headers })
+    }
+
+    it('deletes: 204 with an empty body + no-store; afterwards every endpoint treats it as nonexistent', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(del(`/api/v1/conversations/${conversationId}`))
+      expect(res.status).toBe(204)
+      expect(res.headers.get('Cache-Control')).toBe('no-store')
+      expect(await res.text()).toBe('')
+
+      // GET → 404.
+      const getRes = await api(get(`/api/v1/conversations/${conversationId}`))
+      expect(getRes.status).toBe(404)
+
+      // The list never shows it, under any folder.
+      const listRes = await api(get('/api/v1/conversations'))
+      const listBody = (await listRes.json()) as { conversations: Array<{ id: string }> }
+      expect(listBody.conversations.map((c) => c.id)).not.toContain(conversationId)
+
+      // PATCH → 404 (not reachable), reply → 404 (nothing sent).
+      const patchRes = await api(
+        patch(`/api/v1/conversations/${conversationId}`, { status: 'active' }),
+      )
+      expect(patchRes.status).toBe(404)
+      const replyRes = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'Hello?' }),
+      )
+      expect(replyRes.status).toBe(404)
+    })
+
+    it('a second DELETE is 404 — already-deleted is indistinguishable from never-existed', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      expect((await api(del(`/api/v1/conversations/${conversationId}`))).status).toBe(204)
+      const second = await api(del(`/api/v1/conversations/${conversationId}`))
+      expect(second.status).toBe(404)
+      expect(await second.json()).toEqual({
+        error: { code: 'not_found', message: expect.any(String) },
+      })
+    })
+
+    it('404s for a missing id and for a non-UUID-shaped id', async () => {
+      const { api } = await freshApi()
+      expect((await api(del(`/api/v1/conversations/${RANDOM_UUID}`))).status).toBe(404)
+      expect((await api(del('/api/v1/conversations/not-a-uuid'))).status).toBe(404)
+    })
+
+    it('a keyed replay of a previously-successful reply returns 404 after the delete (spec §4a replay-vs-delete)', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const first = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'Original send.' },
+          { idempotencyKey: 'replay-vs-delete' },
+        ),
+      )
+      expect(first.status).toBe(201)
+
+      expect((await api(del(`/api/v1/conversations/${conversationId}`))).status).toBe(204)
+
+      // The replay does NOT resurrect the original 201 — the conversation is
+      // gone; there is no mail-safety impact (the original send already
+      // happened).
+      const replay = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'Original send.' },
+          { idempotencyKey: 'replay-vs-delete' },
+        ),
+      )
+      expect(replay.status).toBe(404)
+    })
+
+    it('401s without a token', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      const res = await api(del(`/api/v1/conversations/${conversationId}`, undefined))
+      expect(res.status).toBe(401)
+
+      // And nothing was deleted by the unauthenticated call.
+      expect((await api(get(`/api/v1/conversations/${conversationId}`))).status).toBe(200)
+    })
+  })
+
   // --- method routing (HT-18 additions) ------------------------------------------
 
   describe('method routing', () => {
@@ -994,16 +1093,16 @@ describe('createInboxApi', () => {
       expect(res.headers.get('Cache-Control')).toBe('no-store')
     })
 
-    it('DELETE on the item route is 405 with Allow: GET, PATCH', async () => {
+    it('PUT on the item route is 405 with Allow: GET, PATCH, DELETE', async () => {
       const { api } = await freshApi()
       const res = await api(
         new Request(`https://x.example.test/api/v1/conversations/${RANDOM_UUID}`, {
-          method: 'DELETE',
+          method: 'PUT',
           headers: { Authorization: `Bearer ${TOKEN}` },
         }),
       )
       expect(res.status).toBe(405)
-      expect(res.headers.get('Allow')).toBe('GET, PATCH')
+      expect(res.headers.get('Allow')).toBe('GET, PATCH, DELETE')
     })
 
     it('GET on the replies route is 405 with Allow: POST', async () => {
