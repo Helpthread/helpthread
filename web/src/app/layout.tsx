@@ -4,6 +4,8 @@ import '../theme/helpthread.css'
 import { ShortcutsProvider } from '../components/ShortcutsProvider'
 import { ThemeProvider } from '../components/ThemeProvider'
 import { ToasterProvider } from '../components/Toaster'
+import { TopBar } from '../components/TopBar'
+import { listConversations } from '../lib/api'
 import { THEME_INIT_SCRIPT } from '../lib/theme'
 
 export const metadata: Metadata = {
@@ -14,9 +16,14 @@ export const metadata: Metadata = {
 /**
  * The app shell: the accent-filled top bar — the design system's ONE colored
  * surface — carrying the wordmark (plain text, serif, muted dot; there is no
- * logo), over the warm-paper canvas everything else sits on.
+ * logo) and the Mailbox/Manage/Notifications/Agent menus (`TopBar`), over the
+ * warm-paper canvas everything else sits on. Stays a server component: the
+ * Notifications panel's data (6 most recent open conversations) is fetched
+ * here, with the Bearer token, and handed to the client `TopBar` as props.
  */
-export default function RootLayout({ children }: { children: ReactNode }) {
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  const recentOpen = await listConversations({ folder: 'open', limit: 6 })
+
   return (
     // suppressHydrationWarning: the inline script below sets `data-theme` on
     // this element BEFORE React hydrates (that's the whole point — it avoids
@@ -46,27 +53,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <ThemeProvider>
           <ToasterProvider>
             <ShortcutsProvider>
-              <header
-                style={{
-                  background: 'var(--ht-header-bg)',
-                  color: 'var(--ht-header-fg)',
-                  padding: '10px 18px',
-                  display: 'flex',
-                  alignItems: 'baseline',
-                  gap: 12,
-                }}
-              >
-                <span
-                  style={{
-                    fontFamily: "var(--ht-serif, 'Source Serif 4', serif)",
-                    fontSize: 18,
-                    fontWeight: 600,
-                    letterSpacing: '0.01em',
-                  }}
-                >
-                  helpthread<span style={{ opacity: 0.55 }}>.</span>
-                </span>
-              </header>
+              <TopBar recentOpen={recentOpen.conversations} />
               {children}
             </ShortcutsProvider>
           </ToasterProvider>
