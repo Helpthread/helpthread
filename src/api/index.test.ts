@@ -1166,6 +1166,98 @@ describe('createInboxApi', () => {
     })
   })
 
+  // --- notes (HT-28, spec §4c v1.1) ------------------------------------------------
+
+  describe('notes', () => {
+    it('201 with the note ThreadView: direction note, from = support address, deliveryStatus null — and the sender is NEVER invoked', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/notes`, { text: 'Internal context.' }),
+      )
+      expect(res.status).toBe(201)
+      const body = (await res.json()) as {
+        direction: string
+        from: string
+        bodyText: string | null
+        bodyHtml: string | null
+        deliveryStatus: string | null
+      }
+      expect(body).toMatchObject({
+        direction: 'note',
+        from: SUPPORT_ADDRESS,
+        bodyText: 'Internal context.',
+        bodyHtml: null,
+        deliveryStatus: null,
+      })
+      // The mail boundary (spec §4c): a note never touches the send path.
+      expect(sent).toEqual([])
+    })
+
+    it('a note on a closed conversation bumps updatedAt but never reopens it', async () => {
+      const { db, store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'closed')
+      await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+
+      const res = await api(
+        post(`/api/v1/conversations/${conversationId}/notes`, { text: 'Still closed.' }),
+      )
+      expect(res.status).toBe(201)
+
+      const updated = await store.getConversation(conversationId)
+      expect(updated?.status).toBe('closed')
+      expect(updated?.updatedAt.getTime()).toBeGreaterThan(
+        new Date('2020-01-01T00:00:00.000Z').getTime(),
+      )
+    })
+
+    it('400s on a missing/empty/over-limit text and a non-JSON body', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      for (const bad of [{}, { text: '' }, { text: 'x'.repeat(5001) }, { text: 42 }]) {
+        const res = await api(post(`/api/v1/conversations/${conversationId}/notes`, bad))
+        expect(res.status).toBe(400)
+      }
+      const rawRes = await api(
+        postRaw(`/api/v1/conversations/${conversationId}/notes`, 'not json{'),
+      )
+      expect(rawRes.status).toBe(400)
+    })
+
+    it('404s for missing, deleted, and non-UUID ids', async () => {
+      const { db, store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'deleted')
+
+      expect(
+        (await api(post(`/api/v1/conversations/${RANDOM_UUID}/notes`, { text: 'x' }))).status,
+      ).toBe(404)
+      expect(
+        (await api(post(`/api/v1/conversations/${conversationId}/notes`, { text: 'x' }))).status,
+      ).toBe(404)
+      expect(
+        (await api(post('/api/v1/conversations/not-a-uuid/notes', { text: 'x' }))).status,
+      ).toBe(404)
+    })
+
+    it('GET on the notes route is 405 with Allow: POST; 401 without a token', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const wrongMethod = await api(get(`/api/v1/conversations/${conversationId}/notes`))
+      expect(wrongMethod.status).toBe(405)
+      expect(wrongMethod.headers.get('Allow')).toBe('POST')
+
+      const noAuth = await api(
+        post(`/api/v1/conversations/${conversationId}/notes`, { text: 'x' }, undefined),
+      )
+      expect(noAuth.status).toBe(401)
+    })
+  })
+
   // --- tags & assignee (HT-29/HT-31, spec §4e/§4f v1.1) ---------------------------
 
   describe('tags & assignee', () => {
