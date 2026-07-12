@@ -75,11 +75,31 @@ export interface EmailSendResult {
  */
 export interface EmailSender {
   /**
+   * The upper bound, in milliseconds, that this implementation ITSELF
+   * enforces on one `send()` call — a real, mechanical timeout (e.g. an
+   * `AbortSignal.timeout` on the underlying HTTP request), not an estimate
+   * or an aspiration. Every `send()` call MUST settle (resolve or reject)
+   * within this many milliseconds.
+   *
+   * Why the contract carries this: the delivery lease (`DEFAULT_LEASE_MS`,
+   * `src/mail/send.ts`) must strictly exceed the worst-case `send()`
+   * duration, or a re-claimed retry can race a still-in-flight send into a
+   * concurrent double-send (specs/mail/sending.md §3a, §4). The engine's
+   * retry paths assert `maxSendMs < leaseMs` before claiming a row, so an
+   * adapter whose bound is missing or too large fails loudly at the call
+   * site instead of silently re-opening that hole. Declaring a value the
+   * implementation does not actually enforce defeats the check — set it
+   * from the same variable that configures the real timeout (see the Gmail
+   * adapter's `timeoutMs`).
+   */
+  readonly maxSendMs: number
+
+  /**
    * Send `email`. Resolves with an {@link EmailSendResult} on success.
    * Rejects (throws) on any failure to hand the message to the provider —
    * `src/mail/send.ts`'s `sendReply` treats a rejection as a delivery
    * failure and marks the outbound thread `'failed'` accordingly
-   * (specs/mail/sending.md §3).
+   * (specs/mail/sending.md §3). Must settle within {@link maxSendMs}.
    */
   send(email: OutboundEmail): Promise<EmailSendResult>
 }

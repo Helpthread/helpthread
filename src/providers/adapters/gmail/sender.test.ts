@@ -54,6 +54,22 @@ describe('createGmailEmailSender', () => {
     await expect(sender.send(email)).rejects.toThrow(/timeout|timed out|aborted/i)
   })
 
+  it('declares maxSendMs equal to the timeout it actually enforces (default and custom)', () => {
+    // `maxSendMs` is what the engine's retry paths assert against the
+    // delivery lease (see EmailSender.maxSendMs's doc) — it must be the SAME
+    // number as the AbortSignal.timeout bound, or the assertion checks a
+    // fiction. The abort test above proves timeoutMs is really enforced;
+    // this pins the declaration to it.
+    const { fetchImpl } = fakeFetch(200, { id: 'gmail-123' })
+    const getAccessToken = async () => 'token'
+
+    const defaulted = createGmailEmailSender({ getAccessToken, fetchImpl })
+    expect(defaulted.maxSendMs).toBe(30_000)
+
+    const custom = createGmailEmailSender({ getAccessToken, fetchImpl, timeoutMs: 5_000 })
+    expect(custom.maxSendMs).toBe(5_000)
+  })
+
   it('happy path: POSTs the encoded raw MIME to the send endpoint and returns providerMessageId', async () => {
     const { fetchImpl, calls } = fakeFetch(200, { id: 'gmail-123' })
     const getAccessToken = vi.fn(async () => 'token-abc-123')

@@ -132,11 +132,42 @@ import { type Keyring, mintReplyMessageId } from './reply-token.js'
  * measured worst case, because none has been measured here. Any
  * `EmailSender` used behind these retry paths (§4) MUST bound its own
  * `send()` call well below this lease — via its own request timeout — so
- * this margin is never actually spent. Raising this constant without also
- * checking every adapter's timeout against it re-opens the hole it exists
- * to close.
+ * this margin is never actually spent.
+ *
+ * This relationship is enforced mechanically, not by convention: every
+ * `EmailSender` declares the bound it enforces (`maxSendMs`,
+ * `src/providers/email-sender.ts`), and both retry paths assert
+ * `maxSendMs < leaseMs` via {@link assertLeaseExceedsSenderBound} before
+ * claiming a row. Changing this constant, an adapter's timeout, or a
+ * worker's `leaseMs` option into a violating combination therefore throws
+ * at the call site instead of silently re-opening the hole.
  */
 export const DEFAULT_LEASE_MS = 120_000
+
+/**
+ * Assert the invariant {@link DEFAULT_LEASE_MS}'s doc comment exists to
+ * hold: the delivery lease strictly exceeds the sender's own enforced
+ * per-`send()` bound (`EmailSender.maxSendMs`). Called by both retry paths
+ * — `sendReply`'s keyed claim and `runDeliveryWorker`'s sweep
+ * (`src/mail/delivery-worker.ts`) — BEFORE any row is claimed, so a
+ * violating configuration fails loudly up front: nothing is claimed,
+ * nothing is sent, and the throw names both numbers.
+ *
+ * A violation is a wiring bug (an adapter timeout raised to/past the lease,
+ * or a lease tuned down below an adapter's timeout), never an expected
+ * runtime outcome — hence a throw, not a discriminated result, matching
+ * `sendReply`'s "only throw on genuinely unexpected faults" contract.
+ */
+export function assertLeaseExceedsSenderBound(sender: EmailSender, leaseMs: number): void {
+  if (!(sender.maxSendMs < leaseMs)) {
+    throw new Error(
+      `delivery lease (${leaseMs}ms) must strictly exceed the sender's enforced send() bound ` +
+        `(maxSendMs: ${sender.maxSendMs}ms), or a re-claimed retry can race a still-in-flight ` +
+        `send into a concurrent double-send (specs/mail/sending.md §3a) — ` +
+        `raise the lease or lower the sender's timeout`,
+    )
+  }
+}
 
 /** Dependencies `sendReply` needs, injected so it stays testable against fakes/in-memory stores. */
 export interface SendReplyDeps {
@@ -293,6 +324,7 @@ export async function sendReply(
   // pre-existing from an earlier attempt, both converge here: claim the
   // delivery lease before sending, so a concurrent duplicate call (same key)
   // or the delivery worker cannot also be sending this row right now.
+  assertLeaseExceedsSenderBound(sender, DEFAULT_LEASE_MS)
   const claimed = await store.claimThreadForDelivery(thread.id, DEFAULT_LEASE_MS)
   if (claimed === null) {
     // The claim can fail for two different reasons, and conflating them

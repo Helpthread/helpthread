@@ -22,6 +22,7 @@ function fakeSender(): EmailSender & { sent: OutboundEmail[] } {
   const sent: OutboundEmail[] = []
   return {
     sent,
+    maxSendMs: 30_000,
     async send(email) {
       sent.push(email)
       return { providerMessageId: 'provider-1' }
@@ -268,6 +269,7 @@ describe('runDeliveryWorker', () => {
 
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const sender: EmailSender = {
+      maxSendMs: 30_000,
       async send() {
         throw new Error('still down')
       },
@@ -304,6 +306,7 @@ describe('runDeliveryWorker', () => {
     const seedDeps: SendReplyDeps = {
       store,
       sender: {
+        maxSendMs: 30_000,
         async send() {
           throw new Error('boom')
         },
@@ -333,6 +336,7 @@ describe('runDeliveryWorker', () => {
     })
     let workerSendCalls = 0
     const workerSender: EmailSender = {
+      maxSendMs: 30_000,
       async send() {
         workerSendCalls++
         await workerSendGate
@@ -362,5 +366,22 @@ describe('runDeliveryWorker', () => {
     const thread = conversation?.threads.find((t) => t.id === seeded.threadId)
     expect(thread?.deliveryStatus).toBe('sent')
     expect(thread?.messageId).toBe(seeded.messageId)
+  })
+
+  it("a leaseMs that does not strictly exceed the sender's maxSendMs throws up front — before anything is listed or claimed", async () => {
+    const { store } = await freshStore()
+    const listSpy = vi.spyOn(store, 'listDeliverableThreads')
+    const claimSpy = vi.spyOn(store, 'claimThreadForDelivery')
+    const sender = fakeSender() // maxSendMs: 30_000
+
+    // Equality is a violation too — the lease must STRICTLY exceed the
+    // sender's enforced bound (specs/mail/sending.md §3a).
+    await expect(
+      runDeliveryWorker({ store, sender }, { leaseMs: sender.maxSendMs }),
+    ).rejects.toThrow(/must strictly exceed/)
+
+    expect(listSpy).not.toHaveBeenCalled()
+    expect(claimSpy).not.toHaveBeenCalled()
+    expect(sender.sent).toHaveLength(0)
   })
 })
