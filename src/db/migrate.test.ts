@@ -43,6 +43,7 @@ describe('migrate', () => {
       { id: 1, name: 'conversations_and_threads' },
       { id: 2, name: 'add_thread_delivery_status' },
       { id: 3, name: 'add_thread_send_idempotency' },
+      { id: 4, name: 'four_state_conversation_status' },
     ])
   })
 
@@ -52,7 +53,7 @@ describe('migrate', () => {
     await migrate(db) // must not throw (e.g. "relation already exists")
 
     const rows = await db.query<{ id: number }>('SELECT id FROM _migrations ORDER BY id')
-    expect(rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }])
+    expect(rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }])
   })
 
   it('migration 002 ties delivery_status to direction: inbound must be NULL, outbound must be pending/sent/failed', async () => {
@@ -273,5 +274,72 @@ describe('migrate', () => {
       outbound.id,
     ])
     expect(row).toEqual({ idempotency_key: null, send_envelope: null, claimed_until: null })
+  })
+
+  it("migration 004 upgrades a NON-fresh 003 database: 'open' rows become 'active', closed/deleted untouched", async () => {
+    // A local const binding so the helper closures below see a narrowed `Db`
+    // (the shared `db` let stays assigned for afterEach's cleanup).
+    const database = await createPgliteDb()
+    db = database
+
+    // Apply only through migration 003, then write conversations the way a
+    // pre-004 deployment would have — the old open/closed/deleted model.
+    await migrate(database, { throughId: 3 })
+    const insert = async (status: string) => {
+      const [row] = await database.query<{ id: string }>(
+        'INSERT INTO conversations (customer_email, status) VALUES ($1, $2) RETURNING id',
+        ['customer@example.test', status],
+      )
+      return row.id
+    }
+    const openId = await insert('open')
+    const closedId = await insert('closed')
+    const deletedId = await insert('deleted')
+
+    // Applying 004 over that existing data must not fail — the old CHECK is
+    // dropped BEFORE the open→active backfill (order is load-bearing; see the
+    // migration's doc comment).
+    await expect(migrate(database)).resolves.toBeUndefined()
+
+    const statusOf = async (id: string) =>
+      (
+        await database.query<{ status: string }>('SELECT status FROM conversations WHERE id = $1', [
+          id,
+        ])
+      )[0].status
+    expect(await statusOf(openId)).toBe('active')
+    expect(await statusOf(closedId)).toBe('closed')
+    expect(await statusOf(deletedId)).toBe('deleted')
+  })
+
+  it("migration 004 installs the four-state model: default is 'active', all four + deleted accepted, 'open' rejected", async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    // The column default moved to 'active' — a status-less INSERT (the
+    // inbound-mail path) creates an active conversation.
+    const [defaulted] = await db.query<{ status: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING status',
+      ['customer@example.test'],
+    )
+    expect(defaulted.status).toBe('active')
+
+    for (const status of ['pending', 'closed', 'spam', 'deleted']) {
+      await expect(
+        db.query('INSERT INTO conversations (customer_email, status) VALUES ($1, $2)', [
+          'customer@example.test',
+          status,
+        ]),
+      ).resolves.toBeDefined()
+    }
+
+    // The pre-004 value is no longer legal — the migration is a rename, not a
+    // widening that quietly keeps both spellings alive.
+    await expect(
+      db.query('INSERT INTO conversations (customer_email, status) VALUES ($1, $2)', [
+        'customer@example.test',
+        'open',
+      ]),
+    ).rejects.toThrow()
   })
 })

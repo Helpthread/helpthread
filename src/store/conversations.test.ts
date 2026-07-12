@@ -37,7 +37,11 @@ function newThread(overrides: Partial<NewThread> = {}): NewThread {
 }
 
 /** Directly flips a conversation's status for test setup — see the task's own note that this is fine for tests. */
-async function setStatus(db: Db, conversationId: string, status: 'open' | 'closed' | 'deleted') {
+async function setStatus(
+  db: Db,
+  conversationId: string,
+  status: 'active' | 'pending' | 'closed' | 'spam' | 'deleted',
+) {
   await db.query('UPDATE conversations SET status = $1 WHERE id = $2', [status, conversationId])
 }
 
@@ -80,7 +84,9 @@ describe('createConversationStore', () => {
     expect(conversation?.id).toBe(conversationId)
     expect(conversation?.subject).toBe('Help with my order')
     expect(conversation?.customerEmail).toBe('customer@example.test')
-    expect(conversation?.status).toBe('open')
+    // Inbound mail creates conversations 'active' — the schema default
+    // (migration 004; spec §2's status semantics).
+    expect(conversation?.status).toBe('active')
     expect(conversation?.createdAt).toBeInstanceOf(Date)
     expect(conversation?.updatedAt).toBeInstanceOf(Date)
     expect(conversation?.threads).toHaveLength(1)
@@ -100,7 +106,7 @@ describe('createConversationStore', () => {
     expect(await store.getConversation(RANDOM_UUID)).toBeNull()
   })
 
-  it('appendThread to an OPEN conversation succeeds; getConversation shows 2 threads in created order', async () => {
+  it('appendThread to an ACTIVE conversation succeeds; getConversation shows 2 threads in created order', async () => {
     const { store } = await freshStore()
     const { conversationId } = await store.createConversation(newConversation())
 
@@ -115,7 +121,7 @@ describe('createConversationStore', () => {
     expect(conversation?.threads[0].direction).toBe('inbound')
     expect(conversation?.threads[1].direction).toBe('outbound')
     expect(conversation?.threads[1].messageId).toBe('<outbound-1@mail.example.test>')
-    expect(conversation?.status).toBe('open')
+    expect(conversation?.status).toBe('active')
   })
 
   it('optional thread fields: omitted values are stored as null; provided values are preserved', async () => {
@@ -160,7 +166,7 @@ describe('createConversationStore', () => {
     })
   })
 
-  it('appendThread to a CLOSED conversation succeeds AND reopens it', async () => {
+  it('appendThread to a CLOSED conversation succeeds AND reopens it to active', async () => {
     const { db, store } = await freshStore()
     const { conversationId } = await store.createConversation(newConversation())
     await setStatus(db, conversationId, 'closed')
@@ -169,7 +175,33 @@ describe('createConversationStore', () => {
     expect(result.ok).toBe(true)
 
     const conversation = await store.getConversation(conversationId)
-    expect(conversation?.status).toBe('open')
+    expect(conversation?.status).toBe('active')
+    expect(conversation?.threads).toHaveLength(2)
+  })
+
+  it('appendThread to a SPAM conversation succeeds AND reopens it to active (spec §4a, v1.1)', async () => {
+    const { db, store } = await freshStore()
+    const { conversationId } = await store.createConversation(newConversation())
+    await setStatus(db, conversationId, 'spam')
+
+    const result = await store.appendThread(conversationId, newThread())
+    expect(result.ok).toBe(true)
+
+    const conversation = await store.getConversation(conversationId)
+    expect(conversation?.status).toBe('active')
+    expect(conversation?.threads).toHaveLength(2)
+  })
+
+  it('appendThread to a PENDING conversation inserts but leaves it pending — pending is an Agent statement, never auto-cleared', async () => {
+    const { db, store } = await freshStore()
+    const { conversationId } = await store.createConversation(newConversation())
+    await setStatus(db, conversationId, 'pending')
+
+    const result = await store.appendThread(conversationId, newThread())
+    expect(result.ok).toBe(true)
+
+    const conversation = await store.getConversation(conversationId)
+    expect(conversation?.status).toBe('pending')
     expect(conversation?.threads).toHaveLength(2)
   })
 
@@ -282,13 +314,27 @@ describe('createConversationStore', () => {
       expect(conversation?.status).toBe('closed')
     })
 
-    it('reopens a closed conversation', async () => {
+    it('reopens a closed conversation to active', async () => {
       const { db, store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'closed')
 
-      const summary = await store.setConversationStatus(conversationId, 'open')
-      expect(summary).toMatchObject({ id: conversationId, status: 'open' })
+      const summary = await store.setConversationStatus(conversationId, 'active')
+      expect(summary).toMatchObject({ id: conversationId, status: 'active' })
+    })
+
+    it('every surfaceable status is settable: pending and spam round-trip too (spec §4b, v1.1)', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const pending = await store.setConversationStatus(conversationId, 'pending')
+      expect(pending).toMatchObject({ id: conversationId, status: 'pending' })
+
+      const spam = await store.setConversationStatus(conversationId, 'spam')
+      expect(spam).toMatchObject({ id: conversationId, status: 'spam' })
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('spam')
     })
 
     it('bumps updated_at', async () => {
@@ -302,16 +348,16 @@ describe('createConversationStore', () => {
 
     it('returns null for a nonexistent id — nothing is created or updated', async () => {
       const { store } = await freshStore()
-      const summary = await store.setConversationStatus(RANDOM_UUID, 'open')
+      const summary = await store.setConversationStatus(RANDOM_UUID, 'active')
       expect(summary).toBeNull()
     })
 
-    it('returns null for a deleted conversation — not reopenable through this method', async () => {
+    it('returns null for a deleted conversation — not reachable through this method', async () => {
       const { db, store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'deleted')
 
-      const summary = await store.setConversationStatus(conversationId, 'open')
+      const summary = await store.setConversationStatus(conversationId, 'active')
       expect(summary).toBeNull()
 
       // And it really wasn't touched — still deleted.
@@ -321,9 +367,9 @@ describe('createConversationStore', () => {
   })
 
   describe('listConversations', () => {
-    it('defaults to excluding deleted; a deleted conversation never appears under any status filter', async () => {
+    it('defaults to excluding deleted; a deleted conversation never appears under any folder', async () => {
       const { db, store } = await freshStore()
-      const { conversationId: openId } = await store.createConversation(newConversation())
+      const { conversationId: activeId } = await store.createConversation(newConversation())
       const { conversationId: closedId } = await store.createConversation(newConversation())
       const { conversationId: deletedId } = await store.createConversation(newConversation())
       await setStatus(db, closedId, 'closed')
@@ -331,15 +377,39 @@ describe('createConversationStore', () => {
 
       const all = await store.listConversations({ limit: 50 })
       const ids = all.map((c) => c.id)
-      expect(ids).toContain(openId)
+      expect(ids).toContain(activeId)
       expect(ids).toContain(closedId)
       expect(ids).not.toContain(deletedId)
 
-      const openOnly = await store.listConversations({ status: 'open', limit: 50 })
-      expect(openOnly.map((c) => c.id)).toEqual([openId])
+      const openOnly = await store.listConversations({ folder: 'open', limit: 50 })
+      expect(openOnly.map((c) => c.id)).toEqual([activeId])
 
-      const closedOnly = await store.listConversations({ status: 'closed', limit: 50 })
+      const closedOnly = await store.listConversations({ folder: 'closed', limit: 50 })
       expect(closedOnly.map((c) => c.id)).toEqual([closedId])
+    })
+
+    it("the open folder is active + pending; 'closed' and 'spam' are exact (spec §3a's folder semantics)", async () => {
+      const { db, store } = await freshStore()
+      const { conversationId: activeId } = await store.createConversation(newConversation())
+      const { conversationId: pendingId } = await store.createConversation(newConversation())
+      const { conversationId: closedId } = await store.createConversation(newConversation())
+      const { conversationId: spamId } = await store.createConversation(newConversation())
+      await setStatus(db, pendingId, 'pending')
+      await setStatus(db, closedId, 'closed')
+      await setStatus(db, spamId, 'spam')
+
+      const open = await store.listConversations({ folder: 'open', limit: 50 })
+      expect(open.map((c) => c.id).sort()).toEqual([activeId, pendingId].sort())
+      // The summary carries the REAL status — the folder is only the filter
+      // grain; pills disambiguate within the open folder (spec §3a).
+      expect(open.find((c) => c.id === pendingId)?.status).toBe('pending')
+      expect(open.find((c) => c.id === activeId)?.status).toBe('active')
+
+      const spam = await store.listConversations({ folder: 'spam', limit: 50 })
+      expect(spam.map((c) => c.id)).toEqual([spamId])
+
+      const closed = await store.listConversations({ folder: 'closed', limit: 50 })
+      expect(closed.map((c) => c.id)).toEqual([closedId])
     })
 
     it('reports threadCount via the correlated subquery', async () => {

@@ -173,6 +173,33 @@ CREATE UNIQUE INDEX threads_conversation_idempotency_key_idx ON threads (convers
 `
 
 /**
+ * Migration 004 — the four-state conversation status model (HT-26;
+ * specs/api/agent-inbox-v1.md §2, v1.1).
+ *
+ * `ConversationStatus` grows from `open | closed` to `active | pending |
+ * closed | spam` (`deleted` unchanged — still never surfaced). `active` is
+ * the working state and what v1.0's `open` becomes; `pending` and `spam` are
+ * Agent statements, never set automatically (spec §2's status semantics).
+ *
+ * Statement order is load-bearing: the old CHECK (`conversations_status_check`,
+ * migration 001's inline column CHECK under Postgres's default
+ * `<table>_<column>_check` naming) forbids `'active'`, so it must be DROPPED
+ * before the `open → active` backfill runs — updating first would fail the
+ * whole migration on any database with existing rows. The new CHECK is added
+ * only after the backfill, when every row satisfies it (same
+ * backfill-before-constraint discipline as migration 002). The column DEFAULT
+ * moves to `'active'` so `createConversation`'s status-less INSERT (the
+ * inbound-mail path) keeps working unchanged — inbound mail creates
+ * conversations `active`, per spec.
+ */
+const MIGRATION_004_FOUR_STATE_CONVERSATION_STATUS = `
+ALTER TABLE conversations DROP CONSTRAINT conversations_status_check;
+UPDATE conversations SET status = 'active' WHERE status = 'open';
+ALTER TABLE conversations ALTER COLUMN status SET DEFAULT 'active';
+ALTER TABLE conversations ADD CONSTRAINT conversations_status_check CHECK (status IN ('active','pending','closed','spam','deleted'));
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -188,6 +215,11 @@ const MIGRATIONS: Migration[] = [
     id: 3,
     name: 'add_thread_send_idempotency',
     sql: MIGRATION_003_SEND_IDEMPOTENCY,
+  },
+  {
+    id: 4,
+    name: 'four_state_conversation_status',
+    sql: MIGRATION_004_FOUR_STATE_CONVERSATION_STATUS,
   },
 ]
 
