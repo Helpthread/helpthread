@@ -17,6 +17,8 @@ import {
   deleteConversation,
   listConversations,
   postReply,
+  putAssignee,
+  putTags,
   setStatus,
 } from './api'
 
@@ -56,6 +58,39 @@ export async function setStatusAction(
 ): Promise<ActionResult> {
   try {
     await setStatus(conversationId, status)
+    revalidatePath(`/conversations/${conversationId}`)
+    revalidatePath('/inbox/[folder]', 'page')
+    return { ok: true }
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return { ok: false, code: error.code, message: error.message }
+    }
+    return { ok: false, code: 'network', message: 'Could not reach the server.' }
+  }
+}
+
+/** Replace-set tags update (spec §4e) — the caller passes the FULL next tag set. */
+export async function putTagsAction(conversationId: string, tags: string[]): Promise<ActionResult> {
+  try {
+    await putTags(conversationId, tags)
+    revalidatePath(`/conversations/${conversationId}`)
+    revalidatePath('/inbox/[folder]', 'page')
+    return { ok: true }
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return { ok: false, code: error.code, message: error.message }
+    }
+    return { ok: false, code: 'network', message: 'Could not reach the server.' }
+  }
+}
+
+/** Claim or release the single-Agent assignee flag (spec §4f). */
+export async function putAssigneeAction(
+  conversationId: string,
+  assignee: 'me' | null,
+): Promise<ActionResult> {
+  try {
+    await putAssignee(conversationId, assignee)
     revalidatePath(`/conversations/${conversationId}`)
     revalidatePath('/inbox/[folder]', 'page')
     return { ok: true }
