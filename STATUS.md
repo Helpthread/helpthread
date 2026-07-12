@@ -1,10 +1,10 @@
 # Helpthread — Status
 
-**Current state:** the mail engine's full loop is built and behind a native HTTP API — an inbound reply is parsed, threaded, and stored; an Agent can list the inbox, read a conversation, and reply; the reply is sent through a real Gmail adapter with a signed token in its Message-ID that a future customer reply threads back on, and the store now runs on either PGlite (local) or Postgres (Supabase-ready, pooler-safe) behind the same seam. Everything from the wire up (parse → thread → store → read → reply → send) exists and is tested against real in-process Postgres, the real `pg` wire protocol, and real `Request`/`Response` objects. What's left to run it *live* is a deployment. All work lands through a guarded pipeline: every PR runs typecheck, lint, tests-with-coverage, secret scanning, and CodeQL, plus AI review (CodeRabbit) and — for security-, auth-, and threading-critical code — an independent Codex pass.
+**Current state:** the mail engine's full loop is built and behind a native HTTP API that now implements the complete **v1.1 contract the Agent Inbox UI was designed against** ([HT-25](https://resonantiq.atlassian.net/browse/HT-25), `specs/api/agent-inbox-v1.md`): four-state conversation status with folder-semantics listing, human-facing conversation numbers and previews, internal notes, tags, a single-Agent assignee, soft delete, and config-gated (default-OFF) open tracking. An inbound reply is parsed, threaded, and stored; an Agent can work the whole inbox surface; replies go out through a real Gmail adapter with a signed token in the Message-ID, and the store runs on either PGlite (local) or Postgres (Supabase-ready, pooler-safe) behind the same seam. What's left to run it *live* is a deployment; what's left to *see* it is the UI integration ([HT-23](https://resonantiq.atlassian.net/browse/HT-23)). All work lands through a guarded pipeline: every PR runs typecheck, lint, tests-with-coverage, secret scanning, and CodeQL, plus AI review (CodeRabbit) and — for security-, auth-, and threading-critical code — an independent Codex pass.
 
 ## Now
 
-**Phase 1 — Core engine, dogfooded.** Both provider adapters (Gmail send, Postgres) are done, and send idempotency + the delivery worker ([HT-16](https://resonantiq.atlassian.net/browse/HT-16)) now guard `sendReply` against double-sends. What's left is the live deployment — a thin Vercel/Node route wrapping `createInboxApi`, a real Gmail inbound webhook, and Supabase.
+**Phase 1 — Core engine, dogfooded.** The backend for the whole designed v1 is done: adapters (Gmail send, Postgres), send idempotency + the delivery worker ([HT-16](https://resonantiq.atlassian.net/browse/HT-16)), and the full v1.1 API surface (HT-26…HT-32, below). What's left: the **Agent Inbox UI integration** ([HT-23](https://resonantiq.atlassian.net/browse/HT-23) — the Claude Design hand-back becomes the real frontend against this API) and the live deployment — a thin Vercel/Node route wrapping `createInboxApi`, a real Gmail inbound webhook, and Supabase.
 
 ## Done
 
@@ -26,7 +26,16 @@
 
 **Agent Inbox API v1** (`src/api/`) — native, framework-agnostic `Request → Response` (a Vercel/Node adapter is a later thin wrapper; Node runtime, since the engine's HMAC uses `node:crypto`).
 - Constant-time Bearer auth that runs *before* routing; native `{ error: { code, message } }` envelope; `Cache-Control: no-store` on every response; UUID-shape guards; a top-level catch so nothing leaks as an uncontrolled 500.
-- `GET /api/v1/conversations` (inbox list, newest-activity-first, status filter, keyset cursor) · `GET /api/v1/conversations/{id}` (conversation + threads) · `POST /api/v1/conversations/{id}/replies` (derives the headers, mints + sends) · `PATCH /api/v1/conversations/{id}` (close/reopen).
+- `GET /api/v1/conversations` (inbox list, newest-activity-first, folder filter, keyset cursor) · `GET /api/v1/conversations/{id}` (conversation + threads) · `POST /api/v1/conversations/{id}/replies` (derives the headers, mints + sends) · `PATCH /api/v1/conversations/{id}` (set status).
+
+**Agent Inbox API v1.1 — the designed contract, implemented** (spec amended in [HT-25](https://resonantiq.atlassian.net/browse/HT-25); the surface the UI prototype was built against, adopted as the v1 target)
+- **Four-state status model** ([HT-26](https://resonantiq.atlassian.net/browse/HT-26)) — `active/pending/closed/spam`; the list filter is a FOLDER (`open` = active + pending); replies reopen closed and spam to active, pending is an Agent statement never set or cleared automatically.
+- **`number` + `preview`** ([HT-27](https://resonantiq.atlassian.net/browse/HT-27)) — a sequential human-facing id (display-only; the uuid stays canonical) and a derived latest-text excerpt, one shared derivation for list and detail.
+- **Internal notes** ([HT-28](https://resonantiq.atlassian.net/browse/HT-28)) — `direction: 'note'` + `POST …/notes`: Agent-only, never emailed (test-asserted from both sides of the mail boundary), bumps activity but never reopens.
+- **Tags** ([HT-29](https://resonantiq.atlassian.net/browse/HT-29)) — replace-set `PUT …/tags` with trim→lowercase→dedupe normalization; metadata, not activity.
+- **Soft delete** ([HT-30](https://resonantiq.atlassian.net/browse/HT-30)) — `DELETE …/{id}` → 204; indistinguishable-from-nonexistent everywhere after, including keyed reply replays; rows and mail stay in storage.
+- **Single-Agent assignee** ([HT-31](https://resonantiq.atlassian.net/browse/HT-31)) — `'me' | null` via `PUT …/assignee`; deliberately not identity.
+- **Open tracking, default OFF** ([HT-32](https://resonantiq.atlassian.net/browse/HT-32)) — a deliberate privacy stance: absent config means byte-identical mail (test-proven) and nothing recorded, ever. When enabled: a SIGNED view token (never the bare thread id) in an HTML-only pixel, injected before persist so retries carry it for free, and an unauthenticated gif endpoint that answers identically valid-or-not.
 
 **Provider adapters — the first concrete implementations**
 - **Gmail `EmailSender`** (`src/providers/adapters/gmail/`, [HT-19](https://resonantiq.atlassian.net/browse/HT-19)) — the first thing that puts actual mail on the wire: builds a raw RFC 5322 MIME message (mimetext, hardened against header injection, over-long lines, and `References` folding), base64url-encodes it, and sends via `users.messages.send` through the support Google Workspace account. A wire-level test proves our Message-ID is transmitted verbatim. Postmark/SES/Resend remain a later one-file swap if scale or deliverability demands it.
@@ -34,7 +43,8 @@
 
 ## Next
 
-- **An Agent inbox UI** over the API (API-first, per the charter).
+- **Agent Inbox UI integration** ([HT-23](https://resonantiq.atlassian.net/browse/HT-23)) — the Claude Design hand-back (design system + prototype) becomes the real frontend over the now-complete v1.1 API. The design system also lives as a Claude Design *design-system project* ("Helpthread"), so future screens are designed from the real components.
+- **A deployment** — a thin Vercel/Node route wrapping `createInboxApi`, a real Gmail inbound webhook, and Supabase.
 - **HT-5 counsel work** — plugin exception text, board consent memo, and trademark policy (charter §3/§7, per the DCO amendment) — gates opening the project to external contributions.
 
 ## Not yet / deferred
@@ -44,4 +54,4 @@
 
 ---
 
-_Last updated: 2026-07-11_
+_Last updated: 2026-07-12_
