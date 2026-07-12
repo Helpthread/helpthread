@@ -186,6 +186,14 @@ export interface StoredThread {
    * See {@link ConversationStore.claimThreadForDelivery}.
    */
   claimedUntil: Date | null
+  /**
+   * Open tracking (v1.1, HT-32; spec §4g): the FIRST time the customer's
+   * mail client fetched this OUTBOUND reply's tracking pixel — `null` until
+   * then, and always `null` when the feature is off or for inbound/note
+   * threads (schema-enforced, migration 008). Recorded idempotently by
+   * {@link ConversationStore.recordThreadView}.
+   */
+  customerViewedAt: Date | null
   createdAt: Date
 }
 
@@ -469,6 +477,17 @@ export interface ConversationStore {
     conversationId: string,
     assignee: 'me' | null,
   ): Promise<ConversationSummary | null>
+
+  /**
+   * Record that the customer viewed an outbound thread (open tracking, spec
+   * §4g, v1.1) — FIRST view wins: a single `UPDATE ... SET customer_viewed_at
+   * = now() WHERE id = $1 AND direction = 'outbound' AND customer_viewed_at
+   * IS NULL`. Idempotent and deliberately SILENT on every miss (already
+   * viewed, not outbound, no such thread): the pixel endpoint must respond
+   * identically whatever happened (spec §4g's no-validity-leak), so there is
+   * nothing useful for this method to report — and a throw would be worse.
+   */
+  recordThreadView(threadId: string): Promise<void>
 }
 
 /**
@@ -634,11 +653,12 @@ interface ThreadRow {
   idempotency_key: string | null
   send_envelope: unknown
   claimed_until: Date | string | null
+  customer_viewed_at: Date | string | null
   created_at: Date | string
 }
 
 const THREAD_COLUMNS =
-  'id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope, claimed_until, created_at'
+  'id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope, claimed_until, customer_viewed_at, created_at'
 
 /**
  * Create a {@link ConversationStore} backed by `db`. Every operation opens
@@ -906,6 +926,14 @@ export function createConversationStore(db: Db): ConversationStore {
       return row === undefined ? null : toConversationSummary(row)
     },
 
+    async recordThreadView(threadId) {
+      await db.query(
+        `UPDATE threads SET customer_viewed_at = now()
+         WHERE id = $1 AND direction = 'outbound' AND customer_viewed_at IS NULL`,
+        [threadId],
+      )
+    },
+
     async deleteConversation(conversationId) {
       // No updated_at bump: a deleted conversation is never surfaced again,
       // so its sort key is meaningless — and leaving it untouched keeps the
@@ -1103,6 +1131,7 @@ function toStoredThread(row: ThreadRow): StoredThread {
     // jsonb column already arrives decoded (see ThreadRow's doc comment).
     sendEnvelope: row.send_envelope as SendEnvelope | null,
     claimedUntil: row.claimed_until === null ? null : toDate(row.claimed_until),
+    customerViewedAt: row.customer_viewed_at === null ? null : toDate(row.customer_viewed_at),
     createdAt: toDate(row.created_at),
   }
 }

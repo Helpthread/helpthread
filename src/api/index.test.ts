@@ -159,7 +159,9 @@ describe('createInboxApi', () => {
     db = undefined
   })
 
-  async function freshApi(overrides: { sender?: EmailSender } = {}): Promise<{
+  async function freshApi(
+    overrides: { sender?: EmailSender; openTracking?: { publicBaseUrl: string } } = {},
+  ): Promise<{
     db: Db
     store: ConversationStore
     api: (request: Request) => Promise<Response>
@@ -177,6 +179,7 @@ describe('createInboxApi', () => {
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
+      ...(overrides.openTracking !== undefined ? { openTracking: overrides.openTracking } : {}),
     })
     return { db, store, api, sent }
   }
@@ -1164,6 +1167,110 @@ describe('createInboxApi', () => {
         error: { code: expect.any(String), message: expect.any(String) },
       })
     })
+  })
+
+  // --- open tracking (HT-32, spec §4g v1.1) -----------------------------------------
+
+  describe('open tracking', () => {
+    const BASE = 'https://desk.example.test'
+
+    /** Reply with html, then pull the pixel token out of the sent mail. */
+    async function replyAndExtractToken(
+      api: (request: Request) => Promise<Response>,
+      sent: OutboundEmail[],
+      conversationId: string,
+    ): Promise<{ token: string; threadId: string }> {
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+          text: 'On it.',
+          html: '<html><body><p>On it.</p></body></html>',
+        }),
+      )
+      expect(res.status).toBe(201)
+      const body = (await res.json()) as { id: string }
+      const match = /\/api\/v1\/t\/([^"]+)\.gif/.exec(sent[0].html as string)
+      expect(match).not.toBeNull()
+      return { token: (match as RegExpExecArray)[1], threadId: body.id }
+    }
+
+    it('full loop: enabled → reply carries the pixel; an UNAUTHENTICATED gif fetch records the first view; the detail surfaces it', async () => {
+      const { store, api, sent } = await freshApi({ openTracking: { publicBaseUrl: BASE } })
+      const { conversationId } = await store.createConversation(newConversation())
+      const { token, threadId } = await replyAndExtractToken(api, sent, conversationId)
+
+      // Before any view: null on the wire.
+      const before = await api(get(`/api/v1/conversations/${conversationId}`))
+      const beforeBody = (await before.json()) as {
+        threads: Array<{ id: string; customerViewedAt: string | null }>
+      }
+      expect(beforeBody.threads.find((t) => t.id === threadId)?.customerViewedAt).toBeNull()
+
+      // The pixel fetch: NO Authorization header — a customer's mail client.
+      const pixel = await fetchPixel(api, token)
+      expect(pixel.status).toBe(200)
+      expect(pixel.headers.get('Content-Type')).toBe('image/gif')
+      expect(pixel.headers.get('Cache-Control')).toBe('no-store')
+      expect((await pixel.arrayBuffer()).byteLength).toBeGreaterThan(0)
+
+      const after = await api(get(`/api/v1/conversations/${conversationId}`))
+      const afterBody = (await after.json()) as {
+        threads: Array<{ id: string; customerViewedAt: string | null }>
+      }
+      const viewedAt = afterBody.threads.find((t) => t.id === threadId)?.customerViewedAt
+      expect(viewedAt).toEqual(expect.any(String))
+
+      // Second fetch: same gif, timestamp unchanged (first view wins).
+      await fetchPixel(api, token)
+      const again = await api(get(`/api/v1/conversations/${conversationId}`))
+      const againBody = (await again.json()) as {
+        threads: Array<{ id: string; customerViewedAt: string | null }>
+      }
+      expect(againBody.threads.find((t) => t.id === threadId)?.customerViewedAt).toBe(viewedAt)
+    })
+
+    it('an invalid token gets the IDENTICAL gif response and records nothing', async () => {
+      const { store, api } = await freshApi({ openTracking: { publicBaseUrl: BASE } })
+      await store.createConversation(newConversation())
+
+      const pixel = await fetchPixel(api, 'v.k1.forged-thread-id.AAAA')
+      expect(pixel.status).toBe(200)
+      expect(pixel.headers.get('Content-Type')).toBe('image/gif')
+    })
+
+    it('DISABLED (the default): no pixel in outbound html, and a valid-looking gif fetch records nothing', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+          text: 'On it.',
+          html: '<html><body><p>On it.</p></body></html>',
+        }),
+      )
+      expect(res.status).toBe(201)
+      const replyBody = (await res.json()) as { id: string }
+      expect(sent[0].html).toBe('<html><body><p>On it.</p></body></html>')
+
+      // Even a genuinely valid token records nothing while the feature is
+      // off — turning tracking off stops recording, not just injection.
+      const { mintViewToken } = await import('../mail/open-tracking.js')
+      const validToken = mintViewToken(replyBody.id, KEYRING)
+      const pixel = await fetchPixel(api, validToken)
+      expect(pixel.status).toBe(200)
+
+      const detail = await api(get(`/api/v1/conversations/${conversationId}`))
+      const detailBody = (await detail.json()) as {
+        threads: Array<{ id: string; customerViewedAt: string | null }>
+      }
+      expect(detailBody.threads.find((t) => t.id === replyBody.id)?.customerViewedAt).toBeNull()
+    })
+
+    function fetchPixel(
+      api: (request: Request) => Promise<Response>,
+      token: string,
+    ): Promise<Response> {
+      return api(new Request(`https://x.example.test/api/v1/t/${token}.gif`))
+    }
   })
 
   // --- notes (HT-28, spec §4c v1.1) ------------------------------------------------

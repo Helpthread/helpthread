@@ -3,6 +3,7 @@ import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import { type ConversationStore, createConversationStore } from '../store/conversations.js'
+import { verifyViewToken } from './open-tracking.js'
 import type { ParsedEmail } from './parse.js'
 import type { Keyring, SigningKey } from './reply-token.js'
 import { DEFAULT_LEASE_MS, type SendReplyDeps, sendReply } from './send.js'
@@ -633,5 +634,130 @@ describe('lease / sender-bound coupling', () => {
     const result = await sendReply(input(conversationId), deps)
     expect(result).toMatchObject({ ok: true, delivery: 'sent' })
     expect(sender.sent).toHaveLength(1)
+  })
+})
+describe('open tracking (HT-32, spec §4g v1.1)', () => {
+  let db: Db | undefined
+
+  afterEach(async () => {
+    await db?.close()
+    db = undefined
+  })
+
+  async function freshStore(): Promise<{ db: Db; store: ConversationStore }> {
+    db = await createPgliteDb()
+    await migrate(db)
+    return { db, store: createConversationStore(db) }
+  }
+
+  async function seedConversation(store: ConversationStore) {
+    return store.createConversation({
+      subject: 'Help with my order',
+      customerEmail: 'customer@example.test',
+      firstMessage: {
+        direction: 'inbound',
+        messageId: '<inbound-1@customer.example.test>',
+        fromAddress: 'customer@example.test',
+        bodyText: 'Where is my order?',
+      },
+    })
+  }
+
+  const HTML = '<html><body><p>Fixed in the next release.</p></body></html>'
+
+  function replyInput(conversationId: string) {
+    return {
+      conversationId,
+      from: 'support@example.test',
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      text: 'Fixed in the next release.',
+      html: HTML,
+    }
+  }
+
+  it('OFF (the default): the sent html and text are byte-identical to the input — no pixel anywhere', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+
+    const result = await sendReply(replyInput(conversationId), {
+      store,
+      sender,
+      keyring,
+      mailDomain,
+    })
+    expect(result.ok).toBe(true)
+
+    expect(sender.sent).toHaveLength(1)
+    expect(sender.sent[0].html).toBe(HTML)
+    expect(sender.sent[0].text).toBe('Fixed in the next release.')
+    expect(sender.sent[0].html).not.toContain('/api/v1/t/')
+
+    const conversation = await store.getConversation(conversationId)
+    const outbound = conversation?.threads.find((t) => t.direction === 'outbound')
+    expect(outbound?.bodyHtml).toBe(HTML)
+    expect(outbound?.customerViewedAt).toBeNull()
+  })
+
+  it('ON: the html body (and ONLY the html body) carries a pixel whose token verifies and binds THIS thread', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+
+    const result = await sendReply(replyInput(conversationId), {
+      store,
+      sender,
+      keyring,
+      mailDomain,
+      openTracking: { publicBaseUrl: 'https://desk.example.test' },
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+
+    const sentHtml = sender.sent[0].html as string
+    const match = /https:\/\/desk\.example\.test\/api\/v1\/t\/([^"]+)\.gif/.exec(sentHtml)
+    expect(match).not.toBeNull()
+    // The token is a SIGNED credential bound to the outbound thread — never
+    // the bare uuid (spec §4g's forgery guard).
+    const token = (match as RegExpExecArray)[1]
+    expect(token).not.toBe(result.threadId)
+    expect(verifyViewToken(token, keyring)).toEqual({ threadId: result.threadId })
+
+    // Injected before </body>; the text part is untouched.
+    expect(sentHtml).toMatch(/style="display:none"><\/body><\/html>$/)
+    expect(sender.sent[0].text).toBe('Fixed in the next release.')
+
+    // Persisted bodyHtml === sent html, so every retry path (which rebuilds
+    // from the stored row) carries the same pixel with no extra logic.
+    const conversation = await store.getConversation(conversationId)
+    const outbound = conversation?.threads.find((t) => t.direction === 'outbound')
+    expect(outbound?.bodyHtml).toBe(sentHtml)
+  })
+
+  it('ON with a text-only reply: no html part is fabricated just to track', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: 'Plain text only.',
+      },
+      {
+        store,
+        sender,
+        keyring,
+        mailDomain,
+        openTracking: { publicBaseUrl: 'https://desk.example.test' },
+      },
+    )
+    expect(result.ok).toBe(true)
+    expect(sender.sent[0].html).toBeUndefined()
+    expect(sender.sent[0].text).toBe('Plain text only.')
   })
 })

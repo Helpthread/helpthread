@@ -299,6 +299,26 @@ ALTER TABLE threads ADD CONSTRAINT threads_delivery_status_by_direction CHECK (
 `
 
 /**
+ * Migration 008 — `customer_viewed_at` for open tracking (HT-32;
+ * specs/api/agent-inbox-v1.md §4g, v1.1).
+ *
+ * Nullable, outbound-only (same cross-column CHECK style as migrations
+ * 002/003, same NULL-semantics care): the first time a customer's mail
+ * client fetches an outbound reply's tracking pixel — feature enabled, token
+ * verified — the timestamp is recorded once, idempotently
+ * (`ConversationStore.recordThreadView`). Inbound threads and notes never
+ * carry one; the schema forbids it, not just the application. No backfill:
+ * NULL is the correct value for every existing row (nothing was tracked
+ * before the feature existed).
+ */
+const MIGRATION_008_CUSTOMER_VIEWED_AT = `
+ALTER TABLE threads ADD COLUMN customer_viewed_at timestamptz;
+ALTER TABLE threads ADD CONSTRAINT threads_customer_viewed_at_outbound_only CHECK (
+  (direction = 'outbound') OR (customer_viewed_at IS NULL)
+);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -334,6 +354,11 @@ const MIGRATIONS: Migration[] = [
     id: 7,
     name: 'note_thread_direction',
     sql: MIGRATION_007_NOTE_DIRECTION,
+  },
+  {
+    id: 8,
+    name: 'customer_viewed_at',
+    sql: MIGRATION_008_CUSTOMER_VIEWED_AT,
   },
 ]
 

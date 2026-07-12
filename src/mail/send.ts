@@ -105,6 +105,7 @@
 import { randomUUID } from 'node:crypto'
 import type { EmailSender } from '../providers/index.js'
 import type { ConversationStore, SendEnvelope, StoredThread } from '../store/conversations.js'
+import { injectTrackingPixel, mintViewToken, pixelUrlFor } from './open-tracking.js'
 import { type Keyring, mintReplyMessageId } from './reply-token.js'
 
 /**
@@ -176,6 +177,19 @@ export interface SendReplyDeps {
   keyring: Keyring
   /** The domain minted into the outbound `Message-ID`'s `@domain` part (see `mintReplyMessageId`). */
   mailDomain: string
+  /**
+   * Open tracking (spec §4g, v1.1 — HT-32). ABSENT BY DEFAULT, and absence
+   * means byte-identical mail to before the feature existed: no pixel, no
+   * change to any body. When present, each outbound reply's HTML body (and
+   * ONLY the HTML body — a text-only reply is never given a fabricated HTML
+   * part) gets a 1×1 pixel whose URL carries a signed view token bound to
+   * this reply's threadId (`src/mail/open-tracking.ts`), served under
+   * `publicBaseUrl`. Injection happens BEFORE persist, so the stored
+   * `bodyHtml` is exactly what was sent — and every retry path (keyed replay,
+   * delivery worker), which rebuilds from the stored row, carries the same
+   * pixel with no extra logic.
+   */
+  openTracking?: { publicBaseUrl: string }
 }
 
 /** One outbound reply to an existing conversation (specs/mail/sending.md §5: reply-only in this increment). */
@@ -265,6 +279,23 @@ export async function sendReply(
     keyring,
   )
 
+  // Open tracking (spec §4g): with the feature OFF (the default), `input`
+  // passes through UNTOUCHED — this line is the whole off-path, and the
+  // byte-identical-mail guarantee rests on it. With it on, only the HTML
+  // body changes, before persist (see SendReplyDeps.openTracking). On a
+  // keyed REPLAY the modified body is irrelevant either way — appendThread
+  // returns the ORIGINAL row's persisted body (§4a's replay rule).
+  const effectiveInput: SendReplyInput =
+    deps.openTracking !== undefined && input.html !== undefined
+      ? {
+          ...input,
+          html: injectTrackingPixel(
+            input.html,
+            pixelUrlFor(deps.openTracking.publicBaseUrl, mintViewToken(threadId, keyring)),
+          ),
+        }
+      : input
+
   // The envelope snapshot is built from THIS call's inputs and persisted
   // verbatim on insert, keyed or not — persisting it unconditionally (not
   // only when idempotencyKey is set) is what lets the delivery worker
@@ -284,7 +315,7 @@ export async function sendReply(
     inReplyTo: input.inReplyTo ?? null,
     fromAddress: input.from,
     bodyText: input.text ?? null,
-    bodyHtml: input.html ?? null,
+    bodyHtml: effectiveInput.html ?? null,
     deliveryStatus: 'pending',
     idempotencyKey: input.idempotencyKey,
     sendEnvelope,
@@ -304,7 +335,7 @@ export async function sendReply(
     // ConversationStore.appendThread's doc comment), so there is no
     // existing-row case to handle; send fresh and mark via
     // setThreadDeliveryStatus, exactly as before this feature existed.
-    return sendFreshAndMark(threadId, messageId, input, deps)
+    return sendFreshAndMark(threadId, messageId, effectiveInput, deps)
   }
 
   const { thread } = appended

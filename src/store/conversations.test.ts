@@ -1105,4 +1105,40 @@ describe('createConversationStore', () => {
       expect(eligible).toEqual([])
     })
   })
+
+  describe('recordThreadView (HT-32, spec §4g v1.1)', () => {
+    it('records the FIRST view only — a second call changes nothing', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, newThread())
+      if (!appended.ok) throw new Error('unreachable')
+
+      await store.recordThreadView(appended.threadId)
+      const first = (await store.getConversation(conversationId))?.threads.find(
+        (t) => t.id === appended.threadId,
+      )
+      expect(first?.customerViewedAt).toBeInstanceOf(Date)
+
+      await store.recordThreadView(appended.threadId)
+      const second = (await store.getConversation(conversationId))?.threads.find(
+        (t) => t.id === appended.threadId,
+      )
+      expect(second?.customerViewedAt?.getTime()).toBe(first?.customerViewedAt?.getTime())
+    })
+
+    it('is silent on every miss: inbound threads and unknown ids record nothing and never throw', async () => {
+      const { store } = await freshStore()
+      const { conversationId, threadId: inboundId } = await store.createConversation(
+        newConversation(),
+      )
+
+      await expect(store.recordThreadView(inboundId)).resolves.toBeUndefined()
+      await expect(store.recordThreadView(RANDOM_UUID)).resolves.toBeUndefined()
+
+      const inbound = (await store.getConversation(conversationId))?.threads.find(
+        (t) => t.id === inboundId,
+      )
+      expect(inbound?.customerViewedAt).toBeNull()
+    })
+  })
 })
