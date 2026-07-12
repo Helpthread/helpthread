@@ -45,6 +45,7 @@ describe('migrate', () => {
       { id: 3, name: 'add_thread_send_idempotency' },
       { id: 4, name: 'four_state_conversation_status' },
       { id: 5, name: 'conversation_number' },
+      { id: 6, name: 'tags_and_assignee' },
     ])
   })
 
@@ -54,7 +55,7 @@ describe('migrate', () => {
     await migrate(db) // must not throw (e.g. "relation already exists")
 
     const rows = await db.query<{ id: number }>('SELECT id FROM _migrations ORDER BY id')
-    expect(rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }])
+    expect(rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }])
   })
 
   it('migration 002 ties delivery_status to direction: inbound must be NULL, outbound must be pending/sent/failed', async () => {
@@ -406,6 +407,37 @@ describe('migrate', () => {
       db.query('INSERT INTO conversations (customer_email, number) VALUES ($1, $2)', [
         'customer@example.test',
         1,
+      ]),
+    ).rejects.toThrow()
+  })
+
+  it('migration 006 upgrades a NON-fresh 005 database: existing rows get [] tags and NULL assignee; the assignee CHECK is live', async () => {
+    const database = await createPgliteDb()
+    db = database
+
+    await migrate(database, { throughId: 5 })
+    const [existing] = await database.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    await expect(migrate(database)).resolves.toBeUndefined()
+
+    const [row] = await database.query<{ tags: unknown; assignee: string | null }>(
+      'SELECT tags, assignee FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(row).toEqual({ tags: [], assignee: null })
+
+    // 'me' and NULL are the only legal assignee values (spec §4f) — the
+    // CHECK rejects anything else at the schema level.
+    await expect(
+      database.query('UPDATE conversations SET assignee = $1 WHERE id = $2', ['me', existing.id]),
+    ).resolves.toBeDefined()
+    await expect(
+      database.query('UPDATE conversations SET assignee = $1 WHERE id = $2', [
+        'someone-else',
+        existing.id,
       ]),
     ).rejects.toThrow()
   })

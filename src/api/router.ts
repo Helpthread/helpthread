@@ -1,9 +1,9 @@
 /**
- * A minimal method+pathname matcher for the Agent Inbox API's three routes
+ * A minimal method+pathname matcher for the Agent Inbox API's five routes
  * (specs/api/agent-inbox-v1.md §3a, §3b, §4).
  *
  * Deliberately NOT a general-purpose router library: the whole surface is
- * three static-ish paths under `/api/v1`, two with a single `{id}` path
+ * five static-ish paths under `/api/v1`, four with a single `{id}` path
  * param. Spec §3 requires distinguishing "path doesn't match anything" (404)
  * from "path matches, method doesn't" (405 + `Allow` header) — that's the
  * one piece of behavior worth a shared helper, so `index.ts` doesn't have to
@@ -36,8 +36,26 @@ const CONVERSATION_REPLIES: RouteDef = {
   methods: ['POST'],
 }
 
+/** `/api/v1/conversations/{id}/tags` — replace the tag set (spec §4e, v1.1), PUT only. */
+const CONVERSATION_TAGS: RouteDef = {
+  pattern: /^\/api\/v1\/conversations\/(?<id>[^/]+)\/tags$/,
+  methods: ['PUT'],
+}
+
+/** `/api/v1/conversations/{id}/assignee` — claim/release (spec §4f, v1.1), PUT only. */
+const CONVERSATION_ASSIGNEE: RouteDef = {
+  pattern: /^\/api\/v1\/conversations\/(?<id>[^/]+)\/assignee$/,
+  methods: ['PUT'],
+}
+
 /** Every route this API recognizes, checked in order. */
-const ROUTES: readonly RouteDef[] = [CONVERSATIONS_LIST, CONVERSATION_ITEM, CONVERSATION_REPLIES]
+const ROUTES: readonly RouteDef[] = [
+  CONVERSATIONS_LIST,
+  CONVERSATION_ITEM,
+  CONVERSATION_REPLIES,
+  CONVERSATION_TAGS,
+  CONVERSATION_ASSIGNEE,
+]
 
 /** The outcome of matching a `(method, pathname)` pair against {@link ROUTES}. */
 export type RouteMatch =
@@ -46,6 +64,8 @@ export type RouteMatch =
   | { kind: 'conversation-patch'; id: string }
   | { kind: 'conversation-delete'; id: string }
   | { kind: 'conversation-reply'; id: string }
+  | { kind: 'conversation-tags'; id: string }
+  | { kind: 'conversation-assignee'; id: string }
   | { kind: 'method-not-allowed'; allow: string[] }
   | { kind: 'not-found' }
 
@@ -83,6 +103,12 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
 
     if (route === CONVERSATION_REPLIES) {
       return { kind: 'conversation-reply', id }
+    }
+    if (route === CONVERSATION_TAGS) {
+      return { kind: 'conversation-tags', id }
+    }
+    if (route === CONVERSATION_ASSIGNEE) {
+      return { kind: 'conversation-assignee', id }
     }
     // route === CONVERSATION_ITEM: GET reads, PATCH updates status, DELETE
     // soft-deletes (spec §4d, v1.1).

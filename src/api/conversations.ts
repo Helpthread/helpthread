@@ -70,6 +70,8 @@ interface ConversationSummaryJson {
   status: ConversationStatus
   threadCount: number
   preview: string
+  tags: string[]
+  assignee: 'me' | null
   createdAt: string
   updatedAt: string
 }
@@ -200,6 +202,8 @@ export async function handleGetConversation(
     status: conversation.status,
     threadCount: conversation.threads.length,
     preview: previewFromThreads(conversation.threads),
+    tags: conversation.tags,
+    assignee: conversation.assignee,
     createdAt: conversation.createdAt.toISOString(),
     updatedAt: conversation.updatedAt.toISOString(),
     threads: conversation.threads.map(toThreadViewJson),
@@ -454,6 +458,85 @@ export async function handleDeleteConversation(
   return noContent()
 }
 
+/** Maximum length of one tag, after trimming (spec §4e, v1.1). */
+const MAX_TAG_LENGTH = 40
+
+/**
+ * Handle `PUT /api/v1/conversations/{id}/tags` — replace the tag set (spec
+ * §4e, v1.1). Body: `{ tags: string[] }`, replace-set semantics (`[]`
+ * clears). Normalization happens HERE, before the store sees anything:
+ * each entry trimmed, then lowercased, then the array de-duplicated
+ * preserving first-occurrence order. Validation is on the TRIMMED value —
+ * 1–{@link MAX_TAG_LENGTH} chars; a non-array `tags`, a non-string entry,
+ * an empty-after-trim entry, or an over-length entry is
+ * `400 validation_failed`. `200` with the updated summary; missing or
+ * deleted conversation → `404 not_found`.
+ */
+export async function handlePutTags(
+  id: string,
+  request: Request,
+  deps: { store: ConversationStore },
+): Promise<Response> {
+  if (!isUuid(id)) {
+    return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  const parsedBody = await parseJsonBody(request)
+  if (!parsedBody.ok) {
+    return apiError(400, 'validation_failed', 'Request body must be valid JSON.')
+  }
+
+  const tags = parseTagsBody(parsedBody.value)
+  if (tags === null) {
+    return apiError(
+      400,
+      'validation_failed',
+      `tags must be an array of strings, each 1-${MAX_TAG_LENGTH} characters after trimming.`,
+    )
+  }
+
+  const updated = await deps.store.setConversationTags(id, tags)
+  if (updated === null) {
+    return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  return json(200, toConversationSummaryJson(updated))
+}
+
+/**
+ * Handle `PUT /api/v1/conversations/{id}/assignee` — claim or release (spec
+ * §4f, v1.1). Body: `{ assignee: 'me' | null }` — the property must be
+ * present and exactly one of those two values (`'me'` = the deployment's
+ * one operator; `null` = Anyone); anything else is `400 validation_failed`.
+ * `200` with the updated summary; missing or deleted conversation → `404`.
+ */
+export async function handlePutAssignee(
+  id: string,
+  request: Request,
+  deps: { store: ConversationStore },
+): Promise<Response> {
+  if (!isUuid(id)) {
+    return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  const parsedBody = await parseJsonBody(request)
+  if (!parsedBody.ok) {
+    return apiError(400, 'validation_failed', 'Request body must be valid JSON.')
+  }
+
+  const assignee = parseAssigneeBody(parsedBody.value)
+  if (assignee === undefined) {
+    return apiError(400, 'validation_failed', "assignee must be 'me' or null.")
+  }
+
+  const updated = await deps.store.setConversationAssignee(id, assignee)
+  if (updated === null) {
+    return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  return json(200, toConversationSummaryJson(updated))
+}
+
 /**
  * Read and JSON-parse `request`'s body without ever throwing — a malformed
  * or empty body is `400 validation_failed`, never an uncontrolled `500`
@@ -512,6 +595,41 @@ function parsePatchStatusBody(raw: unknown): ConversationStatus | null {
 }
 
 /**
+ * Validate and NORMALIZE a PUT-tags body against spec §4e: `tags` must be an
+ * array of strings; each entry is trimmed then lowercased and must be
+ * 1-{@link MAX_TAG_LENGTH} chars after trimming; the result is de-duplicated
+ * preserving first-occurrence order. Returns the normalized array, or `null`
+ * on any violation — never throws.
+ */
+function parseTagsBody(raw: unknown): string[] | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const { tags } = raw as Record<string, unknown>
+  if (!Array.isArray(tags)) return null
+
+  const normalized: string[] = []
+  for (const entry of tags) {
+    if (typeof entry !== 'string') return null
+    const tag = entry.trim().toLowerCase()
+    if (tag.length < 1 || tag.length > MAX_TAG_LENGTH) return null
+    if (!normalized.includes(tag)) normalized.push(tag)
+  }
+  return normalized
+}
+
+/**
+ * Validate a PUT-assignee body against spec §4f: the `assignee` property
+ * must be PRESENT and exactly `'me'` or `null`. Returns the value, or
+ * `undefined` on any violation (which is unambiguous precisely because
+ * `undefined` — a missing property — is itself a violation) — never throws.
+ */
+function parseAssigneeBody(raw: unknown): 'me' | null | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  if (!('assignee' in raw)) return undefined
+  const { assignee } = raw as Record<string, unknown>
+  return assignee === 'me' || assignee === null ? assignee : undefined
+}
+
+/**
  * Derive a reply's mail headers from the conversation being replied to
  * (spec §4a):
  *
@@ -560,6 +678,8 @@ function toConversationSummaryJson(row: {
   status: ConversationStatus
   threadCount: number
   preview: string
+  tags: string[]
+  assignee: 'me' | null
   createdAt: Date
   updatedAt: Date
 }): ConversationSummaryJson {
@@ -571,6 +691,8 @@ function toConversationSummaryJson(row: {
     status: row.status,
     threadCount: row.threadCount,
     preview: row.preview,
+    tags: row.tags,
+    assignee: row.assignee,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }

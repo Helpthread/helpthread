@@ -38,6 +38,8 @@ import {
   handleGetConversation,
   handleListConversations,
   handlePatchConversation,
+  handlePutAssignee,
+  handlePutTags,
   handleReply,
 } from './conversations.js'
 import type { ApiError } from './responses.js'
@@ -147,6 +149,12 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
 
         case 'conversation-delete':
           return await handleDeleteConversation(route.id, { store: deps.store })
+
+        case 'conversation-tags':
+          return await handlePutTags(route.id, request, { store: deps.store })
+
+        case 'conversation-assignee':
+          return await handlePutAssignee(route.id, request, { store: deps.store })
 
         case 'conversation-reply':
           return await handleReply(route.id, request, {

@@ -220,6 +220,14 @@ export interface StoredConversation {
   subject: string
   customerEmail: string
   status: ConversationStatus | 'deleted'
+  /** Short lowercase labels, replace-set via {@link ConversationStore.setConversationTags} (v1.1, HT-29). `[]` default. */
+  tags: string[]
+  /**
+   * Single-Agent claim flag (v1.1, HT-31): `'me'` = the deployment's one
+   * operator, `null` = Anyone. Deliberately NOT identity — the multi-Agent
+   * increment replaces `'me'` with real Agent ids (spec §4f).
+   */
+  assignee: 'me' | null
   createdAt: Date
   updatedAt: Date
 }
@@ -437,6 +445,29 @@ export interface ConversationStore {
    * flip the flag, not chase down consumers.
    */
   deleteConversation(conversationId: string): Promise<boolean>
+
+  /**
+   * Replace a conversation's whole tag set — the write path behind `PUT
+   * /api/v1/conversations/{id}/tags` (specs/api/agent-inbox-v1.md §4e,
+   * v1.1). Persists `tags` VERBATIM — normalization (trim, lowercase,
+   * dedupe) is the HTTP layer's job, done before this call; the store does
+   * not second-guess it. Does NOT bump `updated_at` (tagging is metadata,
+   * not activity — spec §4e). Returns the updated summary, or `null` for a
+   * missing/deleted conversation (same shape as
+   * {@link ConversationStore.setConversationStatus}).
+   */
+  setConversationTags(conversationId: string, tags: string[]): Promise<ConversationSummary | null>
+
+  /**
+   * Claim (`'me'`) or release (`null`) a conversation — the write path
+   * behind `PUT /api/v1/conversations/{id}/assignee` (spec §4f, v1.1). Does
+   * NOT bump `updated_at` (spec §4f). Returns the updated summary, or
+   * `null` for a missing/deleted conversation.
+   */
+  setConversationAssignee(
+    conversationId: string,
+    assignee: 'me' | null,
+  ): Promise<ConversationSummary | null>
 }
 
 /**
@@ -466,6 +497,21 @@ const LATEST_BODY_TEXT_SUBQUERY =
 
 /** Maximum length of a derived `preview`, per spec §2 (v1.1, HT-27). */
 const PREVIEW_MAX_LENGTH = 120
+
+/**
+ * The RETURNING clause every summary-shaped single-row UPDATE shares
+ * (`setConversationStatus`/`setConversationTags`/`setConversationAssignee`) —
+ * the same columns + correlated subqueries `listConversations` selects, so
+ * all four paths map through {@link toConversationSummary} identically.
+ * `idParam` is the placeholder (e.g. `'$2'`) already bound to the
+ * conversation id in the caller's own query — always our own literal, never
+ * caller data.
+ */
+function summaryReturningSql(idParam: string): string {
+  return `RETURNING id, number, subject, customer_email, status, tags, assignee, created_at, updated_at,
+           (SELECT count(*)::int FROM threads WHERE conversation_id = ${idParam}) AS thread_count,
+           (SELECT t.body_text FROM threads t WHERE t.conversation_id = ${idParam} AND t.body_text IS NOT NULL ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text`
+}
 
 /**
  * Derive a `ConversationSummary.preview` from a thread body (spec §2, v1.1):
@@ -499,6 +545,10 @@ export interface ConversationSummary {
   threadCount: number
   /** Derived excerpt of the latest thread with text — see {@link derivePreview}. */
   preview: string
+  /** Short lowercase labels — see {@link StoredConversation.tags}. */
+  tags: string[]
+  /** Single-Agent claim flag — see {@link StoredConversation.assignee}. */
+  assignee: 'me' | null
   createdAt: Date
   updatedAt: Date
 }
@@ -540,6 +590,9 @@ interface ConversationRow {
   subject: string
   customer_email: string
   status: string
+  /** jsonb — arrives already-decoded (same driver behavior as `send_envelope`); this codebase only ever writes string arrays. */
+  tags: unknown
+  assignee: string | null
   created_at: Date | string
   updated_at: Date | string
 }
@@ -657,8 +710,8 @@ export function createConversationStore(db: Db): ConversationStore {
       // work is done proportional to a deleted conversation's size.
       const conversationRows = await db.query<ConversationRow>(
         includeDeleted
-          ? 'SELECT id, number, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1'
-          : "SELECT id, number, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
+          ? 'SELECT id, number, subject, customer_email, status, tags, assignee, created_at, updated_at FROM conversations WHERE id = $1'
+          : "SELECT id, number, subject, customer_email, status, tags, assignee, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
         [conversationId],
       )
       const conversationRow = conversationRows[0]
@@ -798,7 +851,7 @@ export function createConversationStore(db: Db): ConversationStore {
       const limitParam = params.length
 
       const rows = await db.query<ConversationSummaryRow>(
-        `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}, ${LATEST_BODY_TEXT_SUBQUERY}
+        `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}, ${LATEST_BODY_TEXT_SUBQUERY}
          FROM conversations c
          WHERE ${conditions.join(' AND ')}
          ORDER BY c.updated_at DESC, c.id DESC
@@ -814,10 +867,37 @@ export function createConversationStore(db: Db): ConversationStore {
         `UPDATE conversations
          SET status = $1, updated_at = now()
          WHERE id = $2 AND status <> 'deleted'
-         RETURNING id, number, subject, customer_email, status, created_at, updated_at,
-           (SELECT count(*)::int FROM threads WHERE conversation_id = $2) AS thread_count,
-           (SELECT t.body_text FROM threads t WHERE t.conversation_id = $2 AND t.body_text IS NOT NULL ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text`,
+         ${summaryReturningSql('$2')}`,
         [status, conversationId],
+      )
+      const row = rows[0]
+      return row === undefined ? null : toConversationSummary(row)
+    },
+
+    async setConversationTags(conversationId, tags) {
+      // Persisted verbatim (the HTTP layer normalizes first — see the
+      // interface doc); jsonb columns take caller-serialized JSON text, the
+      // same convention as send_envelope. No updated_at bump: metadata, not
+      // activity (spec §4e).
+      const rows = await db.query<ConversationSummaryRow>(
+        `UPDATE conversations
+         SET tags = $1::jsonb
+         WHERE id = $2 AND status <> 'deleted'
+         ${summaryReturningSql('$2')}`,
+        [JSON.stringify(tags), conversationId],
+      )
+      const row = rows[0]
+      return row === undefined ? null : toConversationSummary(row)
+    },
+
+    async setConversationAssignee(conversationId, assignee) {
+      // No updated_at bump: claiming is metadata, not activity (spec §4f).
+      const rows = await db.query<ConversationSummaryRow>(
+        `UPDATE conversations
+         SET assignee = $1
+         WHERE id = $2 AND status <> 'deleted'
+         ${summaryReturningSql('$2')}`,
+        [assignee, conversationId],
       )
       const row = rows[0]
       return row === undefined ? null : toConversationSummary(row)
@@ -968,6 +1048,12 @@ function toStoredConversation(row: ConversationRow): StoredConversation {
     subject: row.subject,
     customerEmail: row.customer_email,
     status: row.status as StoredConversation['status'],
+    // Cast, not parsed — same reasoning as send_envelope in toStoredThread:
+    // this codebase is the only writer (always a JSON string array), and the
+    // jsonb arrives already decoded. The assignee CHECK (migration 006)
+    // makes 'me'/NULL the only representable values.
+    tags: row.tags as string[],
+    assignee: row.assignee as StoredConversation['assignee'],
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
   }
@@ -990,6 +1076,8 @@ function toConversationSummary(row: ConversationSummaryRow): ConversationSummary
     status: row.status as ConversationSummary['status'],
     threadCount: row.thread_count,
     preview: derivePreview(row.latest_body_text),
+    tags: row.tags as string[],
+    assignee: row.assignee as ConversationSummary['assignee'],
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
   }
