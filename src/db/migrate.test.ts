@@ -44,6 +44,7 @@ describe('migrate', () => {
       { id: 2, name: 'add_thread_delivery_status' },
       { id: 3, name: 'add_thread_send_idempotency' },
       { id: 4, name: 'four_state_conversation_status' },
+      { id: 5, name: 'conversation_number' },
     ])
   })
 
@@ -53,7 +54,7 @@ describe('migrate', () => {
     await migrate(db) // must not throw (e.g. "relation already exists")
 
     const rows = await db.query<{ id: number }>('SELECT id FROM _migrations ORDER BY id')
-    expect(rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }])
+    expect(rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }])
   })
 
   it('migration 002 ties delivery_status to direction: inbound must be NULL, outbound must be pending/sent/failed', async () => {
@@ -339,6 +340,72 @@ describe('migrate', () => {
       db.query('INSERT INTO conversations (customer_email, status) VALUES ($1, $2)', [
         'customer@example.test',
         'open',
+      ]),
+    ).rejects.toThrow()
+  })
+
+  it('migration 005 upgrades a NON-fresh 004 database: existing rows numbered in creation order, the sequence continues after them', async () => {
+    const database = await createPgliteDb()
+    db = database
+
+    // Apply only through migration 004, then write conversations the way a
+    // pre-005 deployment would have — no number column yet. Explicit,
+    // strictly-increasing created_at values so "creation order" is fully
+    // controlled rather than relying on clock granularity.
+    await migrate(database, { throughId: 4 })
+    const insert = async (createdAt: string) => {
+      const [row] = await database.query<{ id: string }>(
+        'INSERT INTO conversations (customer_email, created_at) VALUES ($1, $2) RETURNING id',
+        ['customer@example.test', createdAt],
+      )
+      return row.id
+    }
+    // Inserted out of creation order on purpose — the backfill must number by
+    // created_at, not by insertion/physical order.
+    const second = await insert('2026-01-02T00:00:00.000Z')
+    const first = await insert('2026-01-01T00:00:00.000Z')
+    const third = await insert('2026-01-03T00:00:00.000Z')
+
+    await expect(migrate(database)).resolves.toBeUndefined()
+
+    const numberOf = async (id: string) =>
+      (
+        await database.query<{ number: number }>('SELECT number FROM conversations WHERE id = $1', [
+          id,
+        ])
+      )[0].number
+    expect(await numberOf(first)).toBe(1)
+    expect(await numberOf(second)).toBe(2)
+    expect(await numberOf(third)).toBe(3)
+
+    // The sequence picked up AFTER the backfilled rows — a fresh insert is #4.
+    const [fresh] = await database.query<{ number: number }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING number',
+      ['customer@example.test'],
+    )
+    expect(fresh.number).toBe(4)
+  })
+
+  it('migration 005 on a fresh database: numbering starts at 1, increments per insert, and duplicates are rejected', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [a] = await db.query<{ number: number }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING number',
+      ['customer@example.test'],
+    )
+    const [b] = await db.query<{ number: number }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING number',
+      ['customer@example.test'],
+    )
+    expect(a.number).toBe(1)
+    expect(b.number).toBe(2)
+
+    // UNIQUE holds — a manual duplicate is rejected at the schema level.
+    await expect(
+      db.query('INSERT INTO conversations (customer_email, number) VALUES ($1, $2)', [
+        'customer@example.test',
+        1,
       ]),
     ).rejects.toThrow()
   })

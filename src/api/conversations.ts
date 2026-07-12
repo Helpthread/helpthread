@@ -18,11 +18,12 @@
 import type { Keyring } from '../mail/reply-token.js'
 import { sendReply } from '../mail/send.js'
 import type { EmailSender } from '../providers/index.js'
-import type {
-  ConversationFolder,
-  ConversationStatus,
-  ConversationStore,
-  StoredThread,
+import {
+  type ConversationFolder,
+  type ConversationStatus,
+  type ConversationStore,
+  derivePreview,
+  type StoredThread,
 } from '../store/conversations.js'
 import { decodeCursor, encodeCursor } from './cursor.js'
 import { apiError, json } from './responses.js'
@@ -63,10 +64,12 @@ interface ThreadViewJson {
 /** The wire shape of one `ConversationSummary` (specs/api/agent-inbox-v1.md §2) — `Date` fields as ISO strings. */
 interface ConversationSummaryJson {
   id: string
+  number: number
   subject: string
   customerEmail: string
   status: ConversationStatus
   threadCount: number
+  preview: string
   createdAt: string
   updatedAt: string
 }
@@ -191,16 +194,34 @@ export async function handleGetConversation(
 
   const body: ConversationDetailJson = {
     id: conversation.id,
+    number: conversation.number,
     subject: conversation.subject,
     customerEmail: conversation.customerEmail,
     status: conversation.status,
     threadCount: conversation.threads.length,
+    preview: previewFromThreads(conversation.threads),
     createdAt: conversation.createdAt.toISOString(),
     updatedAt: conversation.updatedAt.toISOString(),
     threads: conversation.threads.map(toThreadViewJson),
   }
 
   return json(200, body)
+}
+
+/**
+ * Derive a detail response's `preview` from the threads it already carries —
+ * the SAME rule the store applies for list summaries (`derivePreview`, spec
+ * §2): the most recent thread with a non-null `bodyText`. Threads arrive
+ * oldest-first, so this walks from the end.
+ */
+function previewFromThreads(threads: StoredThread[]): string {
+  for (let i = threads.length - 1; i >= 0; i--) {
+    const bodyText = threads[i].bodyText
+    if (bodyText !== null) {
+      return derivePreview(bodyText)
+    }
+  }
+  return ''
 }
 
 /**
@@ -505,19 +526,23 @@ function deriveReplyHeaders(conversation: { subject: string; threads: StoredThre
 
 function toConversationSummaryJson(row: {
   id: string
+  number: number
   subject: string
   customerEmail: string
   status: ConversationStatus
   threadCount: number
+  preview: string
   createdAt: Date
   updatedAt: Date
 }): ConversationSummaryJson {
   return {
     id: row.id,
+    number: row.number,
     subject: row.subject,
     customerEmail: row.customerEmail,
     status: row.status,
     threadCount: row.threadCount,
+    preview: row.preview,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }
