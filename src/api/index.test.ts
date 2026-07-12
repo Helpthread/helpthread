@@ -55,7 +55,11 @@ function newConversation(overrides: Partial<NewConversation> = {}): NewConversat
   }
 }
 
-async function setStatus(db: Db, conversationId: string, status: 'open' | 'closed' | 'deleted') {
+async function setStatus(
+  db: Db,
+  conversationId: string,
+  status: 'active' | 'pending' | 'closed' | 'spam' | 'deleted',
+) {
   await db.query('UPDATE conversations SET status = $1 WHERE id = $2', [status, conversationId])
 }
 
@@ -251,19 +255,39 @@ describe('createInboxApi', () => {
       expect(body.conversations.map((c) => c.id)).toEqual([a, b])
     })
 
-    it('filters by status: open vs closed', async () => {
+    it('filters by folder: open is active + pending; closed and spam are exact (spec §3a, v1.1)', async () => {
       const { db, store, api } = await freshApi()
-      const { conversationId: openId } = await store.createConversation(newConversation())
+      const { conversationId: activeId } = await store.createConversation(newConversation())
+      const { conversationId: pendingId } = await store.createConversation(newConversation())
       const { conversationId: closedId } = await store.createConversation(newConversation())
+      const { conversationId: spamId } = await store.createConversation(newConversation())
+      await setStatus(db, pendingId, 'pending')
       await setStatus(db, closedId, 'closed')
+      await setStatus(db, spamId, 'spam')
 
       const openRes = await api(get('/api/v1/conversations?status=open'))
-      const openBody = (await openRes.json()) as { conversations: Array<{ id: string }> }
-      expect(openBody.conversations.map((c) => c.id)).toEqual([openId])
+      const openBody = (await openRes.json()) as {
+        conversations: Array<{ id: string; status: string }>
+      }
+      expect(openBody.conversations.map((c) => c.id).sort()).toEqual([activeId, pendingId].sort())
+      // The wire summary carries the REAL status — the query param is the folder.
+      expect(openBody.conversations.find((c) => c.id === pendingId)?.status).toBe('pending')
 
       const closedRes = await api(get('/api/v1/conversations?status=closed'))
       const closedBody = (await closedRes.json()) as { conversations: Array<{ id: string }> }
       expect(closedBody.conversations.map((c) => c.id)).toEqual([closedId])
+
+      const spamRes = await api(get('/api/v1/conversations?status=spam'))
+      const spamBody = (await spamRes.json()) as { conversations: Array<{ id: string }> }
+      expect(spamBody.conversations.map((c) => c.id)).toEqual([spamId])
+    })
+
+    it("rejects raw statuses as filter values — 'active' and 'pending' are not folders", async () => {
+      const { api } = await freshApi()
+      for (const value of ['active', 'pending']) {
+        const res = await api(get(`/api/v1/conversations?status=${value}`))
+        expect(res.status).toBe(400)
+      }
     })
 
     it('rejects an invalid status value with 400', async () => {
@@ -394,7 +418,7 @@ describe('createInboxApi', () => {
       expect(body.id).toBe(conversationId)
       expect(body.subject).toBe('Help with my order')
       expect(body.customerEmail).toBe('customer@example.test')
-      expect(body.status).toBe('open')
+      expect(body.status).toBe('active')
       expect(body.threadCount).toBe(2)
       expect(body.threads).toHaveLength(2)
       expect(body.threads[0]).toMatchObject({
@@ -519,7 +543,7 @@ describe('createInboxApi', () => {
       expect(sent[0].subject).toBe('Re: Already replied')
     })
 
-    it('a reply reopens a closed conversation', async () => {
+    it('a reply reopens a closed conversation to active', async () => {
       const { db, store, api } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'closed')
@@ -530,7 +554,23 @@ describe('createInboxApi', () => {
       expect(res.status).toBe(201)
 
       const updated = await store.getConversation(conversationId, { includeDeleted: false })
-      expect(updated?.status).toBe('open')
+      expect(updated?.status).toBe('active')
+    })
+
+    it('a reply reopens a spam conversation to active (spec §4a, v1.1)', async () => {
+      const { db, store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'spam')
+
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+          text: 'Not spam after all.',
+        }),
+      )
+      expect(res.status).toBe(201)
+
+      const updated = await store.getConversation(conversationId, { includeDeleted: false })
+      expect(updated?.status).toBe('active')
     })
 
     it('404s for a missing conversation id; the sender is never called', async () => {
@@ -839,7 +879,7 @@ describe('createInboxApi', () => {
   // --- patch (status) -----------------------------------------------------------
 
   describe('patch status', () => {
-    it('closes an open conversation: 200 with the updated summary', async () => {
+    it('closes an active conversation: 200 with the updated summary', async () => {
       const { store, api } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
 
@@ -851,20 +891,32 @@ describe('createInboxApi', () => {
       expect(body.status).toBe('closed')
     })
 
-    it('reopens a closed conversation: 200 with the updated summary', async () => {
+    it('reopens a closed conversation to active: 200 with the updated summary', async () => {
       const { db, store, api } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'closed')
 
-      const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status: 'open' }))
+      const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status: 'active' }))
       expect(res.status).toBe(200)
       const body = (await res.json()) as { status: string }
-      expect(body.status).toBe('open')
+      expect(body.status).toBe('active')
+    })
+
+    it('sets pending and spam: every surfaceable status is settable (spec §4b, v1.1)', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      for (const status of ['pending', 'spam'] as const) {
+        const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status }))
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { status: string }
+        expect(body.status).toBe(status)
+      }
     })
 
     it('404s for a missing conversation id', async () => {
       const { api } = await freshApi()
-      const res = await api(patch(`/api/v1/conversations/${RANDOM_UUID}`, { status: 'open' }))
+      const res = await api(patch(`/api/v1/conversations/${RANDOM_UUID}`, { status: 'active' }))
       expect(res.status).toBe(404)
       expect(await res.json()).toEqual({
         error: { code: 'not_found', message: expect.any(String) },
@@ -873,16 +925,16 @@ describe('createInboxApi', () => {
 
     it('404s for a non-UUID-shaped id — never reaches the uuid column', async () => {
       const { api } = await freshApi()
-      const res = await api(patch('/api/v1/conversations/not-a-uuid', { status: 'open' }))
+      const res = await api(patch('/api/v1/conversations/not-a-uuid', { status: 'active' }))
       expect(res.status).toBe(404)
     })
 
-    it('404s for a deleted conversation — not reopenable through this endpoint', async () => {
+    it('404s for a deleted conversation — not reachable through this endpoint', async () => {
       const { db, store, api } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'deleted')
 
-      const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status: 'open' }))
+      const res = await api(patch(`/api/v1/conversations/${conversationId}`, { status: 'active' }))
       expect(res.status).toBe(404)
     })
 

@@ -55,8 +55,8 @@ describe('seedDevData', () => {
     // seed.ts's "failed" demo.
     expect(sent.length).toBe(4)
 
-    const open = await store.listConversations({ limit: 50, status: 'open' })
-    const closed = await store.listConversations({ limit: 50, status: 'closed' })
+    const open = await store.listConversations({ limit: 50, folder: 'open' })
+    const closed = await store.listConversations({ limit: 50, folder: 'closed' })
     expect(open).toHaveLength(5)
     expect(closed).toHaveLength(1)
 

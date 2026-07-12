@@ -311,6 +311,6 @@ describe('createPostgresDb with a schema option', () => {
       'hello',
     ])
     const convs = await db.query<{ status: string }>('SELECT status FROM conversations')
-    expect(convs).toEqual([{ status: 'open' }])
+    expect(convs).toEqual([{ status: 'active' }])
   })
 })

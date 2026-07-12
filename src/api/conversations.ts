@@ -4,7 +4,7 @@
  * §3a) and `GET /api/v1/conversations/{id}` (one conversation with its
  * threads, §3b) — plus the two HT-18 write paths — `POST
  * /api/v1/conversations/{id}/replies` (the Agent replies, §4a) and `PATCH
- * /api/v1/conversations/{id}` (close/reopen, §4b).
+ * /api/v1/conversations/{id}` (set status, §4b).
  *
  * Each handler is a pure function of an already-authenticated, already-
  * routed `Request` plus its dependencies — `src/api/index.ts` is what
@@ -18,7 +18,12 @@
 import type { Keyring } from '../mail/reply-token.js'
 import { sendReply } from '../mail/send.js'
 import type { EmailSender } from '../providers/index.js'
-import type { ConversationStore, StoredThread } from '../store/conversations.js'
+import type {
+  ConversationFolder,
+  ConversationStatus,
+  ConversationStore,
+  StoredThread,
+} from '../store/conversations.js'
 import { decodeCursor, encodeCursor } from './cursor.js'
 import { apiError, json } from './responses.js'
 import { isUuid } from './uuid.js'
@@ -60,7 +65,7 @@ interface ConversationSummaryJson {
   id: string
   subject: string
   customerEmail: string
-  status: 'open' | 'closed'
+  status: ConversationStatus
   threadCount: number
   createdAt: string
   updatedAt: string
@@ -94,14 +99,17 @@ export async function handleListConversations(
 ): Promise<Response> {
   const url = new URL(request.url)
 
+  // `status` here is a FOLDER, not a raw status (spec §3a, v1.1): `open` =
+  // active + pending; `closed`/`spam` = exactly that status. `active` and
+  // `pending` are deliberately NOT accepted — folders are the reading grain.
   const statusParam = url.searchParams.get('status')
-  let status: 'open' | 'closed' | undefined
+  let folder: ConversationFolder
   if (statusParam === null) {
-    status = 'open'
-  } else if (statusParam === 'open' || statusParam === 'closed') {
-    status = statusParam
+    folder = 'open'
+  } else if (statusParam === 'open' || statusParam === 'closed' || statusParam === 'spam') {
+    folder = statusParam
   } else {
-    return apiError(400, 'validation_failed', "status must be 'open' or 'closed'.")
+    return apiError(400, 'validation_failed', "status must be 'open', 'closed' or 'spam'.")
   }
 
   const limitParam = url.searchParams.get('limit')
@@ -128,7 +136,7 @@ export async function handleListConversations(
   // Fetch one extra row: if it comes back, there IS a next page, and its
   // presence is detected by count alone — its own data is discarded (spec
   // §3a's over-fetch-by-one pagination-detection trick).
-  const rows = await deps.store.listConversations({ status, limit: limit + 1, cursor })
+  const rows = await deps.store.listConversations({ folder, limit: limit + 1, cursor })
   const hasNextPage = rows.length > limit
   const page = rows.slice(0, limit)
 
@@ -176,7 +184,7 @@ export async function handleGetConversation(
   // conversation. The `=== 'deleted'` arm is defense-in-depth — it can't fire
   // at runtime today, but it guarantees the API never serves a deleted
   // conversation even if the store's contract later regressed, and it narrows
-  // `status` to the `'open' | 'closed'` the response body commits to.
+  // `status` to the `ConversationStatus` the response body commits to.
   if (conversation === null || conversation.status === 'deleted') {
     return apiError(404, 'not_found', 'No conversation with that id.')
   }
@@ -220,8 +228,8 @@ export async function handleGetConversation(
  * touching the sender again.
  *
  * Outcomes (spec §4a): `201` with the created `ThreadView` on success (a
- * reply to a `closed` conversation reopens it, via `sendReply` →
- * `ConversationStore.appendThread`'s existing policy); `404 not_found` if
+ * reply to a `closed` or `spam` conversation reopens it to `active`, via
+ * `sendReply` → `ConversationStore.appendThread`'s existing policy); `404 not_found` if
  * the conversation is missing or `deleted` (checked BEFORE minting/sending,
  * and again as a race check on `sendReply`'s own result — see below);
  * `400 validation_failed` on a missing `Idempotency-Key` header or a body
@@ -355,14 +363,15 @@ export async function handleReply(
 }
 
 /**
- * Handle `PATCH /api/v1/conversations/{id}` — close or reopen a conversation
- * (spec §4b). Body: `{ status: 'open' | 'closed' }` — `'deleted'` is
- * deliberately not a settable value here (`400`, not `404`, since the body
- * itself is malformed regardless of whether `{id}` exists).
+ * Handle `PATCH /api/v1/conversations/{id}` — set a conversation's status
+ * (spec §4b, v1.1). Body: `{ status: 'active' | 'pending' | 'closed' |
+ * 'spam' }` — `'deleted'` is deliberately not a settable value here (`400`,
+ * not `404`, since the body itself is malformed regardless of whether
+ * `{id}` exists).
  *
  * Outcomes: `200` with the updated `ConversationSummary` on success; `404
  * not_found` if `{id}` is missing or names a `deleted` conversation (a
- * deleted conversation is not reopenable through this endpoint — spec §4b);
+ * deleted conversation is not reachable through this endpoint — spec §4b);
  * `400 validation_failed` on any other `status` value.
  */
 export async function handlePatchConversation(
@@ -381,7 +390,11 @@ export async function handlePatchConversation(
 
   const status = parsePatchStatusBody(parsedBody.value)
   if (status === null) {
-    return apiError(400, 'validation_failed', "status must be 'open' or 'closed'.")
+    return apiError(
+      400,
+      'validation_failed',
+      "status must be 'active', 'pending', 'closed' or 'spam'.",
+    )
   }
 
   const updated = await deps.store.setConversationStatus(id, status)
@@ -437,14 +450,16 @@ function parseReplyBody(raw: unknown): ReplyRequestBody | null {
 }
 
 /**
- * Validate a parsed PATCH body against spec §4b: `status` must be exactly
- * `'open'` or `'closed'` — notably `'deleted'` is NOT settable here. Returns
- * `null` on any violation — never throws.
+ * Validate a parsed PATCH body against spec §4b (v1.1): `status` must be one
+ * of the four {@link ConversationStatus} values — notably `'deleted'` is NOT
+ * settable here. Returns `null` on any violation — never throws.
  */
-function parsePatchStatusBody(raw: unknown): 'open' | 'closed' | null {
+function parsePatchStatusBody(raw: unknown): ConversationStatus | null {
   if (typeof raw !== 'object' || raw === null) return null
   const { status } = raw as Record<string, unknown>
-  return status === 'open' || status === 'closed' ? status : null
+  return status === 'active' || status === 'pending' || status === 'closed' || status === 'spam'
+    ? status
+    : null
 }
 
 /**
@@ -492,7 +507,7 @@ function toConversationSummaryJson(row: {
   id: string
   subject: string
   customerEmail: string
-  status: 'open' | 'closed'
+  status: ConversationStatus
   threadCount: number
   createdAt: Date
   updatedAt: Date

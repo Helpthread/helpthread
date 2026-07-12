@@ -28,13 +28,17 @@
  * resolve them. This module is that implementation, and the behavior
  * below is the resolution:
  *
- * - **A valid token to a CLOSED conversation** → {@link appendThread}
- *   inserts the thread AND reopens the conversation (`status` back to
- *   `'open'`). This is the Help Scout-like behavior the charter holds
- *   itself to (CHARTER.md §1): a customer replying to a resolved ticket
- *   should not silently fall on the floor or spawn a confusing duplicate —
- *   it reopens the same conversation, matching what an agent would expect
- *   to see.
+ * - **A valid token to a CLOSED (or SPAM) conversation** → {@link appendThread}
+ *   inserts the thread AND reopens the conversation (`status` to
+ *   `'active'` — HT-26's four-state model; spec §4a). This is the Help
+ *   Scout-like behavior the charter holds itself to (CHARTER.md §1): a
+ *   customer replying to a resolved ticket should not silently fall on the
+ *   floor or spawn a confusing duplicate — it reopens the same
+ *   conversation, matching what an agent would expect to see. A `pending`
+ *   conversation deliberately STAYS `pending` on append: `pending` is an
+ *   Agent statement (spec §2's status semantics — "nothing sets it
+ *   automatically in v1"), and silently flipping it on new mail would be
+ *   exactly such an automatic set.
  * - **A valid token to a DELETED conversation** → {@link appendThread}
  *   inserts NOTHING and returns `{ ok: false, reason: 'deleted' }`. Unlike
  *   the closed case, a deleted conversation is not a live target to reopen
@@ -184,12 +188,31 @@ export interface StoredThread {
   createdAt: Date
 }
 
+/**
+ * The four surfaceable conversation states (HT-26; specs/api/agent-inbox-v1.md
+ * §2, v1.1). `active` is the working state — inbound mail creates
+ * conversations `active` (the schema default, migration 004). `pending` and
+ * `spam` are Agent statements; nothing sets either automatically. `deleted`
+ * is deliberately NOT a member: it is a storage-internal state that is never
+ * surfaced and never settable through {@link ConversationStore.setConversationStatus}.
+ */
+export type ConversationStatus = 'active' | 'pending' | 'closed' | 'spam'
+
+/**
+ * An inbox folder — the reading grain of
+ * {@link ConversationStore.listConversations} (spec §3a's folder semantics):
+ * `open` is the working folder and returns `active` + `pending` rows;
+ * `closed` and `spam` return exactly that status. Individual statuses
+ * (`active`/`pending`) are deliberately not folders.
+ */
+export type ConversationFolder = 'open' | 'closed' | 'spam'
+
 /** A conversation as read back from storage — camelCase, timestamps as `Date`. */
 export interface StoredConversation {
   id: string
   subject: string
   customerEmail: string
-  status: 'open' | 'closed' | 'deleted'
+  status: ConversationStatus | 'deleted'
   createdAt: Date
   updatedAt: Date
 }
@@ -220,10 +243,11 @@ export interface ConversationStore {
    * Append `thread` to the conversation `conversationId`, applying the
    * closed/deleted/missing policy documented at the top of this module.
    * See that doc for the full behavior; summarized: missing → `not-found`,
-   * deleted → `deleted` (nothing inserted), closed → inserted AND
-   * reopened, open → inserted. A genuinely NEW row (`created: true`) also
-   * bumps the conversation's `updated_at` (and reopens a closed one, per
-   * the above); a REPLAY that found an existing row instead (`created:
+   * deleted → `deleted` (nothing inserted), closed or spam → inserted AND
+   * reopened to `active`, active/pending → inserted (pending stays pending
+   * — see the module doc). A genuinely NEW row (`created: true`) also
+   * bumps the conversation's `updated_at` (and reopens a closed/spam one,
+   * per the above); a REPLAY that found an existing row instead (`created:
    * false`) touches the conversation row not at all — nothing new
    * happened, so nothing about the conversation should look like it did.
    *
@@ -368,21 +392,23 @@ export interface ConversationStore {
   listConversations(options: ListConversationsOptions): Promise<ConversationSummary[]>
 
   /**
-   * Set a conversation's `status` to `'open'` or `'closed'` — the write path
-   * behind `PATCH /api/v1/conversations/{id}` (specs/api/agent-inbox-v1.md
-   * §4b). A single `UPDATE ... RETURNING` statement, scoped to `status <>
-   * 'deleted'` so a deleted conversation is NOT reopenable through this
-   * method — the spec's explicit carve-out (§4b: "a deleted conversation is
-   * not reopenable through this endpoint"). Returns the updated
-   * {@link ConversationSummary} on success, or `null` when no row matched
-   * (the id doesn't exist, or names a `deleted` conversation) — the same
-   * "missing or deleted, indistinguishable" shape {@link getConversation}'s
-   * `includeDeleted: false` uses, so the HTTP layer can map both to a single
-   * generic `404` without an extra existence check.
+   * Set a conversation's `status` to any {@link ConversationStatus} — the
+   * write path behind `PATCH /api/v1/conversations/{id}`
+   * (specs/api/agent-inbox-v1.md §4b, v1.1: all four values are settable
+   * here). A single `UPDATE ... RETURNING` statement, scoped to `status <>
+   * 'deleted'` so a deleted conversation is NOT reachable through this
+   * method — the spec's explicit carve-out (§4b), and `'deleted'` itself is
+   * not a {@link ConversationStatus}, so it is unsettable by type. Returns
+   * the updated {@link ConversationSummary} on success, or `null` when no
+   * row matched (the id doesn't exist, or names a `deleted` conversation) —
+   * the same "missing or deleted, indistinguishable" shape
+   * {@link getConversation}'s `includeDeleted: false` uses, so the HTTP
+   * layer can map both to a single generic `404` without an extra existence
+   * check.
    */
   setConversationStatus(
     conversationId: string,
-    status: 'open' | 'closed',
+    status: ConversationStatus,
   ): Promise<ConversationSummary | null>
 }
 
@@ -413,7 +439,7 @@ export interface ConversationSummary {
   id: string
   subject: string
   customerEmail: string
-  status: 'open' | 'closed'
+  status: ConversationStatus
   threadCount: number
   createdAt: Date
   updatedAt: Date
@@ -436,11 +462,13 @@ export interface ConversationListCursor {
 /** Input to {@link ConversationStore.listConversations}. */
 export interface ListConversationsOptions {
   /**
-   * When given, filter to exactly this status. When omitted, return every
-   * conversation EXCEPT `deleted` — there is no filter value that returns
-   * deleted rows; they are never surfaced by this call (spec §3a).
+   * When given, filter to this FOLDER (spec §3a's folder semantics —
+   * {@link ConversationFolder}): `'open'` returns `active` + `pending`
+   * rows; `'closed'` and `'spam'` return exactly that status. When omitted,
+   * return every conversation EXCEPT `deleted` — there is no filter value
+   * that returns deleted rows; they are never surfaced by this call.
    */
-  status?: 'open' | 'closed'
+  folder?: ConversationFolder
   /** Exact row count to fetch — callers (the HTTP layer) decide over-fetch-by-one for pagination detection themselves. */
   limit: number
   /** Keyset cursor: return rows ordered strictly after this position. Omit for the first page. */
@@ -542,10 +570,12 @@ export function createConversationStore(db: Db): ConversationStore {
         // A REPLAY (an existing row was found, nothing new inserted) touches
         // the conversation not at all — no reopen, no updated_at bump. Only
         // a genuinely new row counts as new activity on the conversation.
+        // Reopen policy (spec §4a, v1.1): closed OR spam → active; pending
+        // deliberately stays pending (see the module doc).
         if (created) {
-          if (row.status === 'closed') {
+          if (row.status === 'closed' || row.status === 'spam') {
             await tx.query(
-              "UPDATE conversations SET status = 'open', updated_at = now() WHERE id = $1",
+              "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1",
               [conversationId],
             )
           } else {
@@ -674,8 +704,14 @@ export function createConversationStore(db: Db): ConversationStore {
       const conditions: string[] = []
       const params: SqlValue[] = []
 
-      if (options.status !== undefined) {
-        params.push(options.status)
+      if (options.folder === 'open') {
+        // The open FOLDER is two statuses (spec §3a's folder semantics):
+        // active is the working state, and pending still counts as open
+        // work. Both values are literals here, not caller data — the only
+        // caller-influenced choice is WHICH fragment appears.
+        conditions.push("c.status IN ('active', 'pending')")
+      } else if (options.folder !== undefined) {
+        params.push(options.folder)
         conditions.push(`c.status = $${params.length}`)
       } else {
         // No explicit filter: every status EXCEPT deleted. A `'deleted'`
@@ -867,8 +903,8 @@ function toStoredConversation(row: ConversationRow): StoredConversation {
  * {@link ConversationSummary} shape. The `status` cast is safe on the same
  * grounds as {@link toStoredConversation}'s: `listConversations`'s own WHERE
  * clause (see above) never lets a `'deleted'` row reach this mapper, so the
- * narrower `'open' | 'closed'` union always holds in practice even though
- * the column itself is untyped `text` at the SQL level.
+ * narrower {@link ConversationStatus} union always holds in practice even
+ * though the column itself is untyped `text` at the SQL level.
  */
 function toConversationSummary(row: ConversationSummaryRow): ConversationSummary {
   return {
