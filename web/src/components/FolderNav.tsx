@@ -31,7 +31,7 @@ const FOLDERS: Array<{ key: ConversationFolder; label: string; icon: string }> =
 
 function FolderIcon({ path }: { path: string }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden>
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
       <path fill="currentColor" d={path} />
     </svg>
   )
