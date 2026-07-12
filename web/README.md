@@ -49,17 +49,25 @@ sign-off. See the "UI fidelity" section of the repo CLAUDE.md; the live gap
 list is the fidelity checklist on
 [HT-23](https://resonantiq.atlassian.net/browse/HT-23).
 
-## Shipped so far (first increment)
+## Shipped so far
 
-Persistent shell (folder rail + top bar) · inbox folders (Open/Closed/Spam,
-keyset load-older) · conversation view with message bands (inbound / Agent
-reply / internal note / failed-delivery / customer-viewed) and the Customer
-context panel · reply composer with the spec §4a idempotency contract (one
-key per logical send, reused on retry; honest failure copy; draft always
-preserved) · close/reopen.
+Persistent shell (folder rail + top bar, dark theme) · inbox folders
+(Unassigned/Mine/Starred/Drafts/Assigned/Closed/Spam, keyset load-older) ·
+conversation view with message bands (inbound / Agent reply / internal note
+/ failed-delivery / customer-viewed) and the Customer context panel · tag
+editing, assignee/Mine, star, four-state status (active/pending/closed/spam),
+soft delete (two-step arm), toasts · a SUMMONED composer (hidden by default;
+opens via the toolbar, `r`/`n`, or automatically when a saved draft exists)
+with Reply/Note tabs, rich-text formatting (bold/italic/list/link, sent as
+HTML alongside plain text), the closed-reopens-on-reply banner, localStorage
+draft persistence (debounced, backing the Drafts folder), and the spec §4a
+idempotency contract (one key per logical send, reused on retry, a fresh one
+after a validation failure; honest send-failure copy with retry) · keyboard
+shortcuts throughout (inbox j/k/Enter/x; conversation j/k/r/n/⌘+↵/cascading
+Escape; global `?` overlay).
 
-Everything else the prototype designs — notes composer, tag editing,
-assignee/Mine, star, soft delete (two-step arm), toasts, keyboard shortcuts,
-dark theme, and whatever else the fidelity checklist enumerates — is REQUIRED
-work under the mandate above, not optional polish. The API for all of it
-already exists.
+Still not wired: Forward, Merge, composing a NEW conversation from scratch
+("New message"), and the Agent's own profile settings — all spec'd for v1
+but not yet implemented. See the fidelity checklist on
+[HT-23](https://resonantiq.atlassian.net/browse/HT-23) for the authoritative
+list of remaining gaps.

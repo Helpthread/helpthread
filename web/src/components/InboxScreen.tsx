@@ -32,6 +32,7 @@ import { MenuItem } from './ds/core/MenuItem'
 import { StatusPill } from './ds/core/StatusPill'
 import { ConversationRow } from './ds/inbox/ConversationRow'
 import { ToolbarBand } from './ds/inbox/ToolbarBand'
+import { useShortcutsOverlay } from './ShortcutsProvider'
 import { useToast } from './Toaster'
 
 const DELETE_DISARM_MS = 3500
@@ -76,6 +77,7 @@ export function InboxScreen({
   const showToast = useToast()
   const { isStarred, toggle } = useStarred()
   const drafts = useDrafts()
+  const { isOpen: isShortcutsOverlayOpen } = useShortcutsOverlay()
 
   const [extraPages, setExtraPages] = useState<ConversationSummary[]>([])
   const [cursor, setCursor] = useState<string | null>(nextCursor)
@@ -87,6 +89,10 @@ export function InboxScreen({
   const [deleteArmed, setDeleteArmed] = useState(false)
   const disarmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // j/k (and ↑/↓) move this cursor; Enter opens it, x toggles its checkbox.
+  const [focusedIndex, setFocusedIndex] = useState(0)
+  const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+
   // A folder switch is a fresh list — appended pages, selection, and the
   // armed-delete state from the previous folder don't carry over. `folder`
   // is the intended trigger (a route change); `nextCursor` always changes
@@ -97,6 +103,7 @@ export function InboxScreen({
     setCursor(nextCursor)
     setSelected(new Set())
     setDeleteArmed(false)
+    setFocusedIndex(0)
     if (disarmTimer.current !== null) clearTimeout(disarmTimer.current)
   }, [folder, nextCursor])
 
@@ -118,6 +125,61 @@ export function InboxScreen({
   })
   const displayed = sortDesc ? visible : [...visible].reverse()
   const allChecked = visible.length > 0 && visible.every((c) => selected.has(c.id))
+
+  // The list can shrink (unstarring the focused row while on Starred, etc.)
+  // without a folder switch — keep the cursor in bounds.
+  useEffect(() => {
+    setFocusedIndex((i) => Math.min(i, Math.max(displayed.length - 1, 0)))
+  }, [displayed.length])
+
+  useEffect(() => {
+    const row = displayed[focusedIndex]
+    if (row === undefined) return
+    rowRefs.current.get(row.id)?.scrollIntoView({ block: 'nearest' })
+  }, [focusedIndex, displayed])
+
+  // Kept in a ref (the "latest closure" pattern): `displayed` is a fresh
+  // array every render, so listing it as a dependency would churn the DOM
+  // listener on every render — only the closure it calls needs to be fresh.
+  const onKeyDownRef = useRef<(event: KeyboardEvent) => void>(() => {})
+  onKeyDownRef.current = (event: KeyboardEvent) => {
+    // The shortcuts overlay owns Escape/'?' while open; don't also act.
+    if (isShortcutsOverlayOpen) return
+
+    const target = event.target as HTMLElement | null
+    const typing =
+      target !== null &&
+      (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+    if (typing) return
+
+    if (event.key === 'j' || event.key === 'ArrowDown') {
+      event.preventDefault()
+      setFocusedIndex((i) => Math.min(i + 1, Math.max(displayed.length - 1, 0)))
+      return
+    }
+    if (event.key === 'k' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      setFocusedIndex((i) => Math.max(i - 1, 0))
+      return
+    }
+    if (event.key === 'Enter') {
+      const row = displayed[focusedIndex]
+      if (row !== undefined) router.push(`/conversations/${row.id}`)
+      return
+    }
+    if (event.key === 'x' && showCheckboxColumn) {
+      const row = displayed[focusedIndex]
+      if (row !== undefined) toggleOne(row.id)
+    }
+  }
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      onKeyDownRef.current(event)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   function toggleAll(): void {
     setSelected(allChecked ? new Set() : new Set(visible.map((c) => c.id)))
@@ -294,8 +356,15 @@ export function InboxScreen({
         <EmptyState {...EMPTY_COPY[folder]} />
       ) : (
         <div>
-          {displayed.map((c) => (
-            <div key={c.id} style={{ position: 'relative' }}>
+          {displayed.map((c, index) => (
+            <div
+              key={c.id}
+              ref={(el) => {
+                if (el) rowRefs.current.set(c.id, el)
+                else rowRefs.current.delete(c.id)
+              }}
+              style={{ position: 'relative' }}
+            >
               <ConversationRow
                 customerName={nameFromEmail(c.customerEmail)}
                 customerEmail={c.customerEmail}
@@ -309,7 +378,11 @@ export function InboxScreen({
                 onCheck={() => toggleOne(c.id)}
                 starred={isStarred(c.id)}
                 onStar={() => toggle(c.id)}
-                onClick={() => router.push(`/conversations/${c.id}`)}
+                selected={index === focusedIndex}
+                onClick={() => {
+                  setFocusedIndex(index)
+                  router.push(`/conversations/${c.id}`)
+                }}
               />
               {c.status === 'pending' && (
                 <span style={{ position: 'absolute', right: 14, top: 6 }}>

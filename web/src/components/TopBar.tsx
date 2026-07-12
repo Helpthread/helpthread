@@ -98,7 +98,7 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
   const pathname = usePathname()
   const router = useRouter()
   const showToast = useToast()
-  const openShortcuts = useShortcutsOverlay()
+  const { open: openShortcuts } = useShortcutsOverlay()
   const [openMenu, setOpenMenu] = useState<MenuKey | null>(null)
 
   useEffect(() => {

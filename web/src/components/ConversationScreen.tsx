@@ -3,29 +3,40 @@
 /**
  * One conversation: toolbar (back, reply/note/delete, tags, star, more,
  * assignee/status/position — subject/#number/status pill on a wrapped
- * second row), the reply composer (resident card, ABOVE the thread — it
- * becomes summoned in a later increment), and the thread as full-bleed
- * MessageBands newest-first (design-system rule: bands, not chat bubbles).
+ * second row), a SUMMONED composer (hidden by default; opens via the
+ * toolbar Reply/Note buttons, the `r`/`n` keys, or automatically when a
+ * saved draft exists), and the thread as full-bleed MessageBands
+ * newest-first (design-system rule: bands, not chat bubbles).
  *
  * The composer implements spec §4a's client contract faithfully:
  * - ONE Idempotency-Key per logical send, minted when the draft starts and
  *   reused verbatim on every retry — a 409 `retry_in_progress` or a network
- *   failure never mints a new key (that would risk a duplicate send).
+ *   failure never mints a new key (that would risk a duplicate send). A
+ *   `400 validation_failed` DOES mint a new key — the original attempt never
+ *   reached the send path, so there is nothing to safely replay.
  * - `send_failed` (502) keeps the draft and says exactly what is true:
- *   nothing reached the customer.
+ *   nothing reached the customer, with a "Retry send" action that reuses
+ *   the same key.
  * - Only a SUCCESS clears the draft and rotates the key.
+ *
+ * This screen also owns its own keyboard shortcuts (j/k conversation nav,
+ * r/n to open the composer, ⌘/Ctrl+↵ to send, and a cascading Escape) — see
+ * the keydown effect below, coordinated with `ShortcutsProvider`'s overlay.
  */
 
 import { useRouter } from 'next/navigation'
+import type { CSSProperties } from 'react'
 import { useEffect, useRef, useState, useTransition } from 'react'
 import {
   deleteConversationAction,
+  postNoteAction,
   putAssigneeAction,
   putTagsAction,
   sendReplyAction,
   setStatusAction,
 } from '../lib/actions'
 import type { ConversationDetail, ConversationStatus, ThreadView } from '../lib/api-types'
+import { clearDraft, getDraft, writeDraft } from '../lib/drafts'
 import { nameFromEmail, relativeTime } from '../lib/format'
 import { useStarred } from '../lib/starred'
 import { Avatar } from './ds/core/Avatar'
@@ -39,11 +50,91 @@ import { TextInput } from './ds/core/TextInput'
 import { MessageBand } from './ds/inbox/MessageBand'
 import { ToolbarBand } from './ds/inbox/ToolbarBand'
 import { SanitizedHtml } from './SanitizedHtml'
+import { useShortcutsOverlay } from './ShortcutsProvider'
 import { useToast } from './Toaster'
 
 const MAX_REPLY_LENGTH = 5000
 const MAX_TAG_LENGTH = 40
 const DELETE_DISARM_MS = 3500
+const DRAFT_SAVE_DEBOUNCE_MS = 300
+
+/** Reply-mode formatting is honestly reported only when the Agent actually
+ *  used the toolbar — checked by tag presence, not by diffing markup. */
+function hasRichFormatting(el: HTMLElement): boolean {
+  return el.querySelector('b, i, ul, a') !== null
+}
+
+/** contenteditable's `innerText` reports a trailing newline for the last
+ *  (empty) line — trim only trailing whitespace, keep interior formatting. */
+function normalizedInnerText(el: HTMLElement): string {
+  return el.innerText.replace(/\s+$/, '')
+}
+
+function pillTabStyle(active: boolean): CSSProperties {
+  return {
+    border: 'none',
+    borderRadius: 999,
+    padding: '4px 12px',
+    fontSize: 12.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+    background: active ? 'var(--ht-accent)' : 'var(--ht-surface-2)',
+    color: active ? 'var(--ht-on-accent)' : 'var(--ht-ink-muted)',
+  }
+}
+
+function counterStyle(length: number): CSSProperties {
+  const over = length > MAX_REPLY_LENGTH
+  return {
+    fontSize: 11.5,
+    fontVariantNumeric: 'tabular-nums',
+    fontWeight: over ? 700 : 400,
+    color: over ? 'var(--ht-critical)' : 'var(--ht-ink-dim)',
+  }
+}
+
+const WARN_BANNER_STYLE: CSSProperties = {
+  marginBottom: 10,
+  padding: '8px 12px',
+  borderRadius: 'var(--ht-radius-md)',
+  background: 'color-mix(in oklab, var(--ht-warn) 9%, var(--ht-surface))',
+  border: '1px solid color-mix(in oklab, var(--ht-warn) 30%, transparent)',
+  fontSize: 12.5,
+  color: 'var(--ht-ink-muted)',
+}
+
+const CRITICAL_BANNER_STYLE: CSSProperties = {
+  marginBottom: 10,
+  padding: '10px 14px',
+  borderRadius: 'var(--ht-radius-md)',
+  background: 'var(--ht-critical-soft)',
+  border: '1px solid color-mix(in oklab, var(--ht-critical) 28%, transparent)',
+}
+
+const FORMAT_BUTTON_STYLE: CSSProperties = {
+  width: 26,
+  height: 26,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  fontSize: 12.5,
+  fontWeight: 700,
+  color: 'var(--ht-ink-muted)',
+  background: 'var(--ht-surface-2)',
+  border: '1px solid var(--ht-border)',
+  borderRadius: 'var(--ht-radius-sm)',
+  cursor: 'pointer',
+}
+
+const CONTENT_EDITABLE_STYLE: CSSProperties = {
+  minHeight: 84,
+  outline: 'none',
+  fontSize: 14,
+  lineHeight: 1.6,
+  color: 'var(--ht-ink)',
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'break-word',
+}
 
 export interface ConversationNeighborPosition {
   index: number
@@ -211,6 +302,48 @@ function ChevronRightIcon() {
   )
 }
 
+function BulletListIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <line x1="9" y1="6" x2="20" y2="6" />
+      <line x1="9" y1="12" x2="20" y2="12" />
+      <line x1="9" y1="18" x2="20" y2="18" />
+      <circle cx="4" cy="6" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="4" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="4" cy="18" r="1.4" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+function LinkIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </svg>
+  )
+}
+
 function CloseIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
@@ -263,16 +396,13 @@ function MessageMenu({
   )
 }
 
-/** Fixed centered modal: the raw source, exactly as it arrived, never rendered as HTML. */
+/**
+ * Fixed centered modal: the raw source, exactly as it arrived, never
+ * rendered as HTML. Escape is handled by the parent's cascading Escape
+ * handler (this modal has top priority in that cascade), not locally — a
+ * single owner avoids two listeners racing to close the same state.
+ */
 function OriginalMessageModal({ thread, onClose }: { thread: ThreadView; onClose: () => void }) {
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
-
   const bodyKind =
     thread.bodyHtml !== null && thread.bodyText !== null && thread.bodyText !== ''
       ? 'HTML + text'
@@ -400,13 +530,35 @@ export function ConversationScreen({
   const router = useRouter()
   const showToast = useToast()
   const { isStarred, toggle } = useStarred()
+  const { isOpen: isShortcutsOverlayOpen } = useShortcutsOverlay()
 
-  const [draft, setDraft] = useState('')
-  const [error, setError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
-  // One key per logical send (spec §4a) — rotated only on success.
+
+  // The summoned composer — hidden by default (spec: opens via the toolbar,
+  // r/n, or automatically when a saved draft exists).
+  const [composerOpen, setComposerOpen] = useState(false)
+  const [composerMode, setComposerMode] = useState<'reply' | 'note'>('reply')
+  const [composerError, setComposerError] = useState<string | null>(null)
+  const [sendFailed, setSendFailed] = useState(false)
+  const [replyTextLength, setReplyTextLength] = useState(0)
+  const [noteDraft, setNoteDraft] = useState('')
+  // Bumped by the per-conversation reset below so the DOM-population effect
+  // re-runs even when `composerOpen` itself doesn't change value (both
+  // conversations have a draft, so it's `true` on both sides of a j/k nav).
+  const [composerGeneration, setComposerGeneration] = useState(0)
+
+  const replyBodyRef = useRef<HTMLDivElement | null>(null)
+  const noteTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  // Plain text loaded from localStorage for the CURRENT conversation, and
+  // the live in-session HTML once the Agent has actually typed (so toggling
+  // the composer closed/open again within the same visit keeps formatting —
+  // only localStorage itself is plain-text-only, per the draft contract).
+  const replyDraftTextRef = useRef<string>('')
+  const replyBodyHtmlRef = useRef<string | null>(null)
+  const draftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // One key per logical send (spec §4a) — rotated on success, and on a
+  // validation failure (the original attempt never reached the send path).
   const idempotencyKey = useRef<string>(crypto.randomUUID())
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const [status, setLocalStatus] = useState<ConversationStatus>(conversation.status)
   const [tags, setTags] = useState<string[]>(conversation.tags)
@@ -428,39 +580,274 @@ export function ConversationScreen({
   useEffect(() => {
     return () => {
       if (deleteDisarmTimer.current !== null) clearTimeout(deleteDisarmTimer.current)
+      if (draftSaveTimer.current !== null) clearTimeout(draftSaveTimer.current)
     }
   }, [])
 
-  function send() {
-    const text = draft
-    if (text.length < 1 || text.length > MAX_REPLY_LENGTH) return
-    setError(null)
+  // Per-conversation reset — this component instance is reused across
+  // conversations (j/k, prev/next chevrons navigate without remounting), so
+  // this can't be a one-time mount effect. Loads that conversation's saved
+  // draft and auto-opens the composer when one exists.
+  useEffect(() => {
+    const existingDraft = getDraft(conversation.id) ?? ''
+    replyDraftTextRef.current = existingDraft
+    replyBodyHtmlRef.current = null
+    setReplyTextLength(existingDraft.length)
+    setNoteDraft('')
+    setComposerError(null)
+    setSendFailed(false)
+    idempotencyKey.current = crypto.randomUUID()
+    setComposerGeneration((generation) => generation + 1)
+    if (existingDraft.length > 0) {
+      setComposerMode('reply')
+      setComposerOpen(true)
+    } else {
+      setComposerOpen(false)
+    }
+  }, [conversation.id])
+
+  // Populate the (uncontrolled) contenteditable whenever the reply composer
+  // becomes visible — never on every keystroke, so the caret stays put.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: composerGeneration is the trigger, not read in the body
+  useEffect(() => {
+    if (!composerOpen || composerMode !== 'reply') return
+    const el = replyBodyRef.current
+    if (el === null) return
+    if (replyBodyHtmlRef.current !== null) {
+      el.innerHTML = replyBodyHtmlRef.current
+    } else {
+      el.textContent = replyDraftTextRef.current
+    }
+    setReplyTextLength(normalizedInnerText(el).length)
+    el.focus()
+    const range = document.createRange()
+    range.selectNodeContents(el)
+    range.collapse(false)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+  }, [composerOpen, composerMode, composerGeneration])
+
+  useEffect(() => {
+    if (composerOpen && composerMode === 'note') noteTextareaRef.current?.focus()
+  }, [composerOpen, composerMode])
+
+  function scheduleDraftSave(text: string): void {
+    if (draftSaveTimer.current !== null) clearTimeout(draftSaveTimer.current)
+    draftSaveTimer.current = setTimeout(() => {
+      writeDraft(conversation.id, text)
+      replyDraftTextRef.current = text
+    }, DRAFT_SAVE_DEBOUNCE_MS)
+  }
+
+  function onReplyBodyInput(): void {
+    const el = replyBodyRef.current
+    if (el === null) return
+    replyBodyHtmlRef.current = el.innerHTML
+    const text = normalizedInnerText(el)
+    setReplyTextLength(text.length)
+    setComposerError(null)
+    scheduleDraftSave(text)
+  }
+
+  // document.execCommand is deprecated, but it remains the only
+  // cross-browser way to drive a contenteditable's rich-text edits without
+  // pulling in a full editor library — exactly what the prototype does.
+  function applyFormat(command: 'bold' | 'italic' | 'insertUnorderedList'): void {
+    replyBodyRef.current?.focus()
+    document.execCommand(command)
+    onReplyBodyInput()
+  }
+
+  function applyLink(): void {
+    const url = window.prompt('Link URL')
+    if (url === null || url.trim().length === 0) return
+    replyBodyRef.current?.focus()
+    document.execCommand('createLink', false, url.trim())
+    onReplyBodyInput()
+  }
+
+  function openComposer(mode: 'reply' | 'note'): void {
+    setComposerMode(mode)
+    setComposerError(null)
+    setSendFailed(false)
+    setComposerOpen(true)
+  }
+
+  function closeComposer(): void {
+    setComposerOpen(false)
+  }
+
+  function switchComposerMode(mode: 'reply' | 'note'): void {
+    setComposerMode(mode)
+    setComposerError(null)
+    setSendFailed(false)
+  }
+
+  function sendReply(): void {
+    const el = replyBodyRef.current
+    const text = el !== null ? normalizedInnerText(el) : ''
+    if (text.length < 1) {
+      setComposerError("Write a reply first — the message can't be empty.")
+      return
+    }
+    if (text.length > MAX_REPLY_LENGTH) {
+      setComposerError('Replies are limited to 5,000 characters.')
+      return
+    }
+    setComposerError(null)
+    setSendFailed(false)
+    const html = el !== null && hasRichFormatting(el) ? el.innerHTML : undefined
+    const wasClosedOrSpam = status === 'closed' || status === 'spam'
     startTransition(async () => {
-      const result = await sendReplyAction(conversation.id, text, idempotencyKey.current)
+      const result = await sendReplyAction(conversation.id, text, idempotencyKey.current, html)
       if (result.ok) {
-        setDraft('')
+        clearDraft(conversation.id)
+        replyDraftTextRef.current = ''
+        replyBodyHtmlRef.current = null
+        if (el !== null) el.innerHTML = ''
+        setReplyTextLength(0)
         idempotencyKey.current = crypto.randomUUID()
+        setComposerOpen(false)
+        if (wasClosedOrSpam) {
+          setLocalStatus('active')
+          showToast({
+            title: 'Reply sent — conversation reopened',
+            detail: 'Replying to a closed conversation reopens it.',
+          })
+        } else {
+          showToast({ title: 'Reply sent' })
+        }
         router.refresh()
         return
       }
       // Honest failure copy per the design system's content rules; the
-      // draft is preserved in all three cases, and the SAME key retries.
+      // draft is preserved in every outcome.
       if (result.code === 'send_failed') {
-        setError('Nothing reached the customer. The draft is preserved — try again.')
-      } else if (result.code === 'retry_in_progress') {
-        setError('This reply is already being sent. Give it a moment, then try again.')
-      } else {
-        setError(result.message ?? 'Something went wrong. The draft is preserved.')
+        setSendFailed(true)
+        return
       }
+      if (result.code === 'retry_in_progress') {
+        setComposerError('This reply is already being sent. Give it a moment, then try again.')
+        return
+      }
+      if (result.code === 'validation_failed') {
+        // The original attempt never reached the send path — a replay key
+        // has nothing to safely replay, so mint a fresh one.
+        idempotencyKey.current = crypto.randomUUID()
+      }
+      setComposerError(result.message ?? 'Something went wrong. The draft is preserved.')
     })
   }
 
-  function focusComposer(): void {
-    const el = textareaRef.current
-    if (el === null) return
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    el.focus()
+  function sendNote(): void {
+    if (noteDraft.length < 1) {
+      setComposerError("Write a note first — the note can't be empty.")
+      return
+    }
+    if (noteDraft.length > MAX_REPLY_LENGTH) {
+      setComposerError('Notes are limited to 5,000 characters.')
+      return
+    }
+    setComposerError(null)
+    startTransition(async () => {
+      const result = await postNoteAction(conversation.id, noteDraft)
+      if (result.ok) {
+        setNoteDraft('')
+        setComposerOpen(false)
+        showToast({ title: 'Note added', detail: 'Visible to Agents only — never emailed.' })
+        router.refresh()
+        return
+      }
+      setComposerError(result.message ?? 'Something went wrong.')
+    })
   }
+
+  function sendActive(): void {
+    if (composerMode === 'reply') sendReply()
+    else sendNote()
+  }
+
+  // The screen's own shortcuts: j/k conversation nav, r/n open the
+  // composer, ⌘/Ctrl+↵ sends, Escape cascades (original-message modal → any
+  // open menu → composer, draft kept → back to the inbox). The shortcuts
+  // overlay's own Escape handler doesn't stop propagation, so this skips
+  // entirely while it's open — otherwise one Escape press would both close
+  // the overlay AND cascade through this screen's own close logic.
+  //
+  // Kept in a ref (the "latest closure" pattern) rather than the effect's
+  // dependency array: nearly every piece of UI state on this screen affects
+  // this handler, and the DOM listener itself doesn't need to churn on each
+  // one — only the closure it calls does.
+  const onKeyDownRef = useRef<(event: KeyboardEvent) => void>(() => {})
+  onKeyDownRef.current = (event: KeyboardEvent) => {
+    if (isShortcutsOverlayOpen) return
+
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && composerOpen) {
+      event.preventDefault()
+      sendActive()
+      return
+    }
+
+    if (event.key === 'Escape') {
+      if (originalMessage !== null) {
+        setOriginalMessage(null)
+        return
+      }
+      if (
+        tagsMenuOpen ||
+        assigneeMenuOpen ||
+        statusMenuOpen ||
+        moreMenuOpen ||
+        openMessageMenuId !== null
+      ) {
+        setTagsMenuOpen(false)
+        setAssigneeMenuOpen(false)
+        setStatusMenuOpen(false)
+        setMoreMenuOpen(false)
+        setOpenMessageMenuId(null)
+        return
+      }
+      if (composerOpen) {
+        closeComposer()
+        return
+      }
+      router.push('/inbox/open')
+      return
+    }
+
+    const target = event.target as HTMLElement | null
+    const typing =
+      target !== null &&
+      (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+    if (typing) return
+
+    if (event.key === 'j' || event.key === 'k') {
+      const targetId = event.key === 'j' ? position?.nextId : position?.prevId
+      if (targetId != null) {
+        event.preventDefault()
+        router.push(`/conversations/${targetId}`)
+      }
+      return
+    }
+    if (event.key === 'r') {
+      event.preventDefault()
+      openComposer('reply')
+      return
+    }
+    if (event.key === 'n') {
+      event.preventDefault()
+      openComposer('note')
+    }
+  }
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      onKeyDownRef.current(event)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   function changeStatus(next: ConversationStatus): void {
     setStatusMenuOpen(false)
@@ -576,18 +963,10 @@ export function ConversationScreen({
             ← Inbox
           </button>
 
-          <IconButton title="Reply (r)" onClick={focusComposer}>
+          <IconButton title="Reply (r)" onClick={() => openComposer('reply')}>
             <ReplyIcon />
           </IconButton>
-          <IconButton
-            title="Add a note (n)"
-            onClick={() =>
-              showToast({
-                title: "Notes composer isn't wired yet",
-                detail: 'Designed for v1 — arriving with the composer increment.',
-              })
-            }
-          >
+          <IconButton title="Add a note (n)" onClick={() => openComposer('note')}>
             <NoteIcon />
           </IconButton>
 
@@ -844,59 +1223,208 @@ export function ConversationScreen({
           <StatusPill status={status} />
         </ToolbarBand>
 
-        <div
-          style={{
-            margin: 14,
-            borderRadius: 'var(--ht-radius-lg, 8px)',
-            border: '1px solid var(--ht-border)',
-            background: 'var(--ht-surface)',
-            boxShadow: 'var(--ht-shadow-md, 0 2px 10px rgba(0,0,0,0.06))',
-            padding: 12,
-          }}
-        >
-          <textarea
-            ref={textareaRef}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={`Reply to ${customerName}…`}
-            rows={4}
-            maxLength={MAX_REPLY_LENGTH}
+        {composerOpen && (
+          <div
             style={{
-              width: '100%',
-              boxSizing: 'border-box',
-              border: 'none',
-              outline: 'none',
-              resize: 'vertical',
-              font: 'inherit',
-              fontSize: 14,
-              lineHeight: 1.6,
-              background: 'transparent',
-              color: 'var(--ht-ink)',
+              margin: 14,
+              borderRadius: 'var(--ht-radius-lg, 8px)',
+              border: '1px solid var(--ht-border)',
+              background: 'var(--ht-surface)',
+              boxShadow: 'var(--ht-shadow-md, 0 2px 10px rgba(0,0,0,0.06))',
+              padding: 12,
             }}
-          />
-          {error !== null && (
-            <div
-              style={{ marginTop: 6, fontSize: 12.5, fontWeight: 600, color: 'var(--ht-critical)' }}
-            >
-              {error}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => switchComposerMode('reply')}
+                  style={pillTabStyle(composerMode === 'reply')}
+                >
+                  Reply
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchComposerMode('note')}
+                  style={pillTabStyle(composerMode === 'note')}
+                >
+                  Note
+                </button>
+              </div>
+              <span style={{ flex: 1 }} />
+              <IconButton title="Close composer — your draft is kept" onClick={closeComposer}>
+                <CloseIcon />
+              </IconButton>
             </div>
-          )}
-          <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span
-              style={{
-                fontSize: 11.5,
-                color: 'var(--ht-ink-dim)',
-                fontVariantNumeric: 'tabular-nums',
-              }}
-            >
-              {draft.length}/{MAX_REPLY_LENGTH}
-            </span>
-            <span style={{ flex: 1 }} />
-            <Button variant="primary" disabled={isPending || draft.length === 0} onClick={send}>
-              {isPending ? 'Sending…' : 'Send reply'}
-            </Button>
+
+            {composerMode === 'note' && (
+              <div style={WARN_BANNER_STYLE}>
+                Internal note — visible to Agents only, never emailed to the customer.
+              </div>
+            )}
+            {composerMode === 'reply' && (status === 'closed' || status === 'spam') && (
+              <div style={WARN_BANNER_STYLE}>
+                This conversation is closed — sending a reply will reopen it.
+              </div>
+            )}
+            {composerMode === 'reply' && sendFailed && (
+              <div style={CRITICAL_BANNER_STYLE}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ht-critical)' }}>
+                  Your reply couldn't be delivered.
+                </div>
+                <div style={{ marginTop: 2, fontSize: 12.5, color: 'var(--ht-ink-muted)' }}>
+                  Nothing reached the customer. The draft is preserved.
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <Button variant="outline" disabled={isPending} onClick={sendReply}>
+                    {isPending ? 'Sending…' : 'Retry send'}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {composerMode === 'reply' ? (
+              <>
+                <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                  <button
+                    type="button"
+                    title="Bold"
+                    onClick={() => applyFormat('bold')}
+                    style={FORMAT_BUTTON_STYLE}
+                  >
+                    <b>B</b>
+                  </button>
+                  <button
+                    type="button"
+                    title="Italic"
+                    onClick={() => applyFormat('italic')}
+                    style={FORMAT_BUTTON_STYLE}
+                  >
+                    <i>I</i>
+                  </button>
+                  <button
+                    type="button"
+                    title="Bulleted list"
+                    onClick={() => applyFormat('insertUnorderedList')}
+                    style={FORMAT_BUTTON_STYLE}
+                  >
+                    <BulletListIcon />
+                  </button>
+                  <button
+                    type="button"
+                    title="Link"
+                    onClick={applyLink}
+                    style={FORMAT_BUTTON_STYLE}
+                  >
+                    <LinkIcon />
+                  </button>
+                </div>
+                <div style={{ position: 'relative' }}>
+                  {replyTextLength === 0 && (
+                    <div
+                      aria-hidden="true"
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        pointerEvents: 'none',
+                        fontSize: 14,
+                        lineHeight: 1.6,
+                        color: 'var(--ht-ink-dim)',
+                      }}
+                    >
+                      Reply to {customerName}…
+                    </div>
+                  )}
+                  {/* biome-ignore lint/a11y/useSemanticElements: rich-text
+                      formatting (bold/italic/list/link via execCommand)
+                      requires a contenteditable element — a <textarea>
+                      cannot host it. */}
+                  <div
+                    ref={replyBodyRef}
+                    contentEditable
+                    onInput={onReplyBodyInput}
+                    role="textbox"
+                    tabIndex={0}
+                    aria-multiline="true"
+                    aria-label={`Reply to ${customerName}`}
+                    suppressContentEditableWarning
+                    style={CONTENT_EDITABLE_STYLE}
+                  />
+                </div>
+                <div style={{ marginTop: 4, fontSize: 11, color: 'var(--ht-ink-dim)' }}>
+                  Formatting is sent as HTML alongside plain text
+                </div>
+              </>
+            ) : (
+              <textarea
+                ref={noteTextareaRef}
+                value={noteDraft}
+                onChange={(event) => {
+                  setNoteDraft(event.target.value)
+                  setComposerError(null)
+                }}
+                placeholder="Add an internal note…"
+                rows={4}
+                maxLength={MAX_REPLY_LENGTH}
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  border: 'none',
+                  outline: 'none',
+                  resize: 'vertical',
+                  font: 'inherit',
+                  fontSize: 14,
+                  lineHeight: 1.6,
+                  background: 'transparent',
+                  color: 'var(--ht-ink)',
+                }}
+              />
+            )}
+
+            {composerError !== null && (
+              <div
+                style={{
+                  marginTop: 6,
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                  color: 'var(--ht-critical)',
+                }}
+              >
+                {composerError}
+              </div>
+            )}
+
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span
+                style={counterStyle(composerMode === 'reply' ? replyTextLength : noteDraft.length)}
+              >
+                {(composerMode === 'reply' ? replyTextLength : noteDraft.length).toLocaleString()} /
+                5,000
+              </span>
+              <span style={{ flex: 1 }} />
+              <span style={{ fontSize: 11, color: 'var(--ht-ink-dim)' }}>⌘/Ctrl + ↵ to send</span>
+              <Button
+                variant="primary"
+                disabled={
+                  isPending ||
+                  (composerMode === 'reply' ? replyTextLength : noteDraft.length) === 0 ||
+                  (composerMode === 'reply' ? replyTextLength : noteDraft.length) > MAX_REPLY_LENGTH
+                }
+                onClick={sendActive}
+              >
+                {composerMode === 'reply'
+                  ? isPending
+                    ? 'Sending…'
+                    : 'Send reply'
+                  : isPending
+                    ? 'Adding…'
+                    : 'Add note'}
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
 
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
           {threadsNewestFirst.map(({ thread, sameSpeakerAsPrev }) => {
