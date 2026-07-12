@@ -84,10 +84,12 @@ async function main(): Promise<void> {
     supportAddress: SUPPORT_ADDRESS,
   })
 
-  const baseUrl = `http://localhost:${PORT}`
+  const baseUrl = `http://127.0.0.1:${PORT}`
   const server = createServer(createHttpBridge(api, baseUrl))
+  // Bind explicitly to loopback — this dev harness must never listen on the
+  // LAN (the default token is public knowledge, right there in this file).
   await new Promise<void>((resolve) => {
-    server.listen(PORT, resolve)
+    server.listen(PORT, '127.0.0.1', resolve)
   })
 
   console.log('')
@@ -113,7 +115,10 @@ async function main(): Promise<void> {
 
   const shutdown = async (): Promise<void> => {
     console.log('\n[dev-api] shutting down...')
-    server.close()
+    // Wait for in-flight requests to drain before closing the db/exiting.
+    await new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()))
+    })
     await db.close()
     process.exit(0)
   }

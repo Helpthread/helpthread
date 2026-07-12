@@ -144,7 +144,7 @@ export async function seedDevData(deps: SeedDevDataDeps): Promise<SeedDevDataRes
     },
   })
   conversationCount++
-  await sendReply(
+  const sentReply = await sendReply(
     {
       conversationId: sentDemo.conversationId,
       from: supportAddress,
@@ -157,6 +157,9 @@ export async function seedDevData(deps: SeedDevDataDeps): Promise<SeedDevDataRes
     },
     { store, sender, keyring, mailDomain },
   )
+  if (!sentReply.ok) {
+    throw new Error("seed: expected the 'sent' delivery-state demo's reply to send successfully")
+  }
 
   // --- 4. Outbound delivery state: 'failed'. ---------------------------------
   const failedDemo = await store.createConversation({
@@ -251,7 +254,7 @@ export async function seedDevData(deps: SeedDevDataDeps): Promise<SeedDevDataRes
     },
   })
   conversationCount++
-  await sendReply(
+  const closedReply = await sendReply(
     {
       conversationId: closedDemo.conversationId,
       from: supportAddress,
@@ -264,6 +267,9 @@ export async function seedDevData(deps: SeedDevDataDeps): Promise<SeedDevDataRes
     },
     { store, sender, keyring, mailDomain },
   )
+  if (!closedReply.ok) {
+    throw new Error("seed: expected the closed-conversation demo's reply to send successfully")
+  }
   await store.setConversationStatus(closedDemo.conversationId, 'closed')
 
   return { conversationCount }

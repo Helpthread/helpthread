@@ -68,9 +68,12 @@ describe('seedDevData', () => {
       .map((t) => t.deliveryStatus)
       .filter((s): s is 'pending' | 'sent' | 'failed' => s !== null)
 
-    expect(deliveryStatuses).toContain('sent')
-    expect(deliveryStatuses).toContain('failed')
-    expect(deliveryStatuses).toContain('pending')
+    // Exact distribution: the threaded demo's 2 replies + the lone 'sent'
+    // demo's reply + the closed demo's reply = 4 'sent'; 1 'failed' (the
+    // simulated provider rejection); 1 'pending' (the backdated stale demo).
+    expect(deliveryStatuses.filter((s) => s === 'sent')).toHaveLength(4)
+    expect(deliveryStatuses.filter((s) => s === 'failed')).toHaveLength(1)
+    expect(deliveryStatuses.filter((s) => s === 'pending')).toHaveLength(1)
 
     // The stale-pending demo's row must actually be old enough for the
     // delivery worker's default staleAfterMs window (src/mail/delivery-worker.ts) —
