@@ -1,6 +1,10 @@
 import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import '../theme/helpthread.css'
+import { ShortcutsProvider } from '../components/ShortcutsProvider'
+import { ThemeProvider } from '../components/ThemeProvider'
+import { ToasterProvider } from '../components/Toaster'
+import { THEME_INIT_SCRIPT } from '../lib/theme'
 
 export const metadata: Metadata = {
   title: 'Helpthread',
@@ -14,7 +18,20 @@ export const metadata: Metadata = {
  */
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    // suppressHydrationWarning: the inline script below sets `data-theme` on
+    // this element BEFORE React hydrates (that's the whole point — it avoids
+    // a flash of the wrong theme), so the attribute React sees during
+    // hydration legitimately differs from what it server-rendered. This is
+    // the standard fix for this exact pattern (see e.g. next-themes); it
+    // only suppresses the warning for this one element's own attributes; it
+    // has no effect on children.
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* biome-ignore lint/security/noDangerouslySetInnerHtml: pre-hydration
+            theme apply, must run standalone before any bundle loads — see
+            lib/theme.ts */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body
         style={{
           margin: 0,
@@ -26,28 +43,34 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           minHeight: '100vh',
         }}
       >
-        <header
-          style={{
-            background: 'var(--ht-header-bg)',
-            color: 'var(--ht-header-fg)',
-            padding: '10px 18px',
-            display: 'flex',
-            alignItems: 'baseline',
-            gap: 12,
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "var(--ht-serif, 'Source Serif 4', serif)",
-              fontSize: 18,
-              fontWeight: 600,
-              letterSpacing: '0.01em',
-            }}
-          >
-            helpthread<span style={{ opacity: 0.55 }}>.</span>
-          </span>
-        </header>
-        {children}
+        <ThemeProvider>
+          <ToasterProvider>
+            <ShortcutsProvider>
+              <header
+                style={{
+                  background: 'var(--ht-header-bg)',
+                  color: 'var(--ht-header-fg)',
+                  padding: '10px 18px',
+                  display: 'flex',
+                  alignItems: 'baseline',
+                  gap: 12,
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: "var(--ht-serif, 'Source Serif 4', serif)",
+                    fontSize: 18,
+                    fontWeight: 600,
+                    letterSpacing: '0.01em',
+                  }}
+                >
+                  helpthread<span style={{ opacity: 0.55 }}>.</span>
+                </span>
+              </header>
+              {children}
+            </ShortcutsProvider>
+          </ToasterProvider>
+        </ThemeProvider>
       </body>
     </html>
   )
