@@ -43,7 +43,10 @@ export function AppError({
           maxWidth: 360,
         }}
       >
-        <div style={{ fontSize: 15, fontWeight: 700 }}>Something went wrong.</div>
+        <div style={{ fontSize: 15, fontWeight: 700 }}>The inbox couldn't load.</div>
+        <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--ht-ink-dim)' }}>
+          {error.message}
+        </div>
         <div style={{ marginTop: 16 }}>
           <Button variant="outline" onClick={reset}>
             Try again
