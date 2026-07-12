@@ -19,6 +19,7 @@ import { useRef, useState, useTransition } from 'react'
 import { sendReplyAction, setStatusAction } from '../lib/actions'
 import type { ConversationDetail, ConversationStatus } from '../lib/api-types'
 import { nameFromEmail, relativeTime } from '../lib/format'
+import { Avatar } from './ds/core/Avatar'
 import { Button } from './ds/core/Button'
 import { StatusPill } from './ds/core/StatusPill'
 import { TagChip } from './ds/core/TagChip'
@@ -70,141 +71,231 @@ export function ConversationScreen({ conversation }: { conversation: Conversatio
   const customerName = nameFromEmail(conversation.customerEmail)
 
   return (
-    <main
-      style={{
-        flex: 1,
-        minWidth: 0,
-        background: 'var(--ht-surface)',
-        display: 'flex',
-        flexDirection: 'column',
-        minHeight: 0,
-      }}
-    >
-      <ToolbarBand>
-        <button
-          type="button"
-          onClick={() => router.push('/inbox/open')}
-          style={{
-            border: 'none',
-            background: 'none',
-            color: 'var(--ht-ink-muted)',
-            fontSize: 13,
-            cursor: 'pointer',
-            padding: '4px 6px',
-          }}
-        >
-          ← Inbox
-        </button>
-        <span style={{ fontSize: 14, fontWeight: 700, marginLeft: 4 }}>{conversation.subject}</span>
-        <span
-          style={{
-            fontFamily: 'var(--ht-mono)',
-            fontSize: 11.5,
-            color: 'var(--ht-ink-dim)',
-            fontVariantNumeric: 'tabular-nums',
-          }}
-        >
-          #{conversation.number}
-        </span>
-        <StatusPill status={conversation.status} />
-        {conversation.tags.map((tag) => (
-          <TagChip key={tag} label={tag} />
-        ))}
-        <span style={{ flex: 1 }} />
-        {conversation.status === 'closed' || conversation.status === 'spam' ? (
-          <Button variant="outline" disabled={isPending} onClick={() => changeStatus('active')}>
-            Reopen
-          </Button>
-        ) : (
-          <Button variant="outline" disabled={isPending} onClick={() => changeStatus('closed')}>
-            Close
-          </Button>
-        )}
-      </ToolbarBand>
-
-      <div style={{ flex: 1, overflowY: 'auto' }}>
-        {conversation.threads.map((thread, index) => {
-          const prev = conversation.threads[index - 1]
-          const kind = thread.direction
-          return (
-            <MessageBand
-              key={thread.id}
-              kind={kind}
-              fromLabel={
-                kind === 'inbound' ? customerName : kind === 'note' ? 'Internal note' : 'You'
-              }
-              fromAddr={thread.from}
-              time={relativeTime(thread.createdAt)}
-              delivery={thread.deliveryStatus ?? undefined}
-              failed={thread.deliveryStatus === 'failed'}
-              viewedAt={
-                thread.customerViewedAt !== null ? relativeTime(thread.customerViewedAt) : undefined
-              }
-              sameSpeakerAsPrev={prev !== undefined && prev.direction === kind}
-              email={kind === 'inbound' ? conversation.customerEmail : thread.from}
-            >
-              {thread.bodyHtml !== null ? (
-                <SanitizedHtml html={thread.bodyHtml} />
-              ) : (
-                (thread.bodyText ?? '')
-              )}
-            </MessageBand>
-          )
-        })}
-      </div>
-
-      <div
+    <div style={{ flex: 1, minWidth: 0, display: 'flex', minHeight: 0 }}>
+      <main
         style={{
-          margin: 14,
-          borderRadius: 'var(--ht-radius-lg, 8px)',
-          border: '1px solid var(--ht-border)',
+          flex: 1,
+          minWidth: 0,
           background: 'var(--ht-surface)',
-          boxShadow: 'var(--ht-shadow-md, 0 2px 10px rgba(0,0,0,0.06))',
-          padding: 12,
+          boxShadow: 'var(--ht-seam-shadow, -1px 0 0 var(--ht-divider))',
+          display: 'flex',
+          flexDirection: 'column',
+          minHeight: 0,
         }}
       >
-        <textarea
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder={`Reply to ${customerName}…`}
-          rows={4}
-          maxLength={MAX_REPLY_LENGTH}
-          style={{
-            width: '100%',
-            boxSizing: 'border-box',
-            border: 'none',
-            outline: 'none',
-            resize: 'vertical',
-            font: 'inherit',
-            fontSize: 14,
-            lineHeight: 1.6,
-            background: 'transparent',
-            color: 'var(--ht-ink)',
-          }}
-        />
-        {error !== null && (
-          <div
-            style={{ marginTop: 6, fontSize: 12.5, fontWeight: 600, color: 'var(--ht-critical)' }}
+        <ToolbarBand>
+          <button
+            type="button"
+            onClick={() => router.push('/inbox/open')}
+            style={{
+              border: 'none',
+              background: 'none',
+              color: 'var(--ht-ink-muted)',
+              fontSize: 13,
+              cursor: 'pointer',
+              padding: '4px 6px',
+            }}
           >
-            {error}
-          </div>
-        )}
-        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+            ← Inbox
+          </button>
+          <span style={{ fontSize: 14, fontWeight: 700, marginLeft: 4 }}>
+            {conversation.subject}
+          </span>
           <span
             style={{
+              fontFamily: 'var(--ht-mono)',
               fontSize: 11.5,
               color: 'var(--ht-ink-dim)',
               fontVariantNumeric: 'tabular-nums',
             }}
           >
-            {draft.length}/{MAX_REPLY_LENGTH}
+            #{conversation.number}
           </span>
+          <StatusPill status={conversation.status} />
+          {conversation.tags.map((tag) => (
+            <TagChip key={tag} label={tag} />
+          ))}
           <span style={{ flex: 1 }} />
-          <Button variant="primary" disabled={isPending || draft.length === 0} onClick={send}>
-            {isPending ? 'Sending…' : 'Send reply'}
-          </Button>
+          {conversation.status === 'closed' || conversation.status === 'spam' ? (
+            <Button variant="outline" disabled={isPending} onClick={() => changeStatus('active')}>
+              Reopen
+            </Button>
+          ) : (
+            <Button variant="outline" disabled={isPending} onClick={() => changeStatus('closed')}>
+              Close
+            </Button>
+          )}
+        </ToolbarBand>
+
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {conversation.threads.map((thread, index) => {
+            const prev = conversation.threads[index - 1]
+            const kind = thread.direction
+            return (
+              <MessageBand
+                key={thread.id}
+                kind={kind}
+                fromLabel={
+                  kind === 'inbound' ? customerName : kind === 'note' ? 'Internal note' : 'You'
+                }
+                fromAddr={thread.from}
+                time={relativeTime(thread.createdAt)}
+                delivery={thread.deliveryStatus ?? undefined}
+                failed={thread.deliveryStatus === 'failed'}
+                viewedAt={
+                  thread.customerViewedAt !== null
+                    ? relativeTime(thread.customerViewedAt)
+                    : undefined
+                }
+                sameSpeakerAsPrev={prev !== undefined && prev.direction === kind}
+                email={kind === 'inbound' ? conversation.customerEmail : thread.from}
+              >
+                {thread.bodyHtml !== null ? (
+                  <SanitizedHtml html={thread.bodyHtml} />
+                ) : (
+                  (thread.bodyText ?? '')
+                )}
+              </MessageBand>
+            )
+          })}
         </div>
-      </div>
-    </main>
+
+        <div
+          style={{
+            margin: 14,
+            borderRadius: 'var(--ht-radius-lg, 8px)',
+            border: '1px solid var(--ht-border)',
+            background: 'var(--ht-surface)',
+            boxShadow: 'var(--ht-shadow-md, 0 2px 10px rgba(0,0,0,0.06))',
+            padding: 12,
+          }}
+        >
+          <textarea
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder={`Reply to ${customerName}…`}
+            rows={4}
+            maxLength={MAX_REPLY_LENGTH}
+            style={{
+              width: '100%',
+              boxSizing: 'border-box',
+              border: 'none',
+              outline: 'none',
+              resize: 'vertical',
+              font: 'inherit',
+              fontSize: 14,
+              lineHeight: 1.6,
+              background: 'transparent',
+              color: 'var(--ht-ink)',
+            }}
+          />
+          {error !== null && (
+            <div
+              style={{ marginTop: 6, fontSize: 12.5, fontWeight: 600, color: 'var(--ht-critical)' }}
+            >
+              {error}
+            </div>
+          )}
+          <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span
+              style={{
+                fontSize: 11.5,
+                color: 'var(--ht-ink-dim)',
+                fontVariantNumeric: 'tabular-nums',
+              }}
+            >
+              {draft.length}/{MAX_REPLY_LENGTH}
+            </span>
+            <span style={{ flex: 1 }} />
+            <Button variant="primary" disabled={isPending || draft.length === 0} onClick={send}>
+              {isPending ? 'Sending…' : 'Send reply'}
+            </Button>
+          </div>
+        </div>
+      </main>
+
+      <aside
+        aria-label="Conversation details"
+        style={{
+          width: 240,
+          flexShrink: 0,
+          borderLeft: '1px solid var(--ht-divider)',
+          background: 'var(--ht-surface)',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <ToolbarBand tone="panel">
+          <span
+            style={{
+              fontSize: 10.5,
+              fontWeight: 700,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              color: 'var(--ht-ink-muted)',
+            }}
+          >
+            Customer
+          </span>
+        </ToolbarBand>
+        <div style={{ padding: '16px 14px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Avatar email={conversation.customerEmail} size={36} ring />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{customerName}</div>
+              <div
+                style={{
+                  fontFamily: 'var(--ht-mono)',
+                  fontSize: 11,
+                  color: 'var(--ht-ink-dim)',
+                  overflowWrap: 'break-word',
+                }}
+              >
+                {conversation.customerEmail}
+              </div>
+            </div>
+          </div>
+
+          <dl
+            style={{
+              margin: 0,
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr',
+              rowGap: 8,
+              columnGap: 12,
+              fontSize: 12,
+            }}
+          >
+            <dt style={{ color: 'var(--ht-ink-dim)' }}>Status</dt>
+            <dd style={{ margin: 0 }}>
+              <StatusPill
+                status={conversation.status}
+                style={{ fontSize: 9.5, padding: '1px 7px' }}
+              />
+            </dd>
+            <dt style={{ color: 'var(--ht-ink-dim)' }}>Started</dt>
+            <dd style={{ margin: 0, fontVariantNumeric: 'tabular-nums' }}>
+              {relativeTime(conversation.createdAt)}
+            </dd>
+            <dt style={{ color: 'var(--ht-ink-dim)' }}>Last activity</dt>
+            <dd style={{ margin: 0, fontVariantNumeric: 'tabular-nums' }}>
+              {relativeTime(conversation.updatedAt)}
+            </dd>
+            <dt style={{ color: 'var(--ht-ink-dim)' }}>Messages</dt>
+            <dd style={{ margin: 0, fontVariantNumeric: 'tabular-nums' }}>
+              {conversation.threadCount}
+            </dd>
+          </dl>
+
+          {conversation.tags.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {conversation.tags.map((tag) => (
+                <TagChip key={tag} label={tag} />
+              ))}
+            </div>
+          )}
+        </div>
+      </aside>
+    </div>
   )
 }

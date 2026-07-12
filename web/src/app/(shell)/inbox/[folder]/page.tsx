@@ -1,7 +1,7 @@
 import { notFound } from 'next/navigation'
-import { InboxScreen } from '../../../components/InboxScreen'
-import { listConversations } from '../../../lib/api'
-import type { ConversationFolder } from '../../../lib/api-types'
+import { InboxScreen } from '../../../../components/InboxScreen'
+import { listConversations } from '../../../../lib/api'
+import type { ConversationFolder } from '../../../../lib/api-types'
 
 const FOLDERS: ReadonlySet<string> = new Set(['open', 'closed', 'spam'])
 
