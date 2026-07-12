@@ -94,6 +94,17 @@ describe('pixel injection & url', () => {
     )
   })
 
+  it('length-changing Unicode case folds before </body> do not shift the insertion point', () => {
+    // 'İ' (U+0130) lowercases to TWO code units — an offset derived from
+    // toLowerCase() would splice one character too late. The pixel must land
+    // exactly before </body> regardless.
+    const html = '<html><body><p>İstanbul İİİ</p></body></html>'
+    const out = injectTrackingPixel(html, 'u')
+    expect(out).toBe(
+      '<html><body><p>İstanbul İİİ</p><img src="u" width="1" height="1" alt="" style="display:none"></body></html>',
+    )
+  })
+
   it('pixelUrlFor tolerates a trailing slash on the base url', () => {
     expect(pixelUrlFor('https://x.test/', 'tok')).toBe('https://x.test/api/v1/t/tok.gif')
     expect(pixelUrlFor('https://x.test', 'tok')).toBe('https://x.test/api/v1/t/tok.gif')

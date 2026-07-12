@@ -140,9 +140,15 @@ export function pixelUrlFor(publicBaseUrl: string, token: string): string {
  */
 export function injectTrackingPixel(html: string, pixelUrl: string): string {
   const img = `<img src="${pixelUrl}" width="1" height="1" alt="" style="display:none">`
-  const closingBody = /<\/body>/i
-  const lastIndex = html.toLowerCase().lastIndexOf('</body>')
-  if (lastIndex !== -1 && closingBody.test(html)) {
+  // The last </body> is located with a case-insensitive regex over the
+  // ORIGINAL string — never via toLowerCase(), whose Unicode case folds can
+  // CHANGE THE STRING LENGTH (e.g. 'İ' lowercases to two code units) and
+  // shift the splice offset into the middle of unrelated markup.
+  let lastIndex = -1
+  for (const match of html.matchAll(/<\/body>/gi)) {
+    lastIndex = match.index
+  }
+  if (lastIndex !== -1) {
     return `${html.slice(0, lastIndex)}${img}${html.slice(lastIndex)}`
   }
   return `${html}${img}`
