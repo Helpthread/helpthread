@@ -39,15 +39,27 @@ The app's dev defaults match the harness (`http://localhost:8787`,
   rendered: DOMPurify always (spec §5's stored-XSS contract), remote images
   stripped.
 
-## v1 scope shipped here (and what's next)
+## The fidelity mandate (TJ, 2026-07-12)
 
-Inbox folders (Open/Closed/Spam) · conversation view with message bands
-(inbound / Agent reply / internal note / failed-delivery / customer-viewed) ·
-reply composer with the spec §4a idempotency contract (one key per logical
-send, reused on retry; honest failure copy; draft always preserved) ·
-close/reopen.
+**The pixel source of truth is the Claude Design prototype** (`Helpthread
+App.dc.html` in the "Helpthread Agent Inbox Design" project), and this app is
+not done until it matches that design exactly — all of its surface, not a
+subset. Deviations of any kind (visual, copy, interaction) need TJ's explicit
+sign-off. See the "UI fidelity" section of the repo CLAUDE.md; the live gap
+list is the fidelity checklist on
+[HT-23](https://resonantiq.atlassian.net/browse/HT-23).
 
-Not yet wired (API exists for all of them): notes composer, tag editing,
-assignee/Mine, soft delete (two-step arm), keyboard shortcuts, dark-theme
-toggle, settings page, load-older pagination polish, an accessibility pass
-over the design-system components.
+## Shipped so far (first increment)
+
+Persistent shell (folder rail + top bar) · inbox folders (Open/Closed/Spam,
+keyset load-older) · conversation view with message bands (inbound / Agent
+reply / internal note / failed-delivery / customer-viewed) and the Customer
+context panel · reply composer with the spec §4a idempotency contract (one
+key per logical send, reused on retry; honest failure copy; draft always
+preserved) · close/reopen.
+
+Everything else the prototype designs — notes composer, tag editing,
+assignee/Mine, star, soft delete (two-step arm), toasts, keyboard shortcuts,
+dark theme, and whatever else the fidelity checklist enumerates — is REQUIRED
+work under the mandate above, not optional polish. The API for all of it
+already exists.

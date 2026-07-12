@@ -34,6 +34,10 @@ Adapted in our own words from Andrej Karpathy's observations on LLM coding pitfa
 
 **Agents** are human support staff. **Assistants** are AI actors. Never conflate them — in schema, code, docs, or prose.
 
+## UI fidelity (TJ, 2026-07-12)
+
+The Agent Inbox UI's pixel source of truth is the Claude Design prototype — `Helpthread App.dc.html` in the "Helpthread Agent Inbox Design" project (the "Helpthread" design-system project carries the same components). **The dogfood site must match it exactly — the whole designed surface, not a subset.** Design-system files under `web/src/components/ds/` stay verbatim copies; improvements go upstream in the design project first. Any deviation — visual, copy, or interaction — requires TJ's explicit sign-off. Remaining gaps are tracked as the fidelity checklist on [HT-23](https://resonantiq.atlassian.net/browse/HT-23); the ticket is not done until the checklist is.
+
 ## Ecosystem
 
 - **This repo**: engineering truth — charter, specs, ADRs, code.
