@@ -15,7 +15,8 @@
     "format": "biome format --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "dev:api": "tsx scripts/dev-api.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
@@ -29,6 +30,7 @@
     "@types/node": "^20.19.43",
     "@types/pg": "^8.20.0",
     "@vitest/coverage-v8": "4.1.10",
+    "tsx": "^4.23.0",
     "typescript": "7.0.2",
     "vitest": "4.1.10"
   }
