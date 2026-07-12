@@ -34,6 +34,7 @@ import type { EmailSender } from '../providers/index.js'
 import type { ConversationStore } from '../store/conversations.js'
 import { authenticateRequest } from './auth.js'
 import {
+  handleDeleteConversation,
   handleGetConversation,
   handleListConversations,
   handlePatchConversation,
@@ -143,6 +144,9 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
 
         case 'conversation-patch':
           return await handlePatchConversation(route.id, request, { store: deps.store })
+
+        case 'conversation-delete':
+          return await handleDeleteConversation(route.id, { store: deps.store })
 
         case 'conversation-reply':
           return await handleReply(route.id, request, {

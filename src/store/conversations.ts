@@ -417,6 +417,26 @@ export interface ConversationStore {
     conversationId: string,
     status: ConversationStatus,
   ): Promise<ConversationSummary | null>
+
+  /**
+   * Soft-delete a conversation — the write path behind `DELETE
+   * /api/v1/conversations/{id}` (specs/api/agent-inbox-v1.md §4d, v1.1). A
+   * single `UPDATE ... SET status = 'deleted' ... RETURNING`, scoped to
+   * `status <> 'deleted'` so deleting twice reports the second call as a
+   * miss. Returns `true` when a live conversation was deleted, `false` when
+   * no row matched (never existed, or already deleted — indistinguishable,
+   * per the API's no-existence-leak rule, §5).
+   *
+   * Soft, permanently: the row and its threads stay in storage (charter
+   * invariant #1 — never lose customer mail) but nothing surfaces them
+   * again. Every read/write path already treats `'deleted'` as nonexistent
+   * — `getConversation({includeDeleted: false})`, `listConversations` (any
+   * folder), `appendThread` (returns `{reason: 'deleted'}`; a reply token
+   * minted against it starts a fresh conversation, threading.md §5), and
+   * `setConversationStatus` (not reachable) — so this method only has to
+   * flip the flag, not chase down consumers.
+   */
+  deleteConversation(conversationId: string): Promise<boolean>
 }
 
 /**
@@ -801,6 +821,18 @@ export function createConversationStore(db: Db): ConversationStore {
       )
       const row = rows[0]
       return row === undefined ? null : toConversationSummary(row)
+    },
+
+    async deleteConversation(conversationId) {
+      // No updated_at bump: a deleted conversation is never surfaced again,
+      // so its sort key is meaningless — and leaving it untouched keeps the
+      // row an exact record of its last LIVE activity (charter invariant #1:
+      // storage keeps the mail; only visibility changes).
+      const rows = await db.query<{ id: string }>(
+        `UPDATE conversations SET status = 'deleted' WHERE id = $1 AND status <> 'deleted' RETURNING id`,
+        [conversationId],
+      )
+      return rows.length === 1
     },
   }
 }

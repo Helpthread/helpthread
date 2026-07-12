@@ -42,10 +42,17 @@ describe('matchRoute', () => {
     })
   })
 
-  it('returns method-not-allowed for a wrong method on the item route, naming GET and PATCH', () => {
+  it('matches DELETE /api/v1/conversations/{id}, extracting the id (spec §4d, v1.1)', () => {
     expect(matchRoute('DELETE', '/api/v1/conversations/abc-123')).toEqual({
+      kind: 'conversation-delete',
+      id: 'abc-123',
+    })
+  })
+
+  it('returns method-not-allowed for a wrong method on the item route, naming GET, PATCH and DELETE', () => {
+    expect(matchRoute('PUT', '/api/v1/conversations/abc-123')).toEqual({
       kind: 'method-not-allowed',
-      allow: ['GET', 'PATCH'],
+      allow: ['GET', 'PATCH', 'DELETE'],
     })
   })
 

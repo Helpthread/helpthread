@@ -24,10 +24,10 @@ const CONVERSATIONS_LIST: RouteDef = {
   methods: ['GET'],
 }
 
-/** `/api/v1/conversations/{id}` — get (spec §3b) and status patch (spec §4b). */
+/** `/api/v1/conversations/{id}` — get (spec §3b), status patch (spec §4b), and soft delete (spec §4d, v1.1). */
 const CONVERSATION_ITEM: RouteDef = {
   pattern: /^\/api\/v1\/conversations\/(?<id>[^/]+)$/,
-  methods: ['GET', 'PATCH'],
+  methods: ['GET', 'PATCH', 'DELETE'],
 }
 
 /** `/api/v1/conversations/{id}/replies` — the Agent replies (spec §4a), POST only. */
@@ -44,6 +44,7 @@ export type RouteMatch =
   | { kind: 'conversations-list' }
   | { kind: 'conversation-item'; id: string }
   | { kind: 'conversation-patch'; id: string }
+  | { kind: 'conversation-delete'; id: string }
   | { kind: 'conversation-reply'; id: string }
   | { kind: 'method-not-allowed'; allow: string[] }
   | { kind: 'not-found' }
@@ -83,8 +84,11 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     if (route === CONVERSATION_REPLIES) {
       return { kind: 'conversation-reply', id }
     }
-    // route === CONVERSATION_ITEM: GET reads, PATCH updates status.
-    return method === 'GET' ? { kind: 'conversation-item', id } : { kind: 'conversation-patch', id }
+    // route === CONVERSATION_ITEM: GET reads, PATCH updates status, DELETE
+    // soft-deletes (spec §4d, v1.1).
+    if (method === 'GET') return { kind: 'conversation-item', id }
+    if (method === 'DELETE') return { kind: 'conversation-delete', id }
+    return { kind: 'conversation-patch', id }
   }
 
   return { kind: 'not-found' }
