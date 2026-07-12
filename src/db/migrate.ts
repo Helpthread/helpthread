@@ -200,6 +200,46 @@ ALTER TABLE conversations ADD CONSTRAINT conversations_status_check CHECK (statu
 `
 
 /**
+ * Migration 005 — the human-facing conversation `number` (HT-27;
+ * specs/api/agent-inbox-v1.md §2, v1.1).
+ *
+ * A small sequential per-deployment integer for humans (inbox rows,
+ * notifications, "#482" in conversation), assigned from a dedicated sequence
+ * at insert. Display-only by contract: the uuid stays the canonical id and
+ * `number` is never accepted as an identifier anywhere in the API.
+ *
+ * Statement order is load-bearing, in the 002/004 backfill-before-constraint
+ * tradition:
+ *
+ * 1. ADD COLUMN (nullable) — existing rows get NULL, legal at this point.
+ * 2. BACKFILL existing rows in `(created_at, id)` order via `row_number()` —
+ *    the spec's "existing rows are backfilled in creation order" (§2), `id`
+ *    as the stable tiebreak for same-instant rows.
+ * 3. CREATE SEQUENCE + `setval(max(number) + 1, false)` so the next insert
+ *    continues where the backfill left off (on an EMPTY table this is
+ *    `setval(1, false)` — the first conversation is #1). The sequence is
+ *    OWNED BY the column so a future drop cascades cleanly.
+ * 4. Only THEN: SET DEFAULT nextval(...), SET NOT NULL, and the UNIQUE
+ *    constraint — each of which every row now satisfies.
+ *
+ * Postgres resolves the `nextval('conversation_number_seq')` DEFAULT to the
+ * sequence's OID at ALTER time (a `regclass` bind, not a runtime name
+ * lookup), so the HT-20 Postgres adapter's schema option is honored — the
+ * default points at the sequence in the configured schema regardless of the
+ * connection's later search_path.
+ */
+const MIGRATION_005_CONVERSATION_NUMBER = `
+ALTER TABLE conversations ADD COLUMN number integer;
+UPDATE conversations SET number = numbered.rn FROM (SELECT id, row_number() OVER (ORDER BY created_at, id) AS rn FROM conversations) AS numbered WHERE conversations.id = numbered.id;
+CREATE SEQUENCE conversation_number_seq;
+ALTER SEQUENCE conversation_number_seq OWNED BY conversations.number;
+SELECT setval('conversation_number_seq', COALESCE((SELECT max(number) FROM conversations), 0) + 1, false);
+ALTER TABLE conversations ALTER COLUMN number SET DEFAULT nextval('conversation_number_seq');
+ALTER TABLE conversations ALTER COLUMN number SET NOT NULL;
+ALTER TABLE conversations ADD CONSTRAINT conversations_number_key UNIQUE (number);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -220,6 +260,11 @@ const MIGRATIONS: Migration[] = [
     id: 4,
     name: 'four_state_conversation_status',
     sql: MIGRATION_004_FOUR_STATE_CONVERSATION_STATUS,
+  },
+  {
+    id: 5,
+    name: 'conversation_number',
+    sql: MIGRATION_005_CONVERSATION_NUMBER,
   },
 ]
 

@@ -1066,6 +1066,48 @@ describe('createInboxApi', () => {
       })
     })
   })
+
+  // --- number & preview on the wire (HT-27, spec §2 v1.1) -----------------------
+
+  describe('number & preview', () => {
+    it('list summaries carry number (creation order) and preview (latest text, collapsed)', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId: firstId } = await store.createConversation(newConversation())
+      const { conversationId: secondId } = await store.createConversation(newConversation())
+      await store.appendThread(firstId, {
+        direction: 'inbound',
+        messageId: null,
+        fromAddress: 'customer@example.test',
+        bodyText: '  latest\n\nreply  ',
+      })
+
+      const res = await api(get('/api/v1/conversations'))
+      const body = (await res.json()) as {
+        conversations: Array<{ id: string; number: number; preview: string }>
+      }
+      const first = body.conversations.find((c) => c.id === firstId)
+      const second = body.conversations.find((c) => c.id === secondId)
+      expect(first).toMatchObject({ number: 1, preview: 'latest reply' })
+      expect(second).toMatchObject({ number: 2, preview: 'Where is my order?' })
+    })
+
+    it('the detail response carries number and the SAME preview rule as the list', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      // An html-only latest thread — preview must fall back to the inbound text.
+      await store.appendThread(conversationId, {
+        direction: 'inbound',
+        messageId: null,
+        fromAddress: 'customer@example.test',
+        bodyHtml: '<p>rich only</p>',
+      })
+
+      const res = await api(get(`/api/v1/conversations/${conversationId}`))
+      const body = (await res.json()) as { number: number; preview: string }
+      expect(body.number).toBe(1)
+      expect(body.preview).toBe('Where is my order?')
+    })
+  })
 })
 
 describe('createInboxApi — hardening (Codex review)', () => {

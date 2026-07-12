@@ -885,4 +885,73 @@ describe('createConversationStore', () => {
       expect(eligible.map((t) => t.id)).toEqual([ids[0], ids[1]])
     })
   })
+
+  describe('number & preview (HT-27, spec §2 v1.1)', () => {
+    it('summaries carry the sequential number (creation order) and getConversation carries it too', async () => {
+      const { store } = await freshStore()
+      const { conversationId: firstId } = await store.createConversation(newConversation())
+      const { conversationId: secondId } = await store.createConversation(newConversation())
+
+      const all = await store.listConversations({ limit: 50 })
+      expect(all.find((c) => c.id === firstId)?.number).toBe(1)
+      expect(all.find((c) => c.id === secondId)?.number).toBe(2)
+
+      const detail = await store.getConversation(firstId)
+      expect(detail?.number).toBe(1)
+    })
+
+    it("preview is the latest thread's text, whitespace-collapsed and capped at 120 chars", async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const messy = `  padded\t\tand\n\nbroken   ${'x'.repeat(200)}`
+      await store.appendThread(conversationId, newThread({ bodyText: messy }))
+
+      const [summary] = await store.listConversations({ limit: 50 })
+      const expected = `padded and broken ${'x'.repeat(200)}`.slice(0, 120)
+      expect(summary.preview).toBe(expected)
+      expect(summary.preview.length).toBe(120)
+    })
+
+    it('an html-only latest thread is skipped — preview falls back to the most recent thread WITH text', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await store.appendThread(
+        conversationId,
+        newThread({ bodyText: null, bodyHtml: '<p>rich only</p>' }),
+      )
+
+      const [summary] = await store.listConversations({ limit: 50 })
+      // Falls back past the html-only append to the first (inbound) thread's text.
+      expect(summary.preview).toBe('Where is my order?')
+    })
+
+    it("preview is '' when no thread has text at all", async () => {
+      const { store } = await freshStore()
+      await store.createConversation(
+        newConversation({
+          firstMessage: {
+            direction: 'inbound',
+            messageId: null,
+            fromAddress: 'customer@example.test',
+            bodyHtml: '<p>html only</p>',
+          },
+        }),
+      )
+
+      const [summary] = await store.listConversations({ limit: 50 })
+      expect(summary.preview).toBe('')
+    })
+
+    it('setConversationStatus returns number and preview on the updated summary', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const summary = await store.setConversationStatus(conversationId, 'closed')
+      expect(summary).toMatchObject({
+        id: conversationId,
+        number: 1,
+        preview: 'Where is my order?',
+      })
+    })
+  })
 })

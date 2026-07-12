@@ -210,6 +210,13 @@ export type ConversationFolder = 'open' | 'closed' | 'spam'
 /** A conversation as read back from storage — camelCase, timestamps as `Date`. */
 export interface StoredConversation {
   id: string
+  /**
+   * Sequential per-deployment human-facing id (v1.1, HT-27; spec §2),
+   * assigned by `conversation_number_seq` at insert (migration 005). Display
+   * only — the uuid `id` remains the canonical key, and `number` is never
+   * accepted as an identifier anywhere.
+   */
+  number: number
   subject: string
   customerEmail: string
   status: ConversationStatus | 'deleted'
@@ -427,6 +434,33 @@ const THREAD_COUNT_SUBQUERY =
   '(SELECT count(*) FROM threads t WHERE t.conversation_id = c.id)::int AS thread_count'
 
 /**
+ * Correlated subquery for a conversation's most recent thread body that has
+ * text — the raw input to {@link derivePreview} (spec §2's `preview`
+ * derivation: "the most recent thread with a non-null `bodyText`", any
+ * direction). The whitespace collapse and truncation happen in JS
+ * ({@link derivePreview}), not SQL — string munging is clearer and cheaper
+ * to test there; SQL's only job is picking the right row.
+ */
+const LATEST_BODY_TEXT_SUBQUERY =
+  '(SELECT t.body_text FROM threads t WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text'
+
+/** Maximum length of a derived `preview`, per spec §2 (v1.1, HT-27). */
+const PREVIEW_MAX_LENGTH = 120
+
+/**
+ * Derive a `ConversationSummary.preview` from a thread body (spec §2, v1.1):
+ * whitespace collapsed to single spaces, trimmed, first
+ * {@link PREVIEW_MAX_LENGTH} characters; `''` when there is no text at all.
+ * Exported because the API's conversation-detail handler applies the SAME
+ * rule to the threads it already holds (`src/api/conversations.ts`) — one
+ * definition, two call sites.
+ */
+export function derivePreview(bodyText: string | null): string {
+  if (bodyText === null) return ''
+  return bodyText.replace(/\s+/g, ' ').trim().slice(0, PREVIEW_MAX_LENGTH)
+}
+
+/**
  * A conversation summary as read back for the inbox list — the same
  * conversation fields as {@link StoredConversation} minus the internal
  * `deleted` status (never surfaced, per spec §3a) plus `threadCount`, a
@@ -437,10 +471,14 @@ const THREAD_COUNT_SUBQUERY =
  */
 export interface ConversationSummary {
   id: string
+  /** Sequential per-deployment display id — see {@link StoredConversation.number}. */
+  number: number
   subject: string
   customerEmail: string
   status: ConversationStatus
   threadCount: number
+  /** Derived excerpt of the latest thread with text — see {@link derivePreview}. */
+  preview: string
   createdAt: Date
   updatedAt: Date
 }
@@ -478,6 +516,7 @@ export interface ListConversationsOptions {
 /** Raw `conversations` row shape, before mapping to {@link StoredConversation}. */
 interface ConversationRow {
   id: string
+  number: number
   subject: string
   customer_email: string
   status: string
@@ -495,6 +534,8 @@ interface ConversationRow {
  */
 interface ConversationSummaryRow extends ConversationRow {
   thread_count: number
+  /** Raw latest thread body with text (see `LATEST_BODY_TEXT_SUBQUERY`) — `null` when no thread has text. */
+  latest_body_text: string | null
 }
 
 /**
@@ -596,8 +637,8 @@ export function createConversationStore(db: Db): ConversationStore {
       // work is done proportional to a deleted conversation's size.
       const conversationRows = await db.query<ConversationRow>(
         includeDeleted
-          ? 'SELECT id, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1'
-          : "SELECT id, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
+          ? 'SELECT id, number, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1'
+          : "SELECT id, number, subject, customer_email, status, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
         [conversationId],
       )
       const conversationRow = conversationRows[0]
@@ -737,7 +778,7 @@ export function createConversationStore(db: Db): ConversationStore {
       const limitParam = params.length
 
       const rows = await db.query<ConversationSummaryRow>(
-        `SELECT c.id, c.subject, c.customer_email, c.status, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}
+        `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}, ${LATEST_BODY_TEXT_SUBQUERY}
          FROM conversations c
          WHERE ${conditions.join(' AND ')}
          ORDER BY c.updated_at DESC, c.id DESC
@@ -753,8 +794,9 @@ export function createConversationStore(db: Db): ConversationStore {
         `UPDATE conversations
          SET status = $1, updated_at = now()
          WHERE id = $2 AND status <> 'deleted'
-         RETURNING id, subject, customer_email, status, created_at, updated_at,
-           (SELECT count(*)::int FROM threads WHERE conversation_id = $2) AS thread_count`,
+         RETURNING id, number, subject, customer_email, status, created_at, updated_at,
+           (SELECT count(*)::int FROM threads WHERE conversation_id = $2) AS thread_count,
+           (SELECT t.body_text FROM threads t WHERE t.conversation_id = $2 AND t.body_text IS NOT NULL ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text`,
         [status, conversationId],
       )
       const row = rows[0]
@@ -890,6 +932,7 @@ function toDate(value: Date | string): Date {
 function toStoredConversation(row: ConversationRow): StoredConversation {
   return {
     id: row.id,
+    number: row.number,
     subject: row.subject,
     customerEmail: row.customer_email,
     status: row.status as StoredConversation['status'],
@@ -909,10 +952,12 @@ function toStoredConversation(row: ConversationRow): StoredConversation {
 function toConversationSummary(row: ConversationSummaryRow): ConversationSummary {
   return {
     id: row.id,
+    number: row.number,
     subject: row.subject,
     customerEmail: row.customer_email,
     status: row.status as ConversationSummary['status'],
     threadCount: row.thread_count,
+    preview: derivePreview(row.latest_body_text),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
   }
