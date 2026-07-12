@@ -267,6 +267,38 @@ ALTER TABLE conversations ADD CONSTRAINT conversations_assignee_check CHECK (ass
 `
 
 /**
+ * Migration 007 — the `note` thread direction (HT-28;
+ * specs/api/agent-inbox-v1.md §4c, v1.1).
+ *
+ * An internal note is Agent-only context on a conversation: it rides the
+ * `threads` table like mail but is NEVER emailed — no reply token, no outbox
+ * row, invisible to the delivery worker (whose queries all scope to
+ * `direction = 'outbound'`).
+ *
+ * Two constraint swaps, both drop-then-re-add (constraints cannot be
+ * altered in place), neither needing a backfill — every existing row
+ * satisfies the widened versions as-is:
+ *
+ * - `threads_direction_check` (migration 001's inline column CHECK, under
+ *   Postgres's default `<table>_<column>_check` naming) widens to admit
+ *   `'note'`.
+ * - `threads_delivery_status_by_direction` (migration 002): a note must
+ *   have a NULL `delivery_status`, exactly like inbound — delivery is not a
+ *   concept for a message that is never sent. Without this swap the OLD
+ *   constraint would reject every note row (a note satisfies neither of its
+ *   two arms), so the two swaps ship together or not at all.
+ */
+const MIGRATION_007_NOTE_DIRECTION = `
+ALTER TABLE threads DROP CONSTRAINT threads_direction_check;
+ALTER TABLE threads ADD CONSTRAINT threads_direction_check CHECK (direction IN ('inbound','outbound','note'));
+ALTER TABLE threads DROP CONSTRAINT threads_delivery_status_by_direction;
+ALTER TABLE threads ADD CONSTRAINT threads_delivery_status_by_direction CHECK (
+  (direction IN ('inbound','note') AND delivery_status IS NULL)
+  OR (direction = 'outbound' AND delivery_status IS NOT NULL AND delivery_status IN ('pending','sent','failed'))
+);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -297,6 +329,11 @@ const MIGRATIONS: Migration[] = [
     id: 6,
     name: 'tags_and_assignee',
     sql: MIGRATION_006_TAGS_AND_ASSIGNEE,
+  },
+  {
+    id: 7,
+    name: 'note_thread_direction',
+    sql: MIGRATION_007_NOTE_DIRECTION,
   },
 ]
 

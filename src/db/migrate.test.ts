@@ -46,6 +46,7 @@ describe('migrate', () => {
       { id: 4, name: 'four_state_conversation_status' },
       { id: 5, name: 'conversation_number' },
       { id: 6, name: 'tags_and_assignee' },
+      { id: 7, name: 'note_thread_direction' },
     ])
   })
 
@@ -55,7 +56,15 @@ describe('migrate', () => {
     await migrate(db) // must not throw (e.g. "relation already exists")
 
     const rows = await db.query<{ id: number }>('SELECT id FROM _migrations ORDER BY id')
-    expect(rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }])
+    expect(rows).toEqual([
+      { id: 1 },
+      { id: 2 },
+      { id: 3 },
+      { id: 4 },
+      { id: 5 },
+      { id: 6 },
+      { id: 7 },
+    ])
   })
 
   it('migration 002 ties delivery_status to direction: inbound must be NULL, outbound must be pending/sent/failed', async () => {
@@ -439,6 +448,52 @@ describe('migrate', () => {
         'someone-else',
         existing.id,
       ]),
+    ).rejects.toThrow()
+  })
+
+  it("migration 007 admits 'note' threads with NULL delivery status only; existing direction rules stay intact", async () => {
+    const database = await createPgliteDb()
+    db = database
+    await migrate(database)
+
+    const [conversation] = await database.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    // A note with NULL delivery status is legal…
+    const [note] = await database.query<{ delivery_status: string | null }>(
+      `INSERT INTO threads (conversation_id, direction, from_address, body_text)
+       VALUES ($1, 'note', $2, 'internal context') RETURNING delivery_status`,
+      [conversation.id, 'support@example.test'],
+    )
+    expect(note.delivery_status).toBeNull()
+
+    // …a note with ANY delivery status is not (delivery is not a concept
+    // for a message that is never sent)…
+    await expect(
+      database.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
+         VALUES ($1, 'note', $2, 'sent')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+
+    // …and the pre-007 rules survived the constraint swap: outbound still
+    // must carry a status, and an unknown direction is still rejected.
+    await expect(
+      database.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
+         VALUES ($1, 'outbound', $2, NULL)`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+    await expect(
+      database.query(
+        `INSERT INTO threads (conversation_id, direction, from_address)
+         VALUES ($1, 'bogus', $2)`,
+        [conversation.id, 'support@example.test'],
+      ),
     ).rejects.toThrow()
   })
 })

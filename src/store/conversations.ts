@@ -115,7 +115,8 @@ export interface NewThread {
    * has no such circularity).
    */
   id?: string
-  direction: 'inbound' | 'outbound'
+  /** `'note'` (v1.1, HT-28) is Agent-only context — never emailed, no delivery concept; see spec §4c. */
+  direction: 'inbound' | 'outbound' | 'note'
   /**
    * The RFC `Message-ID` of this message, verbatim. For an inbound
    * message this is whatever the sending client wrote (or `null` if
@@ -166,7 +167,7 @@ export interface NewConversation {
 export interface StoredThread {
   id: string
   conversationId: string
-  direction: 'inbound' | 'outbound'
+  direction: 'inbound' | 'outbound' | 'note'
   messageId: string | null
   inReplyTo: string | null
   fromAddress: string
@@ -685,9 +686,11 @@ export function createConversationStore(db: Db): ConversationStore {
         // the conversation not at all — no reopen, no updated_at bump. Only
         // a genuinely new row counts as new activity on the conversation.
         // Reopen policy (spec §4a, v1.1): closed OR spam → active; pending
-        // deliberately stays pending (see the module doc).
+        // deliberately stays pending (see the module doc). A NOTE never
+        // reopens anything (spec §4c — noting a closed conversation is not
+        // the customer coming back), but it IS activity: updated_at bumps.
         if (created) {
-          if (row.status === 'closed' || row.status === 'spam') {
+          if ((row.status === 'closed' || row.status === 'spam') && thread.direction !== 'note') {
             await tx.query(
               "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1",
               [conversationId],

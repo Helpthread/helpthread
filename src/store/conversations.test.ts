@@ -1054,4 +1054,55 @@ describe('createConversationStore', () => {
       expect(raw?.assignee).toBeNull()
     })
   })
+
+  describe('note threads (HT-28, spec §4c v1.1)', () => {
+    it('a note appends with null delivery status, bumps updated_at, but NEVER reopens a closed conversation', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'closed')
+      await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+
+      const result = await store.appendThread(conversationId, {
+        direction: 'note',
+        messageId: null,
+        fromAddress: 'support@example.test',
+        bodyText: 'Finance context: PO required on every invoice.',
+      })
+      expect(result).toMatchObject({ ok: true, created: true })
+
+      const conversation = await store.getConversation(conversationId)
+      // Still closed — a note is not the customer coming back (spec §4c)…
+      expect(conversation?.status).toBe('closed')
+      // …but it IS activity: the conversation resurfaces in the inbox.
+      expect(conversation?.updatedAt.getTime()).toBeGreaterThan(
+        new Date('2020-01-01T00:00:00.000Z').getTime(),
+      )
+      const note = conversation?.threads.at(-1)
+      expect(note).toMatchObject({
+        direction: 'note',
+        deliveryStatus: null,
+        messageId: null,
+        bodyText: 'Finance context: PO required on every invoice.',
+      })
+    })
+
+    it('the delivery worker can never see a note — listDeliverableThreads is outbound-scoped', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const appended = await store.appendThread(conversationId, {
+        direction: 'note',
+        messageId: null,
+        fromAddress: 'support@example.test',
+        bodyText: 'never send me',
+      })
+      if (!appended.ok) throw new Error('unreachable')
+      // Age the note far past any staleness threshold — it must STILL be
+      // invisible to the retry sweep (charter invariant #5 adjacency: a note
+      // reaching the send path would be a bug, per spec §4c).
+      await setCreatedAt(db, appended.threadId, new Date('2020-01-01T00:00:00.000Z'))
+
+      const eligible = await store.listDeliverableThreads({ staleAfterMs: 0, batchSize: 50 })
+      expect(eligible).toEqual([])
+    })
+  })
 })

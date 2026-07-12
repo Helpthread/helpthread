@@ -53,7 +53,7 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 255
 /** The wire shape of one `ThreadView` (specs/api/agent-inbox-v1.md §2) — `StoredThread` with `Date` fields as ISO strings and `fromAddress` renamed to `from`. */
 interface ThreadViewJson {
   id: string
-  direction: 'inbound' | 'outbound'
+  direction: 'inbound' | 'outbound' | 'note'
   from: string
   bodyText: string | null
   bodyHtml: string | null
@@ -458,6 +458,58 @@ export async function handleDeleteConversation(
   return noContent()
 }
 
+/**
+ * Handle `POST /api/v1/conversations/{id}/notes` — append an internal note
+ * (spec §4c, v1.1). Body: `{ text: string }`, 1–5000 chars, plain text only
+ * in v1. A note is Agent-only context: it is NEVER emailed — this handler
+ * never touches `sendReply`, mints no token, creates no outbox row (the
+ * boundary spec §4c calls a bug if crossed; the tests assert the sender is
+ * never invoked). It bumps `updatedAt` (a note is activity) but never
+ * changes `status` — noting a closed conversation does not reopen it
+ * (`appendThread`'s note-aware policy).
+ *
+ * Outcomes: `201` with the created `ThreadView` (`direction: 'note'`,
+ * `from` = the support address, `deliveryStatus: null`);
+ * `400 validation_failed` on a bad body; `404 not_found` for a missing or
+ * deleted conversation.
+ */
+export async function handlePostNote(
+  id: string,
+  request: Request,
+  deps: { store: ConversationStore; supportAddress: string },
+): Promise<Response> {
+  if (!isUuid(id)) {
+    return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  const parsedBody = await parseJsonBody(request)
+  if (!parsedBody.ok) {
+    return apiError(400, 'validation_failed', 'Request body must be valid JSON.')
+  }
+
+  const note = parseNoteBody(parsedBody.value)
+  if (note === null) {
+    return apiError(
+      400,
+      'validation_failed',
+      `text is required and must be ${MIN_REPLY_TEXT_LENGTH}-${MAX_REPLY_TEXT_LENGTH} characters.`,
+    )
+  }
+
+  const result = await deps.store.appendThread(id, {
+    direction: 'note',
+    messageId: null,
+    fromAddress: deps.supportAddress,
+    bodyText: note.text,
+  })
+  if (!result.ok) {
+    // not-found and deleted are one generic 404 (spec §5's no-existence-leak).
+    return apiError(404, 'not_found', 'No conversation with that id.')
+  }
+
+  return json(201, toThreadViewJson(result.thread))
+}
+
 /** Maximum length of one tag, after trimming (spec §4e, v1.1). */
 const MAX_TAG_LENGTH = 40
 
@@ -592,6 +644,26 @@ function parsePatchStatusBody(raw: unknown): ConversationStatus | null {
   return status === 'active' || status === 'pending' || status === 'closed' || status === 'spam'
     ? status
     : null
+}
+
+/**
+ * Validate a POST-notes body against spec §4c: `text` must be a string of
+ * `[MIN_REPLY_TEXT_LENGTH, MAX_REPLY_TEXT_LENGTH]` chars; notes are plain
+ * text in v1, so there is no `html` (unknown properties are ignored, the
+ * same posture as the reply body). Returns `null` on any violation — never
+ * throws.
+ */
+function parseNoteBody(raw: unknown): { text: string } | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const { text } = raw as Record<string, unknown>
+  if (
+    typeof text !== 'string' ||
+    text.length < MIN_REPLY_TEXT_LENGTH ||
+    text.length > MAX_REPLY_TEXT_LENGTH
+  ) {
+    return null
+  }
+  return { text }
 }
 
 /**

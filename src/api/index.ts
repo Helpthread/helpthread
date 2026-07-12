@@ -38,6 +38,7 @@ import {
   handleGetConversation,
   handleListConversations,
   handlePatchConversation,
+  handlePostNote,
   handlePutAssignee,
   handlePutTags,
   handleReply,
@@ -149,6 +150,12 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
 
         case 'conversation-delete':
           return await handleDeleteConversation(route.id, { store: deps.store })
+
+        case 'conversation-note':
+          return await handlePostNote(route.id, request, {
+            store: deps.store,
+            supportAddress: deps.supportAddress,
+          })
 
         case 'conversation-tags':
           return await handlePutTags(route.id, request, { store: deps.store })

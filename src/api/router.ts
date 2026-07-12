@@ -1,9 +1,9 @@
 /**
- * A minimal method+pathname matcher for the Agent Inbox API's five routes
+ * A minimal method+pathname matcher for the Agent Inbox API's six routes
  * (specs/api/agent-inbox-v1.md §3a, §3b, §4).
  *
  * Deliberately NOT a general-purpose router library: the whole surface is
- * five static-ish paths under `/api/v1`, four with a single `{id}` path
+ * six static-ish paths under `/api/v1`, five with a single `{id}` path
  * param. Spec §3 requires distinguishing "path doesn't match anything" (404)
  * from "path matches, method doesn't" (405 + `Allow` header) — that's the
  * one piece of behavior worth a shared helper, so `index.ts` doesn't have to
@@ -36,6 +36,12 @@ const CONVERSATION_REPLIES: RouteDef = {
   methods: ['POST'],
 }
 
+/** `/api/v1/conversations/{id}/notes` — internal note (spec §4c, v1.1), POST only. */
+const CONVERSATION_NOTES: RouteDef = {
+  pattern: /^\/api\/v1\/conversations\/(?<id>[^/]+)\/notes$/,
+  methods: ['POST'],
+}
+
 /** `/api/v1/conversations/{id}/tags` — replace the tag set (spec §4e, v1.1), PUT only. */
 const CONVERSATION_TAGS: RouteDef = {
   pattern: /^\/api\/v1\/conversations\/(?<id>[^/]+)\/tags$/,
@@ -53,6 +59,7 @@ const ROUTES: readonly RouteDef[] = [
   CONVERSATIONS_LIST,
   CONVERSATION_ITEM,
   CONVERSATION_REPLIES,
+  CONVERSATION_NOTES,
   CONVERSATION_TAGS,
   CONVERSATION_ASSIGNEE,
 ]
@@ -64,6 +71,7 @@ export type RouteMatch =
   | { kind: 'conversation-patch'; id: string }
   | { kind: 'conversation-delete'; id: string }
   | { kind: 'conversation-reply'; id: string }
+  | { kind: 'conversation-note'; id: string }
   | { kind: 'conversation-tags'; id: string }
   | { kind: 'conversation-assignee'; id: string }
   | { kind: 'method-not-allowed'; allow: string[] }
@@ -103,6 +111,9 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
 
     if (route === CONVERSATION_REPLIES) {
       return { kind: 'conversation-reply', id }
+    }
+    if (route === CONVERSATION_NOTES) {
+      return { kind: 'conversation-note', id }
     }
     if (route === CONVERSATION_TAGS) {
       return { kind: 'conversation-tags', id }
