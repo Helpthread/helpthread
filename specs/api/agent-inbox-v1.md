@@ -1,24 +1,36 @@
 # Agent Inbox API v1
 
-Status: accepted (HT-17 reads, HT-18 writes, HT-16 send idempotency). Helpthread's first
-public API, designed **native** — on Helpthread's own domain model, not reverse-engineered
-from any other helpdesk's wire format. (It supersedes the earlier `conversations-v1.md`
-draft, which was shaped for a FreeScout-consumer cutover that no longer applies — see the
-project history.)
+Status: accepted (HT-17 reads, HT-18 writes, HT-16 send idempotency); **amended to v1.1**
+(HT-25, 2026-07-11) — the contract additions the Agent Inbox UI was designed against,
+adopted as the v1 build target (§7 changelog). Helpthread's first public API, designed
+**native** — on Helpthread's own domain model, not reverse-engineered from any other
+helpdesk's wire format. (It supersedes the earlier `conversations-v1.md` draft, which was
+shaped for a FreeScout-consumer cutover that no longer applies — see the project history.)
 
 ## 1. Purpose
 
 This is the **Agent side**: the surface an Agent (today, a single operator) uses to work
 the inbox — see what has come in, read a conversation, and act on it. It is the API under
-the eventual Agent inbox UI (API-first, CHARTER.md §2), and the loop Helpthread is
-dogfooded through: mail lands → Agent sees it → Agent replies.
+the Agent inbox UI (API-first, CHARTER.md §2), and the loop Helpthread is dogfooded
+through: mail lands → Agent sees it → Agent replies.
 
-v1 is deliberately single-Agent: there is no assignment, no per-Agent identity, no teams.
-The Bearer token authenticates *the deployment's one operator*, not a user among many.
-Multi-Agent identity is a later increment, added when there is a second Agent.
+v1 is deliberately single-Agent: there is no per-Agent identity, no teams. The Bearer
+token authenticates *the deployment's one operator*, not a user among many. The v1.1
+`assignee` flag (§4f) is deliberately shaped to need no identity — `'me' | null` — so the
+inbox's "Mine" folder works without inventing users. Multi-Agent identity is a later
+increment, added when there is a second Agent.
 
-This document covers the whole v1 surface; **HT-17 implements §3's read paths and all of
-the conventions below; HT-18 implements §4's write paths.**
+This document covers the whole v1 surface. **HT-17 implemented §3's read paths and the
+conventions below; HT-18 implemented §4a–4b; HT-16 amended §4a with send idempotency.**
+The v1.1 additions land per-ticket: HT-26 (status model), HT-27 (`preview` + `number`),
+HT-28 (notes), HT-29 (tags), HT-30 (delete), HT-31 (assignee), HT-32 (open tracking).
+
+Rollout note: **HT-26 is the one BREAKING increment** — existing status values are
+renamed and the list filter's meaning changes, so backend and UI adopt it together (a
+coordinated rollout, deliberately first in the sequence; dogfood-only means the
+coordination is a single deploy, per HT-16's same reasoning). Every OTHER addition is
+additive with a nullable/empty default, and the UI degrades per-field for those —
+partial deployment of the additive increments is safe.
 
 ## 2. Domain model (native)
 
@@ -26,14 +38,19 @@ The API speaks Helpthread's own vocabulary — the same the store (`src/store/`)
 surfaced as JSON with ISO-8601 timestamps and no translation layer.
 
 ```ts
-type ConversationStatus = 'open' | 'closed'          // 'deleted' is never surfaced (§3a)
+type ConversationStatus = 'active' | 'pending' | 'closed' | 'spam'
+                          // v1.1 (HT-26). 'deleted' is never surfaced (§3a)
 
 interface ConversationSummary {
   id: string                 // uuid — the canonical id, used verbatim in every path
+  number: number             // v1.1: sequential per-deployment id, display-only (never a path key)
   subject: string
   customerEmail: string
   status: ConversationStatus
   threadCount: number
+  assignee: 'me' | null      // v1.1: null = Anyone; single-Agent shaped (§4f)
+  tags: string[]             // v1.1: short lowercase labels, [] default (§4e)
+  preview: string            // v1.1: latest bodyText excerpt, '' when none (derivation below)
   createdAt: string          // ISO-8601
   updatedAt: string          // ISO-8601 — last activity; the inbox sort key
 }
@@ -44,29 +61,57 @@ interface ConversationDetail extends ConversationSummary {
 
 interface ThreadView {
   id: string                 // uuid
-  direction: 'inbound' | 'outbound'   // inbound = from the customer; outbound = the Agent's sent reply
-  from: string               // the message's From address
+  direction: 'inbound' | 'outbound' | 'note'
+                             // inbound = from the customer; outbound = the Agent's sent
+                             // reply; note = internal, Agent-only (v1.1, §4c)
+  from: string               // the message's From address; the support address for notes
   bodyText: string | null
   bodyHtml: string | null    // ⚠ UNTRUSTED, UNSANITIZED — see §5
-  deliveryStatus: 'pending' | 'sent' | 'failed' | null   // outbound only; null for inbound
+  deliveryStatus: 'pending' | 'sent' | 'failed' | null   // outbound only; null otherwise
+  customerViewedAt: string | null
+                             // v1.1: outbound only, and only when open tracking is
+                             // enabled (§4g) — first time the customer viewed the reply;
+                             // null until then, always null for inbound and notes
   createdAt: string          // ISO-8601
 }
 ```
 
-Ids are **UUID strings**, verbatim as the store generates them — no integer surrogates,
-no separate ticket number. There is no `customer` entity in v1 (a conversation carries a
-`customerEmail` string); no mailbox; no internal notes. Each is added when a real need
-appears, not preemptively.
+**Status semantics (v1.1, HT-26).** `active` is the working state — inbound mail creates
+conversations `active`, and v1.0's `open` rows migrate to `active`. `pending` is an Agent
+statement that the conversation is parked awaiting something outside the inbox (a
+customer, a third party, a release); nothing sets it automatically in v1, and it still
+counts as open work (§3a). `closed` is resolved. `spam` is junk an Agent has thrown out
+of the inbox; nothing classifies spam automatically in v1. Status pills in the UI:
+Active = accent, Pending = warn, Closed = dim, Spam = critical.
+
+**`number`** is assigned from a per-deployment monotone sequence at conversation
+creation (existing rows are backfilled in creation order by the HT-27 migration). It
+exists for humans — inbox rows, notifications, "re: #482" in conversation — and is
+display-only: every path parameter remains the uuid, and `number` is never accepted as
+an identifier anywhere in this API.
+
+**`preview`** is derived at read time, not stored: the most recent thread with a
+non-null `bodyText` (any direction — notes included; this is an Agent-only surface),
+whitespace collapsed to single spaces, trimmed, first 120 characters; `''` when no
+thread has text.
+
+Ids are **UUID strings**, verbatim as the store generates them — the uuid is canonical
+and `number` is a human-facing convenience, not a surrogate key. There is no `customer`
+entity in v1 (a conversation carries a `customerEmail` string) and no mailbox. Each is
+added when a real need appears, not preemptively.
 
 ## 3. Conventions (apply to every endpoint, reads and writes)
 
 - **Base path:** `/api/v1`.
-- **Format:** JSON in and out, `Content-Type: application/json`.
+- **Format:** JSON in and out, `Content-Type: application/json`. (One exception: the
+  open-tracking pixel, §4g, responds `image/gif` — it is fetched by mail clients, not
+  API consumers.)
 - **Auth:** `Authorization: Bearer <token>` on every request, compared against the
   configured service token (`HELPTHREAD_API_TOKEN`) with a **constant-time** comparison
   (length-guarded, as `src/mail/reply-token.ts` already does). A missing, malformed, or
   wrong token is `401 unauthorized` with a generic message — the response never reveals
-  which of those it was.
+  which of those it was. (The open-tracking pixel, §4g, is the one deliberate exception
+  to Bearer auth — it is fetched by customer mail clients and carries its own rules.)
 - **Never cache:** every response carries `Cache-Control: no-store`. This is authenticated
   support data; no edge or CDN copy, ever.
 - **Error envelope:**
@@ -92,7 +137,7 @@ desc as a stable tiebreak).
 
 | query param | type | default | notes |
 |---|---|---|---|
-| `status` | `open` \| `closed` | `open` | the inbox defaults to open work; `deleted` is not an accepted value and deleted rows are never returned under any filter |
+| `status` | `open` \| `closed` \| `spam` | `open` | **folder semantics (v1.1):** `open` returns `active` + `pending` rows — the inbox defaults to open work, and pending still needs eventual attention. `closed` and `spam` return exactly that status. `active`/`pending` are NOT accepted filter values (folders are the reading grain; pills disambiguate within the open folder), and `deleted` is not an accepted value — deleted rows are never returned under any filter |
 | `limit` | number | 25 | hard cap 50; values above are clamped, not rejected |
 | `cursor` | string | — | opaque keyset cursor from a previous response's `nextCursor` |
 
@@ -115,7 +160,7 @@ Returns a `ConversationDetail` — the conversation plus its `threads`, oldest-f
 not_found` if `{id}` is not a conversation (or is a `deleted` one — a deleted conversation
 is indistinguishable from a nonexistent one to this API, on purpose).
 
-## 4. Write paths (HT-18)
+## 4. Write paths
 
 ### 4a. `POST /api/v1/conversations/{id}/replies` — the Agent replies
 
@@ -168,8 +213,8 @@ NEW request's body is irrelevant — the response reflects the ORIGINAL attempt'
 
 Outcomes:
 - **`201`** with the created (or, on a replay after success, the ORIGINAL) `ThreadView`. A
-  reply to a `closed` conversation **reopens** it (the store's existing append policy) —
-  only on the call that actually creates the row, not on a replay.
+  reply to a `closed` or `spam` conversation **reopens** it to `active` (v1.1, HT-26 — the
+  store's append policy) — only on the call that actually creates the row, not on a replay.
 - **`400 validation_failed`** on a missing/empty `Idempotency-Key` header, or a body that
   violates the limits.
 - **`404 not_found`** if the conversation is missing or `deleted` — no message is sent; a
@@ -194,17 +239,105 @@ Outcomes:
   delivered, so a subsequent failure to record `'sent'` is NOT a `send_failed` — it resolves
   to `201`, since reporting a delivered message as failed would invite a resend.)
 
-### 4b. `PATCH /api/v1/conversations/{id}` — close or reopen
+### 4b. `PATCH /api/v1/conversations/{id}` — set status
 
-Body: `{ status: 'open' | 'closed' }`. Returns the updated `ConversationSummary` (`200`).
-Needs a store `setConversationStatus(id, status)` that **excludes `deleted`** (a deleted
-conversation is not reopenable through this endpoint): missing or deleted → `404 not_found`;
-a body whose `status` is neither `open` nor `closed` (notably `deleted`, which is not
-settable here) → `400 validation_failed`.
+Body: `{ status: ConversationStatus }` — any of `active`, `pending`, `closed`, `spam`
+(v1.1, HT-26). Returns the updated `ConversationSummary` (`200`) and bumps `updatedAt`
+(a status change is activity — the conversation resurfaces in its folder). The store's
+`setConversationStatus(id, status)` **excludes `deleted`** (a deleted conversation is not
+reachable through this endpoint): missing or deleted → `404 not_found`; a body whose
+`status` is not one of the four values (notably `deleted`, which is not settable here) →
+`400 validation_failed`.
 
-Both write paths grow `InboxApiDeps` with what `sendReply` needs — `sender` (`EmailSender`),
-`keyring`, `mailDomain`, and `supportAddress` — injected at deploy time alongside `store`
-and `apiToken`.
+### 4c. `POST /api/v1/conversations/{id}/notes` — internal note (v1.1, HT-28)
+
+An internal note is Agent-only context on a conversation. **It is never emailed and
+never touches the send path**: no reply token is minted, no outbox row is created, and
+the delivery worker never sees it — a `note` row existing anywhere near `sendReply` is a
+bug, and HT-28 adds a test asserting the boundary (charter invariant #5 adjacency).
+
+Body: `{ text: string }` — 1–5000 chars, server-enforced; no `html` (notes are plain
+text in v1). Outcomes:
+
+- **`201`** with the created `ThreadView`: `direction: 'note'`, `from` = the support
+  address, `bodyHtml: null`, `deliveryStatus: null`, `customerViewedAt: null`. Bumps
+  `updatedAt` (a note is activity; the conversation resurfaces in the inbox) but **never
+  changes `status`** — noting a closed conversation does not reopen it.
+- **`400 validation_failed`** on a body that violates the limits.
+- **`404 not_found`** if the conversation is missing or `deleted`.
+
+### 4d. `DELETE /api/v1/conversations/{id}` — soft delete (v1.1, HT-30)
+
+Marks the conversation `deleted`. **`204`** with an empty body on success; `404
+not_found` if the conversation is missing or already deleted. From that point the
+conversation is indistinguishable from one that never existed, on every endpoint —
+list, get, replies (including keyed replays, §4a), notes, tags, assignee, PATCH. A
+deleted conversation is not restorable through this API, and a reply token minted
+against it starts a fresh conversation (threading.md's existing deleted-conversation
+rule). The UI pairs this with a two-step arm (press → solid critical "Confirm" →
+auto-disarm) rather than a modal.
+
+### 4e. `PUT /api/v1/conversations/{id}/tags` — replace the tag set (v1.1, HT-29)
+
+Body: `{ tags: string[] }` — **replace-set semantics**: the request's array becomes the
+conversation's whole tag set (send `[]` to clear). Each entry is trimmed, lowercased,
+then the array is de-duplicated preserving first-occurrence order. After trimming, each
+tag must be 1–40 characters; a non-array body, a non-string entry, an empty-after-trim
+entry, or an over-length entry is `400 validation_failed`. Returns the updated
+`ConversationSummary` (`200`). Does **not** bump `updatedAt` — tagging is metadata, not
+activity. Missing or deleted conversation → `404 not_found`. There is no tag-filtered
+listing in v1 — tags are display and organization until a real query need appears.
+
+### 4f. `PUT /api/v1/conversations/{id}/assignee` — claim or release (v1.1, HT-31)
+
+Body: `{ assignee: 'me' | null }` — `null` means "Anyone". Anything else is
+`400 validation_failed`. Returns the updated `ConversationSummary` (`200`). Does **not**
+bump `updatedAt`. Missing or deleted conversation → `404 not_found`.
+
+This is deliberately NOT identity: `'me'` is the deployment's one operator (the Bearer
+token holder), stored as a flag, not a user id. It exists so the UI's "Mine" folder
+works in v1; the multi-Agent increment replaces `'me'` with real Agent ids and this
+endpoint's body shape is expected to change then (that is an acceptable v2 break —
+dogfood-only, same reasoning as HT-16's).
+
+### 4g. Open tracking — `customerViewedAt` (v1.1, HT-32; config-gated, default OFF)
+
+Open tracking records the first time a customer's mail client fetched a tracking pixel
+embedded in an outbound reply, surfacing it as `customerViewedAt` on that outbound
+`ThreadView`.
+
+**It is off by default, as a deliberate stance, not an oversight.** Open-tracking pixels
+are telemetry on customers, which sits uneasily with the ownership-and-trust positioning
+this project exists for. The operator must explicitly enable it in deployment
+configuration (an `InboxApiDeps`-level flag plus the deployment's public base URL, pinned
+by HT-32). While disabled — the shipped default — no pixel is injected, the field is
+always `null`, and outbound mail is **byte-identical** to pre-v1.1 behavior: HT-32 must
+prove text bodies, headers, and threading unchanged against the existing fixtures
+(charter invariant #5), and that enabling it alters only the HTML body.
+
+When enabled:
+
+- The send path (§4a) injects a pixel URL into the outbound **HTML body only** (a
+  text-only reply gets no pixel — never fabricate an HTML part just to track). The URL
+  carries an **unguessable, signed credential bound to the outbound thread** — the same
+  keyring/HMAC pattern reply tokens already use (`src/mail/reply-token.ts`), NEVER the
+  bare thread uuid: a guessable identifier would let anyone who learns (or enumerates)
+  an id forge a "customer viewed" signal. The exact route and token format are pinned by
+  HT-32 against that requirement.
+- The pixel endpoint is the API's one **unauthenticated** surface, fetched by customer
+  mail clients. Its contract: always respond `200` with `Content-Type: image/gif`, a
+  fixed 1×1 gif body, and `Cache-Control: no-store` (a cached pixel would suppress the
+  very fetch it exists to observe) — valid token or not, identical either way (no
+  existence or validity leak); record only the FIRST view's timestamp for a valid token
+  (idempotent — later hits change nothing); set no cookies and record nothing beyond
+  that single timestamp.
+- `customerViewedAt` remains `null` until a view is recorded; it is always `null` for
+  inbound threads and notes.
+
+Both §4a write paths grow `InboxApiDeps` with what `sendReply` needs — `sender`
+(`EmailSender`), `keyring`, `mailDomain`, and `supportAddress` — injected at deploy time
+alongside `store` and `apiToken`; HT-32 adds the open-tracking configuration described
+above.
 
 ## 5. Security notes
 
@@ -212,20 +345,42 @@ and `apiToken`.
   `<script>` and all (specs/mail/threading.md §5; a fixture confirmed a stored `<script>`).
   This API returns it as-is — which is safe as JSON, but **any UI that renders it MUST
   sanitize first** (e.g. DOMPurify), or it is a stored-XSS vector against the Agent. This
-  contract MUST carry to the inbox-UI increment; a server-side sanitized variant is a
-  candidate hardening. Flagged, not solved, here.
+  contract carries to the inbox UI (HT-23), whose design renders sanitized HTML in an
+  isolated container; a server-side sanitized variant is a candidate hardening. Flagged,
+  not solved, here.
+- **Notes are Agent-only, permanently.** `direction: 'note'` rows ride the same
+  `ThreadView` shape as mail, but they must never leave the Agent surface: any future
+  customer-side API, webhook, or export MUST exclude them. Stated here so the boundary
+  is on record before any such surface exists.
 - **No existence leak.** Not-found and not-authorized are distinct status codes (404 vs
   401) but neither response body distinguishes "never existed" from "deleted" or from "you
-  can't see it" — messages are generic.
+  can't see it" — messages are generic. The open-tracking pixel (§4g) extends the same
+  rule to its unauthenticated surface: `200` + gif regardless of token validity.
 - **The Bearer token is a service credential.** It grants the whole inbox. It is compared
   in constant time and read only from server configuration, never logged.
 
 ## 6. What v1 is NOT
 
-- No multi-Agent identity, assignment, teams, or per-user authorization.
+- No multi-Agent identity, teams, or per-user authorization (the single-Agent `assignee`
+  flag, §4f, is deliberately not identity).
 - No customer-side / self-service surface (a separate future API, designed native when
   there are customers to serve).
-- No internal notes, no mailbox management, no search, no realtime, no webhooks-out.
+- No mailbox management, no search, no realtime, no webhooks-out, no tag-filtered listing.
 - No attachment upload on reply yet (the blob seam exists; wiring is later).
 - Framework-agnostic by construction: handlers are `Request → Response`; a Vercel/Next
   adapter is a thin deploy-time wrapper, not part of this spec.
+
+## 7. Changelog
+
+- **v1.1 (2026-07-11, HT-25).** Adopted the contract the Agent Inbox UI was designed
+  against (the Claude Design prototype's `mock-api.js`, whose additions were each marked
+  `CONTRACT ADDITION`), after review of the drift between the designed surface and v1.0.
+  Additions, each with its implementation ticket: status model
+  `active/pending/closed/spam` with folder-semantics listing and spam-reopen (HT-26);
+  `preview` + `number` on summaries (HT-27); internal notes (HT-28); tags (HT-29); soft
+  delete endpoint (HT-30); single-Agent assignee (HT-31); config-gated open tracking,
+  default off (HT-32). One place the prototype does NOT govern: its mock simplifies §4a's
+  replay model (no delivery lease, no `409 retry_in_progress`) — the shipped HT-16
+  semantics stand, and the UI must handle the 409.
+- **v1.0.** Accepted; HT-17 (reads + conventions), HT-18 (writes), then HT-16 amended
+  §4a with required `Idempotency-Key`, lease-based replay, and `409 retry_in_progress`.
