@@ -1,0 +1,9 @@
+/* Helpthread — shape & depth tokens. 6-8px corners; shadows are edges, not glows. */
+:root {
+  --ht-radius-sm: 6px;
+  --ht-radius-md: 8px;
+  --ht-shadow-sm: 0 1px 3px oklch(0 0 0 / 0.05);
+  --ht-shadow-md: 0 4px 16px oklch(0 0 0 / 0.07);
+  /* the seam: the elevated work surface casting onto the sidebar canvas */
+  --ht-seam-shadow: -3px 0 10px oklch(0 0 0 / 0.14), -1px 0 0 var(--ht-divider);
+}

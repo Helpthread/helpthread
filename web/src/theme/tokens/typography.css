@@ -1,0 +1,9 @@
+/* Helpthread — type tokens. UI runs on the native system stack (low fatigue,
+   zero download); the serif is reserved for the wordmark. Mono carries email
+   addresses, counters and raw source. */
+:root {
+  --ht-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --ht-display: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --ht-serif: "Source Serif 4", Georgia, serif;
+  --ht-mono: "Source Code Pro", ui-monospace, "SF Mono", monospace;
+}

@@ -1,0 +1,11 @@
+/* ============================================================================
+   Helpthread — theme entry (the ONE file a rebrand touches)
+   ----------------------------------------------------------------------------
+   Every visual decision flows through the token files below (shared with the
+   design system). Swapping accent, neutrals, radii or type there restyles
+   every component; no component files change. Light is default; dark is
+   first-class via [data-theme='dark'] on <html>.
+   ========================================================================== */
+@import url("./tokens/colors.css");
+@import url("./tokens/typography.css");
+@import url("./tokens/shape.css");
