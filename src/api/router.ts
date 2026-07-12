@@ -92,6 +92,22 @@ export type RouteMatch =
  * independently, not as a fallback, and the two routes never contend for
  * the same pathname.
  */
+/**
+ * Match the open-tracking pixel path (spec §4g, v1.1 — HT-32):
+ * `GET /api/v1/t/{token}.gif`. Kept SEPARATE from {@link matchRoute} on
+ * purpose — the pixel is the API's one UNAUTHENTICATED surface, checked by
+ * `index.ts` BEFORE Bearer auth, and giving it its own matcher keeps the
+ * authenticated route table free of any pre-auth special case. GET only;
+ * any other method on this path simply falls through to the normal
+ * authenticated pipeline (and 401s like everything else).
+ */
+export function matchOpenTrackingPixel(method: string, pathname: string): { token: string } | null {
+  if (method !== 'GET') return null
+  const match = /^\/api\/v1\/t\/(?<token>[^/]+)\.gif$/.exec(pathname)
+  const token = match?.groups?.token
+  return token === undefined ? null : { token }
+}
+
 export function matchRoute(method: string, pathname: string): RouteMatch {
   for (const route of ROUTES) {
     const match = route.pattern.exec(pathname)

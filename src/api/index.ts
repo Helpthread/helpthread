@@ -29,6 +29,7 @@
  * 3. **Dispatch** to the matched handler (`src/api/conversations.ts`).
  */
 
+import { TRANSPARENT_GIF, verifyViewToken } from '../mail/open-tracking.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { EmailSender } from '../providers/index.js'
 import type { ConversationStore } from '../store/conversations.js'
@@ -45,7 +46,7 @@ import {
 } from './conversations.js'
 import type { ApiError } from './responses.js'
 import { apiError } from './responses.js'
-import { matchRoute } from './router.js'
+import { matchOpenTrackingPixel, matchRoute } from './router.js'
 
 /**
  * Minimum length for the service Bearer token. A short/empty token is a
@@ -76,6 +77,15 @@ export interface InboxApiDeps {
   mailDomain: string
   /** The deployment's configured support address — the `from` on every Agent reply (spec §4a). */
   supportAddress: string
+  /**
+   * Open tracking (spec §4g, v1.1 — HT-32): ABSENT BY DEFAULT — a deliberate
+   * privacy stance, not an unset knob. When present, outbound replies get a
+   * signed tracking pixel served from `publicBaseUrl`, and the pixel
+   * endpoint records first views. When absent — the shipped default —
+   * nothing is injected and nothing is EVER recorded (a pixel from mail sent
+   * while the feature was on stops recording the moment it is turned off).
+   */
+  openTracking?: { publicBaseUrl: string }
 }
 
 /**
@@ -96,6 +106,39 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
   }
 
   return async (request: Request): Promise<Response> => {
+    // The open-tracking pixel is the API's ONE unauthenticated surface (spec
+    // §4g; §3 names it as the deliberate exception) — customer mail clients
+    // fetch it, so it is matched BEFORE Bearer auth. Everything about it is
+    // deliberately uniform: `200` + the same 1×1 gif + `no-store`, valid
+    // token or not, feature on or off — no validity or existence leak, and a
+    // pixel baked into old mail keeps rendering harmlessly forever. The
+    // recording side effect happens ONLY when the feature is enabled AND the
+    // token verifies (first view wins; `recordThreadView` is idempotent and
+    // silent on every miss). Its own try/catch keeps even a store failure
+    // answering with the gif — the JSON error envelope below must never
+    // reach an <img> tag.
+    const pixel = matchOpenTrackingPixel(request.method, new URL(request.url).pathname)
+    if (pixel !== null) {
+      if (deps.openTracking !== undefined) {
+        try {
+          const verified = verifyViewToken(pixel.token, deps.keyring)
+          if (verified !== null) {
+            await deps.store.recordThreadView(verified.threadId)
+          }
+        } catch (err) {
+          console.error('[inbox-api] open-tracking record failed (gif still served)', err)
+        }
+      }
+      return new Response(new Uint8Array(TRANSPARENT_GIF), {
+        status: 200,
+        headers: {
+          'Content-Type': 'image/gif',
+          'Cache-Control': 'no-store',
+          'Content-Length': String(TRANSPARENT_GIF.length),
+        },
+      })
+    }
+
     if (!authenticateRequest(request, deps.apiToken)) {
       return apiError(401, 'unauthorized', 'Missing or invalid credentials.')
     }
@@ -170,6 +213,7 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             keyring: deps.keyring,
             mailDomain: deps.mailDomain,
             supportAddress: deps.supportAddress,
+            ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
           })
       }
     } catch (err) {

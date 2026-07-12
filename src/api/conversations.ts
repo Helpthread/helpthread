@@ -58,6 +58,8 @@ interface ThreadViewJson {
   bodyText: string | null
   bodyHtml: string | null
   deliveryStatus: 'pending' | 'sent' | 'failed' | null
+  /** Open tracking (spec §4g, v1.1): first customer view of this outbound reply; null until then, always null for inbound/notes or with the feature off. */
+  customerViewedAt: string | null
   createdAt: string
 }
 
@@ -278,6 +280,7 @@ export async function handleReply(
     keyring: Keyring
     mailDomain: string
     supportAddress: string
+    openTracking?: { publicBaseUrl: string }
   },
 ): Promise<Response> {
   if (!isUuid(id)) {
@@ -346,6 +349,7 @@ export async function handleReply(
       sender: deps.sender,
       keyring: deps.keyring,
       mailDomain: deps.mailDomain,
+      ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
     },
   )
 
@@ -778,6 +782,8 @@ function toThreadViewJson(thread: StoredThread): ThreadViewJson {
     bodyText: thread.bodyText,
     bodyHtml: thread.bodyHtml,
     deliveryStatus: thread.deliveryStatus,
+    customerViewedAt:
+      thread.customerViewedAt === null ? null : thread.customerViewedAt.toISOString(),
     createdAt: thread.createdAt.toISOString(),
   }
 }

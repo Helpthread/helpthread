@@ -47,6 +47,7 @@ describe('migrate', () => {
       { id: 5, name: 'conversation_number' },
       { id: 6, name: 'tags_and_assignee' },
       { id: 7, name: 'note_thread_direction' },
+      { id: 8, name: 'customer_viewed_at' },
     ])
   })
 
@@ -64,6 +65,7 @@ describe('migrate', () => {
       { id: 5 },
       { id: 6 },
       { id: 7 },
+      { id: 8 },
     ])
   })
 
@@ -495,5 +497,33 @@ describe('migrate', () => {
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
+  })
+  it('migration 008 ties customer_viewed_at to direction: outbound may carry one, inbound and note may not', async () => {
+    const database = await createPgliteDb()
+    db = database
+    await migrate(database)
+
+    const [conversation] = await database.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    await expect(
+      database.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, customer_viewed_at)
+         VALUES ($1, 'outbound', $2, 'sent', now())`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).resolves.toBeDefined()
+
+    for (const direction of ['inbound', 'note']) {
+      await expect(
+        database.query(
+          `INSERT INTO threads (conversation_id, direction, from_address, customer_viewed_at)
+           VALUES ($1, $2, $3, now())`,
+          [conversation.id, direction, 'customer@example.test'],
+        ),
+      ).rejects.toThrow()
+    }
   })
 })
