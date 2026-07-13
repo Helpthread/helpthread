@@ -21,6 +21,24 @@
       "preset": "recommended"
     }
   },
+  "overrides": [
+    {
+      "includes": ["web/src/components/ds/**"],
+      "linter": {
+        "rules": {
+          "correctness": { "noUnusedImports": "off" },
+          "complexity": { "useOptionalChain": "off" },
+          "style": { "useTemplate": "off" },
+          "suspicious": { "noExplicitAny": "off" },
+          "a11y": {
+            "noSvgWithoutTitle": "off",
+            "useKeyWithClickEvents": "off",
+            "noStaticElementInteractions": "off"
+          }
+        }
+      }
+    }
+  ],
   "javascript": {
     "formatter": {
       "quoteStyle": "single",

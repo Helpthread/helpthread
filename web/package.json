@@ -1,0 +1,25 @@
+{
+  "name": "@helpthread/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Helpthread Agent Inbox \u2014 the UI client of the Agent Inbox API (HT-23; API-first per CHARTER.md).",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.4",
+    "next": "^15.5.12",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.4",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.8.2"
+  }
+}

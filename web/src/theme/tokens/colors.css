@@ -1,0 +1,48 @@
+/* Helpthread — color tokens. Light is default; dark via [data-theme='dark'] on <html>. */
+:root {
+  /* identity */
+  --ht-accent: #4a55a2;
+  --ht-accent-soft: color-mix(in oklab, var(--ht-accent) 8%, transparent);
+  --ht-on-accent: #ffffff;
+  /* the one colored surface — follows the accent */
+  --ht-header-bg: var(--ht-accent);
+  --ht-header-fg: #ffffff;
+  /* neutrals (warm paper) */
+  --ht-bg: oklch(0.977 0.004 85);
+  --ht-surface: oklch(0.995 0.002 90);
+  --ht-surface-2: oklch(0.948 0.005 85);
+  --ht-divider: oklch(0.912 0.006 85);
+  --ht-border: oklch(0.862 0.008 85);
+  /* ink */
+  --ht-ink: oklch(0.245 0.012 270);
+  --ht-ink-muted: oklch(0.45 0.014 270);
+  --ht-ink-dim: oklch(0.575 0.014 270);
+  /* feedback */
+  --ht-critical: oklch(0.54 0.2 27);
+  --ht-critical-soft: oklch(0.54 0.2 27 / 0.07);
+  --ht-warn: oklch(0.55 0.12 75);
+  /* inverse (toasts) */
+  --ht-inverse-bg: oklch(0.245 0.012 270);
+  --ht-inverse-fg: oklch(0.97 0.003 85);
+}
+
+[data-theme="dark"] {
+  --ht-accent: #93a0e8;
+  --ht-accent-soft: color-mix(in oklab, var(--ht-accent) 13%, transparent);
+  --ht-on-accent: oklch(0.17 0.02 270);
+  --ht-header-bg: color-mix(in oklab, var(--ht-accent) 30%, oklch(0.2 0.01 270));
+  --ht-header-fg: oklch(0.95 0.005 85);
+  --ht-bg: oklch(0.185 0.008 270);
+  --ht-surface: oklch(0.222 0.008 270);
+  --ht-surface-2: oklch(0.268 0.009 270);
+  --ht-divider: oklch(0.29 0.009 270);
+  --ht-border: oklch(0.36 0.01 270);
+  --ht-ink: oklch(0.945 0.005 85);
+  --ht-ink-muted: oklch(0.74 0.008 270);
+  --ht-ink-dim: oklch(0.59 0.01 270);
+  --ht-critical: oklch(0.7 0.18 26);
+  --ht-critical-soft: oklch(0.7 0.18 26 / 0.12);
+  --ht-warn: oklch(0.76 0.11 80);
+  --ht-inverse-bg: oklch(0.945 0.005 85);
+  --ht-inverse-fg: oklch(0.22 0.01 270);
+}
