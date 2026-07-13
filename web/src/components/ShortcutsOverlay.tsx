@@ -2,7 +2,7 @@
 
 /** The keyboard-shortcuts modal (fidelity checklist). Toggled/closed by `ShortcutsProvider`. */
 
-import type { ReactNode } from 'react'
+import { type ReactNode, useEffect, useRef } from 'react'
 import { Kbd } from './ds/core/Kbd'
 
 const ROWS: Array<{ keys: ReactNode; label: string }> = [
@@ -42,6 +42,18 @@ const ROWS: Array<{ keys: ReactNode; label: string }> = [
 ]
 
 export function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
+  const closeRef = useRef<HTMLButtonElement>(null)
+
+  // Focus the close button on open and return focus to whatever was focused
+  // before, on close — the baseline modal a11y contract. (Esc is handled by
+  // ShortcutsProvider.) The close button is the dialog's only focusable
+  // control, so the Tab handler below keeps focus on it — a minimal trap.
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null
+    closeRef.current?.focus()
+    return () => previous?.focus?.()
+  }, [])
+
   return (
     // Backdrop is non-interactive by design — Esc and the header's close
     // chip are the documented ways to dismiss (see ShortcutsProvider).
@@ -49,6 +61,13 @@ export function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard shortcuts"
+      onKeyDown={(event) => {
+        if (event.key === 'Tab') {
+          // One focusable control — keep focus trapped on it.
+          event.preventDefault()
+          closeRef.current?.focus()
+        }
+      }}
       style={{
         position: 'fixed',
         inset: 0,
@@ -80,6 +99,7 @@ export function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
         >
           <span style={{ fontSize: 14, fontWeight: 700 }}>Keyboard shortcuts</span>
           <button
+            ref={closeRef}
             type="button"
             title="Close"
             onClick={onClose}

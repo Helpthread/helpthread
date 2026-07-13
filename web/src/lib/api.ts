@@ -41,12 +41,32 @@ export class ApiError extends Error {
   }
 }
 
+/** Upstream fetch timeout — a hung API must fail fast, not hang the render. */
+const REQUEST_TIMEOUT_MS = 15_000
+
 function config(): { baseUrl: string; token: string } {
-  // Dev defaults match the HT-24 harness (`npm run dev:api`); a deployment
-  // sets both. The default token is the harness's clearly-dev-only value.
+  const baseUrl = process.env.HELPTHREAD_API_URL
+  const token = process.env.HELPTHREAD_API_TOKEN
+  // A deployment MUST set both. Falling back to the dev harness's values in
+  // production would silently point the app at localhost with a well-known
+  // token — fail loud at the first RUNTIME request instead. Skipped during
+  // `next build` (NEXT_PHASE), where prerendering runs in production mode
+  // without the runtime env and dev defaults are harmless.
+  const isBuild = process.env.NEXT_PHASE === 'phase-production-build'
+  if (
+    process.env.NODE_ENV === 'production' &&
+    !isBuild &&
+    (baseUrl === undefined || token === undefined)
+  ) {
+    throw new Error(
+      'HELPTHREAD_API_URL and HELPTHREAD_API_TOKEN must be set in production — refusing to fall back to dev defaults.',
+    )
+  }
+  // Dev defaults match the HT-24 harness (`npm run dev:api`); the default
+  // token is the harness's clearly-dev-only value.
   return {
-    baseUrl: (process.env.HELPTHREAD_API_URL ?? 'http://localhost:8787').replace(/\/+$/, ''),
-    token: process.env.HELPTHREAD_API_TOKEN ?? 'helpthread-dev-token',
+    baseUrl: (baseUrl ?? 'http://localhost:8787').replace(/\/+$/, ''),
+    token: token ?? 'helpthread-dev-token',
   }
 }
 
@@ -66,6 +86,9 @@ async function request<T>(
     // Authenticated support data: the API says no-store (spec §3) and the
     // client agrees — every render sees current truth.
     cache: 'no-store',
+    // Bound every call so a hung upstream fails fast (→ error boundary /
+    // action network-error) rather than hanging the server render.
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
 
   if (response.status === 204) {

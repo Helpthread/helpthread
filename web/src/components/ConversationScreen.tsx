@@ -770,7 +770,7 @@ export function ConversationScreen({
   function sendReply(): void {
     const el = replyBodyRef.current
     const text = el !== null ? normalizedInnerText(el) : ''
-    if (text.length < 1) {
+    if (text.trim().length < 1) {
       setComposerError("Write a reply first — the message can't be empty.")
       return
     }
@@ -824,7 +824,7 @@ export function ConversationScreen({
   }
 
   function sendNote(): void {
-    if (noteDraft.length < 1) {
+    if (noteDraft.trim().length < 1) {
       setComposerError("Write a note first — the note can't be empty.")
       return
     }
@@ -940,6 +940,10 @@ export function ConversationScreen({
         setLocalStatus(next)
         showToast({ title: `Marked ${next}` })
         router.refresh()
+      } else {
+        // Surface the failure like tags/assignee do — never leave a status
+        // change silently dropped.
+        showToast({ title: "Couldn't update the conversation", detail: 'Please try again.' })
       }
     })
   }
