@@ -65,8 +65,20 @@ Required checks, all of them (a failure of any is a uniform rejection):
 
 This surface is materially costlier than the pixel: a single accepted POST can trigger
 Gmail API fetches, blob writes, and DB writes. So it does **no heavy work inline** — it
-authenticates, records the notification (a durable "history advanced for mailbox X" marker),
-acks Pub/Sub with a fast 2xx, and lets the reconciliation step (§3) do the fetching.
+authenticates, records the notification, acks Pub/Sub with a fast 2xx, and lets the
+reconciliation step (§3) do the fetching.
+
+**Recording the notification is a durable enqueue, not an in-process continuation.** The
+endpoint **enqueues a "reconcile mailbox X" job onto the `QueueProvider`**
+(`src/providers/queue.ts`; Vercel Queues per charter §4), then acks. A `QueueProvider`
+consumer runs §3. This is deliberate, and it is the near-real-time path — the §6 daily sweep
+is the 24h-bounded *fallback*, not the primary trigger — so the hand-off must not rely on a
+`waitUntil`/after-response continuation, which a serverless runtime does not guarantee to
+execute: a dropped continuation would silently degrade push to "eventually caught by the
+sweep" with no signal, whereas a durable queue job cannot vanish that way. It also keeps the
+"no heavy work inline" property intact — the endpoint only enqueues and acks; the consumer
+does the fetching.
+
 Returning 2xx quickly also prevents Pub/Sub's own redelivery from amplifying load; a non-2xx
 tells Pub/Sub to redeliver, which idempotency (§4, inbound-ingestion.md §4) makes safe but
 which we don't want to invite needlessly.
@@ -148,6 +160,13 @@ here the cursor itself is unrecoverable.)
   never doubled (inbound-ingestion.md §4). (Cadence is a tuning knob: daily bounds worst-case
   staleness to ~24h for a dropped tail notification; a tighter interval trades quota for
   freshness and can be revisited without changing the design.)
+- **Serialize reconciliation per mailbox.** Push-triggered reconciliation (§2–§3) and this
+  sweep both advance the same mailbox's cursor, so a mailbox's reconciliation runs are
+  serialized by a **reconciliation lease** (the inbound analogue of the outbound delivery
+  lease, sending.md §3a); different mailboxes still reconcile concurrently. This is an
+  efficiency guard, not a correctness one — §4 already makes each run's cursor advance
+  independently safe — it only avoids redundant `history.list`/`messages.get` work when a
+  push lands mid-sweep.
 - On `watch()` failure (revoked/expired grant, admin change): mark the mailbox
   **needs-reconnect** and surface it — never crash the cron for other mailboxes (OAuth
   handling, HT-38/HT-40).
@@ -169,12 +188,12 @@ here the cursor itself is unrecoverable.)
 Against a **faked** Gmail API + Pub/Sub push (no cloud):
 
 - A push with a valid OIDC JWT (correct `aud`, service-account `email`, `email_verified`,
-  and matching `subscription`) → mailbox resolved from `emailAddress` → `history.list` →
-  `messages.get?format=raw` → the raw bytes reach the ingest pipeline with correct
-  `{ mailboxId, providerMessageId, receivedAt }`.
+  and matching `subscription`) → mailbox resolved from `emailAddress` → a reconcile job
+  enqueued → the consumer runs `history.list` → `messages.get?format=raw` → the raw bytes
+  reach the ingest pipeline with correct `{ mailboxId, providerMessageId, receivedAt }`.
 - A forged / wrong-`aud` / wrong-service-account / `email_verified:false` / expired JWT, or
   a notification whose `subscription` isn't ours, or whose `emailAddress` resolves to no
-  known mailbox → rejected, uniform response, no fetch triggered.
+  known mailbox → rejected, uniform response, nothing enqueued, no fetch triggered.
 - A duplicate push (same `historyId`) → no duplicate ingestion (dedup, inbound-ingestion.md §4).
 - A mid-batch failure → the cursor does not advance past the unstored message.
 - A 404 on `history.list` → the mailbox is paused and flagged, no resync attempted.
