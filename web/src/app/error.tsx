@@ -12,6 +12,9 @@
 
 import { AppError } from '../components/AppError'
 
-export default function Error(props: { error: Error & { digest?: string }; reset: () => void }) {
+export default function RootError(props: {
+  error: Error & { digest?: string }
+  reset: () => void
+}) {
   return <AppError {...props} />
 }
