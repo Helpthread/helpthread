@@ -15,21 +15,30 @@ const ROWS: Array<{ keys: ReactNode; label: string }> = [
     ),
     label: 'Move through the inbox',
   },
-  { keys: <Kbd>↵</Kbd>, label: 'Open conversation' },
-  { keys: <Kbd>x</Kbd>, label: 'Select conversation' },
-  { keys: <Kbd>r</Kbd>, label: 'Reply' },
-  { keys: <Kbd>n</Kbd>, label: 'Add a note' },
+  { keys: <Kbd>↵</Kbd>, label: 'Open the selected conversation' },
+  { keys: <Kbd>x</Kbd>, label: 'Select the focused conversation' },
   {
     keys: (
       <>
-        <Kbd>⌘</Kbd>
+        <Kbd>j</Kbd>
+        <Kbd>k</Kbd>
+      </>
+    ),
+    label: 'Next / previous conversation (while reading)',
+  },
+  { keys: <Kbd>r</Kbd>, label: 'Open the reply composer' },
+  { keys: <Kbd>n</Kbd>, label: 'Add an internal note' },
+  {
+    keys: (
+      <>
+        <Kbd>⌘/Ctrl</Kbd>
         <Kbd>↵</Kbd>
       </>
     ),
-    label: 'Send',
+    label: 'Send the reply',
   },
-  { keys: <Kbd>Esc</Kbd>, label: 'Close / back' },
-  { keys: <Kbd>?</Kbd>, label: 'Show these shortcuts' },
+  { keys: <Kbd>Esc</Kbd>, label: 'Back to the inbox / close dialogs' },
+  { keys: <Kbd>?</Kbd>, label: 'Show this overlay' },
 ]
 
 export function ShortcutsOverlay({ onClose }: { onClose: () => void }) {

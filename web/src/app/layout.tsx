@@ -6,6 +6,7 @@ import { ThemeProvider } from '../components/ThemeProvider'
 import { ToasterProvider } from '../components/Toaster'
 import { TopBar } from '../components/TopBar'
 import { listConversations } from '../lib/api'
+import type { ConversationSummary } from '../lib/api-types'
 import { THEME_INIT_SCRIPT } from '../lib/theme'
 
 export const metadata: Metadata = {
@@ -22,7 +23,19 @@ export const metadata: Metadata = {
  * here, with the Bearer token, and handed to the client `TopBar` as props.
  */
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const recentOpen = await listConversations({ folder: 'open', limit: 6 })
+  // The notifications bell is non-critical chrome. Its fetch MUST NOT be able
+  // to take down the whole app: an error thrown here (e.g. a bad token
+  // surfacing as 401) would escape ABOVE every route error boundary — the
+  // boundaries live under this layout — so the designed AuthFailure screen
+  // would never render and the app would hard-crash instead. Swallowing it to
+  // an empty bell lets the SAME 401 resurface from the page-level fetch, which
+  // the route error boundaries DO catch and route to AuthFailure.
+  let recentOpen: ConversationSummary[] = []
+  try {
+    recentOpen = (await listConversations({ folder: 'open', limit: 6 })).conversations
+  } catch {
+    // Empty bell; the real error surfaces (and is handled) at the page level.
+  }
 
   return (
     // suppressHydrationWarning: the inline script below sets `data-theme` on
@@ -53,7 +66,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
         <ThemeProvider>
           <ToasterProvider>
             <ShortcutsProvider>
-              <TopBar recentOpen={recentOpen.conversations} />
+              <TopBar recentOpen={recentOpen} />
               {children}
             </ShortcutsProvider>
           </ToasterProvider>

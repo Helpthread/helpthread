@@ -111,6 +111,8 @@ const CRITICAL_BANNER_STYLE: CSSProperties = {
   border: '1px solid color-mix(in oklab, var(--ht-critical) 28%, transparent)',
 }
 
+/** Plain borderless icon buttons on the format-toolbar row — the design has
+ *  no grey pill/segmented group around them, just hover feedback. */
 const FORMAT_BUTTON_STYLE: CSSProperties = {
   width: 26,
   height: 26,
@@ -120,10 +122,18 @@ const FORMAT_BUTTON_STYLE: CSSProperties = {
   fontSize: 12.5,
   fontWeight: 700,
   color: 'var(--ht-ink-muted)',
-  background: 'var(--ht-surface-2)',
-  border: '1px solid var(--ht-border)',
+  background: 'none',
+  border: 'none',
   borderRadius: 'var(--ht-radius-sm)',
   cursor: 'pointer',
+}
+
+function onFormatButtonHover(event: { currentTarget: HTMLElement }): void {
+  event.currentTarget.style.background = 'var(--ht-surface-2)'
+}
+
+function onFormatButtonUnhover(event: { currentTarget: HTMLElement }): void {
+  event.currentTarget.style.background = 'none'
 }
 
 const CONTENT_EDITABLE_STYLE: CSSProperties = {
@@ -1311,9 +1321,14 @@ export function ConversationScreen({
                 </button>
               </div>
               <span style={{ flex: 1 }} />
-              <IconButton title="Close composer — your draft is kept" onClick={closeComposer}>
-                <CloseIcon />
-              </IconButton>
+              {/* Reply mode hosts the close button on the format-toolbar row
+                  below (design: icons ... caption ... ×); Note mode has no
+                  format row, so its close button stays up here. */}
+              {composerMode === 'note' && (
+                <IconButton title="Close composer — your draft is kept" onClick={closeComposer}>
+                  <CloseIcon />
+                </IconButton>
+              )}
             </div>
 
             {composerMode === 'note' && (
@@ -1344,12 +1359,14 @@ export function ConversationScreen({
 
             {composerMode === 'reply' ? (
               <>
-                <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6 }}>
                   <button
                     type="button"
                     title="Bold"
                     onClick={() => applyFormat('bold')}
                     style={FORMAT_BUTTON_STYLE}
+                    onMouseEnter={onFormatButtonHover}
+                    onMouseLeave={onFormatButtonUnhover}
                   >
                     <b>B</b>
                   </button>
@@ -1358,6 +1375,8 @@ export function ConversationScreen({
                     title="Italic"
                     onClick={() => applyFormat('italic')}
                     style={FORMAT_BUTTON_STYLE}
+                    onMouseEnter={onFormatButtonHover}
+                    onMouseLeave={onFormatButtonUnhover}
                   >
                     <i>I</i>
                   </button>
@@ -1366,6 +1385,8 @@ export function ConversationScreen({
                     title="Bulleted list"
                     onClick={() => applyFormat('insertUnorderedList')}
                     style={FORMAT_BUTTON_STYLE}
+                    onMouseEnter={onFormatButtonHover}
+                    onMouseLeave={onFormatButtonUnhover}
                   >
                     <BulletListIcon />
                   </button>
@@ -1374,9 +1395,18 @@ export function ConversationScreen({
                     title="Link"
                     onClick={applyLink}
                     style={FORMAT_BUTTON_STYLE}
+                    onMouseEnter={onFormatButtonHover}
+                    onMouseLeave={onFormatButtonUnhover}
                   >
                     <LinkIcon />
                   </button>
+                  <span style={{ flex: 1 }} />
+                  <span style={{ fontSize: 11, color: 'var(--ht-ink-dim)' }}>
+                    Formatting is sent as HTML alongside plain text
+                  </span>
+                  <IconButton title="Close composer — your draft is kept" onClick={closeComposer}>
+                    <CloseIcon />
+                  </IconButton>
                 </div>
                 <div style={{ position: 'relative' }}>
                   {replyTextLength === 0 && (
@@ -1411,9 +1441,6 @@ export function ConversationScreen({
                     suppressContentEditableWarning
                     style={CONTENT_EDITABLE_STYLE}
                   />
-                </div>
-                <div style={{ marginTop: 4, fontSize: 11, color: 'var(--ht-ink-dim)' }}>
-                  Formatting is sent as HTML alongside plain text
                 </div>
               </>
             ) : (

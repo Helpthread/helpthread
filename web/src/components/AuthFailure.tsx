@@ -28,7 +28,24 @@ export function AuthFailure() {
         padding: 24,
       }}
     >
-      <h1 style={{ fontFamily: 'var(--ht-display)', fontSize: 22, fontWeight: 600, margin: 0 }}>
+      <div
+        style={{
+          fontFamily: "var(--ht-serif, 'Source Serif 4', serif)",
+          fontSize: 18,
+          fontWeight: 600,
+          letterSpacing: '0.01em',
+        }}
+      >
+        helpthread<span style={{ color: 'var(--ht-accent)' }}>.</span>
+      </div>
+      <h1
+        style={{
+          fontFamily: 'var(--ht-display)',
+          fontSize: 22,
+          fontWeight: 600,
+          margin: '18px 0 0',
+        }}
+      >
         Helpthread can&rsquo;t reach your inbox
       </h1>
       <p
@@ -40,15 +57,12 @@ export function AuthFailure() {
           color: 'var(--ht-ink-muted)',
         }}
       >
-        The Agent Inbox API rejected the request. There&rsquo;s nothing to sign into — this is
-        configuration, not a login.
-      </p>
-      <p style={{ margin: '18px 0 0', fontSize: 12, color: 'var(--ht-ink-dim)' }}>
-        Check that this is set correctly on the server:
+        Every request is signed with this deployment&rsquo;s service token, and the API just
+        rejected it. There&rsquo;s nothing to sign into — this is configuration, not a login.
       </p>
       <code
         style={{
-          marginTop: 6,
+          marginTop: 18,
           fontFamily: 'var(--ht-mono)',
           fontSize: 12.5,
           color: 'var(--ht-ink)',
@@ -60,8 +74,19 @@ export function AuthFailure() {
       >
         HELPTHREAD_API_TOKEN
       </code>
+      <p
+        style={{
+          margin: '10px 0 0',
+          maxWidth: 380,
+          fontSize: 12,
+          lineHeight: 1.6,
+          color: 'var(--ht-ink-dim)',
+        }}
+      >
+        Update the token in your deployment settings, redeploy, and reload this page.
+      </p>
       <div style={{ marginTop: 20 }}>
-        <Button variant="primary" onClick={() => window.location.reload()}>
+        <Button variant="outline" onClick={() => window.location.reload()}>
           Reload
         </Button>
       </div>
