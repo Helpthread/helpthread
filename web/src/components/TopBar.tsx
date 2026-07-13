@@ -143,11 +143,20 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
           letterSpacing: '0.01em',
           color: 'inherit',
           textDecoration: 'none',
-          marginRight: 10,
         }}
       >
         helpthread<span style={{ opacity: 0.55 }}>.</span>
       </Link>
+
+      <span
+        aria-hidden="true"
+        style={{
+          width: 1,
+          height: 18,
+          background: 'var(--ht-header-fg)',
+          opacity: 0.25,
+        }}
+      />
 
       <button
         type="button"
@@ -167,8 +176,6 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
       >
         Mailbox
       </button>
-
-      <span style={{ flex: 1 }} />
 
       <div style={{ position: 'relative' }}>
         <button
@@ -190,7 +197,7 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
         >
           Manage
         </button>
-        <DropdownMenu open={openMenu === 'manage'} onClose={() => setOpenMenu(null)} align="right">
+        <DropdownMenu open={openMenu === 'manage'} onClose={() => setOpenMenu(null)}>
           <MenuItem
             onClick={() => {
               setOpenMenu(null)
@@ -210,6 +217,8 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
           </MenuItem>
         </DropdownMenu>
       </div>
+
+      <span style={{ flex: 1 }} />
 
       <div style={{ position: 'relative' }}>
         <IconButton

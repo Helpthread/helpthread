@@ -32,6 +32,28 @@ function FolderIcon({ path }: { path: string }) {
   )
 }
 
+function SettingsIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"
+      />
+    </svg>
+  )
+}
+
+function MailIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z"
+      />
+    </svg>
+  )
+}
+
 export function FolderNav({
   supportAddress,
   counts,
@@ -77,9 +99,7 @@ export function FolderNav({
 
       <div
         style={{
-          flex: 1,
           minHeight: 0,
-          overflowY: 'auto',
           padding: '4px 10px',
           display: 'flex',
           flexDirection: 'column',
@@ -101,33 +121,42 @@ export function FolderNav({
 
       <div
         style={{
-          margin: 10,
+          margin: '10px 10px 0',
           flexShrink: 0,
           display: 'flex',
           border: '1px solid var(--ht-border)',
-          borderRadius: 999,
+          borderRadius: 'var(--ht-radius-md)',
           overflow: 'hidden',
         }}
       >
         <button
           type="button"
+          title="Settings"
           onClick={() => router.push('/settings')}
           style={{
             flex: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
             border: 'none',
             borderRight: '1px solid var(--ht-border)',
             background: 'none',
-            padding: '7px 0',
-            fontSize: 12,
-            fontWeight: 600,
+            padding: '9px 0',
             color: 'var(--ht-ink-muted)',
             cursor: 'pointer',
           }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'var(--ht-surface-2)'
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'none'
+          }}
         >
-          Settings
+          <SettingsIcon />
         </button>
         <button
           type="button"
+          title="New message"
           onClick={() =>
             showToast({
               title: "New message isn't wired yet",
@@ -136,16 +165,23 @@ export function FolderNav({
           }
           style={{
             flex: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
             border: 'none',
             background: 'none',
-            padding: '7px 0',
-            fontSize: 12,
-            fontWeight: 600,
+            padding: '9px 0',
             color: 'var(--ht-ink-muted)',
             cursor: 'pointer',
           }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'var(--ht-surface-2)'
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'none'
+          }}
         >
-          New message
+          <MailIcon />
         </button>
       </div>
     </nav>
