@@ -2,8 +2,8 @@
 
 /**
  * Full-screen auth-failure state (fidelity checklist). Rendered by
- * `AppError` when a thrown `ApiError`'s message carries the `unauthorized:`
- * prefix (see `lib/api.ts`). `position: fixed; inset: 0` so it covers the
+ * `AppError` when a thrown `ApiError` carries the auth-failure `error.digest`
+ * (see `lib/api.ts` and `lib/auth-error.ts`). `position: fixed; inset: 0` so it covers the
  * whole viewport regardless of where in the tree it's rendered — a broken
  * service token means nothing else on the page (folder rail included) is
  * usable anyway.

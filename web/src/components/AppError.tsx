@@ -2,12 +2,14 @@
 
 /**
  * Shared body for the route error boundaries (`app/(shell)/error.tsx`,
- * `app/settings/error.tsx`). A 401 from `lib/api.ts` carries the
- * `unauthorized:` prefix on `error.message` — the one detail that survives
- * from a server-thrown error to a client error boundary — which is what
- * selects the AuthFailure screen instead of the generic fallback below.
+ * `app/settings/error.tsx`). A 401 from `lib/api.ts` is tagged with
+ * `error.digest === AUTH_ERROR_DIGEST` — the channel that survives Next.js's
+ * production sanitization of Server Component errors (which strips `message`)
+ * — and that selects the AuthFailure screen instead of the generic fallback
+ * below. The `unauthorized:` message prefix is a dev-only fallback.
  */
 
+import { AUTH_ERROR_DIGEST } from '../lib/auth-error'
 import { AuthFailure } from './AuthFailure'
 import { Button } from './ds/core/Button'
 
@@ -18,7 +20,7 @@ export function AppError({
   error: Error & { digest?: string }
   reset: () => void
 }) {
-  if (error.message.startsWith('unauthorized:')) {
+  if (error.digest === AUTH_ERROR_DIGEST || error.message.startsWith('unauthorized:')) {
     return <AuthFailure />
   }
 

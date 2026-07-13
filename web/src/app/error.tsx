@@ -3,7 +3,7 @@
 /**
  * Top-level route error boundary — the fallback for any route NOT inside a
  * more specific boundary (notably `/dashboard`, which lives outside the
- * `(shell)` group). Routes a 401 (the `unauthorized:` prefix) to the designed
+ * `(shell)` group). Routes a 401 (tagged via `error.digest`) to the designed
  * AuthFailure screen, like the segment boundaries do. It does NOT catch errors
  * thrown by the ROOT LAYOUT itself (only a global-error boundary can) — but the
  * layout is now resilient (its one fetch is swallowed on failure), so nothing

@@ -20,6 +20,7 @@ import type {
   ConversationSummary,
   ThreadView,
 } from './api-types'
+import { AUTH_ERROR_DIGEST } from './auth-error'
 
 export type * from './api-types'
 
@@ -32,12 +33,17 @@ export type * from './api-types'
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
+  // Optional Next.js error digest. Set to AUTH_ERROR_DIGEST on a 401 so the
+  // client error boundary can route to AuthFailure even in production, where
+  // Server Component error *messages* are stripped and only `digest` survives.
+  readonly digest?: string
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, digest?: string) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.digest = digest
   }
 }
 
@@ -109,14 +115,14 @@ async function request<T>(
       // Non-JSON error body — keep the generic message.
     }
     // A 401 means the deployment's own Bearer token is missing or wrong —
-    // not a user failing to log in (there is no login). A client error
-    // boundary (`app/**/error.tsx`) only ever receives `error.message`
-    // (everything else is stripped off a thrown error crossing the
-    // server/client boundary), so that's the one channel available to tell
-    // it to render the AuthFailure screen — hence the `unauthorized:`
-    // prefix, detected in `components/AppError.tsx`.
+    // not a user failing to log in (there is no login). It must route to the
+    // AuthFailure screen via a client error boundary (`app/**/error.tsx`). In
+    // production Next.js strips a Server Component error's `message` and
+    // forwards only `error.digest`, so the digest — not the message — is what
+    // `components/AppError.tsx` matches on. The `unauthorized:` message prefix
+    // is kept for dev/server logs and as a belt-and-suspenders fallback.
     if (response.status === 401) {
-      throw new ApiError(response.status, code, `unauthorized:${message}`)
+      throw new ApiError(response.status, code, `unauthorized:${message}`, AUTH_ERROR_DIGEST)
     }
     throw new ApiError(response.status, code, message)
   }
