@@ -27,6 +27,21 @@ import { useToast } from './Toaster'
 
 type MenuKey = 'manage' | 'notifications' | 'avatar'
 
+function ChevronDownIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" style={{ opacity: 0.85 }}>
+      <polyline
+        points="6 9 12 15 18 9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 function BellIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
@@ -182,6 +197,9 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
           type="button"
           onClick={() => toggle('manage')}
           style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
             border: 'none',
             cursor: 'pointer',
             fontSize: 13,
@@ -196,6 +214,7 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
           }}
         >
           Manage
+          <ChevronDownIcon />
         </button>
         <DropdownMenu open={openMenu === 'manage'} onClose={() => setOpenMenu(null)}>
           <MenuItem
