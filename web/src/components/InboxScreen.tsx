@@ -90,7 +90,10 @@ export function InboxScreen({
   const disarmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // j/k (and ↑/↓) move this cursor; Enter opens it, x toggles its checkbox.
-  const [focusedIndex, setFocusedIndex] = useState(0)
+  // Starts at -1 (NO row focused) so the table shows no highlight on load —
+  // the design has no default-selected row; the cursor appears only once the
+  // Agent starts navigating (the first j/k/arrow lands on row 0).
+  const [focusedIndex, setFocusedIndex] = useState(-1)
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map())
 
   // A folder switch is a fresh list — appended pages, selection, and the
@@ -103,7 +106,7 @@ export function InboxScreen({
     setCursor(nextCursor)
     setSelected(new Set())
     setDeleteArmed(false)
-    setFocusedIndex(0)
+    setFocusedIndex(-1)
     if (disarmTimer.current !== null) clearTimeout(disarmTimer.current)
   }, [folder, nextCursor])
 
