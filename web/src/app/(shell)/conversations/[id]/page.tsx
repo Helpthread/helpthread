@@ -11,14 +11,21 @@ import { ApiError, getConversation, listConversations } from '../../../../lib/ap
  * app folders the Agent arrived from) to derive prev/next neighbors and a
  * "{i} of {n}" position. If this conversation isn't in that page (closed,
  * spam, or past the first 50), the toolbar just hides prev/next.
+ *
+ * Also fetches the closed folder's first 50 and, together with the open
+ * page, derives the context panel's "Previous conversations" list: every
+ * other conversation from the same customer, newest-updated first.
  */
 export default async function ConversationPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
 
   try {
     const conversation = await getConversation(id)
-    const folderPage = await listConversations({ folder: 'open', limit: 50 })
-    const ids = folderPage.conversations.map((c) => c.id)
+    const [openPage, closedPage] = await Promise.all([
+      listConversations({ folder: 'open', limit: 50 }),
+      listConversations({ folder: 'closed', limit: 50 }),
+    ])
+    const ids = openPage.conversations.map((c) => c.id)
     const index = ids.indexOf(id)
     const position =
       index === -1
@@ -29,7 +36,17 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
             prevId: index > 0 ? (ids[index - 1] ?? null) : null,
             nextId: index < ids.length - 1 ? (ids[index + 1] ?? null) : null,
           }
-    return <ConversationScreen conversation={conversation} position={position} />
+    const previousConversations = [...openPage.conversations, ...closedPage.conversations]
+      .filter((c) => c.customerEmail === conversation.customerEmail && c.id !== id)
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .map((c) => ({ id: c.id, subject: c.subject, status: c.status, updatedAt: c.updatedAt }))
+    return (
+      <ConversationScreen
+        conversation={conversation}
+        position={position}
+        previousConversations={previousConversations}
+      />
+    )
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) notFound()
     throw error

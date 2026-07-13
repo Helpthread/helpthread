@@ -34,3 +34,30 @@ export function nameFromEmail(email: string): string {
     .map((part) => part[0].toUpperCase() + part.slice(1))
     .join(' ')
 }
+
+/** "Jun 19" / "Jun 19, 2025" (year only when not the current year) — used
+ *  for the context panel's Previous conversations rows. */
+export function shortDate(iso: string, now: Date = new Date()): string {
+  const then = new Date(iso)
+  const sameYear = then.getFullYear() === now.getFullYear()
+  return then.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  })
+}
+
+/** Message-band timestamp: same calendar day → absolute clock time
+ *  ("6:10 PM"); older → the short date. Unlike `relativeTime`, this never
+ *  ages in place while a conversation is open. */
+export function messageTime(iso: string, now: Date = new Date()): string {
+  const then = new Date(iso)
+  const sameDay =
+    then.getFullYear() === now.getFullYear() &&
+    then.getMonth() === now.getMonth() &&
+    then.getDate() === now.getDate()
+  if (sameDay) {
+    return then.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  }
+  return shortDate(iso, now)
+}

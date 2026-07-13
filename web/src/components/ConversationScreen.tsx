@@ -37,7 +37,7 @@ import {
 } from '../lib/actions'
 import type { ConversationDetail, ConversationStatus, ThreadView } from '../lib/api-types'
 import { clearDraft, getDraft, writeDraft } from '../lib/drafts'
-import { nameFromEmail, relativeTime } from '../lib/format'
+import { messageTime, nameFromEmail, relativeTime, shortDate } from '../lib/format'
 import { useStarred } from '../lib/starred'
 import { Avatar } from './ds/core/Avatar'
 import { Button } from './ds/core/Button'
@@ -143,11 +143,24 @@ export interface ConversationNeighborPosition {
   nextId: string | null
 }
 
-const STATUS_META: Record<ConversationStatus, { label: string; fg: string }> = {
-  active: { label: 'Active', fg: 'var(--ht-accent)' },
-  pending: { label: 'Pending', fg: 'var(--ht-warn)' },
-  closed: { label: 'Closed', fg: 'var(--ht-ink-dim)' },
-  spam: { label: 'Spam', fg: 'var(--ht-critical)' },
+/** A prior conversation from the same customer — the context panel's
+ *  "Previous conversations" section (design fix C5). */
+export interface PreviousConversationSummary {
+  id: string
+  subject: string
+  status: ConversationStatus
+  updatedAt: string
+}
+
+const STATUS_META: Record<ConversationStatus, { label: string; fg: string; bg: string }> = {
+  active: { label: 'Active', fg: 'var(--ht-accent)', bg: 'var(--ht-accent-soft)' },
+  pending: {
+    label: 'Pending',
+    fg: 'var(--ht-warn)',
+    bg: 'color-mix(in oklab, var(--ht-warn) 12%, transparent)',
+  },
+  closed: { label: 'Closed', fg: 'var(--ht-ink-dim)', bg: 'var(--ht-surface-2)' },
+  spam: { label: 'Spam', fg: 'var(--ht-critical)', bg: 'var(--ht-critical-soft)' },
 }
 
 function ReplyIcon() {
@@ -243,6 +256,63 @@ function StarIcon({ filled }: { filled: boolean }) {
       aria-hidden="true"
     >
       <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+    </svg>
+  )
+}
+
+function PersonIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </svg>
+  )
+}
+
+function FlagIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+      <line x1="4" y1="22" x2="4" y2="15" />
+    </svg>
+  )
+}
+
+function GearIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
   )
 }
@@ -523,9 +593,11 @@ function OriginalMessageModal({ thread, onClose }: { thread: ThreadView; onClose
 export function ConversationScreen({
   conversation,
   position,
+  previousConversations,
 }: {
   conversation: ConversationDetail
   position: ConversationNeighborPosition | null
+  previousConversations: PreviousConversationSummary[]
 }) {
   const router = useRouter()
   const showToast = useToast()
@@ -570,6 +642,7 @@ export function ConversationScreen({
   const [statusMenuOpen, setStatusMenuOpen] = useState(false)
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const [following, setFollowing] = useState(false)
+  const [previousConversationsOpen, setPreviousConversationsOpen] = useState(true)
 
   const [deleteArmed, setDeleteArmed] = useState(false)
   const deleteDisarmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -948,21 +1021,6 @@ export function ConversationScreen({
         }}
       >
         <ToolbarBand>
-          <button
-            type="button"
-            onClick={() => router.push('/inbox/open')}
-            style={{
-              border: 'none',
-              background: 'none',
-              color: 'var(--ht-ink-muted)',
-              fontSize: 13,
-              cursor: 'pointer',
-              padding: '4px 6px',
-            }}
-          >
-            ← Inbox
-          </button>
-
           <IconButton title="Reply (r)" onClick={() => openComposer('reply')}>
             <ReplyIcon />
           </IconButton>
@@ -982,7 +1040,11 @@ export function ConversationScreen({
               Confirm
             </Button>
           ) : (
-            <IconButton title="Delete conversation" onClick={onDeleteClick}>
+            <IconButton
+              title="Delete conversation"
+              onClick={onDeleteClick}
+              style={{ color: 'var(--ht-critical)' }}
+            >
               <TrashIcon />
             </IconButton>
           )}
@@ -1102,6 +1164,7 @@ export function ConversationScreen({
 
           <div style={{ position: 'relative' }}>
             <Button variant="outline" onClick={() => setAssigneeMenuOpen((open) => !open)}>
+              <PersonIcon />
               {assignee === 'me' ? 'Me' : 'Anyone'}
               <ChevronDownIcon />
             </Button>
@@ -1127,9 +1190,9 @@ export function ConversationScreen({
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 6,
-                border: '1px solid var(--ht-border)',
-                background: 'var(--ht-surface)',
-                borderRadius: 'var(--ht-radius-md)',
+                border: 'none',
+                background: STATUS_META[status].bg,
+                borderRadius: 999,
                 padding: '6px 12px',
                 fontSize: 12.5,
                 fontWeight: 700,
@@ -1137,6 +1200,7 @@ export function ConversationScreen({
                 cursor: 'pointer',
               }}
             >
+              <FlagIcon />
               {STATUS_META[status].label}
               <ChevronDownIcon />
             </button>
@@ -1166,6 +1230,17 @@ export function ConversationScreen({
 
           {position !== null && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <span
+                style={{
+                  fontSize: 12,
+                  color: 'var(--ht-ink-dim)',
+                  fontVariantNumeric: 'tabular-nums',
+                  minWidth: 56,
+                  textAlign: 'center',
+                }}
+              >
+                {position.index} of {position.total}
+              </span>
               <IconButton
                 title="Previous conversation"
                 onClick={() => {
@@ -1178,17 +1253,6 @@ export function ConversationScreen({
               >
                 <ChevronLeftIcon />
               </IconButton>
-              <span
-                style={{
-                  fontSize: 12,
-                  color: 'var(--ht-ink-dim)',
-                  fontVariantNumeric: 'tabular-nums',
-                  minWidth: 56,
-                  textAlign: 'center',
-                }}
-              >
-                {position.index} of {position.total}
-              </span>
               <IconButton
                 title="Next conversation"
                 onClick={() => {
@@ -1203,25 +1267,20 @@ export function ConversationScreen({
               </IconButton>
             </div>
           )}
-
-          {/* Force the informational display onto its own row within the wrapping band. */}
-          <div style={{ flexBasis: '100%', height: 0 }} aria-hidden="true" />
-
-          <span style={{ fontSize: 14, fontWeight: 700, marginLeft: 4 }}>
-            {conversation.subject}
-          </span>
-          <span
-            style={{
-              fontFamily: 'var(--ht-mono)',
-              fontSize: 11.5,
-              color: 'var(--ht-ink-dim)',
-              fontVariantNumeric: 'tabular-nums',
-            }}
-          >
-            #{conversation.number}
-          </span>
-          <StatusPill status={status} />
         </ToolbarBand>
+
+        <div
+          style={{
+            padding: '14px 18px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontSize: 19, fontWeight: 700 }}>{conversation.subject}</span>
+          <StatusPill status={status} />
+        </div>
 
         {composerOpen && (
           <div
@@ -1437,7 +1496,7 @@ export function ConversationScreen({
                     kind === 'inbound' ? customerName : kind === 'note' ? 'Internal note' : 'You'
                   }
                   fromAddr={thread.from}
-                  time={relativeTime(thread.createdAt)}
+                  time={messageTime(thread.createdAt)}
                   delivery={thread.deliveryStatus ?? undefined}
                   failed={thread.deliveryStatus === 'failed'}
                   viewedAt={
@@ -1493,69 +1552,123 @@ export function ConversationScreen({
         }}
       >
         <ToolbarBand tone="panel">
-          <span
-            style={{
-              fontSize: 10.5,
-              fontWeight: 700,
-              letterSpacing: '0.08em',
-              textTransform: 'uppercase',
-              color: 'var(--ht-ink-muted)',
-            }}
+          <span style={{ flex: 1 }} />
+          <IconButton
+            title="Customer settings"
+            onClick={() =>
+              showToast({
+                title: "Customer settings isn't wired yet",
+                detail: "Designed for v1 — the endpoint is spec'd, not in the mock.",
+              })
+            }
           >
-            Customer
-          </span>
+            <GearIcon />
+          </IconButton>
         </ToolbarBand>
-        <div style={{ padding: '16px 14px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Avatar email={conversation.customerEmail} size={36} ring />
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 700 }}>{customerName}</div>
-              <div
-                style={{
-                  fontFamily: 'var(--ht-mono)',
-                  fontSize: 11,
-                  color: 'var(--ht-ink-dim)',
-                  overflowWrap: 'break-word',
-                }}
-              >
-                {conversation.customerEmail}
-              </div>
+        <div style={{ padding: '0 14px 16px', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ marginTop: -36 }}>
+            <Avatar email={conversation.customerEmail} size={72} ring />
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 19, fontWeight: 700 }}>{customerName}</div>
+            <div
+              style={{
+                fontFamily: 'var(--ht-mono)',
+                fontSize: 11,
+                color: 'var(--ht-ink-dim)',
+                overflowWrap: 'break-word',
+              }}
+            >
+              {conversation.customerEmail}
             </div>
           </div>
 
-          <dl
-            style={{
-              margin: 0,
-              display: 'grid',
-              gridTemplateColumns: 'auto 1fr',
-              rowGap: 8,
-              columnGap: 12,
-              fontSize: 12,
-            }}
-          >
-            <dt style={{ color: 'var(--ht-ink-dim)' }}>Status</dt>
-            <dd style={{ margin: 0 }}>
-              <StatusPill status={status} style={{ fontSize: 9.5, padding: '1px 7px' }} />
-            </dd>
-            <dt style={{ color: 'var(--ht-ink-dim)' }}>Started</dt>
-            <dd style={{ margin: 0, fontVariantNumeric: 'tabular-nums' }}>
-              {relativeTime(conversation.createdAt)}
-            </dd>
-            <dt style={{ color: 'var(--ht-ink-dim)' }}>Last activity</dt>
-            <dd style={{ margin: 0, fontVariantNumeric: 'tabular-nums' }}>
-              {relativeTime(conversation.updatedAt)}
-            </dd>
-            <dt style={{ color: 'var(--ht-ink-dim)' }}>Messages</dt>
-            <dd style={{ margin: 0, fontVariantNumeric: 'tabular-nums' }}>
-              {conversation.threadCount}
-            </dd>
-          </dl>
+          <div
+            style={{ height: 1, background: 'var(--ht-divider)', margin: '14px 0' }}
+            aria-hidden="true"
+          />
 
-          {tags.length > 0 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {tags.map((tag) => (
-                <TagChip key={tag} label={tag} />
-              ))}
+          {previousConversations.length > 0 && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setPreviousConversationsOpen((open) => !open)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  width: '100%',
+                  border: 'none',
+                  background: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  color: 'var(--ht-ink-muted)',
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  Previous conversations
+                </span>
+                <span style={{ fontSize: 11, color: 'var(--ht-ink-dim)' }}>
+                  {previousConversations.length}
+                </span>
+                <span style={{ flex: 1 }} />
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    transform: previousConversationsOpen ? 'none' : 'rotate(-90deg)',
+                  }}
+                >
+                  <ChevronDownIcon />
+                </span>
+              </button>
+              {previousConversationsOpen && (
+                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column' }}>
+                  {previousConversations.slice(0, 5).map((prior) => (
+                    <button
+                      key={prior.id}
+                      type="button"
+                      onClick={() => router.push(`/conversations/${prior.id}`)}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        border: 'none',
+                        background: 'none',
+                        padding: '6px 0',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 700,
+                          color: 'var(--ht-ink)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {prior.subject}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: 'var(--ht-ink-dim)' }}>
+                        {STATUS_META[prior.status].label} · {shortDate(prior.updatedAt)}
+                      </div>
+                    </button>
+                  ))}
+                  {previousConversations.length > 5 && (
+                    <div style={{ fontSize: 11.5, color: 'var(--ht-ink-dim)', padding: '4px 0' }}>
+                      and {previousConversations.length - 5} more
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
