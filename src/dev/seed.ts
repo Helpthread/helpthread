@@ -3,8 +3,10 @@
  * boot for the upcoming Agent Inbox UI (HT-23) to exercise every state it
  * must render: an inbound-only conversation, a threaded back-and-forth, one
  * outbound thread in each delivery state (`sent`/`failed`/stale `pending`),
- * and a closed conversation. Every name and message below is invented for
- * this seed — never real customer data (CLAUDE.md).
+ * a closed conversation, and one inbound message with a rich HTML body (so
+ * the UI's sanitized-HTML path — spec §5's stored-XSS contract — is exercised
+ * against real data). Every name and message below is invented for this
+ * seed — never real customer data (CLAUDE.md).
  *
  * Reuses the real engine paths wherever practical rather than raw SQL, so
  * seeding itself exercises the store and the send pipeline:
@@ -271,6 +273,42 @@ export async function seedDevData(deps: SeedDevDataDeps): Promise<SeedDevDataRes
     throw new Error("seed: expected the closed-conversation demo's reply to send successfully")
   }
   await store.setConversationStatus(closedDemo.conversationId, 'closed')
+
+  // --- 7. Inbound-only with a rich HTML body. --------------------------------
+  // The one demo that exercises the inbox UI's sanitized-HTML path (spec
+  // §5's stored-XSS contract). The parser stores inbound HTML verbatim —
+  // `<script>` and all (specs/mail/threading.md §5, fixtures/mail/observed/
+  // html-body.json) — so this `bodyHtml` deliberately carries the four
+  // things the UI's sanitizer, its "HTML email · sanitized · external images
+  // blocked" caption, and its Show-original modal must all handle: formatting,
+  // a link, a remote `<img>` (a tracking pixel), and a `<script>`. The store
+  // returns it untouched (safe as JSON); sanitization is the renderer's job.
+  // `bodyText` is the plain-text alternative the same mail would carry.
+  await store.createConversation({
+    subject: 'Unexpected charge on my March invoice',
+    customerEmail: 'noah.feldman@example.test',
+    firstMessage: {
+      direction: 'inbound',
+      messageId: '<inbound-1@noah-feldman.example.test>',
+      fromAddress: 'noah.feldman@example.test',
+      bodyText:
+        'Hi there,\n\n' +
+        "My March invoice shows a charge I don't recognize — a line item for " +
+        '"Priority Support" that I never signed up for.\n\n' +
+        'Here is the invoice in question: https://billing.example.com/invoices/48213\n\n' +
+        'Could you take a look and let me know? Thanks,\nNoah',
+      bodyHtml:
+        '<p>Hi there,</p>' +
+        '<p>My <strong>March invoice</strong> shows a charge I don&rsquo;t recognize &mdash; ' +
+        'a line item for <em>&ldquo;Priority Support&rdquo;</em> that I never signed up for.</p>' +
+        '<p>Here is the invoice in question: ' +
+        '<a href="https://billing.example.com/invoices/48213">billing.example.com/invoices/48213</a></p>' +
+        '<p>Could you take a look and let me know? Thanks,<br>Noah</p>' +
+        '<img src="https://tracker.example.com/o.gif?u=48213" width="1" height="1" alt="">' +
+        '<script>document.title = "pwned"</script>',
+    },
+  })
+  conversationCount++
 
   return { conversationCount }
 }
