@@ -48,16 +48,17 @@ describe('seedDevData', () => {
       supportAddress: SUPPORT_ADDRESS,
     })
 
-    expect(result.conversationCount).toBe(6)
+    expect(result.conversationCount).toBe(7)
 
     // Real sends went through the injected sender for every reply EXCEPT the
     // one deliberately routed through the seed's own failing sender — see
-    // seed.ts's "failed" demo.
+    // seed.ts's "failed" demo. The HTML demo is inbound-only (no reply), so
+    // it adds a conversation without adding a send.
     expect(sent.length).toBe(4)
 
     const open = await store.listConversations({ limit: 50, folder: 'open' })
     const closed = await store.listConversations({ limit: 50, folder: 'closed' })
-    expect(open).toHaveLength(5)
+    expect(open).toHaveLength(6)
     expect(closed).toHaveLength(1)
 
     const allThreads = await Promise.all(
@@ -83,5 +84,19 @@ describe('seedDevData', () => {
       .find((t) => t.deliveryStatus === 'pending')
     expect(pendingThread).toBeDefined()
     expect(Date.now() - (pendingThread?.createdAt.getTime() ?? 0)).toBeGreaterThan(5 * 60_000)
+
+    // The HTML demo exists to exercise the inbox UI's sanitized-HTML path, so
+    // its inbound thread must actually carry a bodyHtml, stored verbatim
+    // (spec §5: the store returns untrusted HTML as-is; the renderer sanitizes)
+    // alongside a plain-text alternative. Assert the four things the UI must
+    // handle survived storage: formatting, a link, a remote <img>, a <script>.
+    const htmlThread = allThreads.flatMap((c) => c?.threads ?? []).find((t) => t.bodyHtml !== null)
+    expect(htmlThread).toBeDefined()
+    expect(htmlThread?.direction).toBe('inbound')
+    expect(htmlThread?.bodyText).not.toBeNull()
+    expect(htmlThread?.bodyHtml).toContain('<strong>')
+    expect(htmlThread?.bodyHtml).toContain('<a href=')
+    expect(htmlThread?.bodyHtml).toContain('<img ')
+    expect(htmlThread?.bodyHtml).toContain('<script>')
   })
 })
