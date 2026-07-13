@@ -25,10 +25,16 @@ Gmail push has two moving parts, and the split matters:
    watermark, not a message id.
 
 So receipt is never "parse the webhook body into an email." It is: authenticate the push,
-then **reconcile** from our own stored cursor via `users.history.list` to discover exactly
-which messages changed, and fetch each as raw MIME. The notification is a *hint that
-something changed*; the stored cursor is the source of truth. That is precisely the
-charter's "bounded reconciliation fetch."
+resolve which mailbox it is for, then **reconcile** from our own stored cursor via
+`users.history.list` to discover exactly which messages changed, and fetch each as raw MIME.
+The notification is a *hint that something changed*; the stored cursor is the source of
+truth. That is precisely the charter's "bounded reconciliation fetch."
+
+Push is **best-effort, not guaranteed** — Gmail rate-limits notifications to ~1/second per
+watched mailbox and may drop or delay them under load. Correctness therefore never rests on
+push alone: a scheduled bounded reconciliation (§6) is the safety net Google's own guidance
+requires, and the idempotent ingest pipeline (inbound-ingestion.md §4) makes the overlap
+between push and sweep free of duplicates.
 
 ## 2. Webhook receipt and security (HT-39)
 
@@ -43,11 +49,15 @@ Required checks, all of them (a failure of any is a uniform rejection):
 
 - **Verify the OIDC JWT** on the request (`Authorization: Bearer <jwt>`): signature against
   Google's published certs; `iss` is Google; `aud` equals **our exact endpoint URL**;
-  `email` is the specific push service account we configured for the subscription; `exp`
-  not passed.
-- **Bind to our subscription/project** — reject a notification that did not originate from
-  the Pub/Sub subscription we created. A valid Google JWT is necessary but not sufficient;
-  it must be *our* push identity.
+  `email` is the specific push service account we configured for the subscription;
+  **`email_verified` is `true`** (Google's push-auth guidance is explicit that the signed
+  `email` claim is only trustworthy when `email_verified` is set — a valid signature and
+  audience do not by themselves bind the identity); `exp` not passed.
+- **Bind to our subscription** — compare the push envelope's top-level `subscription` field
+  (`projects/{project}/subscriptions/{name}`, present on every Pub/Sub push body) against
+  the exact subscription we provisioned, and reject anything else. A valid Google JWT is
+  necessary but not sufficient; the delivery must also be *our* subscription, not merely
+  some authenticated Pub/Sub push.
 - **Envelope limits** — `POST` + `application/json` only; a body-size cap; a uniform
   response that does not leak *which* check failed; replay tolerance (a re-POST is safe
   because ingestion is idempotent — inbound-ingestion.md §4 — but abusive repeats are
@@ -55,32 +65,43 @@ Required checks, all of them (a failure of any is a uniform rejection):
 
 This surface is materially costlier than the pixel: a single accepted POST can trigger
 Gmail API fetches, blob writes, and DB writes. So it does **no heavy work inline** — it
-authenticates, records the notification (a durable "history advanced for mailbox X to
-`historyId` Y" marker), acks Pub/Sub with a fast 2xx, and lets the reconciliation step (§3)
-do the fetching. Returning 2xx quickly also prevents Pub/Sub's own redelivery from
-amplifying load; a non-2xx tells Pub/Sub to redeliver, which idempotency (§4,
-inbound-ingestion.md §4) makes safe but which we don't want to invite needlessly.
+authenticates, records the notification (a durable "history advanced for mailbox X" marker),
+acks Pub/Sub with a fast 2xx, and lets the reconciliation step (§3) do the fetching.
+Returning 2xx quickly also prevents Pub/Sub's own redelivery from amplifying load; a non-2xx
+tells Pub/Sub to redeliver, which idempotency (§4, inbound-ingestion.md §4) makes safe but
+which we don't want to invite needlessly.
 
 ## 3. History reconciliation and raw fetch (HT-41)
 
-From a recorded notification (a `mailboxId` and a new `historyId` watermark):
+**Resolve the mailbox first.** The notification carries `emailAddress`, **not** a
+`mailboxId`. Before recording any cursor or calling `history.list`, resolve `emailAddress`
+to a known, active connected mailbox and **reject the notification if it does not map to
+one** — this stops a misrouted, stale, or spoofed push from advancing or querying the wrong
+mailbox. Everything downstream keys off the resolved `mailboxId`, never the raw
+`emailAddress`. (The JWT's `email` claim in §2 is the *push service account*; the payload's
+`emailAddress` is the *watched mailbox* — two different identities, both checked.)
+
+Then, from the resolved mailbox and its stored cursor:
 
 - `users.history.list?startHistoryId=<stored cursor>` — enumerate `messagesAdded` since
-  **our stored cursor**, not merely since the notification's `historyId`. Page through all
-  results.
+  **our stored cursor**, not the notification's `historyId` (which is the *new* watermark:
+  starting from it returns nothing, because there are no changes newer than the current
+  state — the stored cursor is the source of truth). Page through all results.
 - For each new message id: `users.messages.get?format=raw` → the raw RFC822 bytes. `raw` is
   mandatory; a parsed/`full` fetch would reintroduce the second-parser problem
-  (inbound-ingestion.md §1). Attachments present in the raw MIME are written to the
-  `BlobStore` under a **mailbox-namespaced** key before hand-off (blob.ts).
+  (inbound-ingestion.md §1).
 - Hand each message to the ingest pipeline as `{ raw, mailboxId, providerMessageId =
-  <Gmail message id>, receivedAt }` (inbound-ingestion.md §2–3). The transport never parses.
+  <Gmail message id>, receivedAt }` (inbound-ingestion.md §2–3). **The transport never
+  parses — and therefore never extracts attachments.** Parsing the MIME and writing
+  attachments to the `BlobStore` is the pipeline's job (inbound-ingestion.md §2–3),
+  downstream of the single `parseInboundEmail` call; the transport only moves raw bytes.
 
 ## 4. The cursor: monotonic, transactional with persistence
 
 Each mailbox stores a `historyId` cursor (HT-36). Its one rule: **it advances only after
 the ingest pipeline confirms every message in the batch is `stored` or `suppressed`**
 (inbound-ingestion.md §4). A crash mid-batch leaves the cursor where it was; the next
-notification (or the watch-renewal re-baseline) re-lists from there, re-fetches, and the
+notification (or the §6 reconciliation sweep) re-lists from there, re-fetches, and the
 pipeline dedups on `(mailboxId, providerMessageId)`. Advancing the cursor *before*
 persistence would silently drop any message that failed to store — the one outcome
 invariant #1 forbids — so we always bias to re-fetch, never to skip.
@@ -99,14 +120,15 @@ doing work bounded only by mailbox size — exactly the kind of surprising, hard
 behavior the charter's serverless posture avoids, and a real risk to the sacred no-drop /
 no-storm guarantees if dedup or blob writes hiccup at scale. For RIQ-watching-itself, a
 paused mailbox is a visible, operator-resolvable state (re-baseline deliberately), not a
-silent failure.
+silent failure. (This is distinct from the §6 sweep, which reconciles from a *live* cursor;
+here the cursor itself is unrecoverable.)
 
 > **OPEN QUESTION (deferred with the forwarding/GA work).** The external default likely
 > needs an *automatic bounded* rebaseline — e.g. re-arm `watch()` for a fresh cursor and
 > ingest only messages received after the pause timestamp, accepting a bounded gap rather
 > than a full resync. Specced when GA onboarding is, not now.
 
-## 6. `watch()` lifecycle and renewal (HT-42)
+## 6. `watch()` renewal and periodic reconciliation (HT-42)
 
 - `watch()` is called when a mailbox is connected (OAuth, HT-40) and returns the initial
   `historyId` (the cursor's starting point) and an expiration (~7 days out).
@@ -114,17 +136,27 @@ silent failure.
   stop** — no error on either side, mail just keeps arriving with nothing telling us. A
   daily `SchedulerProvider` cron (`registerCron`, `src/providers/scheduler.ts`) re-arms
   `watch()` for every active mailbox. Daily (not every-6-days) buys a safety margin against
-  a missed run; `watch()` is idempotent, so re-arming early is free. This is the charter's
-  sanctioned low-frequency **cron trigger** (§4), not a polling loop — it fires once a day
-  regardless of mail volume and fetches nothing itself.
+  a missed run; `watch()` is idempotent, so re-arming early is free.
+- **The same daily cron also runs a bounded reconciliation `history.list` from each active
+  mailbox's stored cursor.** This is not optional polish: because push is best-effort (§1),
+  a dropped or delayed notification — most damagingly the *last* one before a quiet spell —
+  can otherwise leave a mailbox stale indefinitely, since nothing else triggers a fetch. The
+  sweep is the charter's exact "bounded reconciliation fetch, never a long-running poller"
+  (§4, phase-1): it reuses the §3–§4 fetch/cursor path, is bounded per run, and fires on the
+  same once-daily tick — it is a scheduled catch-up, not a polling loop. It feeds the
+  identical idempotent ingest pipeline, so any message already delivered by push is deduped,
+  never doubled (inbound-ingestion.md §4). (Cadence is a tuning knob: daily bounds worst-case
+  staleness to ~24h for a dropped tail notification; a tighter interval trades quota for
+  freshness and can be revisited without changing the design.)
 - On `watch()` failure (revoked/expired grant, admin change): mark the mailbox
   **needs-reconnect** and surface it — never crash the cron for other mailboxes (OAuth
   handling, HT-38/HT-40).
 
 ## 7. What this transport does not own
 
-- **Parsing, threading, storage, idempotency, loop-suppression, observability** →
-  inbound-ingestion.md. This transport hands over raw bytes and provider metadata and stops.
+- **Parsing, threading, storage, idempotency, attachment extraction, loop-suppression,
+  observability** → inbound-ingestion.md. This transport hands over raw bytes and provider
+  metadata and stops.
 - **OAuth token acquisition/refresh** → HT-38; the **connect/consent flow** → HT-40.
 - **One-time GCP/Pub-Sub provisioning** (Internal OAuth app; enable the Gmail + Pub/Sub APIs;
   create the topic; grant `gmail-api-push@system.gserviceaccount.com` the Pub/Sub Publisher
@@ -136,13 +168,18 @@ silent failure.
 
 Against a **faked** Gmail API + Pub/Sub push (no cloud):
 
-- A push with a valid OIDC JWT → `history.list` → `messages.get?format=raw` → the raw bytes
-  reach the ingest pipeline with correct `{ mailboxId, providerMessageId, receivedAt }`.
-- A forged / wrong-`aud` / wrong-service-account / expired JWT, or a notification not bound
-  to our subscription → rejected, uniform response, no fetch triggered.
+- A push with a valid OIDC JWT (correct `aud`, service-account `email`, `email_verified`,
+  and matching `subscription`) → mailbox resolved from `emailAddress` → `history.list` →
+  `messages.get?format=raw` → the raw bytes reach the ingest pipeline with correct
+  `{ mailboxId, providerMessageId, receivedAt }`.
+- A forged / wrong-`aud` / wrong-service-account / `email_verified:false` / expired JWT, or
+  a notification whose `subscription` isn't ours, or whose `emailAddress` resolves to no
+  known mailbox → rejected, uniform response, no fetch triggered.
 - A duplicate push (same `historyId`) → no duplicate ingestion (dedup, inbound-ingestion.md §4).
 - A mid-batch failure → the cursor does not advance past the unstored message.
 - A 404 on `history.list` → the mailbox is paused and flagged, no resync attempted.
+- The daily reconciliation sweep re-lists from the stored cursor and ingests a message a
+  *dropped* push never delivered — with no duplication of messages push already delivered.
 
 The **live** end-to-end proof against real Gmail — send via the Gmail API, assert the
 delivered message carries our verbatim token-bearing `Message-ID`, reply from a real Gmail
