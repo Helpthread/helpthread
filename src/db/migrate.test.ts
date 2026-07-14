@@ -709,18 +709,16 @@ describe('migrate', () => {
       status: string
       attempts: number
       last_error: string | null
-      conversation_id: string | null
       thread_id: string | null
     }>(
       `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id) VALUES ($1, $2)
-       RETURNING id, status, attempts, last_error, conversation_id, thread_id`,
+       RETURNING id, status, attempts, last_error, thread_id`,
       [mailbox.id, 'gmail-msg-1'],
     )
     expect(delivery.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
     expect(delivery.status).toBe('received')
     expect(delivery.attempts).toBe(0)
     expect(delivery.last_error).toBeNull()
-    expect(delivery.conversation_id).toBeNull()
     expect(delivery.thread_id).toBeNull()
 
     // A plain second INSERT of the SAME (mailbox_id, provider_message_id)
@@ -792,7 +790,7 @@ describe('migrate', () => {
     ).rejects.toThrow()
   })
 
-  it('migration 012 ties conversation_id/thread_id to real rows via FK, and clears them (SET NULL) rather than deleting the ledger row when the conversation is removed', async () => {
+  it('migration 012 ties thread_id to a real thread via FK, and clears it (SET NULL) rather than deleting the ledger row when the thread is removed', async () => {
     db = await createPgliteDb()
     await migrate(db)
 
@@ -810,33 +808,34 @@ describe('migrate', () => {
       [conversation.id, 'customer@example.test'],
     )
 
-    // A nonexistent conversation_id violates the FK.
+    // A nonexistent thread_id violates the FK.
     await expect(
       db.query(
-        `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status, conversation_id, thread_id)
-         VALUES ($1, $2, 'stored', $3, $4)`,
-        [mailbox.id, 'gmail-msg-1', '00000000-0000-0000-0000-000000000000', thread.id],
+        `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status, thread_id)
+         VALUES ($1, $2, 'stored', $3)`,
+        [mailbox.id, 'gmail-msg-1', '00000000-0000-0000-0000-000000000000'],
       ),
     ).rejects.toThrow()
 
+    // The recorded outcome is the thread; its conversation is derivable via
+    // threads.conversation_id, so there is no separate conversation_id column
+    // that could be paired with a thread from a different conversation.
     const [delivery] = await db.query<{ id: string }>(
-      `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status, conversation_id, thread_id)
-       VALUES ($1, $2, 'stored', $3, $4) RETURNING id`,
-      [mailbox.id, 'gmail-msg-2', conversation.id, thread.id],
+      `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status, thread_id)
+       VALUES ($1, $2, 'stored', $3) RETURNING id`,
+      [mailbox.id, 'gmail-msg-2', thread.id],
     )
 
-    // Deleting the conversation (which cascades to its thread, migration
-    // 001) must NOT delete the ledger row — the ingestion fact survives;
-    // only the now-unresolvable pointers clear.
+    // Deleting the conversation cascades to its thread (migration 001), which
+    // must NOT delete the ledger row — the ingestion fact survives; only the
+    // now-unresolvable thread pointer clears.
     await db.query('DELETE FROM conversations WHERE id = $1', [conversation.id])
 
-    const [afterDelete] = await db.query<{
-      id: string
-      conversation_id: string | null
-      thread_id: string | null
-    }>('SELECT id, conversation_id, thread_id FROM inbound_deliveries WHERE id = $1', [delivery.id])
+    const [afterDelete] = await db.query<{ id: string; thread_id: string | null }>(
+      'SELECT id, thread_id FROM inbound_deliveries WHERE id = $1',
+      [delivery.id],
+    )
     expect(afterDelete.id).toBe(delivery.id)
-    expect(afterDelete.conversation_id).toBeNull()
     expect(afterDelete.thread_id).toBeNull()
   })
 })

@@ -102,14 +102,16 @@ as data and as a *secondary* duplicate signal, never as the dedup key.
 **The delivery ledger** (a table, HT-36) is one row per `(mailboxId, providerMessageId)`
 with a **unique constraint** on that pair, carrying `status` (`received` | `stored` |
 `suppressed` | `failed` | `dead-letter`), `attempts`, `last_error`, and the resulting
-`conversationId`/`threadId`. It is simultaneously the **idempotency record** (§3 step 1),
+`threadId` (the produced/appended thread; its conversation follows from
+`threads.conversationId` and is not stored as a redundant second column). It is
+simultaneously the **idempotency record** (§3 step 1),
 the **claim/lease**, and the **retry queue**.
 
 **The claim, the store write, and the outcome are one atomic unit.** The step-5 store write
 (`createConversation`/`appendThread`) and the ledger's `received → stored` transition —
 recording the resulting ids — commit in a **single transaction**, so the ledger row *is*
 the idempotency record: a retry re-hits the §3-step-1 claim, finds a `stored` row, and
-returns its recorded `conversationId` without re-writing. A crash *before* that commit
+returns its recorded outcome (its `threadId`) without re-writing. A crash *before* that commit
 leaves the row at `received` and no conversation, and the retry redoes the whole unit
 cleanly. This is what closes the "successful conversation write, then failed ledger update,
 then duplicate conversation on retry" window — the write and its record are never

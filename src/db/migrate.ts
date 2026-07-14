@@ -516,19 +516,23 @@ CREATE TABLE gmail_watch_state (
  * ceiling or backoff; that policy belongs to the worker that consumes this
  * table (a later ticket).
  *
- * `conversation_id`/`thread_id` are the ledger's recorded OUTCOME (spec §3
- * step 5, §4: "recording the resulting conversationId/threadId"), nullable
- * because most statuses (`received`, `suppressed`, `failed`, `dead-letter`)
- * never resolve to one. Declared as real FKs, matching this schema's
- * unbroken convention that every id-shaped reference column is one, but
- * `ON DELETE SET NULL` rather than `CASCADE` (migration 001's `threads`
- * choice): unlike a thread, which has no meaning without its conversation,
- * a ledger row's audit/idempotency value ("we received message X for
- * mailbox Y, and here is what happened") does not depend on the
- * conversation it produced still existing — invariant #1's
- * never-silently-lost applies to the fact of ingestion, not just the
- * resulting conversation, so the ledger row survives and only the
- * now-unresolvable pointer clears.
+ * `thread_id` is the ledger's recorded OUTCOME (spec §3 step 5, §4),
+ * nullable because most statuses (`received`, `suppressed`, `failed`,
+ * `dead-letter`) never resolve to one. The resulting CONVERSATION is
+ * deliberately NOT a second column: a thread belongs to exactly one
+ * conversation (`threads.conversation_id`, NOT NULL, migration 001), so
+ * `thread_id` already determines it — a separate `conversation_id` would be
+ * derivable-but-denormalized, and two independent FKs would let a row pair a
+ * `conversation_id` with a `thread_id` from a DIFFERENT conversation, a
+ * corrupt outcome the schema simply should not be able to represent. Derive
+ * the conversation with a join to `threads` when an audit query needs it.
+ * Declared a real FK (this schema's convention for id-shaped columns) but
+ * `ON DELETE SET NULL` rather than `CASCADE` (unlike migration 001's
+ * `threads`): a ledger row's audit/idempotency value ("we received message X
+ * for mailbox Y, and here is what happened") does not depend on the thread it
+ * produced still existing — invariant #1's never-silently-lost applies to the
+ * fact of ingestion, so the ledger row survives and only the now-unresolvable
+ * pointer clears.
  *
  * No cross-column CHECK tying `status` to `conversation_id`/`thread_id`
  * nullability (e.g. "non-null iff `stored`") — deliberately deferred: the
@@ -551,7 +555,6 @@ CREATE TABLE inbound_deliveries (
   status text NOT NULL DEFAULT 'received' CHECK (status IN ('received','stored','suppressed','failed','dead-letter')),
   attempts integer NOT NULL DEFAULT 0,
   last_error text,
-  conversation_id uuid REFERENCES conversations(id) ON DELETE SET NULL,
   thread_id uuid REFERENCES threads(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
