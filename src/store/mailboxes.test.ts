@@ -279,9 +279,13 @@ describe('createMailboxStore', () => {
       expect(rows).toHaveLength(1)
     })
 
-    it('reconnect keeps provider in sync with EXCLUDED.provider on every call', async () => {
+    it('reconnect updates provider from EXCLUDED.provider (seed differs from reconnect)', async () => {
       const { db, store } = await freshStore()
-      await insertMailbox(db, { address: 'provider-swap@example.test', provider: 'gmail' })
+      // Seed with a DIFFERENT provider than the reconnect uses, so this
+      // actually proves EXCLUDED.provider overwrote the row rather than the
+      // value happening to already match. Migration 009's `provider` column is
+      // unconstrained text, so a placeholder value is valid here.
+      await insertMailbox(db, { address: 'provider-swap@example.test', provider: 'legacy-imap' })
 
       const mailbox = await store.upsertConnectedMailbox({
         address: 'provider-swap@example.test',

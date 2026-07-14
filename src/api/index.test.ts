@@ -1803,6 +1803,7 @@ describe('createInboxApi', () => {
       }
 
       const service = createGmailConnectService({
+        db,
         clientId: CLIENT_ID,
         clientSecret: CLIENT_SECRET,
         redirectUri: REDIRECT_URI,
@@ -1947,17 +1948,27 @@ describe('createInboxApi', () => {
       const gmailConnect = realGmailConnect(db)
       const api = apiWithGmailConnect(db, gmailConnect)
       vi.useFakeTimers()
-      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
-      const { consentUrl } = gmailConnect.service.beginConnect()
-      const state = new URL(consentUrl).searchParams.get('state') as string
-      vi.setSystemTime(new Date('2026-01-01T00:11:00.000Z')) // past the default 10 min TTL
-      vi.useRealTimers()
+      try {
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+        const { consentUrl } = gmailConnect.service.beginConnect()
+        const state = new URL(consentUrl).searchParams.get('state') as string
+        // Advance PAST the default 10 min TTL with fake time STILL ACTIVE, so
+        // verifyConnectState's own Date.now() (inside the callback below) sees
+        // the advance. Restoring real timers before the request — as an earlier
+        // version did — would check the freshly-minted state against wall-clock
+        // time instead, so the 10-minute boundary was never actually exercised.
+        vi.setSystemTime(new Date('2026-01-01T00:11:00.000Z'))
 
-      const res = await api(callbackGet(`?code=auth-code&state=${encodeURIComponent(state)}`))
+        const res = await api(callbackGet(`?code=auth-code&state=${encodeURIComponent(state)}`))
 
-      expect(res.status).toBe(400)
-      const rows = await db.query('SELECT id FROM mailboxes')
-      expect(rows).toHaveLength(0)
+        expect(res.status).toBe(400)
+        const rows = await db.query('SELECT id FROM mailboxes')
+        expect(rows).toHaveLength(0)
+      } finally {
+        // Always restore, even if an assertion throws, so fake time never
+        // leaks into a later test.
+        vi.useRealTimers()
+      }
     })
 
     it('deps.gmailConnect absent: GET .../callback 404s (never the gmail-push-webhook uniform-reject shape)', async () => {

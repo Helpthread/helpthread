@@ -384,6 +384,7 @@ describe('createGmailConnectService', () => {
     const createWatchClient = vi.fn(() => watchClient)
 
     const service = createGmailConnectService({
+      db,
       clientId: CLIENT_ID,
       clientSecret: CLIENT_SECRET,
       redirectUri: REDIRECT_URI,
@@ -471,6 +472,48 @@ describe('createGmailConnectService', () => {
     const tokens = await tokenStore.getTokens(result.mailboxId)
     expect(tokens?.refreshToken).toBe('fresh-refresh-token')
     expect(tokens?.accessToken).toBe('fresh-access-token')
+  })
+
+  it('persist is atomic: a failure in the last write rolls back the mailbox and token rows', async () => {
+    // Reuse freshService only for a real db + real mailbox/token stores, then
+    // build a service whose watch-state seed (the LAST of the three step-5
+    // writes) throws. The mailbox insert and token write happen first, via the
+    // same transaction; the seed failure must roll ALL of them back, leaving no
+    // partial connect (gmail-connect.md §4 step 5).
+    const { db, mailboxStore, tokenStore } = await freshService()
+    const throwingWatchState: GmailWatchStateStore = {
+      getCursor: async () => null,
+      setCursor: async () => {},
+      seedBaseline: async () => {
+        throw new Error('simulated seedBaseline failure')
+      },
+    }
+    const { fetchImpl } = fakeTokenEndpoint(200, DEFAULT_TOKEN_RESPONSE)
+    const service = createGmailConnectService({
+      db,
+      clientId: CLIENT_ID,
+      clientSecret: CLIENT_SECRET,
+      redirectUri: REDIRECT_URI,
+      topicName: TOPIC_NAME,
+      scopes: SCOPES,
+      keyring: KEYRING,
+      mailboxStore,
+      tokenStore,
+      watchStateStore: throwingWatchState,
+      createWatchClient: () => fakeWatchClient(),
+      fetchImpl,
+    })
+    const state = stateFrom(service)
+
+    await expect(service.completeConnect({ code: 'auth-code-1', state })).rejects.toThrow(
+      'simulated seedBaseline failure',
+    )
+
+    // The whole transaction rolled back: neither the mailbox row nor its token
+    // row survives, so a retry starts from a clean slate rather than a
+    // half-connected mailbox.
+    expect(await db.query('SELECT id FROM mailboxes')).toHaveLength(0)
+    expect(await db.query('SELECT mailbox_id FROM mailbox_oauth_tokens')).toHaveLength(0)
   })
 
   it('arms watch() with the configured topicName', async () => {
@@ -660,6 +703,9 @@ describe('createGmailConnectService — construction validation', () => {
     createWatchClient: () => ({}) as unknown as GmailWatchClient,
   }
   const validDeps: GmailConnectServiceDeps = {
+    // Construction only validates config strings + the keyring, never touches
+    // db/stores — a dummy Db is fine here (no query/transaction is ever run).
+    db: {} as unknown as Db,
     clientId: CLIENT_ID,
     clientSecret: CLIENT_SECRET,
     redirectUri: REDIRECT_URI,

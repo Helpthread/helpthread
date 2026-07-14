@@ -35,7 +35,7 @@
  * module-level open question in the HT-38 implementation report).
  */
 
-import type { Db } from '../db/client.js'
+import type { Db, Queryable } from '../db/client.js'
 import { decrypt, encrypt } from './token-crypto.js'
 
 /** Input to {@link MailboxTokenStore.upsertTokens}. */
@@ -69,8 +69,15 @@ export interface MailboxTokenStore {
    * `input.accessToken` (when given) are encrypted with this store's
    * configured key before the write — see the module doc for the
    * full-row-replace semantics of the optional fields.
+   *
+   * Optionally runs the write against a caller-supplied `tx`
+   * (`Db.transaction`'s `Queryable`) instead of the bound `db`, so the
+   * connect flow (gmail-connect.md §4 step 5) can persist the mailbox row,
+   * this token row, and the watch-state seed atomically. Encryption is
+   * unaffected — it happens here regardless of which `Queryable` runs the
+   * final `INSERT`; only the statement's execution target changes.
    */
-  upsertTokens(mailboxId: string, input: UpsertTokensInput): Promise<void>
+  upsertTokens(mailboxId: string, input: UpsertTokensInput, tx?: Queryable): Promise<void>
 
   /**
    * Read back `mailboxId`'s tokens, decrypted. Returns `null` if no row
@@ -105,12 +112,12 @@ const TOKEN_COLUMNS =
  */
 export function createMailboxTokenStore(db: Db, encryptionKey: Buffer): MailboxTokenStore {
   return {
-    async upsertTokens(mailboxId, input) {
+    async upsertTokens(mailboxId, input, tx) {
       const refreshTokenCiphertext = encrypt(input.refreshToken, encryptionKey)
       const accessTokenCiphertext =
         input.accessToken !== undefined ? encrypt(input.accessToken, encryptionKey) : null
 
-      await db.query(
+      await (tx ?? db).query(
         `INSERT INTO mailbox_oauth_tokens (mailbox_id, refresh_token_ciphertext, access_token_ciphertext, access_token_expires_at, scopes, updated_at)
          VALUES ($1, $2, $3, $4, $5, now())
          ON CONFLICT (mailbox_id) DO UPDATE SET

@@ -150,7 +150,12 @@ no armed watch to clean up.
    from which `history.list` will resume, so using getProfile's separately-read
    `historyId` could straddle the arm and miss or replay a sliver of history.
 5. **Persist, now that the grant is proven** — three writes keyed by the
-   resolved mailbox:
+   resolved mailbox, committed in **one `Db` transaction** (all-or-nothing: a
+   mid-persist failure rolls back rather than leaving an `active` mailbox with
+   no cursor — a partial state that is *worse* than no mailbox at all, since
+   the webhook would then enqueue reconcile jobs for a mailbox whose cursor
+   never gets seeded, silently no-op'ing every push the already-armed
+   `watch()` delivers):
    - `MailboxStore.upsertConnectedMailbox({ address, provider: 'gmail' })` →
      the `mailboxes` row, `status = 'active'`. **Upsert by `address`** so a
      **reconnect** (a mailbox previously `needs_reconnect` or `paused`

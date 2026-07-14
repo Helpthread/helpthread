@@ -43,7 +43,7 @@
  * add operations as the ticket that needs them requires.
  */
 
-import type { Db } from '../db/client.js'
+import type { Db, Queryable } from '../db/client.js'
 
 /** A mailbox's lifecycle state (migration 009's CHECK constraint). */
 export type MailboxStatus = 'active' | 'paused' | 'needs_reconnect'
@@ -121,8 +121,18 @@ export interface MailboxStore {
    * before" and "reconnecting a `paused`/`needs_reconnect` mailbox" — the
    * latter is exactly the "transitioning back to `active`" this store's
    * module doc used to reserve for this ticket.
+   *
+   * Optionally runs against a caller-supplied `tx` (`Db.transaction`'s
+   * `Queryable`) instead of the bound `db`, so the connect flow can commit
+   * this insert, the token write, and the watch-state seed as ONE atomic
+   * unit (gmail-connect.md §4 step 5) — a partial connect (an `active`
+   * mailbox with no cursor, silently un-ingesting) is worse than none.
+   * Omitted, it runs standalone on `db` exactly as before.
    */
-  upsertConnectedMailbox(input: { address: string; provider: string }): Promise<MailboxRecord>
+  upsertConnectedMailbox(
+    input: { address: string; provider: string },
+    tx?: Queryable,
+  ): Promise<MailboxRecord>
 }
 
 /** Raw `mailboxes` row shape, before mapping to {@link MailboxRecord}. */
@@ -174,8 +184,8 @@ export function createMailboxStore(db: Db): MailboxStore {
       }
     },
 
-    async upsertConnectedMailbox(input) {
-      const rows = await db.query<MailboxRow>(
+    async upsertConnectedMailbox(input, tx) {
+      const rows = await (tx ?? db).query<MailboxRow>(
         `INSERT INTO mailboxes (address, provider)
          VALUES ($1, $2)
          ON CONFLICT (address) DO UPDATE SET

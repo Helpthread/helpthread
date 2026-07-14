@@ -74,7 +74,12 @@
  *    MailboxTokenStore.upsertTokens} (the refresh token encrypted at rest —
  *    this module NEVER writes a token to the database itself), and {@link
  *    GmailWatchStateStore.seedBaseline} (both `history_id` AND
- *    `watch_expiration`, from the SAME `watch()` response).
+ *    `watch_expiration`, from the SAME `watch()` response). All three run in
+ *    ONE `db.transaction` — a mid-persist failure rolls the whole thing back
+ *    rather than leaving a PARTIAL connect (e.g. an `active` mailbox with no
+ *    cursor, which would silently no-op every push the already-armed
+ *    `watch()` delivers — worse than no mailbox at all, since the webhook
+ *    would enqueue reconcile jobs that find nothing to resume from).
  * 6. Return `{ mailboxId, address }` — the API layer renders the success
  *    page.
  *
@@ -122,6 +127,7 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import type { Db } from '../db/client.js'
 import type { GmailWatchClient, GmailWatchResult } from '../providers/adapters/gmail/index.js'
 import type { GmailWatchStateStore } from '../store/gmail-watch-state.js'
 import type { MailboxTokenStore } from '../store/mailbox-tokens.js'
@@ -429,6 +435,13 @@ export async function exchangeAuthCode(options: ExchangeAuthCodeOptions): Promis
 
 /** Dependencies {@link createGmailConnectService} needs. */
 export interface GmailConnectServiceDeps {
+  /**
+   * The database handle whose {@link Db.transaction} wraps the step-5 persist
+   * (mailbox row + token row + watch-state seed) into one atomic unit — see
+   * the module doc's step 5. The three stores below must be the SAME `Db`'s
+   * stores, so the transaction's `Queryable` targets the same database.
+   */
+  db: Db
   /** The deployment's Internal OAuth app client id/secret (gmail-connect.md §3) — injected config, never hardcoded. */
   clientId: string
   clientSecret: string
@@ -493,6 +506,7 @@ function assertNonEmpty(field: string, value: string): void {
  */
 export function createGmailConnectService(deps: GmailConnectServiceDeps): GmailConnectService {
   const {
+    db,
     clientId,
     clientSecret,
     redirectUri,
@@ -567,20 +581,30 @@ export function createGmailConnectService(deps: GmailConnectServiceDeps): GmailC
         )
       }
 
-      // --- Step 5: persist, now that the grant is proven usable. ---
-      const mailbox = await mailboxStore.upsertConnectedMailbox({
-        address: profile.emailAddress,
-        provider: 'gmail',
-      })
-      await tokenStore.upsertTokens(mailbox.id, {
-        refreshToken: exchanged.refreshToken,
-        accessToken: exchanged.accessToken,
-        accessTokenExpiresAt: new Date(Date.now() + exchanged.expiresIn * 1000),
-        scopes: exchanged.scope,
-      })
-      await watchStateStore.seedBaseline(mailbox.id, {
-        historyId: armed.historyId,
-        watchExpiration: armed.expiration,
+      // --- Step 5: persist, now that the grant is proven usable — ONE atomic
+      // transaction (module doc) so a mid-persist failure never leaves a
+      // partial connect. ---
+      const mailbox = await db.transaction(async (tx) => {
+        const created = await mailboxStore.upsertConnectedMailbox(
+          { address: profile.emailAddress, provider: 'gmail' },
+          tx,
+        )
+        await tokenStore.upsertTokens(
+          created.id,
+          {
+            refreshToken: exchanged.refreshToken,
+            accessToken: exchanged.accessToken,
+            accessTokenExpiresAt: new Date(Date.now() + exchanged.expiresIn * 1000),
+            scopes: exchanged.scope,
+          },
+          tx,
+        )
+        await watchStateStore.seedBaseline(
+          created.id,
+          { historyId: armed.historyId, watchExpiration: armed.expiration },
+          tx,
+        )
+        return created
       })
 
       // --- Step 6: the mailbox is live. ---

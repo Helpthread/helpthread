@@ -22,7 +22,7 @@
  * would if it matched zero rows.
  */
 
-import type { Db } from '../db/client.js'
+import type { Db, Queryable } from '../db/client.js'
 
 /** Persistence for one mailbox's Gmail history cursor. See the module doc. */
 export interface GmailWatchStateStore {
@@ -53,10 +53,16 @@ export interface GmailWatchStateStore {
    * fresh `watch()` call rather than leaving a stale expiration paired with
    * a new cursor, or vice versa — the two values always land together, from
    * the same `watch()` call, in one write.
+   *
+   * Optionally runs against a caller-supplied `tx` (`Db.transaction`'s
+   * `Queryable`) instead of the bound `db`, so the connect flow can commit
+   * this seed together with the mailbox row and token write as one atomic
+   * unit (gmail-connect.md §4 step 5). Omitted, it runs standalone on `db`.
    */
   seedBaseline(
     mailboxId: string,
     input: { historyId: string; watchExpiration: Date },
+    tx?: Queryable,
   ): Promise<void>
 }
 
@@ -81,8 +87,8 @@ export function createGmailWatchStateStore(db: Db): GmailWatchStateStore {
       )
     },
 
-    async seedBaseline(mailboxId, input) {
-      await db.query(
+    async seedBaseline(mailboxId, input, tx) {
+      await (tx ?? db).query(
         `INSERT INTO gmail_watch_state (mailbox_id, history_id, watch_expiration)
          VALUES ($1, $2, $3)
          ON CONFLICT (mailbox_id) DO UPDATE SET
