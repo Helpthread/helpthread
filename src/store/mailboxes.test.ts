@@ -356,4 +356,71 @@ describe('createMailboxStore', () => {
       expect(a.id).not.toBe(b.id)
     })
   })
+
+  // --- listActiveMailboxes (HT-42, gmail-push.md §6) -----------------------
+
+  describe('listActiveMailboxes', () => {
+    it('returns only active mailboxes — paused and needs_reconnect are excluded', async () => {
+      const { db, store } = await freshStore()
+      const activeId = await insertMailbox(db, { address: 'active@example.test', status: 'active' })
+      await insertMailbox(db, { address: 'paused@example.test', status: 'paused' })
+      await insertMailbox(db, {
+        address: 'needs-reconnect@example.test',
+        status: 'needs_reconnect',
+      })
+
+      const mailboxes = await store.listActiveMailboxes()
+
+      expect(mailboxes).toHaveLength(1)
+      expect(mailboxes[0]).toEqual({
+        id: activeId,
+        address: 'active@example.test',
+        provider: 'gmail',
+        status: 'active',
+      })
+    })
+
+    it('orders by created_at', async () => {
+      const { db, store } = await freshStore()
+      const first = await insertMailbox(db, { address: 'first@example.test' })
+      const second = await insertMailbox(db, { address: 'second@example.test' })
+      const third = await insertMailbox(db, { address: 'third@example.test' })
+      // Force distinguishable timestamps, deliberately out of insertion
+      // order, so a passing test actually proves the ORDER BY clause rather
+      // than coincidentally matching insertion order.
+      await db.query('UPDATE mailboxes SET created_at = $1 WHERE id = $2', [
+        new Date('2026-01-03T00:00:00Z'),
+        first,
+      ])
+      await db.query('UPDATE mailboxes SET created_at = $1 WHERE id = $2', [
+        new Date('2026-01-01T00:00:00Z'),
+        second,
+      ])
+      await db.query('UPDATE mailboxes SET created_at = $1 WHERE id = $2', [
+        new Date('2026-01-02T00:00:00Z'),
+        third,
+      ])
+
+      const mailboxes = await store.listActiveMailboxes()
+
+      expect(mailboxes.map((m) => m.id)).toEqual([second, third, first])
+    })
+
+    it('returns [] when no mailbox is active', async () => {
+      const { db, store } = await freshStore()
+      await insertMailbox(db, { address: 'paused3@example.test', status: 'paused' })
+      await insertMailbox(db, {
+        address: 'needs-reconnect3@example.test',
+        status: 'needs_reconnect',
+      })
+
+      expect(await store.listActiveMailboxes()).toEqual([])
+    })
+
+    it('returns [] when there are no mailboxes at all', async () => {
+      const { store } = await freshStore()
+
+      expect(await store.listActiveMailboxes()).toEqual([])
+    })
+  })
 })

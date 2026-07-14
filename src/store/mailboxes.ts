@@ -37,10 +37,19 @@
  *   (migration 009's `UNIQUE` constraint) is what makes a reconnect
  *   idempotent: re-running connect for the same account never collides with
  *   its own prior row.
+ * - {@link MailboxStore.listActiveMailboxes} (HT-42): list every `active`
+ *   mailbox, ordered by `created_at` — the per-mailbox source the daily
+ *   watch-renewal + reconciliation-sweep cron (`../mail/gmail-watch-
+ *   maintenance.ts`, gmail-push.md §6) iterates. `paused`/`needs_reconnect`
+ *   mailboxes are excluded by the query itself, not filtered by the caller
+ *   (unlike `getMailboxByAddress`/`getMailboxById` above): neither needs
+ *   `watch()` re-armed (a `paused` mailbox isn't being ingested; a
+ *   `needs_reconnect` one has a dead grant `watch()` can't fix) nor a
+ *   reconcile job enqueued, for the same reason.
  *
- * A fuller `mailboxes` CRUD surface (listing, and anything beyond the single
- * connect-time write above) is still narrower than a general CRUD module —
- * add operations as the ticket that needs them requires.
+ * A fuller `mailboxes` CRUD surface (beyond the operations above) is still
+ * narrower than a general CRUD module — add operations as the ticket that
+ * needs them requires.
  */
 
 import type { Db, Queryable } from '../db/client.js'
@@ -133,6 +142,16 @@ export interface MailboxStore {
     input: { address: string; provider: string },
     tx?: Queryable,
   ): Promise<MailboxRecord>
+
+  /**
+   * List every mailbox currently `active`, ordered by `created_at` — the
+   * per-mailbox source the daily watch-renewal + reconciliation-sweep cron
+   * (HT-42, `../mail/gmail-watch-maintenance.ts`, gmail-push.md §6)
+   * iterates. `paused`/`needs_reconnect` mailboxes are excluded by the
+   * query itself, not filtered by the caller (see the module doc). Returns
+   * `[]` when no mailbox is currently active.
+   */
+  listActiveMailboxes(): Promise<MailboxRecord[]>
 }
 
 /** Raw `mailboxes` row shape, before mapping to {@link MailboxRecord}. */
@@ -196,6 +215,13 @@ export function createMailboxStore(db: Db): MailboxStore {
         [input.address, input.provider],
       )
       return toMailboxRecord(rows[0])
+    },
+
+    async listActiveMailboxes() {
+      const rows = await db.query<MailboxRow>(
+        "SELECT id, address, provider, status FROM mailboxes WHERE status = 'active' ORDER BY created_at",
+      )
+      return rows.map(toMailboxRecord)
     },
   }
 }

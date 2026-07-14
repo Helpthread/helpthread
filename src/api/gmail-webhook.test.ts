@@ -53,6 +53,9 @@ function fakeMailboxes(records: MailboxRecord[]): MailboxStore {
     async upsertConnectedMailbox() {
       throw new Error('upsertConnectedMailbox: not used by the push-webhook path')
     },
+    async listActiveMailboxes() {
+      throw new Error('listActiveMailboxes: not used by the push-webhook path')
+    },
   }
 }
 
@@ -375,6 +378,9 @@ describe('handleGmailPushWebhook', () => {
         },
         async upsertConnectedMailbox() {
           throw new Error('upsertConnectedMailbox: not used by the push-webhook path')
+        },
+        async listActiveMailboxes() {
+          throw new Error('listActiveMailboxes: not used by the push-webhook path')
         },
       },
     })

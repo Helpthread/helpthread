@@ -487,6 +487,9 @@ describe('createGmailConnectService', () => {
       seedBaseline: async () => {
         throw new Error('simulated seedBaseline failure')
       },
+      setWatchExpiration: async () => {
+        throw new Error('setWatchExpiration: not used by the connect flow')
+      },
     }
     const { fetchImpl } = fakeTokenEndpoint(200, DEFAULT_TOKEN_RESPONSE)
     const service = createGmailConnectService({

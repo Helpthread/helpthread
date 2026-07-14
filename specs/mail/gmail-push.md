@@ -140,7 +140,7 @@ here the cursor itself is unrecoverable.)
 > ingest only messages received after the pause timestamp, accepting a bounded gap rather
 > than a full resync. Specced when GA onboarding is, not now.
 
-## 6. `watch()` renewal and periodic reconciliation (HT-42)
+## 6. `watch()` renewal and periodic reconciliation (HT-42; reconciliation lease → HT-48)
 
 - `watch()` is called when a mailbox is connected (OAuth, HT-40) and returns the initial
   `historyId` (the cursor's starting point) and an expiration (~7 days out).
@@ -160,16 +160,29 @@ here the cursor itself is unrecoverable.)
   never doubled (inbound-ingestion.md §4). (Cadence is a tuning knob: daily bounds worst-case
   staleness to ~24h for a dropped tail notification; a tighter interval trades quota for
   freshness and can be revisited without changing the design.)
-- **Serialize reconciliation per mailbox.** Push-triggered reconciliation (§2–§3) and this
-  sweep both advance the same mailbox's cursor, so a mailbox's reconciliation runs are
-  serialized by a **reconciliation lease** (the inbound analogue of the outbound delivery
-  lease, sending.md §3a); different mailboxes still reconcile concurrently. This is an
-  efficiency guard, not a correctness one — §4 already makes each run's cursor advance
-  independently safe — it only avoids redundant `history.list`/`messages.get` work when a
-  push lands mid-sweep.
-- On `watch()` failure (revoked/expired grant, admin change): mark the mailbox
-  **needs-reconnect** and surface it — never crash the cron for other mailboxes (OAuth
-  handling, HT-38/HT-40).
+- **Serialize reconciliation per mailbox — deferred to HT-48.** Push-triggered
+  reconciliation (§2–§3) and this sweep both advance the same mailbox's cursor, so a
+  mailbox's reconciliation runs *should* be serialized by a **reconciliation lease** (the
+  inbound analogue of the outbound delivery lease, sending.md §3a); different mailboxes
+  still reconcile concurrently. This is an efficiency guard, **not** a correctness one —
+  §4 already makes each run's cursor advance independently safe, so a push landing
+  mid-sweep is deduped, never doubled — it only avoids redundant
+  `history.list`/`messages.get` work. Because it is pure optimization and carries a
+  migration, it is **split out of HT-42 into HT-48**: HT-42 ships the renewal cron and the
+  sweep (which are correct without the lease); HT-48 adds the lease.
+- **Failure handling — the token layer owns `needs_reconnect`.** A dead grant
+  (revoked/expired, admin change) surfaces as an `invalid_grant` when the OAuth token
+  service refreshes, and *that* is what marks the mailbox **needs-reconnect** (HT-38,
+  `getAccessToken`) — it catches every dead grant within the access token's cache lifetime
+  (~1h), across both push-triggered reconcile and this cron. So the renewal cron does **not**
+  itself mark `needs_reconnect` on a generic `watch()` failure: past a valid token, a
+  `watch()` error is treated as **transient** (logged, counted, retried on the next daily
+  tick — the ~7-day expiry leaves ample margin for a few missed runs), rather than halting a
+  healthy mailbox on a transient Gmail blip. The cron is **failure-isolated per mailbox** —
+  one mailbox's token or `watch()` failure never stops the others (HT-38/HT-40). (This
+  refines the earlier "watch() failure → needs-reconnect" wording, which predates HT-38's
+  token layer owning that transition; the dead-grant outcome is unchanged, only *where* it
+  is decided.)
 
 ## 7. What this transport does not own
 
