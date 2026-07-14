@@ -237,4 +237,113 @@ describe('createGmailWatchStateStore', () => {
       expect(await store.getCursor(mailboxB)).toBe('b-baseline')
     })
   })
+
+  // --- setWatchExpiration (HT-42, gmail-push.md §6) ---------------------------
+
+  describe('setWatchExpiration', () => {
+    it('updates watch_expiration and PRESERVES the existing history_id — the sacred renewal rule', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.seedBaseline(mailboxId, {
+        historyId: 'baseline-cursor',
+        watchExpiration: new Date('2026-01-01T00:00:00.000Z'),
+      })
+
+      const renewed = new Date('2026-01-08T00:00:00.000Z')
+      await store.setWatchExpiration(mailboxId, renewed)
+
+      const rows = await db.query<{ history_id: string | null; watch_expiration: Date | null }>(
+        'SELECT history_id, watch_expiration FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0].history_id).toBe('baseline-cursor')
+      expect(rows[0].watch_expiration?.toISOString()).toBe(renewed.toISOString())
+      expect(await store.getCursor(mailboxId)).toBe('baseline-cursor')
+    })
+
+    it('a second call updates the expiration again, still preserving history_id', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.seedBaseline(mailboxId, {
+        historyId: 'baseline-cursor-2',
+        watchExpiration: new Date('2026-01-01T00:00:00.000Z'),
+      })
+
+      await store.setWatchExpiration(mailboxId, new Date('2026-01-08T00:00:00.000Z'))
+      const secondRenewal = new Date('2026-01-15T00:00:00.000Z')
+      await store.setWatchExpiration(mailboxId, secondRenewal)
+
+      const rows = await db.query<{ history_id: string | null; watch_expiration: Date | null }>(
+        'SELECT history_id, watch_expiration FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0].history_id).toBe('baseline-cursor-2')
+      expect(rows[0].watch_expiration?.toISOString()).toBe(secondRenewal.toISOString())
+    })
+
+    it('on a mailbox with no watch-state row yet, inserts a row with NULL history_id and the expiration', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      // No seedBaseline/setCursor call — no gmail_watch_state row exists yet.
+
+      const expiration = new Date('2026-01-08T00:00:00.000Z')
+      await store.setWatchExpiration(mailboxId, expiration)
+
+      const rows = await db.query<{ history_id: string | null; watch_expiration: Date | null }>(
+        'SELECT history_id, watch_expiration FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0].history_id).toBeNull()
+      expect(rows[0].watch_expiration?.toISOString()).toBe(expiration.toISOString())
+      expect(await store.getCursor(mailboxId)).toBeNull()
+    })
+
+    it('bumps updated_at', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await db.query(
+        "INSERT INTO gmail_watch_state (mailbox_id, history_id, updated_at) VALUES ($1, $2, now() - interval '1 hour')",
+        [mailboxId, '111'],
+      )
+      const before = await db.query<{ updated_at: Date }>(
+        'SELECT updated_at FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+
+      await store.setWatchExpiration(mailboxId, new Date('2026-01-08T00:00:00.000Z'))
+
+      const after = await db.query<{ updated_at: Date }>(
+        'SELECT updated_at FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(after[0].updated_at.getTime()).toBeGreaterThan(before[0].updated_at.getTime())
+    })
+
+    it('is per-mailbox — updating one mailbox does not touch another', async () => {
+      const { db, store } = await freshStore()
+      const mailboxA = await insertMailbox(db, 'expire-a@example.test')
+      const mailboxB = await insertMailbox(db, 'expire-b@example.test')
+      const initialExpiration = new Date('2026-01-01T00:00:00.000Z')
+      await store.seedBaseline(mailboxA, { historyId: 'a-1', watchExpiration: initialExpiration })
+      await store.seedBaseline(mailboxB, { historyId: 'b-1', watchExpiration: initialExpiration })
+
+      const renewedA = new Date('2026-01-08T00:00:00.000Z')
+      await store.setWatchExpiration(mailboxA, renewedA)
+
+      const rowsA = await db.query<{ watch_expiration: Date | null }>(
+        'SELECT watch_expiration FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxA],
+      )
+      const rowsB = await db.query<{ watch_expiration: Date | null }>(
+        'SELECT watch_expiration FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxB],
+      )
+      expect(rowsA[0].watch_expiration?.toISOString()).toBe(renewedA.toISOString())
+      expect(rowsB[0].watch_expiration?.toISOString()).toBe(initialExpiration.toISOString())
+      expect(await store.getCursor(mailboxB)).toBe('b-1')
+    })
+  })
 })

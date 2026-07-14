@@ -60,6 +60,9 @@ function fakeMailboxStore(initial: MailboxRecord): {
       async upsertConnectedMailbox() {
         throw new Error('upsertConnectedMailbox: not used by the reconcile handler')
       },
+      async listActiveMailboxes() {
+        throw new Error('listActiveMailboxes: not used by the reconcile handler')
+      },
     },
     records,
   }
@@ -83,6 +86,9 @@ function fakeWatchStateStore(initial: Record<string, string> = {}): {
       },
       async seedBaseline() {
         throw new Error('seedBaseline: not used by the reconcile handler')
+      },
+      async setWatchExpiration() {
+        throw new Error('setWatchExpiration: not used by the reconcile handler')
       },
     },
     cursors,
