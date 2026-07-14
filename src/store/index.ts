@@ -16,3 +16,7 @@ export type {
   StoredThread,
 } from './conversations.js'
 export { createConversationStore } from './conversations.js'
+export type { MailboxTokenStore, StoredMailboxTokens, UpsertTokensInput } from './mailbox-tokens.js'
+export { createMailboxTokenStore } from './mailbox-tokens.js'
+export type { MailboxStore } from './mailboxes.js'
+export { createMailboxStore } from './mailboxes.js'
