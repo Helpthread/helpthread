@@ -2,7 +2,7 @@
  * `MailboxStore` — the `mailboxes` (migration 009, `src/db/migrate.ts`) seam:
  * the lookups and lifecycle-status mutations the inbound path needs so far.
  *
- * Deliberately narrow. Two operations exist today, each added by the ticket
+ * Deliberately narrow. Operations exist today, each added by the ticket
  * that first needed it:
  *
  * - {@link MailboxStore.getMailboxByAddress} (HT-39): resolve a Gmail push
@@ -12,6 +12,13 @@
  *   `includeDeleted` option uses — so the webhook handler
  *   (`src/api/gmail-webhook.ts`) is what decides `status !== 'active'` means
  *   "reject," not this store.
+ * - {@link MailboxStore.getMailboxById} (HT-41): the same lookup, keyed by
+ *   id rather than address — the reconcile handler
+ *   (`src/mail/gmail-reconcile.ts`) already has a `mailboxId` (from the
+ *   queue job) and must re-check the mailbox's CURRENT status before/while
+ *   reconciling (gmail-push.md §3, §5), never trusting the enqueue-time
+ *   snapshot. Same "returns the row regardless of status" split as
+ *   `getMailboxByAddress`.
  * - {@link MailboxStore.markNeedsReconnect} (HT-38): mark a mailbox
  *   `needs_reconnect` when its OAuth grant turns out revoked/expired
  *   (`src/mail/gmail-oauth.ts`'s `getAccessToken`, on an `invalid_grant`
@@ -19,6 +26,10 @@
  *   renewal (gmail-push.md §6) and should call this rather than duplicate the
  *   SQL — that shared reuse is why this is a store module, not a raw query
  *   inline.
+ * - {@link MailboxStore.markPaused} (HT-41): mark a mailbox `paused` — the
+ *   deliberate dogfood response to an expired (404) Gmail history cursor
+ *   (gmail-push.md §5): "pause the mailbox and flag it for manual
+ *   rebaseline," rather than an automatic full-mailbox resync.
  *
  * A fuller `mailboxes` CRUD surface — creating a row on connect, listing,
  * transitioning back to `active` — belongs to HT-40 (the connect/consent flow
@@ -53,6 +64,13 @@ export interface MailboxStore {
   getMailboxByAddress(address: string): Promise<MailboxRecord | null>
 
   /**
+   * Look up a mailbox by id. Returns `null` when no mailbox has that id.
+   * Same "store returns the row regardless of status, caller applies
+   * policy" split as {@link getMailboxByAddress} — see the module doc.
+   */
+  getMailboxById(mailboxId: string): Promise<MailboxRecord | null>
+
+  /**
    * Mark `mailboxId` `needs_reconnect` — the operator-visible, resolvable
    * state gmail-push.md §5/§6 puts a mailbox into when its OAuth grant is
    * revoked/expired or a `watch()` renewal fails. A single `UPDATE ...
@@ -68,6 +86,18 @@ export interface MailboxStore {
    * throw-on-zero-rows convention (`src/store/conversations.ts`).
    */
   markNeedsReconnect(mailboxId: string): Promise<void>
+
+  /**
+   * Mark `mailboxId` `paused` — gmail-push.md §5's dogfood response to an
+   * expired (404) Gmail history cursor: "pause the mailbox and flag it for
+   * manual rebaseline," rather than an automatic full-mailbox resync. Same
+   * shape as {@link markNeedsReconnect}: a single `UPDATE ... RETURNING
+   * id`, idempotent, throws if no mailbox exists with this id (the
+   * reconcile handler always reaches this with a `mailboxId` it just read a
+   * mailbox row for, so a missing row here is structurally unreachable in
+   * practice).
+   */
+  markPaused(mailboxId: string): Promise<void>
 }
 
 /** Raw `mailboxes` row shape, before mapping to {@link MailboxRecord}. */
@@ -90,6 +120,15 @@ export function createMailboxStore(db: Db): MailboxStore {
       return row === undefined ? null : toMailboxRecord(row)
     },
 
+    async getMailboxById(mailboxId) {
+      const rows = await db.query<MailboxRow>(
+        'SELECT id, address, provider, status FROM mailboxes WHERE id = $1',
+        [mailboxId],
+      )
+      const row = rows[0]
+      return row === undefined ? null : toMailboxRecord(row)
+    },
+
     async markNeedsReconnect(mailboxId) {
       const updated = await db.query<{ id: string }>(
         "UPDATE mailboxes SET status = 'needs_reconnect', updated_at = now() WHERE id = $1 RETURNING id",
@@ -97,6 +136,16 @@ export function createMailboxStore(db: Db): MailboxStore {
       )
       if (updated.length === 0) {
         throw new Error(`markNeedsReconnect: no mailbox with id ${mailboxId}`)
+      }
+    },
+
+    async markPaused(mailboxId) {
+      const updated = await db.query<{ id: string }>(
+        "UPDATE mailboxes SET status = 'paused', updated_at = now() WHERE id = $1 RETURNING id",
+        [mailboxId],
+      )
+      if (updated.length === 0) {
+        throw new Error(`markPaused: no mailbox with id ${mailboxId}`)
       }
     },
   }

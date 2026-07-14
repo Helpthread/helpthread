@@ -133,4 +133,83 @@ describe('createMailboxStore', () => {
     const { store } = await freshStore()
     await expect(store.markNeedsReconnect(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
   })
+
+  it('getMailboxById finds an existing mailbox by id', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { address: 'support@example.test' })
+
+    const mailbox = await store.getMailboxById(mailboxId)
+    expect(mailbox).toEqual({
+      id: mailboxId,
+      address: 'support@example.test',
+      provider: 'gmail',
+      status: 'active',
+    })
+  })
+
+  it('getMailboxById returns null for an unknown id', async () => {
+    const { store } = await freshStore()
+    expect(await store.getMailboxById(RANDOM_UUID)).toBeNull()
+  })
+
+  it('getMailboxById returns a non-active mailbox WITH its real status', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'needs_reconnect' })
+
+    const mailbox = await store.getMailboxById(mailboxId)
+    expect(mailbox?.status).toBe('needs_reconnect')
+  })
+
+  it('markPaused flips an active mailbox to paused', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'active' })
+
+    await store.markPaused(mailboxId)
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('paused')
+  })
+
+  it('markPaused bumps updated_at', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db)
+    const before = await db.query<{ updated_at: Date }>(
+      'SELECT updated_at FROM mailboxes WHERE id = $1',
+      [mailboxId],
+    )
+    // Force a distinguishable prior timestamp so a same-instant now() still
+    // reads as strictly later — a bare now()-vs-now() race is not what this
+    // test is proving.
+    await db.query('UPDATE mailboxes SET updated_at = $1 WHERE id = $2', [
+      new Date(before[0].updated_at.getTime() - 60_000),
+      mailboxId,
+    ])
+
+    await store.markPaused(mailboxId)
+
+    const after = await db.query<{ updated_at: Date }>(
+      'SELECT updated_at FROM mailboxes WHERE id = $1',
+      [mailboxId],
+    )
+    expect(after[0].updated_at.getTime()).toBeGreaterThan(before[0].updated_at.getTime() - 60_000)
+  })
+
+  it('markPaused is idempotent — marking an already paused mailbox succeeds', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'paused' })
+
+    await expect(store.markPaused(mailboxId)).resolves.toBeUndefined()
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('paused')
+  })
+
+  it('markPaused throws for a mailbox id that does not exist', async () => {
+    const { store } = await freshStore()
+    await expect(store.markPaused(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
+  })
 })
