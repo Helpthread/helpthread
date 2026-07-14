@@ -41,6 +41,9 @@ function fakeMailboxes(records: MailboxRecord[]): MailboxStore {
     async getMailboxByAddress(address) {
       return records.find((r) => r.address === address) ?? null
     },
+    async markNeedsReconnect() {
+      throw new Error('markNeedsReconnect: not used by the push-webhook path')
+    },
   }
 }
 
@@ -351,6 +354,9 @@ describe('handleGmailPushWebhook', () => {
       mailboxes: {
         async getMailboxByAddress() {
           throw new Error('db unavailable')
+        },
+        async markNeedsReconnect() {
+          throw new Error('markNeedsReconnect: not used by the push-webhook path')
         },
       },
     })

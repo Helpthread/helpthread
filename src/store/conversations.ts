@@ -84,6 +84,23 @@
  * retry or the delivery worker (`src/mail/delivery-worker.ts`) uses to make
  * sure at most one in-flight attempt is ever sending a given outbound thread
  * at a time — see their own doc comments below.
+ *
+ * ## Transaction-scoped cores (HT-37)
+ *
+ * {@link createConversationInTx} and {@link appendThreadInTx} are the bodies
+ * of {@link ConversationStore.createConversation}/{@link
+ * ConversationStore.appendThread}, factored out to accept an
+ * externally-supplied `tx: Queryable` instead of opening their own
+ * `db.transaction(...)`. Both `ConversationStore` methods are now thin
+ * wrappers around them (`db.transaction((tx) => createConversationInTx(tx,
+ * input))`), so their behavior is unchanged. They are exported so a caller
+ * that must commit this write atomically alongside a DIFFERENT store's write
+ * — the inbound ingest pipeline's store-write + delivery-ledger `received →
+ * stored` transition, specs/mail/inbound-ingestion.md §4 — can run both
+ * inside ONE transaction it opens itself (`src/mail/ingest.ts`), rather than
+ * this store committing independently. See that module's doc comment for why
+ * this composition is otherwise impossible: a transaction opened by one
+ * `db.transaction` call cannot be joined by a second, separate call.
  */
 
 import type { Db, Queryable, SqlValue } from '../db/client.js'
@@ -665,65 +682,87 @@ const THREAD_COLUMNS =
  * its own transaction (or, for the read-only {@link ConversationStore.getConversation},
  * plain queries) against `db` — this factory holds no state of its own.
  */
+/**
+ * Transaction-scoped core of {@link ConversationStore.createConversation} —
+ * see the module doc's "Transaction-scoped cores (HT-37)" section for why
+ * this is exported and accepts an external `tx` rather than opening its own
+ * transaction.
+ */
+export async function createConversationInTx(
+  tx: Queryable,
+  input: NewConversation,
+): Promise<{ conversationId: string; threadId: string }> {
+  const [conversation] = await tx.query<{ id: string }>(
+    'INSERT INTO conversations (subject, customer_email) VALUES ($1, $2) RETURNING id',
+    [input.subject, input.customerEmail],
+  )
+  const { threadId } = await insertThread(tx, conversation.id, input.firstMessage)
+  return { conversationId: conversation.id, threadId }
+}
+
+/**
+ * Transaction-scoped core of {@link ConversationStore.appendThread} — see
+ * that method's doc comment for the full closed/deleted/missing policy and
+ * the idempotency-key get-or-insert, and the module doc's "Transaction-scoped
+ * cores (HT-37)" section for why this is exported and accepts an external
+ * `tx` rather than opening its own transaction.
+ */
+export async function appendThreadInTx(
+  tx: Queryable,
+  conversationId: string,
+  thread: NewThread,
+): Promise<AppendResult> {
+  // FOR UPDATE: lock the conversation row for the life of this
+  // transaction so a concurrent appendThread/delete against the same
+  // conversation can't race between this status check and the insert
+  // below (e.g. two replies arriving for the same closed conversation
+  // at once should both observe-and-reopen deterministically, not
+  // interleave into an inconsistent status). This same lock is what
+  // makes the idempotency-key get-or-insert below safe under
+  // concurrency — see the interface doc comment above.
+  const rows = await tx.query<{ status: string }>(
+    'SELECT status FROM conversations WHERE id = $1 FOR UPDATE',
+    [conversationId],
+  )
+  const row = rows[0]
+  if (row === undefined) {
+    return { ok: false, reason: 'not-found' }
+  }
+  if (row.status === 'deleted') {
+    return { ok: false, reason: 'deleted' }
+  }
+
+  const { threadId, created, row: threadRow } = await insertThread(tx, conversationId, thread)
+
+  // A REPLAY (an existing row was found, nothing new inserted) touches
+  // the conversation not at all — no reopen, no updated_at bump. Only
+  // a genuinely new row counts as new activity on the conversation.
+  // Reopen policy (spec §4a, v1.1): closed OR spam → active; pending
+  // deliberately stays pending (see the module doc). A NOTE never
+  // reopens anything (spec §4c — noting a closed conversation is not
+  // the customer coming back), but it IS activity: updated_at bumps.
+  if (created) {
+    if ((row.status === 'closed' || row.status === 'spam') && thread.direction !== 'note') {
+      await tx.query(
+        "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1",
+        [conversationId],
+      )
+    } else {
+      await tx.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [conversationId])
+    }
+  }
+
+  return { ok: true, threadId, created, thread: toStoredThread(threadRow) }
+}
+
 export function createConversationStore(db: Db): ConversationStore {
   return {
     async createConversation(input) {
-      return db.transaction(async (tx) => {
-        const [conversation] = await tx.query<{ id: string }>(
-          'INSERT INTO conversations (subject, customer_email) VALUES ($1, $2) RETURNING id',
-          [input.subject, input.customerEmail],
-        )
-        const { threadId } = await insertThread(tx, conversation.id, input.firstMessage)
-        return { conversationId: conversation.id, threadId }
-      })
+      return db.transaction((tx) => createConversationInTx(tx, input))
     },
 
     async appendThread(conversationId, thread) {
-      return db.transaction(async (tx) => {
-        // FOR UPDATE: lock the conversation row for the life of this
-        // transaction so a concurrent appendThread/delete against the same
-        // conversation can't race between this status check and the insert
-        // below (e.g. two replies arriving for the same closed conversation
-        // at once should both observe-and-reopen deterministically, not
-        // interleave into an inconsistent status). This same lock is what
-        // makes the idempotency-key get-or-insert below safe under
-        // concurrency — see the interface doc comment above.
-        const rows = await tx.query<{ status: string }>(
-          'SELECT status FROM conversations WHERE id = $1 FOR UPDATE',
-          [conversationId],
-        )
-        const row = rows[0]
-        if (row === undefined) {
-          return { ok: false, reason: 'not-found' }
-        }
-        if (row.status === 'deleted') {
-          return { ok: false, reason: 'deleted' }
-        }
-
-        const { threadId, created, row: threadRow } = await insertThread(tx, conversationId, thread)
-
-        // A REPLAY (an existing row was found, nothing new inserted) touches
-        // the conversation not at all — no reopen, no updated_at bump. Only
-        // a genuinely new row counts as new activity on the conversation.
-        // Reopen policy (spec §4a, v1.1): closed OR spam → active; pending
-        // deliberately stays pending (see the module doc). A NOTE never
-        // reopens anything (spec §4c — noting a closed conversation is not
-        // the customer coming back), but it IS activity: updated_at bumps.
-        if (created) {
-          if ((row.status === 'closed' || row.status === 'spam') && thread.direction !== 'note') {
-            await tx.query(
-              "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1",
-              [conversationId],
-            )
-          } else {
-            await tx.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [
-              conversationId,
-            ])
-          }
-        }
-
-        return { ok: true, threadId, created, thread: toStoredThread(threadRow) }
-      })
+      return db.transaction((tx) => appendThreadInTx(tx, conversationId, thread))
     },
 
     async getConversation(conversationId, options) {

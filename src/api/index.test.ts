@@ -1556,6 +1556,9 @@ describe('createInboxApi', () => {
         async getMailboxByAddress(address: string) {
           return record !== null && record.address === address ? record : null
         },
+        async markNeedsReconnect() {
+          throw new Error('markNeedsReconnect: not used by the push-webhook path')
+        },
       }
     }
 
