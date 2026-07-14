@@ -7,13 +7,13 @@
  * provenance), a modern serverless-friendly MIME parser with zero
  * dependencies of its own.
  *
- * `ParsedEmail` is deliberately RICHER than
- * `NormalizedInboundEmail` (`src/providers/inbound-email.ts`): it carries
- * attachment BYTES inline (`ParsedAttachment.content`), whereas
- * `NormalizedInboundEmail` carries only a `BlobStore` key (`contentRef`).
- * Writing attachment bytes to blob storage is a later step at the store
- * layer, downstream of this pure parse — this module knows nothing about
- * `BlobStore` and never will.
+ * This is the pipeline's single parse (specs/mail/inbound-ingestion.md §1):
+ * an `InboundEmailProvider` hands over the raw RFC822 bytes untouched
+ * (`RawInboundMessage`, `src/providers/inbound-email.ts`), and this turns
+ * them into a structured `ParsedEmail`. `ParsedEmail` carries attachment
+ * BYTES inline (`ParsedAttachment.content`); writing those bytes to blob
+ * storage is a later step at the store layer, downstream of this pure
+ * parse — this module knows nothing about `BlobStore` and never will.
  */
 
 import PostalMime, { type Address, type Attachment, type Header } from 'postal-mime'
@@ -26,9 +26,9 @@ export interface ParsedAddress {
 }
 
 /**
- * One attachment, bytes included. See the module doc above for why this
- * differs from `NormalizedInboundAttachment` (which carries a `contentRef`
- * instead of `content`).
+ * One attachment, bytes included (`content`). Blob-referencing those bytes
+ * is a later store-layer step, not this pure parse's concern (see the
+ * module doc).
  */
 export interface ParsedAttachment {
   filename: string | null
@@ -108,8 +108,7 @@ export interface ParsedEmail {
    * individual entries with no built-in multi-value join, so this is this
    * module's own convention, not postal-mime's. Consumers that need exact
    * multi-value semantics (order, repetition) should not rely on this bag
-   * for those headers — same caveat `NormalizedInboundEmail.headers`
-   * documents.
+   * for those headers.
    */
   headers: Record<string, string>
 
