@@ -43,9 +43,13 @@
  *
  * ## Failure handling — the token layer owns `needs_reconnect`
  *
- * Mirrors `./gmail-reconcile.ts`'s step 2 EXACTLY: a token-acquisition
- * failure is resolved by re-reading the mailbox's CURRENT status (never
- * trusting the caught error's content) — `needs_reconnect` means the OAuth
+ * The access token is acquired ONCE per mailbox and reused for the single
+ * `watch()` call (see {@link maintainOneMailbox} step 1) — not fetched a
+ * second time through the watch client. Beyond saving a redundant token-service
+ * call, this keeps token-acquisition failures classified in one place: a
+ * token-acquisition failure is resolved by re-reading the mailbox's CURRENT
+ * status (never trusting the caught error's content) — `needs_reconnect`
+ * means the OAuth
  * token layer (`./gmail-oauth.ts`'s `getAccessToken`, on `invalid_grant`)
  * already found the grant dead and marked it, so this cron counts it and
  * moves on; any other status means the failure is transient (network,
@@ -223,11 +227,21 @@ async function maintainOneMailbox(
 ): Promise<void> {
   const { tokenService, mailboxStore, watchStateStore, queue, createWatchClient, topicName } = deps
 
-  // --- Step 1: acquire a token; distinguish dead-grant from transient
-  // (mirrors ./gmail-reconcile.ts step 2 EXACTLY — module doc). ---
-  const getAccessToken = () => tokenService.getAccessToken(mailboxId)
+  // --- Step 1: acquire a token ONCE — this both probes the grant (to
+  // distinguish a dead grant from a transient failure, the classification
+  // ./gmail-reconcile.ts step 2 does) AND is the exact token reused for the
+  // single watch() call below. Calling the token service once per mailbox
+  // rather than twice also keeps token-acquisition failures classified in
+  // ONE place: a watch() failure below is then unambiguously a watch-API
+  // failure, never a token refresh that raced revocation mid-call and got
+  // mislabeled transient. The token service already refreshed if the cached
+  // token was within its expiry skew, so this value is safe to reuse for the
+  // one watch() request that follows (unlike ./gmail-reconcile.ts, whose
+  // multi-page, long-running client is deliberately handed the getAccessToken
+  // CLOSURE so a long run never carries a token that goes stale mid-run). ---
+  let accessToken: string
   try {
-    await getAccessToken()
+    accessToken = await tokenService.getAccessToken(mailboxId)
   } catch {
     // Deliberately never logs the caught error's own content here — see
     // gmail-reconcile.ts's identical discipline; the mailbox's CURRENT
@@ -257,7 +271,8 @@ async function maintainOneMailbox(
   // not this cron, owns needs_reconnect). Does NOT `return` on failure —
   // the sweep still runs even when renewal fails. ---
   try {
-    const { expiration } = await createWatchClient(getAccessToken).watch({ topicName })
+    const watchClient = createWatchClient(() => Promise.resolve(accessToken))
+    const { expiration } = await watchClient.watch({ topicName })
     await watchStateStore.setWatchExpiration(mailboxId, expiration)
     counts.renewed++
   } catch (err) {

@@ -197,6 +197,36 @@ describe('runGmailWatchMaintenance', () => {
     })
   })
 
+  it('acquires the access token exactly once per mailbox — reused for watch(), not re-fetched', async () => {
+    const { mailboxStore, watchStateStore } = await freshStores()
+    const mailboxA = await seedActiveMailboxWithCursor(
+      mailboxStore,
+      watchStateStore,
+      'once-a@example.test',
+      'cursor-a',
+    )
+    const mailboxB = await seedActiveMailboxWithCursor(
+      mailboxStore,
+      watchStateStore,
+      'once-b@example.test',
+      'cursor-b',
+    )
+    const { queue } = fakeQueue()
+    const tokenService = fakeTokenService(mailboxStore, {})
+    const getTokenSpy = vi.spyOn(tokenService, 'getAccessToken')
+
+    await runGmailWatchMaintenance(
+      buildDeps(mailboxStore, watchStateStore, queue, { tokenService }),
+    )
+
+    // Exactly one token-service call per mailbox: step 1 acquires the token and
+    // the watch client reuses it, rather than fetching a second time. (Two
+    // calls per mailbox here would mean the redundant re-fetch is back.)
+    expect(getTokenSpy).toHaveBeenCalledTimes(2)
+    expect(getTokenSpy).toHaveBeenCalledWith(mailboxA)
+    expect(getTokenSpy).toHaveBeenCalledWith(mailboxB)
+  })
+
   it('a mailbox with no baseline cursor is renewed but NOT swept', async () => {
     const { mailboxStore, watchStateStore } = await freshStores()
     const mailbox = await mailboxStore.upsertConnectedMailbox({
