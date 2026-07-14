@@ -319,6 +319,250 @@ ALTER TABLE threads ADD CONSTRAINT threads_customer_viewed_at_outbound_only CHEC
 `
 
 /**
+ * Migration 009 — `mailboxes`, the inbound-ingestion namespace anchor
+ * (HT-36; specs/mail/inbound-ingestion.md §2, §7).
+ *
+ * One row per connected mailbox. `id` is `mailboxId` everywhere else in the
+ * mail-ingestion specs (inbound-ingestion.md §2, gmail-push.md §3) — the
+ * value every other table this migration group adds is namespaced by, and
+ * the anchor for storage, blob keys, and dedup today, and tenancy later
+ * (inbound-ingestion.md §7: "the schema carries mailboxId from day one...
+ * but behavior is single-tenant for the dogfood").
+ *
+ * - `address` is UNIQUE: gmail-push.md §3 resolves a push notification's
+ *   `emailAddress` to "a known, active connected mailbox" and rejects
+ *   anything that doesn't map to exactly one — a duplicate address would
+ *   make that resolution ambiguous, so uniqueness is enforced here rather
+ *   than trusted to application code.
+ * - `provider` is plain `text`, deliberately NOT CHECK-constrained (unlike
+ *   `status` below). Constraining it to a fixed list would couple a
+ *   provider-agnostic pipeline (inbound-ingestion.md's own framing) to a
+ *   schema migration every time a new transport ships an adapter
+ *   (`src/providers/inbound-email.ts` already anticipates "Postmark inbound,
+ *   SES inbound, etc." arriving as adapter code, not schema changes);
+ *   `'gmail'` is simply the only value written today.
+ * - `status` IS CHECK-constrained — a mailbox's own lifecycle is a small,
+ *   engine-owned set, matching this file's standing convention of
+ *   CHECK-constraining every closed-set lifecycle column
+ *   (`conversations.status`, `threads.direction`, `threads.delivery_status`).
+ *   `'needs_reconnect'` is the state gmail-push.md §5 (an expired/404 history
+ *   cursor) and §6 (a failed `watch()` renewal) put a mailbox into —
+ *   operator-visible and resolvable, never a silent failure. `'paused'` is
+ *   the deliberate dogfood response to §5's expired-cursor case ("pause the
+ *   mailbox and flag it for manual rebaseline"). Default `'active'`: a
+ *   mailbox starts usable the moment it is connected (HT-40).
+ *
+ * No `updated_at` trigger: exactly like `conversations`/`threads`, this
+ * schema has no auto-bump mechanism anywhere — `updated_at` is maintained by
+ * whichever application code writes the row (a later ticket for this table;
+ * HT-36 is schema only).
+ */
+const MIGRATION_009_MAILBOXES = `
+CREATE TABLE mailboxes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  address text NOT NULL UNIQUE,
+  provider text NOT NULL,
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','needs_reconnect')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+`
+
+/**
+ * Migration 010 — `mailbox_oauth_tokens`, per-mailbox OAuth credential
+ * storage (HT-36, schema only; gmail-push.md §7: "OAuth token
+ * acquisition/refresh → HT-38; the connect/consent flow → HT-40").
+ *
+ * `mailbox_id` is the PRIMARY KEY, not a separate surrogate `id` — this is a
+ * per-mailbox singleton (one OAuth grant per connected mailbox today), the
+ * same 1:1-sidecar shape `gmail_watch_state` below uses, deliberately kept
+ * consistent between the two.
+ *
+ * ## This migration stores ciphertext. It does not encrypt anything.
+ *
+ * `refresh_token_ciphertext` is `bytea` — opaque encrypted bytes — and
+ * `NOT NULL` because a row only exists once an OAuth grant actually produced
+ * a refresh token (HT-40); there is no legal "connected but tokenless" row.
+ * **No encryption or decryption logic exists anywhere in this codebase
+ * yet.** HT-38 ("OAuth token acquisition/refresh") is the ticket that
+ * implements the actual encrypt/decrypt and is the only code ever meant to
+ * hold plaintext; this migration only reserves the column shape a
+ * ciphertext value will live in. `bytea` (not `text`) because encrypted
+ * output is arbitrary binary, not necessarily valid text — and because
+ * `SqlValue` (`src/db/client.ts`) already treats `Uint8Array` as a
+ * first-class bindable value precisely for columns like this one (see the
+ * `pg`/PGlite round-trip proof in `src/db/postgres.test.ts`).
+ *
+ * `access_token_ciphertext`/`access_token_expires_at` are the short-lived
+ * (~1h, for Gmail) OAuth access-token cache — nullable (absent until the
+ * first token exchange). The access token is ALSO stored as ciphertext
+ * (`bytea`), not plaintext: it is itself a bearer credential that grants
+ * mailbox access for its whole lifetime, so a database dump alone must not
+ * yield usable mailbox access even for that ~1h window. Encrypting BOTH
+ * secrets means an attacker needs the encryption key (held only by HT-38's
+ * code, never the DB) to use either — a plaintext access-token column would
+ * hand a DB thief ~1h of live mailbox access for free, defeating the point
+ * of encrypting the refresh token beside it. As with the refresh token,
+ * HT-38 owns the encrypt/decrypt; this migration only reserves the column.
+ *
+ * `scopes` is raw nullable `text` — the OAuth token endpoint's own
+ * space-delimited `scope` string (RFC 6749 §5.1), stored verbatim and
+ * unparsed, not a `jsonb` array like `conversations.tags`. This is provider
+ * metadata for audit/debugging, not a queried or filtered feature, so no
+ * structure is imposed on it until something actually needs one — the
+ * `jsonb` alternative is noted as an open option in the implementation
+ * report.
+ *
+ * `ON DELETE CASCADE` mirrors this schema's one existing FK precedent
+ * (`threads.conversation_id`, migration 001): a token row has no purpose
+ * once its owning mailbox is gone.
+ */
+const MIGRATION_010_MAILBOX_OAUTH_TOKENS = `
+CREATE TABLE mailbox_oauth_tokens (
+  mailbox_id uuid PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,
+  refresh_token_ciphertext bytea NOT NULL,
+  access_token_ciphertext bytea,
+  access_token_expires_at timestamptz,
+  scopes text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+`
+
+/**
+ * Migration 011 — `gmail_watch_state`, per-mailbox Gmail push cursor state
+ * (HT-36; gmail-push.md §4 "the cursor", §6 "watch() renewal").
+ *
+ * Kept as its own table, OUT of the generic `mailboxes` schema, on purpose:
+ * inbound-ingestion.md's pipeline is provider-agnostic and never reads this
+ * table — only the Gmail transport (gmail-push.md) does — so a future
+ * non-Gmail provider (the forwarding-address transport, or any other) adds
+ * nothing here and this table needs no change for it to ship. Same
+ * 1:1-sidecar shape as `mailbox_oauth_tokens`: `mailbox_id` is the PRIMARY
+ * KEY (one watch state per mailbox), not a separate surrogate `id`.
+ *
+ * - `history_id` is `text`, not an integer type, even though Gmail's
+ *   `historyId` is numeric-looking. Gmail's own API represents it as a
+ *   string, the engine only ever treats it as an opaque watermark —
+ *   compared and passed back to `history.list?startHistoryId=`, never
+ *   arithmetic'd (gmail-push.md §1: "historyId is a watermark, not a
+ *   message id") — and `text` sidesteps any bigint range/precision question
+ *   entirely rather than assuming Gmail's values always fit one. Nullable:
+ *   a mailbox between connection and its first successful `watch()` call
+ *   has no cursor yet.
+ * - `watch_expiration` is nullable `timestamptz`: `watch()`'s returned
+ *   expiration (~7 days out, gmail-push.md §6), null until the first
+ *   successful `watch()`.
+ *
+ * No `created_at` (unlike `mailboxes`/`inbound_deliveries`): this is a 1:1
+ * mutable operational state whose "created" moment adds nothing beyond its
+ * owning mailbox's own `created_at` — only `updated_at` is meaningful here,
+ * tracking cursor freshness.
+ */
+const MIGRATION_011_GMAIL_WATCH_STATE = `
+CREATE TABLE gmail_watch_state (
+  mailbox_id uuid PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,
+  history_id text,
+  watch_expiration timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+`
+
+/**
+ * Migration 012 — `inbound_deliveries`, the delivery ledger (HT-36;
+ * specs/mail/inbound-ingestion.md §4).
+ *
+ * One row per `(mailbox_id, provider_message_id)` — simultaneously the
+ * **idempotency record**, the **claim/lease**, and the **retry queue** (spec
+ * §4's own three-way framing). `provider_message_id`, not the RFC
+ * `Message-ID`, is the dedup authority: the inbound `Message-ID` is optional
+ * and entirely sender-controlled (`NewThread.messageId` permits `null`,
+ * `src/store/conversations.ts`), while the transport's own message id is
+ * stable and provider-issued (spec §4).
+ *
+ * `id` is a conventional surrogate `uuid` PRIMARY KEY (matching every other
+ * table in this schema), separate from the UNIQUE claim key below — the
+ * same "surrogate PK + a separate business-key unique index" shape
+ * migration 003 already uses for `threads`' own idempotency key
+ * (`threads_conversation_idempotency_key_idx`).
+ *
+ * ## The claim key
+ *
+ * `inbound_deliveries_mailbox_id_provider_message_id_key` is what the
+ * ingest pipeline's step 1 targets (spec §3 step 1): `INSERT ... ON
+ * CONFLICT (mailbox_id, provider_message_id) DO NOTHING RETURNING *`. A
+ * fresh insert means the caller owns processing this delivery; a conflict
+ * means a concurrent or prior delivery already claimed or completed it, and
+ * the caller must return THAT row's outcome rather than double-process
+ * (spec §3 step 1, §8's "two concurrent deliveries... exactly one
+ * conversation" acceptance case). Ordinary `UNIQUE`, not partial: unlike
+ * `threads.idempotency_key` (optional, migration 003),
+ * `provider_message_id` is always present (spec §2: the transport rejects a
+ * delivery it cannot resolve to a `providerMessageId`), so every row
+ * participates in the constraint.
+ *
+ * `status` defaults to `'received'` — the state a row is inserted in at the
+ * step-1 claim, before parse/thread/store (steps 2-5) even run. The CHECK
+ * list is spelled `'dead-letter'` (hyphen) to match
+ * specs/mail/inbound-ingestion.md §4's own spelling, used consistently
+ * throughout that spec (and matching the industry-standard "dead-letter
+ * queue" term); HT-36's ticket text listed the same value with an
+ * underscore (`dead_letter`) in one place, which reads as a transcription
+ * slip against the spec's consistent hyphenated usage — flagged for
+ * explicit confirmation in the implementation report rather than resolved
+ * silently.
+ *
+ * `attempts`/`last_error` are the retry-queue bookkeeping the spec's "retry
+ * queue" framing implies (§4) — no schema-level opinion on the attempts
+ * ceiling or backoff; that policy belongs to the worker that consumes this
+ * table (a later ticket).
+ *
+ * `thread_id` is the ledger's recorded OUTCOME (spec §3 step 5, §4),
+ * nullable because most statuses (`received`, `suppressed`, `failed`,
+ * `dead-letter`) never resolve to one. The resulting CONVERSATION is
+ * deliberately NOT a second column: a thread belongs to exactly one
+ * conversation (`threads.conversation_id`, NOT NULL, migration 001), so
+ * `thread_id` already determines it — a separate `conversation_id` would be
+ * derivable-but-denormalized, and two independent FKs would let a row pair a
+ * `conversation_id` with a `thread_id` from a DIFFERENT conversation, a
+ * corrupt outcome the schema simply should not be able to represent. Derive
+ * the conversation with a join to `threads` when an audit query needs it.
+ * Declared a real FK (this schema's convention for id-shaped columns) but
+ * `ON DELETE SET NULL` rather than `CASCADE` (unlike migration 001's
+ * `threads`): a ledger row's audit/idempotency value ("we received message X
+ * for mailbox Y, and here is what happened") does not depend on the thread it
+ * produced still existing — invariant #1's never-silently-lost applies to the
+ * fact of ingestion, so the ledger row survives and only the now-unresolvable
+ * pointer clears.
+ *
+ * No cross-column CHECK tying `status` to `conversation_id`/`thread_id`
+ * nullability (e.g. "non-null iff `stored`") — deliberately deferred: the
+ * exact invariant depends on retry/dead-letter edge cases the consuming
+ * store methods (a later ticket) haven't been written yet to pin down, and
+ * this ticket is schema-only. Worth adding once that implementation settles
+ * the question for real.
+ *
+ * No index beyond the UNIQUE claim key: the ticket's own framing ("the
+ * unique index IS the claim key") reads as the one index this migration
+ * needs; a `status`-scoped index for a future retry-sweep/dead-letter-review
+ * query is deferred to whichever ticket implements that query, so as not to
+ * carry write-time index cost for a read pattern that doesn't exist yet.
+ */
+const MIGRATION_012_INBOUND_DELIVERIES = `
+CREATE TABLE inbound_deliveries (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  mailbox_id uuid NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  provider_message_id text NOT NULL,
+  status text NOT NULL DEFAULT 'received' CHECK (status IN ('received','stored','suppressed','failed','dead-letter')),
+  attempts integer NOT NULL DEFAULT 0,
+  last_error text,
+  thread_id uuid REFERENCES threads(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX inbound_deliveries_mailbox_id_provider_message_id_key ON inbound_deliveries (mailbox_id, provider_message_id);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -359,6 +603,26 @@ const MIGRATIONS: Migration[] = [
     id: 8,
     name: 'customer_viewed_at',
     sql: MIGRATION_008_CUSTOMER_VIEWED_AT,
+  },
+  {
+    id: 9,
+    name: 'mailboxes',
+    sql: MIGRATION_009_MAILBOXES,
+  },
+  {
+    id: 10,
+    name: 'mailbox_oauth_tokens',
+    sql: MIGRATION_010_MAILBOX_OAUTH_TOKENS,
+  },
+  {
+    id: 11,
+    name: 'gmail_watch_state',
+    sql: MIGRATION_011_GMAIL_WATCH_STATE,
+  },
+  {
+    id: 12,
+    name: 'inbound_deliveries',
+    sql: MIGRATION_012_INBOUND_DELIVERIES,
   },
 ]
 

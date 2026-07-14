@@ -297,6 +297,10 @@ describe('createPostgresDb with a schema option', () => {
     expect(placed.rows.map((r) => r.table_name)).toEqual([
       '_migrations',
       'conversations',
+      'gmail_watch_state',
+      'inbound_deliveries',
+      'mailbox_oauth_tokens',
+      'mailboxes',
       'threads',
     ])
 
