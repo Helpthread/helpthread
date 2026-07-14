@@ -23,9 +23,10 @@
  *    push.md §3: the notification's `historyId` is the NEW watermark;
  *    starting `history.list` from it would return nothing, since nothing
  *    is newer than the current state — the stored cursor is the source of
- *    truth). No stored cursor yet → ack (watch(), HT-42, seeds the
- *    baseline at connect; a push arriving before that baseline exists is a
- *    no-op here, not an error).
+ *    truth). No stored cursor yet → ack (`watch()` seeds the baseline at
+ *    connect — HT-40, gmail-connect.md §4 steps 4-5; HT-42 only renews it,
+ *    gmail-connect.md §1, gmail-push.md §6). A push arriving before that
+ *    baseline exists is a no-op here, not an error.
  * 4. `history.list` from that cursor. A 404 means the cursor expired
  *    (gmail-push.md §5) — pause the mailbox, do NOT advance the cursor,
  *    ack (a human must rebaseline; retrying a 404 forever helps nobody).
@@ -279,7 +280,7 @@ async function reconcileOneMailbox(
       outcome: 'ack',
       reason: 'no-baseline-cursor',
       notifiedHistoryId,
-      note: 'watch() (HT-42) seeds the baseline cursor at connect — a push before that baseline exists is a no-op',
+      note: 'watch() (HT-40, gmail-connect.md §4) seeds the baseline cursor at connect; HT-42 only renews it — a push before that baseline exists is a no-op',
     })
     return { kind: 'ack' }
   }

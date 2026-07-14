@@ -176,7 +176,9 @@ here the cursor itself is unrecoverable.)
 - **Parsing, threading, storage, idempotency, attachment extraction, loop-suppression,
   observability** → inbound-ingestion.md. This transport hands over raw bytes and provider
   metadata and stops.
-- **OAuth token acquisition/refresh** → HT-38; the **connect/consent flow** → HT-40.
+- **OAuth token acquisition/refresh** → HT-38; the **connect/consent flow**
+  (authorization-code grant, initial `watch()` arm, baseline cursor seed) →
+  HT-40, [gmail-connect.md](./gmail-connect.md).
 - **One-time GCP/Pub-Sub provisioning** (Internal OAuth app; enable the Gmail + Pub/Sub APIs;
   create the topic; grant `gmail-api-push@system.gserviceaccount.com` the Pub/Sub Publisher
   role; create the push subscription → our endpoint) is an **operator runbook** (HT-43), not

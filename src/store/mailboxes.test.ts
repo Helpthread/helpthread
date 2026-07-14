@@ -212,4 +212,144 @@ describe('createMailboxStore', () => {
     const { store } = await freshStore()
     await expect(store.markPaused(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
   })
+
+  // --- upsertConnectedMailbox (HT-40, gmail-connect.md §4-§5) -----------------
+
+  describe('upsertConnectedMailbox', () => {
+    it('inserts a brand-new mailbox as active and returns the row', async () => {
+      const { db, store } = await freshStore()
+
+      const mailbox = await store.upsertConnectedMailbox({
+        address: 'new@example.test',
+        provider: 'gmail',
+      })
+
+      expect(mailbox.address).toBe('new@example.test')
+      expect(mailbox.provider).toBe('gmail')
+      expect(mailbox.status).toBe('active')
+      expect(typeof mailbox.id).toBe('string')
+
+      const rows = await db.query<{ address: string; provider: string; status: string }>(
+        'SELECT address, provider, status FROM mailboxes WHERE id = $1',
+        [mailbox.id],
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toEqual({ address: 'new@example.test', provider: 'gmail', status: 'active' })
+    })
+
+    it('reactivates an existing needs_reconnect mailbox to active — same row, not a duplicate', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db, {
+        address: 'reconnect@example.test',
+        status: 'needs_reconnect',
+      })
+
+      const mailbox = await store.upsertConnectedMailbox({
+        address: 'reconnect@example.test',
+        provider: 'gmail',
+      })
+
+      expect(mailbox.id).toBe(mailboxId)
+      expect(mailbox.status).toBe('active')
+
+      const rows = await db.query<{ id: string }>('SELECT id FROM mailboxes WHERE address = $1', [
+        'reconnect@example.test',
+      ])
+      expect(rows).toHaveLength(1)
+      expect(rows[0].id).toBe(mailboxId)
+    })
+
+    it('reactivates an existing paused mailbox to active — same row, not a duplicate', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db, {
+        address: 'paused2@example.test',
+        status: 'paused',
+      })
+
+      const mailbox = await store.upsertConnectedMailbox({
+        address: 'paused2@example.test',
+        provider: 'gmail',
+      })
+
+      expect(mailbox.id).toBe(mailboxId)
+      expect(mailbox.status).toBe('active')
+      const rows = await db.query('SELECT id FROM mailboxes WHERE address = $1', [
+        'paused2@example.test',
+      ])
+      expect(rows).toHaveLength(1)
+    })
+
+    it('reconnect keeps provider in sync with EXCLUDED.provider on every call', async () => {
+      const { db, store } = await freshStore()
+      await insertMailbox(db, { address: 'provider-swap@example.test', provider: 'gmail' })
+
+      const mailbox = await store.upsertConnectedMailbox({
+        address: 'provider-swap@example.test',
+        provider: 'gmail',
+      })
+
+      expect(mailbox.provider).toBe('gmail')
+      const rows = await db.query<{ provider: string }>(
+        'SELECT provider FROM mailboxes WHERE address = $1',
+        ['provider-swap@example.test'],
+      )
+      expect(rows[0].provider).toBe('gmail')
+    })
+
+    it('bumps updated_at on reconnect', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db, { address: 'bump@example.test', status: 'paused' })
+      await db.query('UPDATE mailboxes SET updated_at = $1 WHERE id = $2', [
+        new Date(Date.now() - 60_000),
+        mailboxId,
+      ])
+      const before = await db.query<{ updated_at: Date }>(
+        'SELECT updated_at FROM mailboxes WHERE id = $1',
+        [mailboxId],
+      )
+
+      await store.upsertConnectedMailbox({ address: 'bump@example.test', provider: 'gmail' })
+
+      const after = await db.query<{ updated_at: Date }>(
+        'SELECT updated_at FROM mailboxes WHERE id = $1',
+        [mailboxId],
+      )
+      expect(after[0].updated_at.getTime()).toBeGreaterThan(before[0].updated_at.getTime())
+    })
+
+    it('an already-active mailbox stays active (idempotent) and keeps the same row', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db, {
+        address: 'active@example.test',
+        status: 'active',
+      })
+
+      const mailbox = await store.upsertConnectedMailbox({
+        address: 'active@example.test',
+        provider: 'gmail',
+      })
+
+      expect(mailbox.id).toBe(mailboxId)
+      expect(mailbox.status).toBe('active')
+      const rows = await db.query('SELECT id FROM mailboxes WHERE address = $1', [
+        'active@example.test',
+      ])
+      expect(rows).toHaveLength(1)
+    })
+
+    it('two different addresses produce two distinct mailbox rows', async () => {
+      const { store } = await freshStore()
+
+      const a = await store.upsertConnectedMailbox({
+        address: 'a3@example.test',
+        provider: 'gmail',
+      })
+      const b = await store.upsertConnectedMailbox({
+        address: 'b3@example.test',
+        provider: 'gmail',
+      })
+
+      expect(a.id).not.toBe(b.id)
+    })
+  })
 })

@@ -1,7 +1,10 @@
+import { randomBytes } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
+import { createGmailConnectService } from '../mail/gmail-connect.js'
 import type { Keyring } from '../mail/reply-token.js'
+import type { GmailWatchClient } from '../providers/adapters/gmail/index.js'
 import type {
   EmailSender,
   EnqueueOptions,
@@ -13,9 +16,14 @@ import {
   createConversationStore,
   type NewConversation,
 } from '../store/conversations.js'
+import { createGmailWatchStateStore } from '../store/gmail-watch-state.js'
+import { createMailboxTokenStore } from '../store/mailbox-tokens.js'
 import { createMailboxStore } from '../store/mailboxes.js'
+import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
 import type { GmailReconcileJob } from './gmail-webhook.js'
 import { createInboxApi, type InboxApiDeps } from './index.js'
+
+const TOKEN_ENC_KEY = randomBytes(ENCRYPTION_KEY_BYTES)
 
 const TOKEN = 'test-token-used-across-the-inbox-api-suite'
 const RANDOM_UUID = '00000000-0000-4000-8000-000000000000'
@@ -171,6 +179,7 @@ describe('createInboxApi', () => {
       sender?: EmailSender
       openTracking?: { publicBaseUrl: string }
       gmailPush?: InboxApiDeps['gmailPush']
+      gmailConnect?: InboxApiDeps['gmailConnect']
     } = {},
   ): Promise<{
     db: Db
@@ -192,6 +201,7 @@ describe('createInboxApi', () => {
       supportAddress: SUPPORT_ADDRESS,
       ...(overrides.openTracking !== undefined ? { openTracking: overrides.openTracking } : {}),
       ...(overrides.gmailPush !== undefined ? { gmailPush: overrides.gmailPush } : {}),
+      ...(overrides.gmailConnect !== undefined ? { gmailConnect: overrides.gmailConnect } : {}),
     })
     return { db, store, api, sent }
   }
@@ -1565,6 +1575,9 @@ describe('createInboxApi', () => {
         async markPaused() {
           throw new Error('markPaused: not used by the push-webhook path')
         },
+        async upsertConnectedMailbox() {
+          throw new Error('upsertConnectedMailbox: not used by the push-webhook path')
+        },
       }
     }
 
@@ -1730,6 +1743,251 @@ describe('createInboxApi', () => {
           queue,
         },
       })
+      const res = await api(get('/api/v1/conversations', undefined))
+      expect(res.status).toBe(401)
+    })
+  })
+
+  // --- gmail connect (HT-40, gmail-connect.md §2) --------------------------------
+  //
+  // Focused on the WIRING contract createInboxApi owns: `POST .../connect`
+  // is an ORDINARY Bearer-gated route (unlike the push webhook, it needs no
+  // special pre-auth treatment itself), the callback IS a pre-auth carve-out
+  // matched before the Bearer gate, and `deps.gmailConnect` absence 404s both
+  // routes. Handler-level response-shape details (HTML escaping, which
+  // GmailConnectError code maps to which page) live in
+  // `src/api/gmail-connect.test.ts` — this block does not re-derive those.
+  //
+  // Mirrors the "gmail push webhook" block's own pattern above: `freshApi()`
+  // is called ONCE per test to obtain a `db`, then `createInboxApi` is called
+  // DIRECTLY (not via `freshApi` again) so every dependency — including the
+  // gmail-connect service's own stores — is bound to that SAME database.
+  describe('gmail connect', () => {
+    const CONNECT_PATH = '/api/v1/inbound/gmail/connect'
+    const CALLBACK_PATH = '/api/v1/inbound/gmail/callback'
+    const CLIENT_ID = 'test-client-id.apps.googleusercontent.com'
+    const CLIENT_SECRET = 'test-client-secret'
+    const REDIRECT_URI = `https://x.example.test${CALLBACK_PATH}`
+    const TOPIC_NAME = 'projects/helpthread-prod/topics/gmail-push'
+    const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+
+    /** A real `GmailConnectService` backed by `db`, with Google's token endpoint and the Gmail watch-arm client both faked. */
+    function realGmailConnect(
+      db: Db,
+      options: {
+        tokenResponse?: { status: number; body: unknown }
+        watchClient?: GmailWatchClient
+      } = {},
+    ): { service: ReturnType<typeof createGmailConnectService> } {
+      const tokenResp = options.tokenResponse ?? {
+        status: 200,
+        body: {
+          access_token: 'fresh-access-token',
+          refresh_token: 'fresh-refresh-token',
+          expires_in: 3600,
+        },
+      }
+      const fetchImpl = (async () =>
+        new Response(JSON.stringify(tokenResp.body), {
+          status: tokenResp.status,
+        })) as unknown as typeof fetch
+      const watchClient: GmailWatchClient = options.watchClient ?? {
+        getProfile: async () => ({
+          emailAddress: 'connected@example.test',
+          historyId: 'profile-hid',
+        }),
+        watch: async () => ({
+          historyId: 'baseline-hid',
+          expiration: new Date('2026-08-01T00:00:00.000Z'),
+        }),
+      }
+
+      const service = createGmailConnectService({
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        redirectUri: REDIRECT_URI,
+        topicName: TOPIC_NAME,
+        scopes: SCOPES,
+        keyring: KEYRING,
+        mailboxStore: createMailboxStore(db),
+        tokenStore: createMailboxTokenStore(db, TOKEN_ENC_KEY),
+        watchStateStore: createGmailWatchStateStore(db),
+        createWatchClient: () => watchClient,
+        fetchImpl,
+      })
+      return { service }
+    }
+
+    /** Build a full `createInboxApi` instance wired to `db`, with `gmailConnect` present (or, if omitted, absent entirely — for the "not configured" tests). */
+    function apiWithGmailConnect(
+      db: Db,
+      gmailConnect?: InboxApiDeps['gmailConnect'],
+    ): (request: Request) => Promise<Response> {
+      return createInboxApi({
+        store: createConversationStore(db),
+        apiToken: TOKEN,
+        sender: createFakeSender().sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+        ...(gmailConnect !== undefined ? { gmailConnect } : {}),
+      })
+    }
+
+    function connectPost(...tokenArg: [string | undefined] | []): Request {
+      const token = tokenArg.length > 0 ? tokenArg[0] : TOKEN
+      const headers: Record<string, string> = {}
+      if (token !== undefined) {
+        headers.Authorization = `Bearer ${token}`
+      }
+      return new Request(`https://x.example.test${CONNECT_PATH}`, { method: 'POST', headers })
+    }
+
+    function callbackGet(query: string): Request {
+      return new Request(`https://x.example.test${CALLBACK_PATH}${query}`)
+    }
+
+    // --- POST .../connect: an ORDINARY Bearer-gated route -----------------
+
+    it('POST .../connect with a valid Bearer token → 200 { consentUrl }', async () => {
+      const { db } = await freshApi()
+      const gmailConnect = realGmailConnect(db)
+      const api = apiWithGmailConnect(db, gmailConnect)
+
+      const res = await api(connectPost())
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Content-Type')).toBe('application/json')
+      const body = (await res.json()) as { consentUrl: string }
+      expect(body.consentUrl).toContain('https://accounts.google.com/o/oauth2/v2/auth')
+      expect(new URL(body.consentUrl).searchParams.get('client_id')).toBe(CLIENT_ID)
+    })
+
+    it('POST .../connect WITHOUT a Bearer token → 401, before the handler ever runs', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailConnect(db, realGmailConnect(db))
+
+      const res = await api(connectPost(undefined))
+      expect(res.status).toBe(401)
+    })
+
+    it('POST .../connect with the WRONG Bearer token → 401', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailConnect(db, realGmailConnect(db))
+
+      const res = await api(connectPost('the-wrong-token'))
+      expect(res.status).toBe(401)
+    })
+
+    it('deps.gmailConnect absent: POST .../connect 404s (no route-table special case needed — Bearer-gated either way)', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailConnect(db) // no gmailConnect
+
+      const res = await api(connectPost())
+      expect(res.status).toBe(404)
+    })
+
+    // --- GET .../callback: a PRE-AUTH carve-out -----------------------------
+
+    it('GET .../callback runs BEFORE Bearer auth: no Authorization header at all still succeeds', async () => {
+      const { db } = await freshApi()
+      const gmailConnect = realGmailConnect(db)
+      const api = apiWithGmailConnect(db, gmailConnect)
+      const { consentUrl } = gmailConnect.service.beginConnect()
+      const state = new URL(consentUrl).searchParams.get('state') as string
+
+      // No Authorization header — every OTHER route on this api would 401.
+      const res = await api(callbackGet(`?code=auth-code&state=${encodeURIComponent(state)}`))
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Content-Type')).toBe('text/html; charset=utf-8')
+    })
+
+    it('a valid code+state completes the connect AND PERSISTS: an active mailbox, encrypted tokens, a seeded watch-state row', async () => {
+      const { db } = await freshApi()
+      const gmailConnect = realGmailConnect(db)
+      const api = apiWithGmailConnect(db, gmailConnect)
+      const { consentUrl } = gmailConnect.service.beginConnect()
+      const state = new URL(consentUrl).searchParams.get('state') as string
+
+      const res = await api(callbackGet(`?code=auth-code&state=${encodeURIComponent(state)}`))
+
+      expect(res.status).toBe(200)
+      const html = await res.text()
+      expect(html).toContain('connected@example.test')
+
+      const rows = await db.query<{ status: string }>(
+        "SELECT status FROM mailboxes WHERE address = 'connected@example.test'",
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0].status).toBe('active')
+      const tokenRows = await db.query('SELECT mailbox_id FROM mailbox_oauth_tokens')
+      expect(tokenRows).toHaveLength(1)
+      const watchRows = await db.query<{ history_id: string }>(
+        'SELECT history_id FROM gmail_watch_state',
+      )
+      expect(watchRows).toHaveLength(1)
+      expect(watchRows[0].history_id).toBe('baseline-hid')
+    })
+
+    it('a forged state is rejected: 4xx html, nothing persisted', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailConnect(db, realGmailConnect(db))
+
+      const res = await api(callbackGet('?code=auth-code&state=gmc.k1.999.forged-nonce.forged-sig'))
+
+      expect(res.status).toBe(400)
+      expect(res.headers.get('Content-Type')).toBe('text/html; charset=utf-8')
+      const rows = await db.query('SELECT id FROM mailboxes')
+      expect(rows).toHaveLength(0)
+    })
+
+    it('an expired state is rejected: 4xx html, nothing persisted', async () => {
+      const { db } = await freshApi()
+      const gmailConnect = realGmailConnect(db)
+      const api = apiWithGmailConnect(db, gmailConnect)
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+      const { consentUrl } = gmailConnect.service.beginConnect()
+      const state = new URL(consentUrl).searchParams.get('state') as string
+      vi.setSystemTime(new Date('2026-01-01T00:11:00.000Z')) // past the default 10 min TTL
+      vi.useRealTimers()
+
+      const res = await api(callbackGet(`?code=auth-code&state=${encodeURIComponent(state)}`))
+
+      expect(res.status).toBe(400)
+      const rows = await db.query('SELECT id FROM mailboxes')
+      expect(rows).toHaveLength(0)
+    })
+
+    it('deps.gmailConnect absent: GET .../callback 404s (never the gmail-push-webhook uniform-reject shape)', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailConnect(db) // no gmailConnect
+
+      const res = await api(callbackGet('?code=abc&state=xyz'))
+      expect(res.status).toBe(404)
+      expect(await res.json()).toEqual({
+        error: { code: 'not_found', message: expect.any(String) },
+      })
+    })
+
+    it('a WRONG method on the callback path is handled by the pre-auth handler itself, never 401-routed', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailConnect(db, realGmailConnect(db))
+
+      // POST to the callback path (Google only ever GETs it) — still a
+      // pre-auth match; the handler itself decides how to respond (missing
+      // code/state → 400), never falls through to the authed pipeline.
+      const res = await api(
+        new Request(`https://x.example.test${CALLBACK_PATH}`, { method: 'POST' }),
+      )
+      expect(res.status).not.toBe(401)
+    })
+
+    it('existing routes are unaffected: /api/v1/conversations still 401s without a token', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailConnect(db, realGmailConnect(db))
+
       const res = await api(get('/api/v1/conversations', undefined))
       expect(res.status).toBe(401)
     })
