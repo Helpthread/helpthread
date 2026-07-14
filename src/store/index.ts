@@ -22,6 +22,8 @@ export {
   createConversationInTx,
   createConversationStore,
 } from './conversations.js'
+export type { GmailWatchStateStore } from './gmail-watch-state.js'
+export { createGmailWatchStateStore } from './gmail-watch-state.js'
 export type {
   ClaimResult,
   InboundDeliveryStatus,
