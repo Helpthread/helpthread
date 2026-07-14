@@ -130,4 +130,111 @@ describe('createGmailWatchStateStore', () => {
     expect(await store.getCursor(mailboxA)).toBe('a-2')
     expect(await store.getCursor(mailboxB)).toBe('b-1')
   })
+
+  // --- seedBaseline (HT-40, gmail-connect.md §4 step 5) -----------------------
+
+  describe('seedBaseline', () => {
+    it('writes BOTH history_id and watch_expiration from a single call', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      const expiration = new Date('2026-08-01T00:00:00.000Z')
+
+      await store.seedBaseline(mailboxId, { historyId: '555', watchExpiration: expiration })
+
+      const rows = await db.query<{ history_id: string | null; watch_expiration: Date | null }>(
+        'SELECT history_id, watch_expiration FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0].history_id).toBe('555')
+      expect(rows[0].watch_expiration?.toISOString()).toBe(expiration.toISOString())
+    })
+
+    it('getCursor reads back the seeded historyId', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+
+      await store.seedBaseline(mailboxId, {
+        historyId: '777',
+        watchExpiration: new Date('2026-08-01T00:00:00.000Z'),
+      })
+
+      expect(await store.getCursor(mailboxId)).toBe('777')
+    })
+
+    it('a second call upserts over the existing row — one row, both columns rebaselined (reconnect)', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.seedBaseline(mailboxId, {
+        historyId: '111',
+        watchExpiration: new Date('2026-08-01T00:00:00.000Z'),
+      })
+
+      const secondExpiration = new Date('2026-09-01T00:00:00.000Z')
+      await store.seedBaseline(mailboxId, { historyId: '222', watchExpiration: secondExpiration })
+
+      const rows = await db.query<{ history_id: string | null; watch_expiration: Date | null }>(
+        'SELECT history_id, watch_expiration FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows).toHaveLength(1) // still exactly one row for this mailbox
+      expect(rows[0].history_id).toBe('222')
+      expect(rows[0].watch_expiration?.toISOString()).toBe(secondExpiration.toISOString())
+    })
+
+    it('seedBaseline over a row previously advanced by setCursor overwrites BOTH columns, not just history_id', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      // Simulate a cursor advanced by the reconcile handler (setCursor never
+      // touches watch_expiration) before a reconnect re-seeds the baseline.
+      await store.setCursor(mailboxId, '999')
+
+      const expiration = new Date('2026-10-01T00:00:00.000Z')
+      await store.seedBaseline(mailboxId, { historyId: '1000', watchExpiration: expiration })
+
+      const rows = await db.query<{ history_id: string | null; watch_expiration: Date | null }>(
+        'SELECT history_id, watch_expiration FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows[0].history_id).toBe('1000')
+      expect(rows[0].watch_expiration?.toISOString()).toBe(expiration.toISOString())
+    })
+
+    it('bumps updated_at', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await db.query(
+        "INSERT INTO gmail_watch_state (mailbox_id, history_id, updated_at) VALUES ($1, $2, now() - interval '1 hour')",
+        [mailboxId, '111'],
+      )
+      const before = await db.query<{ updated_at: Date }>(
+        'SELECT updated_at FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+
+      await store.seedBaseline(mailboxId, {
+        historyId: '222',
+        watchExpiration: new Date('2026-08-01T00:00:00.000Z'),
+      })
+
+      const after = await db.query<{ updated_at: Date }>(
+        'SELECT updated_at FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(after[0].updated_at.getTime()).toBeGreaterThan(before[0].updated_at.getTime())
+    })
+
+    it('is per-mailbox — seeding one mailbox does not touch another', async () => {
+      const { db, store } = await freshStore()
+      const mailboxA = await insertMailbox(db, 'seed-a@example.test')
+      const mailboxB = await insertMailbox(db, 'seed-b@example.test')
+      const expiration = new Date('2026-08-01T00:00:00.000Z')
+
+      await store.seedBaseline(mailboxA, { historyId: 'a-baseline', watchExpiration: expiration })
+      await store.seedBaseline(mailboxB, { historyId: 'b-baseline', watchExpiration: expiration })
+
+      expect(await store.getCursor(mailboxA)).toBe('a-baseline')
+      expect(await store.getCursor(mailboxB)).toBe('b-baseline')
+    })
+  })
 })

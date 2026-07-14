@@ -3,23 +3,26 @@
  * (`gmail_watch_state`, migration 011, `src/db/migrate.ts`; gmail-push.md
  * §4 "the cursor"). One row per mailbox (`mailbox_id` is the PRIMARY KEY —
  * migration 011's doc comment), holding the `history_id` watermark
- * `history.list` resumes from. Deliberately narrow — `watch_expiration`
- * (HT-42's `watch()` renewal concern) has no reader/writer here yet; this
- * ticket (HT-41) only needs the cursor half.
+ * `history.list` resumes from, plus `watch_expiration` (the `watch()`
+ * renewal deadline, gmail-push.md §6).
  *
  * ## Why {@link GmailWatchStateStore.setCursor} upserts rather than a plain `UPDATE`
  *
- * The baseline `gmail_watch_state` row is normally seeded by `watch()`
- * (HT-42, gmail-push.md §6) at mailbox-connect time. But HT-41's reconcile
- * handler (`src/mail/gmail-reconcile.ts`) must still be able to ADVANCE a
- * cursor correctly even before HT-42 ships, or in the pathological case of
- * a push arriving before the baseline row exists. `INSERT ... ON CONFLICT
- * (mailbox_id) DO UPDATE` handles "no row yet" and "row exists" with one
- * statement, so advancing never silently no-ops the way a plain `UPDATE ...
- * WHERE mailbox_id = $1` would if it matched zero rows.
+ * The baseline `gmail_watch_state` row is seeded by {@link
+ * GmailWatchStateStore.seedBaseline} (HT-40, specs/mail/gmail-connect.md §4
+ * step 5) at mailbox-connect time — HT-42 only *renews* `watch()` and
+ * re-arms the same row thereafter (gmail-push.md §6; see gmail-connect.md
+ * §1 for the authoritative HT-40/HT-42 split). But the reconcile handler
+ * (`src/mail/gmail-reconcile.ts`, HT-41) must still be able to ADVANCE a
+ * cursor correctly even in the pathological case of a push arriving before
+ * that baseline row exists (e.g. a connect whose `seedBaseline` write
+ * hasn't landed yet). `INSERT ... ON CONFLICT (mailbox_id) DO UPDATE`
+ * handles "no row yet" and "row exists" with one statement, so advancing
+ * never silently no-ops the way a plain `UPDATE ... WHERE mailbox_id = $1`
+ * would if it matched zero rows.
  */
 
-import type { Db } from '../db/client.js'
+import type { Db, Queryable } from '../db/client.js'
 
 /** Persistence for one mailbox's Gmail history cursor. See the module doc. */
 export interface GmailWatchStateStore {
@@ -39,6 +42,28 @@ export interface GmailWatchStateStore {
    * so this is safe to call whether or not a baseline row already exists.
    */
   setCursor(mailboxId: string, historyId: string): Promise<void>
+
+  /**
+   * Seed (or re-seed, on reconnect) `mailboxId`'s BASELINE watch state:
+   * both `history_id` and `watch_expiration` together, from a single
+   * `watch()` response (specs/mail/gmail-connect.md §4 step 5 — `watch()`'s
+   * `historyId`, NOT `getProfile`'s, is the baseline cursor; see
+   * gmail-connect.md §4's rationale). Upserts (module doc), so a reconnect
+   * (gmail-connect.md §5) correctly REBASELINES both columns from the
+   * fresh `watch()` call rather than leaving a stale expiration paired with
+   * a new cursor, or vice versa — the two values always land together, from
+   * the same `watch()` call, in one write.
+   *
+   * Optionally runs against a caller-supplied `tx` (`Db.transaction`'s
+   * `Queryable`) instead of the bound `db`, so the connect flow can commit
+   * this seed together with the mailbox row and token write as one atomic
+   * unit (gmail-connect.md §4 step 5). Omitted, it runs standalone on `db`.
+   */
+  seedBaseline(
+    mailboxId: string,
+    input: { historyId: string; watchExpiration: Date },
+    tx?: Queryable,
+  ): Promise<void>
 }
 
 /** Create a {@link GmailWatchStateStore} backed by `db`. */
@@ -59,6 +84,18 @@ export function createGmailWatchStateStore(db: Db): GmailWatchStateStore {
          VALUES ($1, $2)
          ON CONFLICT (mailbox_id) DO UPDATE SET history_id = EXCLUDED.history_id, updated_at = now()`,
         [mailboxId, historyId],
+      )
+    },
+
+    async seedBaseline(mailboxId, input, tx) {
+      await (tx ?? db).query(
+        `INSERT INTO gmail_watch_state (mailbox_id, history_id, watch_expiration)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (mailbox_id) DO UPDATE SET
+           history_id = EXCLUDED.history_id,
+           watch_expiration = EXCLUDED.watch_expiration,
+           updated_at = now()`,
+        [mailboxId, input.historyId, input.watchExpiration],
       )
     },
   }

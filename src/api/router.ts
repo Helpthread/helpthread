@@ -1,14 +1,22 @@
 /**
- * A minimal method+pathname matcher for the Agent Inbox API's six routes
- * (specs/api/agent-inbox-v1.md §3a, §3b, §4).
+ * A minimal method+pathname matcher for the Agent Inbox API's authenticated
+ * routes: the six conversation-CRUD routes (specs/api/agent-inbox-v1.md
+ * §3a, §3b, §4) plus `POST /api/v1/inbound/gmail/connect` (HT-40,
+ * gmail-connect.md §2a).
  *
- * Deliberately NOT a general-purpose router library: the whole surface is
- * six static-ish paths under `/api/v1`, five with a single `{id}` path
- * param. Spec §3 requires distinguishing "path doesn't match anything" (404)
- * from "path matches, method doesn't" (405 + `Allow` header) — that's the
- * one piece of behavior worth a shared helper, so `index.ts` doesn't have to
- * re-derive it by hand. Everything else (query-string parsing, body
+ * Deliberately NOT a general-purpose router library: the whole surface is a
+ * handful of static-ish paths under `/api/v1`, most with a single `{id}`
+ * path param. Spec §3 requires distinguishing "path doesn't match anything"
+ * (404) from "path matches, method doesn't" (405 + `Allow` header) — that's
+ * the one piece of behavior worth a shared helper, so `index.ts` doesn't
+ * have to re-derive it by hand. Everything else (query-string parsing, body
  * parsing) belongs to the individual handlers, not this matcher.
+ *
+ * The API's PRE-AUTH carve-outs (the open-tracking pixel, the Gmail push
+ * webhook, and the Gmail connect callback) are matched separately by
+ * {@link matchOpenTrackingPixel}/{@link matchGmailPushWebhook}/{@link
+ * matchGmailConnectCallback} below, checked by `index.ts` BEFORE this
+ * matcher — see each function's own doc for why.
  */
 
 /** One route this API recognizes, in match order. */
@@ -54,6 +62,19 @@ const CONVERSATION_ASSIGNEE: RouteDef = {
   methods: ['PUT'],
 }
 
+/**
+ * `/api/v1/inbound/gmail/connect` — mint the Google consent URL (HT-40;
+ * gmail-connect.md §2a), POST only. An ordinary Bearer-gated route, unlike
+ * its sibling `/callback` (which is a pre-auth carve-out —
+ * {@link matchGmailConnectCallback} — never listed here). Its pattern is
+ * anchored (`connect$`) so it can never collide with the webhook's exact
+ * `/api/v1/inbound/gmail` match or the callback's `/callback` suffix.
+ */
+const GMAIL_CONNECT: RouteDef = {
+  pattern: /^\/api\/v1\/inbound\/gmail\/connect$/,
+  methods: ['POST'],
+}
+
 /** Every route this API recognizes, checked in order. */
 const ROUTES: readonly RouteDef[] = [
   CONVERSATIONS_LIST,
@@ -62,6 +83,7 @@ const ROUTES: readonly RouteDef[] = [
   CONVERSATION_NOTES,
   CONVERSATION_TAGS,
   CONVERSATION_ASSIGNEE,
+  GMAIL_CONNECT,
 ]
 
 /** The outcome of matching a `(method, pathname)` pair against {@link ROUTES}. */
@@ -74,6 +96,7 @@ export type RouteMatch =
   | { kind: 'conversation-note'; id: string }
   | { kind: 'conversation-tags'; id: string }
   | { kind: 'conversation-assignee'; id: string }
+  | { kind: 'gmail-connect' }
   | { kind: 'method-not-allowed'; allow: string[] }
   | { kind: 'not-found' }
 
@@ -132,6 +155,34 @@ export function matchGmailPushWebhook(pathname: string): boolean {
   return pathname === '/api/v1/inbound/gmail'
 }
 
+/**
+ * Match the Gmail connect callback path (HT-40; gmail-connect.md §2b):
+ * `GET /api/v1/inbound/gmail/callback`. Kept SEPARATE from {@link
+ * matchRoute} and checked by `index.ts` BEFORE Bearer auth — the SAME
+ * pre-auth carve-out pattern as {@link matchGmailPushWebhook}/
+ * {@link matchOpenTrackingPixel}, for the same reason: Google's redirect
+ * cannot present our service Bearer token, so this route authenticates
+ * itself (a signed `state` parameter, verified inside
+ * `GmailConnectService.completeConnect`).
+ *
+ * Matches on PATHNAME ONLY, not method, mirroring {@link
+ * matchGmailPushWebhook}: the handler itself
+ * (`handleGmailConnectCallback`, `src/api/gmail-connect.ts`) is what
+ * decides how to respond to a non-GET request on this path, rather than
+ * falling through to a route-table 404/405 that would behave differently
+ * from a bad `code`/`state` on the same path — one pre-auth surface, one
+ * uniform place deciding its own responses.
+ *
+ * Exact-match, distinct from {@link matchGmailPushWebhook}'s
+ * `/api/v1/inbound/gmail` and `GMAIL_CONNECT`'s
+ * `/api/v1/inbound/gmail/connect` — the three paths share a prefix but
+ * none is a substring match of another's full pattern, so they never
+ * contend for the same pathname.
+ */
+export function matchGmailConnectCallback(pathname: string): boolean {
+  return pathname === '/api/v1/inbound/gmail/callback'
+}
+
 export function matchRoute(method: string, pathname: string): RouteMatch {
   for (const route of ROUTES) {
     const match = route.pattern.exec(pathname)
@@ -143,6 +194,9 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
 
     if (route === CONVERSATIONS_LIST) {
       return { kind: 'conversations-list' }
+    }
+    if (route === GMAIL_CONNECT) {
+      return { kind: 'gmail-connect' }
     }
 
     // Both CONVERSATION_ITEM and CONVERSATION_REPLIES guarantee a present,

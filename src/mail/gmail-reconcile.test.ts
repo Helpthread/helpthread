@@ -57,6 +57,9 @@ function fakeMailboxStore(initial: MailboxRecord): {
         if (r === undefined) throw new Error(`no mailbox ${id}`)
         records.set(id, { ...r, status: 'paused' })
       },
+      async upsertConnectedMailbox() {
+        throw new Error('upsertConnectedMailbox: not used by the reconcile handler')
+      },
     },
     records,
   }
@@ -77,6 +80,9 @@ function fakeWatchStateStore(initial: Record<string, string> = {}): {
       async setCursor(mailboxId, historyId) {
         cursors.set(mailboxId, historyId)
         setCalls.push({ mailboxId, historyId })
+      },
+      async seedBaseline() {
+        throw new Error('seedBaseline: not used by the reconcile handler')
       },
     },
     cursors,

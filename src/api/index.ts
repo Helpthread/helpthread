@@ -44,10 +44,20 @@ import {
   handlePutTags,
   handleReply,
 } from './conversations.js'
+import {
+  type GmailConnectDeps,
+  handleGmailConnect,
+  handleGmailConnectCallback,
+} from './gmail-connect.js'
 import { type GmailPushDeps, gmailPushRejected, handleGmailPushWebhook } from './gmail-webhook.js'
 import type { ApiError } from './responses.js'
 import { apiError } from './responses.js'
-import { matchGmailPushWebhook, matchOpenTrackingPixel, matchRoute } from './router.js'
+import {
+  matchGmailConnectCallback,
+  matchGmailPushWebhook,
+  matchOpenTrackingPixel,
+  matchRoute,
+} from './router.js'
 
 /**
  * Minimum length for the service Bearer token. A short/empty token is a
@@ -98,6 +108,22 @@ export interface InboxApiDeps {
    * whether this deployment has Gmail push configured at all.
    */
   gmailPush?: GmailPushDeps
+  /**
+   * The Gmail connect/consent flow (HT-40; gmail-connect.md §2): ABSENT BY
+   * DEFAULT — a deployment that hasn't provisioned its Internal OAuth app
+   * yet (HT-43) simply never configures this. When present, `POST
+   * /api/v1/inbound/gmail/connect` (Bearer-gated) mints the consent URL and
+   * `GET /api/v1/inbound/gmail/callback` (pre-auth) completes the grant —
+   * see `src/api/gmail-connect.ts`. When absent, both routes 404 — the
+   * connect POST through the normal authenticated dispatch (no route-table
+   * special-casing needed, since it's Bearer-gated either way), and the
+   * callback through its own pre-auth branch below (never the DIFFERENT
+   * "uniform rejection" shape the Gmail push webhook uses, since the
+   * callback has no equivalent no-oracle requirement — a caller either
+   * knows this deployment supports Gmail connect or doesn't, and 404 is the
+   * ordinary "no such route" answer either way).
+   */
+  gmailConnect?: GmailConnectDeps
 }
 
 /**
@@ -166,6 +192,21 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
       return deps.gmailPush !== undefined
         ? await handleGmailPushWebhook(request, deps.gmailPush)
         : gmailPushRejected()
+    }
+
+    // The Gmail connect callback is the API's THIRD unauthenticated surface
+    // (HT-40; gmail-connect.md §2b): Google's redirect carries no service
+    // Bearer token, so — exactly like the pixel and the push webhook above —
+    // it is matched and handled BEFORE the Bearer-auth gate, authenticated
+    // instead by its own mechanism (the signed `state` parameter, verified
+    // inside `GmailConnectService.completeConnect`). Unlike the push
+    // webhook, a not-configured deployment answers plain `404 not_found`
+    // here rather than a uniform reject shape — see `gmailConnect`'s own doc
+    // above for why that asymmetry is fine on this surface.
+    if (matchGmailConnectCallback(new URL(request.url).pathname)) {
+      return deps.gmailConnect !== undefined
+        ? await handleGmailConnectCallback(request, deps.gmailConnect)
+        : apiError(404, 'not_found', 'No such route.')
     }
 
     if (!authenticateRequest(request, deps.apiToken)) {
@@ -244,6 +285,11 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             supportAddress: deps.supportAddress,
             ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
           })
+
+        case 'gmail-connect':
+          return deps.gmailConnect !== undefined
+            ? await handleGmailConnect(request, deps.gmailConnect)
+            : apiError(404, 'not_found', 'No such route.')
       }
     } catch (err) {
       console.error('[inbox-api] unhandled error handling request', err)

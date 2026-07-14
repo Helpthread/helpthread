@@ -30,13 +30,20 @@
  *   deliberate dogfood response to an expired (404) Gmail history cursor
  *   (gmail-push.md §5): "pause the mailbox and flag it for manual
  *   rebaseline," rather than an automatic full-mailbox resync.
+ * - {@link MailboxStore.upsertConnectedMailbox} (HT-40; gmail-connect.md
+ *   §4-§5): the connect/consent flow's own write — creates the `mailboxes`
+ *   row on a first-ever connect, or reactivates an existing `paused`/
+ *   `needs_reconnect` row to `active` on a reconnect. Upsert BY `address`
+ *   (migration 009's `UNIQUE` constraint) is what makes a reconnect
+ *   idempotent: re-running connect for the same account never collides with
+ *   its own prior row.
  *
- * A fuller `mailboxes` CRUD surface — creating a row on connect, listing,
- * transitioning back to `active` — belongs to HT-40 (the connect/consent flow
- * that actually inserts mailbox rows in the first place).
+ * A fuller `mailboxes` CRUD surface (listing, and anything beyond the single
+ * connect-time write above) is still narrower than a general CRUD module —
+ * add operations as the ticket that needs them requires.
  */
 
-import type { Db } from '../db/client.js'
+import type { Db, Queryable } from '../db/client.js'
 
 /** A mailbox's lifecycle state (migration 009's CHECK constraint). */
 export type MailboxStatus = 'active' | 'paused' | 'needs_reconnect'
@@ -98,6 +105,34 @@ export interface MailboxStore {
    * practice).
    */
   markPaused(mailboxId: string): Promise<void>
+
+  /**
+   * Insert a new connected mailbox, or — on a **reconnect** for an address
+   * that already exists — reactivate it to `active` (gmail-connect.md §4
+   * step 5, §5's idempotent-by-address reconnect). `provider` is written on
+   * every call (including a reconnect), matching `EXCLUDED.provider`, so a
+   * reconnect always leaves the row's `provider` in sync with the fresh
+   * grant rather than whatever the row previously held.
+   *
+   * `INSERT ... ON CONFLICT (address) DO UPDATE` — never a plain `INSERT`,
+   * which would violate migration 009's `UNIQUE(address)` constraint on a
+   * reconnect, and never a plain `UPDATE`, which would silently no-op on a
+   * genuinely new address. One statement handles both "never connected
+   * before" and "reconnecting a `paused`/`needs_reconnect` mailbox" — the
+   * latter is exactly the "transitioning back to `active`" this store's
+   * module doc used to reserve for this ticket.
+   *
+   * Optionally runs against a caller-supplied `tx` (`Db.transaction`'s
+   * `Queryable`) instead of the bound `db`, so the connect flow can commit
+   * this insert, the token write, and the watch-state seed as ONE atomic
+   * unit (gmail-connect.md §4 step 5) — a partial connect (an `active`
+   * mailbox with no cursor, silently un-ingesting) is worse than none.
+   * Omitted, it runs standalone on `db` exactly as before.
+   */
+  upsertConnectedMailbox(
+    input: { address: string; provider: string },
+    tx?: Queryable,
+  ): Promise<MailboxRecord>
 }
 
 /** Raw `mailboxes` row shape, before mapping to {@link MailboxRecord}. */
@@ -147,6 +182,20 @@ export function createMailboxStore(db: Db): MailboxStore {
       if (updated.length === 0) {
         throw new Error(`markPaused: no mailbox with id ${mailboxId}`)
       }
+    },
+
+    async upsertConnectedMailbox(input, tx) {
+      const rows = await (tx ?? db).query<MailboxRow>(
+        `INSERT INTO mailboxes (address, provider)
+         VALUES ($1, $2)
+         ON CONFLICT (address) DO UPDATE SET
+           status = 'active',
+           provider = EXCLUDED.provider,
+           updated_at = now()
+         RETURNING id, address, provider, status`,
+        [input.address, input.provider],
+      )
+      return toMailboxRecord(rows[0])
     },
   }
 }
