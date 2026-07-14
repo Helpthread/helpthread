@@ -48,6 +48,10 @@ describe('migrate', () => {
       { id: 6, name: 'tags_and_assignee' },
       { id: 7, name: 'note_thread_direction' },
       { id: 8, name: 'customer_viewed_at' },
+      { id: 9, name: 'mailboxes' },
+      { id: 10, name: 'mailbox_oauth_tokens' },
+      { id: 11, name: 'gmail_watch_state' },
+      { id: 12, name: 'inbound_deliveries' },
     ])
   })
 
@@ -66,6 +70,10 @@ describe('migrate', () => {
       { id: 6 },
       { id: 7 },
       { id: 8 },
+      { id: 9 },
+      { id: 10 },
+      { id: 11 },
+      { id: 12 },
     ])
   })
 
@@ -525,5 +533,310 @@ describe('migrate', () => {
         ),
       ).rejects.toThrow()
     }
+  })
+
+  it('migration 009 creates mailboxes with a default status, enforces the address UNIQUE constraint and the status CHECK', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [mailbox] = await db.query<{
+      id: string
+      status: string
+      created_at: string
+      updated_at: string
+    }>(
+      `INSERT INTO mailboxes (address, provider) VALUES ($1, $2)
+       RETURNING id, status, created_at, updated_at`,
+      ['support@example.test', 'gmail'],
+    )
+    expect(mailbox.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    expect(mailbox.status).toBe('active')
+    expect(mailbox.created_at).toBeDefined()
+    expect(mailbox.updated_at).toBeDefined()
+
+    // A second mailbox at the SAME address collides — gmail-push.md §3 needs
+    // emailAddress to resolve to exactly one mailbox.
+    await expect(
+      db.query('INSERT INTO mailboxes (address, provider) VALUES ($1, $2)', [
+        'support@example.test',
+        'gmail',
+      ]),
+    ).rejects.toThrow()
+
+    // A different address with an explicit, legal non-default status is fine.
+    await expect(
+      db.query('INSERT INTO mailboxes (address, provider, status) VALUES ($1, $2, $3)', [
+        'ops@example.test',
+        'gmail',
+        'needs_reconnect',
+      ]),
+    ).resolves.toBeDefined()
+
+    // An out-of-domain status is rejected.
+    await expect(
+      db.query('INSERT INTO mailboxes (address, provider, status) VALUES ($1, $2, $3)', [
+        'billing@example.test',
+        'gmail',
+        'bogus',
+      ]),
+    ).rejects.toThrow()
+  })
+
+  it('migration 010 stores OAuth ciphertext bytes keyed one-to-one by mailbox, enforces NOT NULL and the FK, and cascades on mailbox delete', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [mailbox] = await db.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      ['support@example.test', 'gmail'],
+    )
+
+    const ciphertext = new Uint8Array([1, 2, 3, 253, 254, 255])
+    const accessCiphertext = new Uint8Array([10, 20, 30, 250, 251, 252])
+    const [token] = await db.query<{
+      mailbox_id: string
+      refresh_token_ciphertext: Uint8Array
+      access_token_ciphertext: Uint8Array | null
+      scopes: string | null
+    }>(
+      `INSERT INTO mailbox_oauth_tokens (mailbox_id, refresh_token_ciphertext, access_token_ciphertext, scopes)
+       VALUES ($1, $2, $3, $4)
+       RETURNING mailbox_id, refresh_token_ciphertext, access_token_ciphertext, scopes`,
+      [mailbox.id, ciphertext, accessCiphertext, 'https://www.googleapis.com/auth/gmail.readonly'],
+    )
+    expect(token.mailbox_id).toBe(mailbox.id)
+    // Both secrets round-trip as genuine bytes, not a re-encoded string —
+    // same proof shape as src/db/postgres.test.ts's bytea round-trip test.
+    expect(Buffer.from(token.refresh_token_ciphertext)).toEqual(Buffer.from(ciphertext))
+    expect(Buffer.from(token.access_token_ciphertext as Uint8Array)).toEqual(
+      Buffer.from(accessCiphertext),
+    )
+    expect(token.scopes).toBe('https://www.googleapis.com/auth/gmail.readonly')
+
+    // A second row for the SAME mailbox collides — mailbox_id is the PK
+    // (one OAuth grant per connected mailbox).
+    await expect(
+      db.query(
+        'INSERT INTO mailbox_oauth_tokens (mailbox_id, refresh_token_ciphertext) VALUES ($1, $2)',
+        [mailbox.id, ciphertext],
+      ),
+    ).rejects.toThrow()
+
+    // A nonexistent mailbox_id violates the FK.
+    await expect(
+      db.query(
+        'INSERT INTO mailbox_oauth_tokens (mailbox_id, refresh_token_ciphertext) VALUES ($1, $2)',
+        ['00000000-0000-0000-0000-000000000000', ciphertext],
+      ),
+    ).rejects.toThrow()
+
+    // A row with no ciphertext at all violates NOT NULL — there is no legal
+    // "connected but tokenless" row.
+    const [bareMailbox] = await db.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      ['bare@example.test', 'gmail'],
+    )
+    await expect(
+      db.query('INSERT INTO mailbox_oauth_tokens (mailbox_id) VALUES ($1)', [bareMailbox.id]),
+    ).rejects.toThrow()
+
+    // Deleting the mailbox cascades to its token row.
+    await db.query('DELETE FROM mailboxes WHERE id = $1', [mailbox.id])
+    const remaining = await db.query(
+      'SELECT mailbox_id FROM mailbox_oauth_tokens WHERE mailbox_id = $1',
+      [mailbox.id],
+    )
+    expect(remaining).toEqual([])
+  })
+
+  it('migration 011 stores a nullable Gmail cursor keyed one-to-one by mailbox, and cascades on mailbox delete', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [mailbox] = await db.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      ['support@example.test', 'gmail'],
+    )
+
+    // No cursor yet (between connect and the first successful watch()) is legal.
+    const [bare] = await db.query<{
+      history_id: string | null
+      watch_expiration: string | null
+    }>(
+      'INSERT INTO gmail_watch_state (mailbox_id) VALUES ($1) RETURNING history_id, watch_expiration',
+      [mailbox.id],
+    )
+    expect(bare.history_id).toBeNull()
+    expect(bare.watch_expiration).toBeNull()
+
+    // A second row for the SAME mailbox collides — mailbox_id is the PK.
+    await expect(
+      db.query('INSERT INTO gmail_watch_state (mailbox_id) VALUES ($1)', [mailbox.id]),
+    ).rejects.toThrow()
+
+    // Once watch() succeeds, both columns are populated — history_id stays a
+    // string (Gmail's own wire type), never coerced to a number.
+    await db.query(
+      'UPDATE gmail_watch_state SET history_id = $1, watch_expiration = $2 WHERE mailbox_id = $3',
+      ['123456789', '2026-07-20T00:00:00.000Z', mailbox.id],
+    )
+    const [updated] = await db.query<{ history_id: string | null }>(
+      'SELECT history_id FROM gmail_watch_state WHERE mailbox_id = $1',
+      [mailbox.id],
+    )
+    expect(updated.history_id).toBe('123456789')
+
+    // Deleting the mailbox cascades to its watch-state row.
+    await db.query('DELETE FROM mailboxes WHERE id = $1', [mailbox.id])
+    const remaining = await db.query(
+      'SELECT mailbox_id FROM gmail_watch_state WHERE mailbox_id = $1',
+      [mailbox.id],
+    )
+    expect(remaining).toEqual([])
+  })
+
+  it('migration 012 enforces the (mailbox_id, provider_message_id) claim key and its defaults', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [mailbox] = await db.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      ['support@example.test', 'gmail'],
+    )
+
+    const [delivery] = await db.query<{
+      id: string
+      status: string
+      attempts: number
+      last_error: string | null
+      conversation_id: string | null
+      thread_id: string | null
+    }>(
+      `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id) VALUES ($1, $2)
+       RETURNING id, status, attempts, last_error, conversation_id, thread_id`,
+      [mailbox.id, 'gmail-msg-1'],
+    )
+    expect(delivery.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    expect(delivery.status).toBe('received')
+    expect(delivery.attempts).toBe(0)
+    expect(delivery.last_error).toBeNull()
+    expect(delivery.conversation_id).toBeNull()
+    expect(delivery.thread_id).toBeNull()
+
+    // A plain second INSERT of the SAME (mailbox_id, provider_message_id)
+    // violates the unique claim key outright.
+    await expect(
+      db.query('INSERT INTO inbound_deliveries (mailbox_id, provider_message_id) VALUES ($1, $2)', [
+        mailbox.id,
+        'gmail-msg-1',
+      ]),
+    ).rejects.toThrow()
+
+    // The EXACT claim pattern the pipeline uses (spec §3 step 1): a conflict
+    // is absorbed, not thrown — 0 rows back, so the caller re-reads the
+    // winner's row instead of double-processing.
+    const claimed = await db.query(
+      `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id)
+       VALUES ($1, $2)
+       ON CONFLICT (mailbox_id, provider_message_id) DO NOTHING
+       RETURNING id`,
+      [mailbox.id, 'gmail-msg-1'],
+    )
+    expect(claimed).toEqual([])
+
+    // The SAME provider_message_id at a DIFFERENT mailbox is not a
+    // collision — the claim key is the pair, not provider_message_id alone.
+    const [otherMailbox] = await db.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      ['ops@example.test', 'gmail'],
+    )
+    await expect(
+      db.query('INSERT INTO inbound_deliveries (mailbox_id, provider_message_id) VALUES ($1, $2)', [
+        otherMailbox.id,
+        'gmail-msg-1',
+      ]),
+    ).resolves.toBeDefined()
+  })
+
+  it('migration 012 CHECKs status against the closed set, spelled dead-letter with a hyphen', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [mailbox] = await db.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      ['support@example.test', 'gmail'],
+    )
+
+    for (const status of ['received', 'stored', 'suppressed', 'failed', 'dead-letter']) {
+      await expect(
+        db.query(
+          'INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status) VALUES ($1, $2, $3)',
+          [mailbox.id, `msg-${status}`, status],
+        ),
+      ).resolves.toBeDefined()
+    }
+
+    // The ticket text's underscore spelling is NOT the spec's — rejected.
+    await expect(
+      db.query(
+        'INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status) VALUES ($1, $2, $3)',
+        [mailbox.id, 'msg-bad-spelling', 'dead_letter'],
+      ),
+    ).rejects.toThrow()
+
+    await expect(
+      db.query(
+        'INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status) VALUES ($1, $2, $3)',
+        [mailbox.id, 'msg-bogus', 'bogus'],
+      ),
+    ).rejects.toThrow()
+  })
+
+  it('migration 012 ties conversation_id/thread_id to real rows via FK, and clears them (SET NULL) rather than deleting the ledger row when the conversation is removed', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [mailbox] = await db.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      ['support@example.test', 'gmail'],
+    )
+    const [conversation] = await db.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+    const [thread] = await db.query<{ id: string }>(
+      `INSERT INTO threads (conversation_id, direction, from_address)
+       VALUES ($1, 'inbound', $2) RETURNING id`,
+      [conversation.id, 'customer@example.test'],
+    )
+
+    // A nonexistent conversation_id violates the FK.
+    await expect(
+      db.query(
+        `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status, conversation_id, thread_id)
+         VALUES ($1, $2, 'stored', $3, $4)`,
+        [mailbox.id, 'gmail-msg-1', '00000000-0000-0000-0000-000000000000', thread.id],
+      ),
+    ).rejects.toThrow()
+
+    const [delivery] = await db.query<{ id: string }>(
+      `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status, conversation_id, thread_id)
+       VALUES ($1, $2, 'stored', $3, $4) RETURNING id`,
+      [mailbox.id, 'gmail-msg-2', conversation.id, thread.id],
+    )
+
+    // Deleting the conversation (which cascades to its thread, migration
+    // 001) must NOT delete the ledger row — the ingestion fact survives;
+    // only the now-unresolvable pointers clear.
+    await db.query('DELETE FROM conversations WHERE id = $1', [conversation.id])
+
+    const [afterDelete] = await db.query<{
+      id: string
+      conversation_id: string | null
+      thread_id: string | null
+    }>('SELECT id, conversation_id, thread_id FROM inbound_deliveries WHERE id = $1', [delivery.id])
+    expect(afterDelete.id).toBe(delivery.id)
+    expect(afterDelete.conversation_id).toBeNull()
+    expect(afterDelete.thread_id).toBeNull()
   })
 })
