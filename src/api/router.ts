@@ -108,6 +108,30 @@ export function matchOpenTrackingPixel(method: string, pathname: string): { toke
   return token === undefined ? null : { token }
 }
 
+/**
+ * Match the Gmail push webhook path (HT-39; gmail-push.md §2):
+ * `POST /api/v1/inbound/gmail`. Kept SEPARATE from {@link matchRoute} and
+ * checked by `index.ts` BEFORE Bearer auth — the SAME pre-auth carve-out
+ * pattern as {@link matchOpenTrackingPixel}, for the same reason: Gmail/
+ * Pub/Sub cannot present our service Bearer token, so this route
+ * authenticates itself (a Google-signed OIDC JWT).
+ *
+ * Deliberately matches on PATHNAME ONLY, not method — unlike
+ * {@link matchOpenTrackingPixel}, which matches GET only and lets any other
+ * method fall through to the normal (401/404-shaped) pipeline. This route's
+ * spec requires a UNIFORM rejection for every failed check, method
+ * included (gmail-push.md §2: "POST + application/json only... a uniform
+ * response that does not leak which check failed") — so a wrong method must
+ * be rejected the exact same way a bad JWT is, by the handler itself
+ * (`handleGmailPushWebhook`, `src/api/gmail-webhook.ts`), rather than
+ * falling through to a DIFFERENT status code that would itself be a leak
+ * (e.g. revealing this path exists via a 401/404 instead of the uniform
+ * `403`).
+ */
+export function matchGmailPushWebhook(pathname: string): boolean {
+  return pathname === '/api/v1/inbound/gmail'
+}
+
 export function matchRoute(method: string, pathname: string): RouteMatch {
   for (const route of ROUTES) {
     const match = route.pattern.exec(pathname)

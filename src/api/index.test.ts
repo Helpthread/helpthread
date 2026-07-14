@@ -2,13 +2,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { Keyring } from '../mail/reply-token.js'
-import type { EmailSender, OutboundEmail } from '../providers/index.js'
+import type {
+  EmailSender,
+  EnqueueOptions,
+  OutboundEmail,
+  QueueProvider,
+} from '../providers/index.js'
 import {
   type ConversationStore,
   createConversationStore,
   type NewConversation,
 } from '../store/conversations.js'
-import { createInboxApi } from './index.js'
+import { createMailboxStore } from '../store/mailboxes.js'
+import type { GmailReconcileJob } from './gmail-webhook.js'
+import { createInboxApi, type InboxApiDeps } from './index.js'
 
 const TOKEN = 'test-token-used-across-the-inbox-api-suite'
 const RANDOM_UUID = '00000000-0000-4000-8000-000000000000'
@@ -160,7 +167,11 @@ describe('createInboxApi', () => {
   })
 
   async function freshApi(
-    overrides: { sender?: EmailSender; openTracking?: { publicBaseUrl: string } } = {},
+    overrides: {
+      sender?: EmailSender
+      openTracking?: { publicBaseUrl: string }
+      gmailPush?: InboxApiDeps['gmailPush']
+    } = {},
   ): Promise<{
     db: Db
     store: ConversationStore
@@ -180,6 +191,7 @@ describe('createInboxApi', () => {
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
       ...(overrides.openTracking !== undefined ? { openTracking: overrides.openTracking } : {}),
+      ...(overrides.gmailPush !== undefined ? { gmailPush: overrides.gmailPush } : {}),
     })
     return { db, store, api, sent }
   }
@@ -1519,6 +1531,201 @@ describe('createInboxApi', () => {
       const body = (await res.json()) as { number: number; preview: string }
       expect(body.number).toBe(1)
       expect(body.preview).toBe('Where is my order?')
+    })
+  })
+
+  // --- gmail push webhook (HT-39, gmail-push.md §2) -----------------------------
+  //
+  // Focused on the WIRING contract createInboxApi owns: the pre-auth
+  // carve-out runs before Bearer auth, `deps.gmailPush` absence is
+  // indistinguishable from a configured-but-failing request, and deps thread
+  // through to the handler correctly (including a REAL DB-backed
+  // MailboxStore, for at least one end-to-end proof). JWT-claim edge cases
+  // live in `src/providers/adapters/gmail/push-auth.test.ts`; envelope/
+  // body-limit edge cases live in `src/api/gmail-webhook.test.ts` — this
+  // block does not re-derive either.
+  describe('gmail push webhook', () => {
+    const GMAIL_WEBHOOK_PATH = '/api/v1/inbound/gmail'
+    const SUBSCRIPTION = 'projects/helpthread-prod/subscriptions/gmail-push'
+
+    /** A `MailboxStore` fake for wiring tests that never need real persistence — always resolves to `record` (or `null`). */
+    function fakeMailboxes(
+      record: { id: string; address: string; provider: string; status: 'active' } | null,
+    ) {
+      return {
+        async getMailboxByAddress(address: string) {
+          return record !== null && record.address === address ? record : null
+        },
+        async markNeedsReconnect() {
+          throw new Error('markNeedsReconnect: not used by the push-webhook path')
+        },
+      }
+    }
+
+    function fakeQueue(): {
+      queue: QueueProvider
+      enqueued: Array<{ topic: string; payload: unknown }>
+    } {
+      const enqueued: Array<{ topic: string; payload: unknown }> = []
+      return {
+        queue: {
+          async enqueue(topic, payload, _opts?: EnqueueOptions) {
+            enqueued.push({ topic, payload })
+          },
+        },
+        enqueued,
+      }
+    }
+
+    function pushEnvelope(emailAddress: string, historyId: string): string {
+      const data = Buffer.from(JSON.stringify({ emailAddress, historyId })).toString('base64url')
+      return JSON.stringify({ subscription: SUBSCRIPTION, message: { data } })
+    }
+
+    /** A push POST with NO Authorization header — Gmail/Pub/Sub cannot present the service Bearer token. */
+    function pushPost(body: string): Request {
+      return new Request(`https://x.example.test${GMAIL_WEBHOOK_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      })
+    }
+
+    it('not configured (deps.gmailPush absent): same uniform rejection a configured-but-failing request gets', async () => {
+      const { api: unconfiguredApi } = await freshApi()
+      const { queue, enqueued } = fakeQueue()
+      const { api: configuredApi } = await freshApi({
+        gmailPush: {
+          verifySignature: async () => false, // configured, but every request fails verification
+          subscription: SUBSCRIPTION,
+          mailboxes: fakeMailboxes(null),
+          queue,
+        },
+      })
+
+      const unconfiguredRes = await unconfiguredApi(
+        pushPost(pushEnvelope('support@example.test', '1')),
+      )
+      const configuredRes = await configuredApi(pushPost(pushEnvelope('support@example.test', '1')))
+
+      expect(unconfiguredRes.status).toBe(403)
+      expect(configuredRes.status).toBe(403)
+      expect(await unconfiguredRes.json()).toEqual(await configuredRes.json())
+      expect(enqueued).toHaveLength(0)
+    })
+
+    it('runs BEFORE Bearer auth: no Authorization header at all still reaches the handler and can succeed', async () => {
+      const { queue, enqueued } = fakeQueue()
+      const { api } = await freshApi({
+        gmailPush: {
+          verifySignature: async () => true,
+          subscription: SUBSCRIPTION,
+          mailboxes: fakeMailboxes({
+            id: '22222222-2222-4222-8222-222222222222',
+            address: 'support@example.test',
+            provider: 'gmail',
+            status: 'active',
+          }),
+          queue,
+        },
+      })
+
+      // No Authorization header — every OTHER route on this api would 401.
+      const res = await api(pushPost(pushEnvelope('support@example.test', '42')))
+      expect(res.status).toBe(200)
+      expect(enqueued).toHaveLength(1)
+    })
+
+    it('happy path through createInboxApi: resolves a REAL mailbox from the DB, enqueues, 200', async () => {
+      const { db } = await freshApi()
+      await db.query('INSERT INTO mailboxes (address, provider) VALUES ($1, $2)', [
+        'support@example.test',
+        'gmail',
+      ])
+      const { queue, enqueued } = fakeQueue()
+
+      const api = createInboxApi({
+        store: createConversationStore(db),
+        apiToken: TOKEN,
+        sender: createFakeSender().sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+        gmailPush: {
+          verifySignature: async () => true,
+          subscription: SUBSCRIPTION,
+          mailboxes: createMailboxStore(db),
+          queue,
+        },
+      })
+
+      const res = await api(pushPost(pushEnvelope('support@example.test', '99999')))
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Cache-Control')).toBe('no-store')
+      expect(enqueued).toHaveLength(1)
+      expect(enqueued[0].topic).toBe('gmail-reconcile')
+      expect(enqueued[0].payload).toEqual({
+        mailboxId: expect.any(String),
+        historyId: '99999',
+      } satisfies GmailReconcileJob)
+    })
+
+    it('an unknown emailAddress (no matching mailbox in the real DB) is rejected uniformly, nothing enqueued', async () => {
+      const { db } = await freshApi()
+      const { queue, enqueued } = fakeQueue()
+
+      const api = createInboxApi({
+        store: createConversationStore(db),
+        apiToken: TOKEN,
+        sender: createFakeSender().sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+        gmailPush: {
+          verifySignature: async () => true,
+          subscription: SUBSCRIPTION,
+          mailboxes: createMailboxStore(db), // no mailboxes table rows at all
+          queue,
+        },
+      })
+
+      const res = await api(pushPost(pushEnvelope('nobody@example.test', '1')))
+      expect(res.status).toBe(403)
+      expect(enqueued).toHaveLength(0)
+    })
+
+    it('a GET to the webhook path is rejected uniformly too, not routed as a normal 401/404', async () => {
+      const { queue } = fakeQueue()
+      const { api } = await freshApi({
+        gmailPush: {
+          verifySignature: async () => true,
+          subscription: SUBSCRIPTION,
+          mailboxes: fakeMailboxes(null),
+          queue,
+        },
+      })
+
+      const res = await api(
+        new Request(`https://x.example.test${GMAIL_WEBHOOK_PATH}`, { method: 'GET' }),
+      )
+      expect(res.status).toBe(403)
+      expect(await res.json()).toEqual({
+        error: { code: 'gmail_push_rejected', message: expect.any(String) },
+      })
+    })
+
+    it('existing routes are unaffected: /api/v1/conversations still 401s without a token', async () => {
+      const { queue } = fakeQueue()
+      const { api } = await freshApi({
+        gmailPush: {
+          verifySignature: async () => true,
+          subscription: SUBSCRIPTION,
+          mailboxes: fakeMailboxes(null),
+          queue,
+        },
+      })
+      const res = await api(get('/api/v1/conversations', undefined))
+      expect(res.status).toBe(401)
     })
   })
 })
