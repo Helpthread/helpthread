@@ -16,3 +16,5 @@ export type {
   StoredThread,
 } from './conversations.js'
 export { createConversationStore } from './conversations.js'
+export type { MailboxRecord, MailboxStatus, MailboxStore } from './mailboxes.js'
+export { createMailboxStore } from './mailboxes.js'

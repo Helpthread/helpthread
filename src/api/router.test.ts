@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { matchRoute } from './router.js'
+import { matchGmailPushWebhook, matchRoute } from './router.js'
 
 describe('matchRoute', () => {
   it('matches GET /api/v1/conversations', () => {
@@ -80,5 +80,25 @@ describe('matchRoute', () => {
 
   it('does not match the list route with a trailing slash', () => {
     expect(matchRoute('GET', '/api/v1/conversations/')).toEqual({ kind: 'not-found' })
+  })
+})
+
+describe('matchGmailPushWebhook', () => {
+  it('matches the exact Gmail push path', () => {
+    expect(matchGmailPushWebhook('/api/v1/inbound/gmail')).toBe(true)
+  })
+
+  it('matches regardless of method — the handler itself enforces POST, uniformly (gmail-push.md §2)', () => {
+    // matchGmailPushWebhook only takes a pathname; verifying "any method"
+    // just means the boolean doesn't depend on one at all.
+    expect(matchGmailPushWebhook('/api/v1/inbound/gmail')).toBe(true)
+  })
+
+  it('does not match an unrelated or near-miss path', () => {
+    expect(matchGmailPushWebhook('/api/v1/inbound')).toBe(false)
+    expect(matchGmailPushWebhook('/api/v1/inbound/gmail/')).toBe(false)
+    expect(matchGmailPushWebhook('/api/v1/inbound/postmark')).toBe(false)
+    expect(matchGmailPushWebhook('/api/v1/conversations')).toBe(false)
+    expect(matchGmailPushWebhook('/')).toBe(false)
   })
 })

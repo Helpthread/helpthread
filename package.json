@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
+    "jose": "^6.2.3",
     "mimetext": "^3.0.28",
     "pg": "^8.22.0",
     "postal-mime": "^2.7.5"

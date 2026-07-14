@@ -44,9 +44,10 @@ import {
   handlePutTags,
   handleReply,
 } from './conversations.js'
+import { type GmailPushDeps, gmailPushRejected, handleGmailPushWebhook } from './gmail-webhook.js'
 import type { ApiError } from './responses.js'
 import { apiError } from './responses.js'
-import { matchOpenTrackingPixel, matchRoute } from './router.js'
+import { matchGmailPushWebhook, matchOpenTrackingPixel, matchRoute } from './router.js'
 
 /**
  * Minimum length for the service Bearer token. A short/empty token is a
@@ -86,6 +87,17 @@ export interface InboxApiDeps {
    * while the feature was on stops recording the moment it is turned off).
    */
   openTracking?: { publicBaseUrl: string }
+  /**
+   * The Gmail push webhook (HT-39; gmail-push.md §2): ABSENT BY DEFAULT — a
+   * deployment that hasn't provisioned Gmail push yet (HT-43) simply never
+   * configures this. When present, `POST /api/v1/inbound/gmail` verifies,
+   * resolves, and enqueues (see `src/api/gmail-webhook.ts`). When absent,
+   * every request to that path gets the SAME uniform rejection it would if
+   * the feature WERE configured but the request failed a check — see
+   * `gmailPushRejected` — never a different response that would leak
+   * whether this deployment has Gmail push configured at all.
+   */
+  gmailPush?: GmailPushDeps
 }
 
 /**
@@ -137,6 +149,23 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
           'Content-Length': String(TRANSPARENT_GIF.length),
         },
       })
+    }
+
+    // The Gmail push webhook is the API's SECOND unauthenticated surface
+    // (HT-39; gmail-push.md §2): Gmail/Pub/Sub cannot present our service
+    // Bearer token, so — exactly like the pixel above — it is matched and
+    // handled BEFORE the Bearer-auth gate, authenticated instead by its own
+    // mechanism (a Google-signed OIDC JWT, checked inside
+    // `handleGmailPushWebhook`). When `deps.gmailPush` is unset, this
+    // deployment hasn't configured Gmail push at all — the SAME uniform
+    // rejection is returned as `handleGmailPushWebhook` would give a
+    // configured-but-failing request, so a caller can't distinguish "not
+    // configured" from "configured, but you failed a check" (see
+    // `gmail-webhook.ts`'s module doc).
+    if (matchGmailPushWebhook(new URL(request.url).pathname)) {
+      return deps.gmailPush !== undefined
+        ? await handleGmailPushWebhook(request, deps.gmailPush)
+        : gmailPushRejected()
     }
 
     if (!authenticateRequest(request, deps.apiToken)) {
