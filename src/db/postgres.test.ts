@@ -301,6 +301,7 @@ describe('createPostgresDb with a schema option', () => {
       'inbound_deliveries',
       'mailbox_oauth_tokens',
       'mailboxes',
+      'queue_jobs',
       'threads',
     ])
 
