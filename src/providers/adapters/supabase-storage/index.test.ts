@@ -162,6 +162,28 @@ describe('createSupabaseStorageBlobStore — error propagation', () => {
     )
   })
 
+  it('get surfaces a download infrastructure error (distinct from a plain missing object)', async () => {
+    const blob = createSupabaseStorageBlobStore({
+      url: 'u',
+      serviceRoleKey: 'k',
+      bucket: 'b',
+      bucketClient: erroringBucket('storage 503'),
+    })
+    await expect(blob.get('k')).rejects.toThrow(/get failed.*storage 503/)
+  })
+
+  it('getSignedUrl surfaces a signing error rather than returning a bad URL', async () => {
+    const blob = createSupabaseStorageBlobStore({
+      url: 'u',
+      serviceRoleKey: 'k',
+      bucket: 'b',
+      bucketClient: erroringBucket('signing key rotated'),
+    })
+    await expect(blob.getSignedUrl('k', 300)).rejects.toThrow(
+      /getSignedUrl failed.*signing key rotated/,
+    )
+  })
+
   it('exists surfaces an infrastructure error rather than reporting false', async () => {
     const blob = createSupabaseStorageBlobStore({
       url: 'u',

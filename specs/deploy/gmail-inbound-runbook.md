@@ -3,7 +3,7 @@
 Status: draft (HT-43). The one-time operator steps to take the merged engine
 code (HT-34…HT-42) live: a deployed Vercel environment where **RIQ's own
 inbound Gmail flows end-to-end** into a Helpthread conversation. This is the
-"deployed, end to end" acceptance HT-43 owns; the actual **real Google
+"deployed, end-to-end" acceptance HT-43 owns; the actual **real Google
 consent** that connects the mailbox is the last step and is tracked as
 **HT-44**.
 
@@ -19,7 +19,7 @@ come to exist.
 
 ## 0. Architecture being deployed
 
-```
+```text
 Gmail mailbox ──watch()──▶ Cloud Pub/Sub topic ──push sub (OIDC JWT)──▶
    POST /api/v1/inbound/gmail        (webhook: verify JWT → enqueue reconcile job → 2xx)
         │ enqueue (durable INSERT into the PG job queue — commits BEFORE the 2xx)
@@ -150,6 +150,17 @@ privilege).
    > higher) plan. On Hobby, cron jobs may only run **once per day**, and a
    > more-frequent expression *fails deployment* — so the ~1-minute delivery
    > latency this design targets is a Pro-tier feature.
+4. **Vercel does not retry a failed cron invocation** — a transient non-2xx is
+   simply retried on the *next* scheduled tick. The queue drain self-heals on
+   the following minute; but the **daily** watch-maintenance job would go a full
+   day between attempts, so **alert on its non-2xx responses** (Vercel's cron
+   logs, or your log drain) rather than waiting to notice a stale mailbox.
+5. **`maxDuration` must stay below the queue lease.** `vercel.json` caps the
+   function at **50s**, under both the 60s job lease (`DEFAULT_LEASE_MS`,
+   `src/providers/adapters/postgres-queue/`) and the 60s cron interval: the
+   function is always killed *before* any lease it holds expires, so a
+   still-running drain can never race a concurrent drain that reclaimed one of
+   its rows. If you raise the lease, keep `maxDuration` comfortably under it.
 
 All engine code is served by a single catch-all Vercel Function
 (`api/[...path].ts`, the Node runtime — NOT Edge, since the engine needs
@@ -199,8 +210,10 @@ With the deploy live and env set:
 - [ ] Send a test email **to** the connected mailbox → within ~1 min (the drain
       tick) a new conversation appears (`GET /api/v1/conversations`).
 - [ ] Pub/Sub subscription **oldest-unacked-message age** stays low (no backlog).
-- [ ] The job-queue table: no rows stuck `dead_lettered_at IS NOT NULL`;
-      oldest `ready` job age stays under a minute or two.
+- [ ] The job-queue table: no *unexpected* dead-letter growth (retained
+      `dead_lettered_at IS NOT NULL` rows are by design — inspect them by
+      age/count/rate, not as a pass/fail), and oldest `ready` job age stays
+      under a minute or two.
 - [ ] Reply from the Agent inbox → the reply arrives at the customer, and a
       reply back **threads** into the same conversation (the sacred outbound-token
       check — HT-44's live proof).

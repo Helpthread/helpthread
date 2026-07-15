@@ -108,6 +108,23 @@ describe('loadConfig — missing / malformed values', () => {
       /PUBLIC_BASE_URL/,
     )
   })
+
+  it('rejects a PUBLIC_BASE_URL that is not a bare origin (path/query/fragment/credentials)', () => {
+    for (const bad of [
+      'https://desk.example.com/base', // path
+      'https://desk.example.com/api/v1', // deeper path
+      'https://desk.example.com?x=1', // query
+      'https://desk.example.com/#frag', // fragment
+      'https://user:pass@desk.example.com', // credentials
+    ]) {
+      expect(() => loadConfig({ ...validEnv(), PUBLIC_BASE_URL: bad })).toThrow(/PUBLIC_BASE_URL/)
+    }
+  })
+
+  it('returns the canonical origin (bare host, no trailing slash) for a valid origin with a port', () => {
+    const config = loadConfig({ ...validEnv(), PUBLIC_BASE_URL: 'https://desk.example.com:8443/' })
+    expect(config.publicBaseUrl).toBe('https://desk.example.com:8443')
+  })
 })
 
 describe('loadConfig — never leaks a secret value', () => {

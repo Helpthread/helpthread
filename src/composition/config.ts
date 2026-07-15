@@ -206,11 +206,15 @@ function resolveEncryptionKey(env: NodeJS.ProcessEnv, errors: ConfigErrors): Buf
 }
 
 /**
- * Validate `PUBLIC_BASE_URL` as an absolute http(s) origin and normalize away
- * a trailing slash, so `${publicBaseUrl}/api/...` concatenations (the OAuth
- * redirect URI, the push `aud`) never double-slash — a byte mismatch that
- * would silently break the redirect-URI / audience equality checks Google and
- * the webhook enforce.
+ * Validate `PUBLIC_BASE_URL` as a bare http(s) **origin** and return its
+ * canonical form (`URL.origin` — scheme + host + optional port, no trailing
+ * slash). It must be origin-ONLY: a path, query, fragment, or embedded
+ * credentials are rejected, not silently dropped, because `${publicBaseUrl}` is
+ * concatenated with fixed paths (`/api/v1/inbound/gmail`, `.../callback`) to
+ * form the OAuth redirect URI and the push `aud` — values Google and the
+ * webhook byte-compare. A stray path/query in the base would corrupt those
+ * (`https://x/foo` + `/api/...` → `https://x/foo/api/...`, a mismatch), and
+ * silently stripping it could hide a real operator misconfiguration.
  */
 function resolvePublicBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | null {
   const raw = errors.requireString(env, 'PUBLIC_BASE_URL')
@@ -230,5 +234,20 @@ function resolvePublicBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): str
     )
     return null
   }
-  return raw.replace(/\/+$/, '')
+  // Origin-only: `new URL('https://x')`/`new URL('https://x/')` both have
+  // pathname `/`; anything else (a real path), or a query/fragment/credentials,
+  // means the value is not a bare origin.
+  if (
+    (parsed.pathname !== '/' && parsed.pathname !== '') ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    parsed.username !== '' ||
+    parsed.password !== ''
+  ) {
+    errors.add(
+      'PUBLIC_BASE_URL must be a bare origin with no path, query, fragment, or credentials (e.g. https://desk.example.com)',
+    )
+    return null
+  }
+  return parsed.origin
 }
