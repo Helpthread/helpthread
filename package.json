@@ -4,7 +4,7 @@
   "private": false,
   "type": "module",
   "license": "AGPL-3.0-only",
-  "description": "Open-source, serverless helpdesk engine \u2014 shared inbox, threaded email, knowledge base \u2014 for teams who live on Vercel and Supabase.",
+  "description": "Open-source, serverless helpdesk engine — shared inbox, threaded email, knowledge base — for teams who live on Vercel and Supabase.",
   "engines": {
     "node": ">=20"
   },
@@ -16,10 +16,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "dev:api": "tsx scripts/dev-api.ts"
+    "dev:api": "tsx scripts/dev-api.ts",
+    "migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
+    "@supabase/supabase-js": "^2.110.6",
     "jose": "^6.2.3",
     "mimetext": "^3.0.28",
     "pg": "^8.22.0",

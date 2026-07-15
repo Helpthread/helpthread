@@ -133,15 +133,28 @@ privilege).
      Encrypts refresh tokens at rest; **losing/rotating it orphans every stored
      token** (mailboxes must reconnect).
    - `HELPTHREAD_API_TOKEN` — the Agent-inbox Bearer token (`openssl rand -base64 24`; ≥16 chars).
-   - `CRON_SECRET` — guards the internal cron/drain endpoints (`openssl rand -base64 24`).
+   - `HELPTHREAD_SIGNING_SECRET` — the HMAC keyring backing reply/state/view
+     tokens (`openssl rand -base64 32`; ≥32 chars). Rotating it breaks
+     threading of replies to already-sent mail (single-secret dogfood limit).
+   - `CRON_SECRET` — guards the internal cron/drain endpoints (`openssl rand -base64 24`; ≥16 chars).
 2. `PUBLIC_BASE_URL` = your production URL (e.g. `https://desk.resonantiq.app`),
    matching the OAuth redirect URI (A2.3) and the Pub/Sub push endpoint (A3.4).
+   No trailing slash (the composition root strips one defensively either way).
 3. Deploy. `vercel.json` (in the repo) declares the two Vercel Cron jobs:
    - `*/1 * * * *` → `GET /api/v1/internal/queue/drain` (drain the job queue).
    - `0 6 * * *` → `GET /api/v1/internal/cron/watch-maintenance` (daily renewal + sweep; UTC).
    Vercel Cron invokes these as HTTP GETs; the handlers require the
    `CRON_SECRET` (Vercel sends it as a bearer via the `Authorization` header on
    cron requests) and are idempotent + lease-bounded.
+   > **Plan requirement:** the once-a-minute drain needs a **Vercel Pro** (or
+   > higher) plan. On Hobby, cron jobs may only run **once per day**, and a
+   > more-frequent expression *fails deployment* — so the ~1-minute delivery
+   > latency this design targets is a Pro-tier feature.
+
+All engine code is served by a single catch-all Vercel Function
+(`api/[...path].ts`, the Node runtime — NOT Edge, since the engine needs
+`node:crypto`) that hands every request to the composition root; no per-route
+function files. The cron paths above resolve through that same function.
 
 <a name="env-reference"></a>
 ## Env reference
