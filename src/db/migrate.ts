@@ -563,6 +563,123 @@ CREATE UNIQUE INDEX inbound_deliveries_mailbox_id_provider_message_id_key ON inb
 `
 
 /**
+ * Migration 013 — `queue_jobs`, the durable Postgres-backed queue behind
+ * `createPostgresQueue` (HT-43; `src/providers/adapters/postgres-queue/`).
+ * This is the production `QueueProvider` for the RIQ dogfood: the Gmail
+ * push webhook (`src/api/gmail-webhook.ts`) enqueues a "reconcile" job here,
+ * and a Vercel Cron tick drains and processes a bounded batch
+ * (`PostgresQueue.drainOnce`) — chosen over Vercel Queues (still beta)
+ * because it reuses the Supabase Postgres every deployment already
+ * provisions, rather than adding a second durable-work dependency.
+ *
+ * One row per enqueued job, simultaneously the **dedupe record**, the
+ * **claim/lease**, and the **retry/dead-letter bookkeeping** — the same
+ * three-way framing migration 012's doc comment uses for
+ * `inbound_deliveries`, applied here to outbound queue work instead of
+ * inbound delivery ledgering.
+ *
+ * ## Dedupe: a partial unique index, mirroring migration 003's precedent
+ *
+ * `queue_jobs_topic_dedupe_key` constrains `(topic, dedupe_key)` only when
+ * `dedupe_key IS NOT NULL` — the same partial-index shape migration 003's
+ * `threads_conversation_idempotency_key_idx` established for `threads`:
+ * only rows that opted into dedup (a caller-supplied key) constrain each
+ * other, and every `NULL`-key row is invisible to the index, so ordinary
+ * (non-deduped) enqueues never collide with one another. The adapter's
+ * `enqueue` targets this exact index with `INSERT ... ON CONFLICT (topic,
+ * dedupe_key) WHERE dedupe_key IS NOT NULL AND dead_lettered_at IS NULL DO
+ * NOTHING` — a retried enqueue call sharing the same `(topic, dedupeKey)`
+ * as a still-live job is silently suppressed, matching
+ * `EnqueueOptions.dedupeKey`'s "SHOULD suppress duplicate enqueues"
+ * contract (`src/providers/queue.ts`).
+ *
+ * The `AND dead_lettered_at IS NULL` arm is a deliberate WIDENING beyond
+ * migration 003's precedent, not a copy-paste: a `threads` row is never
+ * reprocessed after it reaches a terminal send state, so 003's index needed
+ * no such arm. A queue job's dedupe key, by contrast, must become reusable
+ * once the job it protected reaches ITS OWN terminal failure
+ * (dead-lettered) — otherwise a poison job's dedupe key would permanently
+ * block every future enqueue attempt for that same key, even after an
+ * operator fixes the root cause and wants to try again. Excluding
+ * dead-lettered rows from the constraint is what makes that re-enqueue
+ * possible while still retaining the dead-lettered row itself (see below).
+ *
+ * ## `run_after` + `locked_until`: "eligible" and "leased" are separate axes
+ *
+ * `run_after` is the earliest time a job may be claimed — `now()` for an
+ * immediate enqueue, later for `delaySeconds` or a backed-off retry.
+ * `locked_until` is a lease: `drainOnce`'s claim sets it to a near-future
+ * expiry so a crashed or timed-out worker's claim eventually lapses and the
+ * job becomes reclaimable, rather than stuck forever behind a lock nobody
+ * will release — the same lease shape migration 003's `threads.claimed_until`
+ * uses for outbound-send delivery claims, applied here to queue jobs
+ * instead. A job is claimable exactly when BOTH are satisfied: `run_after
+ * <= now()` (eligible) AND `locked_until IS NULL OR locked_until < now()`
+ * (unleased) — two independent conditions kept as two columns rather than
+ * folded into one, because "eligible but currently leased" (another worker
+ * has it) is a real, common state that a single combined timestamp could
+ * not distinguish from "not yet eligible."
+ *
+ * ## `dead_lettered_at` rows are retained forever — never silently dropped
+ *
+ * A job that exhausts its retry ceiling is dead-lettered, not deleted:
+ * `dead_lettered_at` is stamped and the row stays in the table permanently,
+ * queryable via `PostgresQueue.getStats()`'s `deadLettered` count or a
+ * direct `SELECT ... WHERE dead_lettered_at IS NOT NULL`. This is
+ * CHARTER.md invariant #1 ("never silently drop") applied to queue work —
+ * the same retention discipline migration 012 uses for
+ * `inbound_deliveries.status = 'dead-letter'`: a poison job is parked and
+ * visible for manual review, never erased. Deleting it on terminal failure
+ * would make "did this job ever run, and why did it fail?" an unanswerable
+ * question during an incident.
+ *
+ * ## The two indexes
+ *
+ * - `queue_jobs_topic_dedupe_key` — the dedupe constraint above; also
+ *   doubles as the lookup a future admin tool would use to find "the live
+ *   job for key X."
+ * - `queue_jobs_ready_idx` — `(topic, run_after) WHERE dead_lettered_at IS
+ *   NULL`, sized for the drain hot path: `drainOnce`'s claim filters to a
+ *   specific topic set and orders by `run_after`, and excluding
+ *   dead-lettered rows keeps the index from accumulating entries for jobs
+ *   that can never be claimed again. `locked_until` is deliberately NOT
+ *   part of this index — it churns on every claim/release, and the "find
+ *   the oldest eligible, unleased jobs" read pattern is already served by
+ *   ordering on `(topic, run_after)` and re-checking `locked_until` in the
+ *   claim query's `WHERE` clause, rather than indexing a column that
+ *   changes this fast.
+ *
+ * No CHECK constraint ties `dead_lettered_at` to `attempts`/`max_attempts`
+ * (unlike, say, migration 002's direction-tied CHECKs): the
+ * attempts-vs-ceiling decision is adapter-level policy
+ * (`PostgresQueue.drainOnce`'s own `maxAttempts` option — see that
+ * module's doc comment for why it reads as a call-level knob rather than
+ * this row's `max_attempts` column), not a database-level invariant the
+ * schema should enforce. `max_attempts` is retained as per-row schema
+ * head-room for a future per-job ceiling override, matching migration
+ * 010's "the column is reserved, the logic lands in a later ticket"
+ * precedent.
+ */
+const MIGRATION_013_QUEUE_JOBS = `
+CREATE TABLE queue_jobs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  topic text NOT NULL,
+  payload jsonb NOT NULL,
+  dedupe_key text,
+  attempts integer NOT NULL DEFAULT 0,
+  max_attempts integer NOT NULL DEFAULT 5,
+  run_after timestamptz NOT NULL DEFAULT now(),
+  locked_until timestamptz,
+  last_error text,
+  dead_lettered_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX queue_jobs_topic_dedupe_key ON queue_jobs (topic, dedupe_key) WHERE dedupe_key IS NOT NULL AND dead_lettered_at IS NULL;
+CREATE INDEX queue_jobs_ready_idx ON queue_jobs (topic, run_after) WHERE dead_lettered_at IS NULL;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -623,6 +740,11 @@ const MIGRATIONS: Migration[] = [
     id: 12,
     name: 'inbound_deliveries',
     sql: MIGRATION_012_INBOUND_DELIVERIES,
+  },
+  {
+    id: 13,
+    name: 'queue_jobs',
+    sql: MIGRATION_013_QUEUE_JOBS,
   },
 ]
 

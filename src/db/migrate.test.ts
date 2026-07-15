@@ -52,6 +52,7 @@ describe('migrate', () => {
       { id: 10, name: 'mailbox_oauth_tokens' },
       { id: 11, name: 'gmail_watch_state' },
       { id: 12, name: 'inbound_deliveries' },
+      { id: 13, name: 'queue_jobs' },
     ])
   })
 
@@ -74,6 +75,7 @@ describe('migrate', () => {
       { id: 10 },
       { id: 11 },
       { id: 12 },
+      { id: 13 },
     ])
   })
 
