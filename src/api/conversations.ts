@@ -17,7 +17,8 @@
 
 import type { Keyring } from '../mail/reply-token.js'
 import { sendReply } from '../mail/send.js'
-import type { EmailSender } from '../providers/index.js'
+import type { BlobStore, EmailSender } from '../providers/index.js'
+import type { StoredThreadAttachment, ThreadAttachmentStore } from '../store/attachments.js'
 import {
   type ConversationFolder,
   type ConversationStatus,
@@ -50,6 +51,19 @@ const MAX_REPLY_TEXT_LENGTH = 5000
  */
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
+/**
+ * The wire shape of one attachment on a `ThreadView` (specs/api/agent-inbox-v1.md
+ * §2, HT-46): attachment METADATA plus a time-limited signed URL — never a
+ * stable/public path (`BlobStore.getSignedUrl`'s contract, `src/providers/blob.ts`).
+ */
+interface AttachmentViewJson {
+  id: string
+  filename: string | null
+  contentType: string
+  size: number
+  url: string
+}
+
 /** The wire shape of one `ThreadView` (specs/api/agent-inbox-v1.md §2) — `StoredThread` with `Date` fields as ISO strings and `fromAddress` renamed to `from`. */
 interface ThreadViewJson {
   id: string
@@ -60,6 +74,8 @@ interface ThreadViewJson {
   deliveryStatus: 'pending' | 'sent' | 'failed' | null
   /** Open tracking (spec §4g, v1.1): first customer view of this outbound reply; null until then, always null for inbound/notes or with the feature off. */
   customerViewedAt: string | null
+  /** HT-46: `[]` unless this thread has stored attachment references AND the deployment wired `attachments` deps (see {@link handleGetConversation}) — absent-by-default, like `openTracking`. */
+  attachments: AttachmentViewJson[]
   createdAt: string
 }
 
@@ -162,6 +178,16 @@ export async function handleListConversations(
 }
 
 /**
+ * How long a minted attachment signed URL stays valid (`BlobStore.getSignedUrl`'s
+ * `expiresInSeconds`, HT-46). One hour: long enough to cover an Agent opening
+ * the conversation and viewing/downloading an attachment in one sitting,
+ * short enough that a URL copied out of a stale API response doesn't stay a
+ * standing credential. Not tuned against any measured usage — a reasonable
+ * default, re-minted fresh on every `GET` since nothing here caches it.
+ */
+const ATTACHMENT_SIGNED_URL_EXPIRY_SECONDS = 3600
+
+/**
  * Handle `GET /api/v1/conversations/{id}` — fetch the conversation and
  * shape it as a `ConversationDetail` (spec §3b). `id` is whatever the
  * router extracted from the path; it is passed straight to
@@ -180,7 +206,16 @@ export async function handleListConversations(
  */
 export async function handleGetConversation(
   id: string,
-  deps: { store: ConversationStore },
+  deps: {
+    store: ConversationStore
+    /**
+     * Attachment read-path deps (HT-46) — ABSENT BY DEFAULT, the same posture
+     * `InboxApiDeps.openTracking` uses: a deployment that hasn't wired a
+     * `ThreadAttachmentStore` + `BlobStore` here simply never surfaces
+     * attachments, and every `ThreadView.attachments` is `[]`.
+     */
+    attachments?: { store: ThreadAttachmentStore; blobStore: BlobStore }
+  },
 ): Promise<Response> {
   if (!isUuid(id)) {
     return apiError(404, 'not_found', 'No conversation with that id.')
@@ -196,6 +231,11 @@ export async function handleGetConversation(
     return apiError(404, 'not_found', 'No conversation with that id.')
   }
 
+  const attachmentsByThreadId =
+    deps.attachments !== undefined
+      ? await attachmentViewsByThreadId(conversation.id, deps.attachments)
+      : new Map<string, AttachmentViewJson[]>()
+
   const body: ConversationDetailJson = {
     id: conversation.id,
     number: conversation.number,
@@ -208,10 +248,60 @@ export async function handleGetConversation(
     assignee: conversation.assignee,
     createdAt: conversation.createdAt.toISOString(),
     updatedAt: conversation.updatedAt.toISOString(),
-    threads: conversation.threads.map(toThreadViewJson),
+    threads: conversation.threads.map((thread) =>
+      toThreadViewJson(thread, attachmentsByThreadId.get(thread.id)),
+    ),
   }
 
   return json(200, body)
+}
+
+/**
+ * Fetch every attachment reference for `conversationId` in one round trip
+ * (`ThreadAttachmentStore.listByConversationId`) and mint each one's signed
+ * URL, grouped by the thread id it belongs to. Signing happens here, not in
+ * the store, so `ThreadAttachmentStore` stays a plain persistence seam with
+ * no `BlobStore` dependency of its own (mirroring how `ConversationStore`
+ * never touches a provider either).
+ */
+async function attachmentViewsByThreadId(
+  conversationId: string,
+  attachments: { store: ThreadAttachmentStore; blobStore: BlobStore },
+): Promise<Map<string, AttachmentViewJson[]>> {
+  const rows = await attachments.store.listByConversationId(conversationId)
+  // Mint every row's signed URL concurrently (independent BlobStore calls,
+  // no shared state) rather than one at a time — a conversation with many
+  // attachments would otherwise pay one signing round trip per attachment,
+  // serially, on every GET.
+  const entries = await Promise.all(
+    rows.map(
+      async (row) =>
+        [row.threadId, await toAttachmentViewJson(row, attachments.blobStore)] as const,
+    ),
+  )
+  const byThreadId = new Map<string, AttachmentViewJson[]>()
+  for (const [threadId, view] of entries) {
+    const existing = byThreadId.get(threadId)
+    if (existing === undefined) {
+      byThreadId.set(threadId, [view])
+    } else {
+      existing.push(view)
+    }
+  }
+  return byThreadId
+}
+
+async function toAttachmentViewJson(
+  row: StoredThreadAttachment,
+  blobStore: BlobStore,
+): Promise<AttachmentViewJson> {
+  return {
+    id: row.id,
+    filename: row.filename,
+    contentType: row.contentType,
+    size: row.size,
+    url: await blobStore.getSignedUrl(row.blobKey, ATTACHMENT_SIGNED_URL_EXPIRY_SECONDS),
+  }
 }
 
 /**
@@ -774,7 +864,17 @@ function toConversationSummaryJson(row: {
   }
 }
 
-function toThreadViewJson(thread: StoredThread): ThreadViewJson {
+/**
+ * Map one `StoredThread` to its wire shape. `attachments` defaults to `[]` —
+ * every caller EXCEPT {@link handleGetConversation} passes none, because a
+ * thread this API just created (a reply or a note) cannot yet have any
+ * (HT-46: attachments are inbound-only, and only `handleGetConversation`'s
+ * deps carry the `ThreadAttachmentStore`/`BlobStore` needed to look them up).
+ */
+function toThreadViewJson(
+  thread: StoredThread,
+  attachments: AttachmentViewJson[] = [],
+): ThreadViewJson {
   return {
     id: thread.id,
     direction: thread.direction,
@@ -784,6 +884,7 @@ function toThreadViewJson(thread: StoredThread): ThreadViewJson {
     deliveryStatus: thread.deliveryStatus,
     customerViewedAt:
       thread.customerViewedAt === null ? null : thread.customerViewedAt.toISOString(),
+    attachments,
     createdAt: thread.createdAt.toISOString(),
   }
 }

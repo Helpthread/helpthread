@@ -28,19 +28,36 @@
  *    the ledger's `received → stored` transition become ONE transaction
  *    (spec §4 — the crux this ticket exists to get right).
  *
- * ## Attachments: deferred (HT-37 scope note)
+ * ## Attachments (HT-46)
  *
- * `ParsedEmail.attachments` carries bytes (`src/mail/parse.ts`), but the
- * `threads` store has no attachment column today, and writing attachment
- * bytes to the `BlobStore` under a mailbox-namespaced key (spec §3's closing
- * paragraph) is explicitly out of scope for this ticket. This pipeline
- * stores the text/html body only; attachment bytes are silently NOT
- * persisted anywhere yet. Flagged in the implementation report as a
- * follow-up, not invented here.
+ * `ParsedEmail.attachments` carries bytes (`src/mail/parse.ts`). Between
+ * step 4 (decide) and step 5 (store), this pipeline writes each attachment's
+ * bytes to the `BlobStore` under a mailbox-namespaced key
+ * (`<mailboxId>/<attachmentId>/<filename>`, spec §3's closing paragraph —
+ * see {@link writeAttachmentBlobs}) BEFORE the step-5 transaction opens, then
+ * persists only the resulting blob-key REFERENCES inside that transaction
+ * (`thread_attachments`, migration 015, `src/store/attachments.ts`) — never
+ * the bytes themselves, and never inside the transaction. This ordering is
+ * the ticket's design, not incidental: `BlobStore.put` is a non-transactional
+ * external side effect (it cannot be rolled back if the transaction that
+ * follows aborts), so spec §4's already-blessed failure mode — "a blob write
+ * that succeeds then a transaction that aborts" — is exactly what happens on
+ * a step-5 failure here, and it is HONEST about it: the blob is orphaned
+ * (unreferenced by any `thread_attachments` row, since that insert never
+ * committed), not corrupted or double-referenced. A retry (this pipeline's
+ * ordinary retry-the-whole-unit contract, spec §4) re-parses, re-decides, and
+ * re-writes FRESH blobs under fresh attachment ids — it never reuses or
+ * cleans up the orphaned ones from the failed attempt. Orphaned blobs are
+ * tolerable and GC-able (a future sweep keyed off `thread_attachments`
+ * cross-referenced against the bucket — not built here, flagged as a
+ * follow-up in the implementation report) but never a correctness problem:
+ * an orphan is simply never referenced by anything, so it is never served.
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Db, Queryable } from '../db/client.js'
 import type { BlobStore, RawInboundMessage, RawMessageContent } from '../providers/index.js'
+import { insertThreadAttachmentsInTx, type NewThreadAttachment } from '../store/attachments.js'
 import { appendThreadInTx, createConversationInTx, type NewThread } from '../store/conversations.js'
 import {
   type InboundDeliveryStore,
@@ -48,7 +65,7 @@ import {
   markStoredInTx,
   type StoredInboundDelivery,
 } from '../store/inbound-deliveries.js'
-import { type ParsedEmail, parseInboundEmail } from './parse.js'
+import { type ParsedAttachment, type ParsedEmail, parseInboundEmail } from './parse.js'
 import { type Keyring, verifyReplyMessageId } from './reply-token.js'
 import { decideThreading, type ThreadingDecision } from './thread.js'
 
@@ -376,6 +393,21 @@ async function processClaimedDelivery(
   // --- Step 4: decide (never re-implemented here). --------------------------
   const decision = decideThreading(parsed, deps.keyring)
 
+  // --- Attachments: write bytes to the BlobStore BEFORE step 5's transaction
+  // (module doc's "Attachments (HT-46)" section) — a blob write is a
+  // non-transactional external side effect, so it must happen outside (and
+  // before) the transaction that references it. -----------------------------
+  let attachmentRefs: Omit<NewThreadAttachment, 'threadId'>[]
+  try {
+    attachmentRefs = await writeAttachmentBlobs(
+      delivery.mailboxId,
+      parsed.attachments,
+      deps.blobStore,
+    )
+  } catch (err) {
+    return recordFailure(delivery, deps, 'blob', err, base)
+  }
+
   // --- Step 5: store + mark stored, ONE transaction (the crux — see
   // storeAndMarkDelivered's doc comment). ------------------------------------
   try {
@@ -384,6 +416,7 @@ async function processClaimedDelivery(
       delivery.id,
       decision,
       parsed,
+      attachmentRefs,
       delivery.attempts,
     )
     logIngestEvent({
@@ -414,6 +447,74 @@ async function processClaimedDelivery(
 }
 
 /**
+ * Write every attachment's bytes to `blobStore` under a fresh, mailbox-
+ * namespaced key (spec §3's closing paragraph): `<mailboxId>/<attachmentId>/
+ * <filename>`, where `attachmentId` is a freshly minted UUID — formable
+ * before any row id exists, exactly the ticket's design (the row this
+ * attachment will reference, `thread_attachments.thread_id`, doesn't exist
+ * until step 5's INSERT). Returns the reference each attachment resolved to
+ * (everything {@link insertThreadAttachmentsInTx} needs except `threadId`,
+ * which step 5 fills in once the thread row exists). `[]` for a message with
+ * no attachments — the common case, and the fast path (no blob writes at
+ * all).
+ *
+ * Called AFTER the loop guard (step 3) so a suppressed own-message-loop
+ * reflection never writes attachment blobs that would then have nothing to
+ * reference — see the module doc's "Attachments (HT-46)" section for why a
+ * write here can still end up orphaned by a LATER step-5 failure, and why
+ * that is tolerable.
+ */
+async function writeAttachmentBlobs(
+  mailboxId: string,
+  attachments: ParsedAttachment[],
+  blobStore: BlobStore,
+): Promise<Omit<NewThreadAttachment, 'threadId'>[]> {
+  const refs: Omit<NewThreadAttachment, 'threadId'>[] = []
+  for (const attachment of attachments) {
+    const blobKey = `${mailboxId}/${randomUUID()}/${sanitizeAttachmentFilename(attachment.filename)}`
+    await blobStore.put(blobKey, attachment.content, {
+      contentType: attachment.contentType,
+      contentLength: attachment.size,
+    })
+    refs.push({
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      size: attachment.size,
+      blobKey,
+    })
+  }
+  return refs
+}
+
+/**
+ * The filename segment of an attachment's blob key — NOT the `filename`
+ * column value (that stays the original, verbatim `ParsedAttachment.filename`,
+ * `null` included). `BlobStore` implementations (e.g. Supabase Storage,
+ * `src/providers/adapters/supabase-storage/`) reject object keys containing
+ * anything outside a restricted ASCII allowlist (letters, digits, `_`, `.`,
+ * `-`) — no unicode, no `/` (a path separator, which would otherwise let an
+ * attacker- or client-supplied filename nest the object under an unintended
+ * "folder" inside this attachment's own namespace slot), no `%`/`#`/quotes/
+ * control characters. Every other character is replaced with `_` so the key
+ * stays exactly three segments deep and adapter-valid, whatever the filename
+ * contains. A missing OR empty filename (`null`, `undefined`, or `''` — a
+ * blank `''` is not caught by `??`) falls back to a fixed placeholder — the
+ * key still needs SOME non-empty final segment. Truncated to
+ * {@link MAX_SANITIZED_FILENAME_LENGTH} characters: `ParsedAttachment.filename`
+ * comes verbatim from an attacker-controlled `Content-Disposition` header
+ * with no length limit of its own, and an oversized key segment would
+ * otherwise make every retry of an ordinary message fail the SAME way at
+ * the `BlobStore` (most object-storage backends cap total key length).
+ */
+const MAX_SANITIZED_FILENAME_LENGTH = 200
+
+export function sanitizeAttachmentFilename(filename: string | null): string {
+  const sanitized = (filename ?? '').replaceAll(/[^A-Za-z0-9._-]/g, '_')
+  if (sanitized === '') return 'attachment'
+  return sanitized.slice(0, MAX_SANITIZED_FILENAME_LENGTH)
+}
+
+/**
  * Record a caught processing failure on the ledger — `dead-letter` once
  * `MAX_INGEST_ATTEMPTS` would be reached, otherwise the retryable `failed`
  * (spec §4). Emits the same structured observability record as the success
@@ -426,7 +527,7 @@ async function processClaimedDelivery(
 async function recordFailure(
   delivery: StoredInboundDelivery,
   deps: IngestDeps,
-  stage: 'parse' | 'store',
+  stage: 'parse' | 'blob' | 'store',
   err: unknown,
   base: IngestOutcomeBase,
 ): Promise<IngestOutcome> {
@@ -483,22 +584,41 @@ async function recordFailure(
  * 'not-found' }` — never resurrects a deleted conversation, never drops the
  * mail (threading.md §5, mirrored here for the ingest path).
  *
- * `claimedAttempts` is threaded straight through to `markStoredInTx` as its
- * fence (`src/store/inbound-deliveries.ts`'s "The fence" section): if it no
- * longer matches, `markStoredInTx` throws `LeaseLostError` and `Db.transaction`
- * rolls back the conversation/thread write this call just made along with it
- * — a stale, lease-lost caller can never leave behind a conversation with no
- * matching ledger mark.
+ * `attachmentRefs` (HT-46) — the blob-key references {@link
+ * writeAttachmentBlobs} already resolved, BEFORE this transaction opened —
+ * are persisted here via `insertThreadAttachmentsInTx`, stamped with the
+ * thread id this same transaction just minted. This is the only place a
+ * `thread_attachments` row is created, and it happens in the SAME commit as
+ * the thread it references: no reference can survive without its thread, and
+ * no thread can be missing a reference for bytes this call already wrote (a
+ * throw anywhere in this transaction rolls back the thread AND the
+ * references together, per this doc's rollback paragraph above — only the
+ * already-written blob bytes are left behind, orphaned, per the module doc).
+ *
+ * `claimedAttempts` (HT-45) is threaded straight through to `markStoredInTx`
+ * as its fence (`src/store/inbound-deliveries.ts`'s "The fence" section): if
+ * it no longer matches, `markStoredInTx` throws `LeaseLostError` and
+ * `Db.transaction` rolls back the conversation/thread write — and the
+ * attachment-reference rows — this call just made along with it. A stale,
+ * lease-lost caller can never leave behind a conversation with no matching
+ * ledger mark, or a `thread_attachments` row pointing at a thread that was
+ * never committed; the only trace it leaves is the orphaned blob bytes the
+ * paragraph above already accounts for.
  */
 async function storeAndMarkDelivered(
   db: Db,
   deliveryId: string,
   decision: ThreadingDecision,
   parsed: ParsedEmail,
+  attachmentRefs: Omit<NewThreadAttachment, 'threadId'>[],
   claimedAttempts: number,
 ): Promise<{ conversationId: string; threadId: string }> {
   return db.transaction(async (tx) => {
     const written = await writeParsedEmail(tx, decision, parsed)
+    await insertThreadAttachmentsInTx(
+      tx,
+      attachmentRefs.map((ref) => ({ ...ref, threadId: written.threadId })),
+    )
     await markStoredInTx(tx, deliveryId, written.threadId, claimedAttempts)
     return written
   })

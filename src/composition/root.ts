@@ -73,6 +73,7 @@ import {
   createInboundDeliveryStore,
   createMailboxStore,
   createMailboxTokenStore,
+  createThreadAttachmentStore,
 } from '../store/index.js'
 import { createAppHandler } from './app.js'
 import { type AppConfig, loadConfig } from './config.js'
@@ -137,6 +138,7 @@ export async function buildApp(
   const tokenStore = createMailboxTokenStore(db, config.tokenEncryptionKey)
   const watchStateStore = createGmailWatchStateStore(db)
   const inboundDeliveryStore = createInboundDeliveryStore(db)
+  const attachmentStore = createThreadAttachmentStore(db)
 
   // --- The HMAC keyring backing reply/state/view tokens (single current key). ---
   const keyring: Keyring = { current: { keyId: SIGNING_KEY_ID, secret: config.signingSecret } }
@@ -214,6 +216,7 @@ export async function buildApp(
     supportAddress: config.supportAddress,
     gmailPush,
     gmailConnect,
+    attachments: { store: attachmentStore, blobStore },
   })
 
   // --- The reconcile handler the queue drain dispatches to. ---

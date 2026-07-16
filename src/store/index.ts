@@ -2,10 +2,17 @@
  * Barrel for the store layer (`src/store/**`) — persistence built on the
  * raw-SQL seam in `src/db/**`. See `src/store/conversations.ts` for the
  * `ConversationStore` contract and the storage-layer policy it implements,
- * and `src/store/inbound-deliveries.ts` for the `InboundDeliveryStore`
- * (inbound delivery ledger) contract.
+ * `src/store/inbound-deliveries.ts` for the `InboundDeliveryStore` (inbound
+ * delivery ledger) contract, and `src/store/attachments.ts` for the
+ * `ThreadAttachmentStore` (inbound attachment blob-reference) contract.
  */
 
+export type {
+  NewThreadAttachment,
+  StoredThreadAttachment,
+  ThreadAttachmentStore,
+} from './attachments.js'
+export { createThreadAttachmentStore, insertThreadAttachmentsInTx } from './attachments.js'
 export type {
   AppendResult,
   ConversationListCursor,

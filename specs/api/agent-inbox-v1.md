@@ -72,7 +72,20 @@ interface ThreadView {
                              // v1.1: outbound only, and only when open tracking is
                              // enabled (§4g) — first time the customer viewed the reply;
                              // null until then, always null for inbound and notes
+  attachments: AttachmentView[]
+                             // HT-46: inbound attachments this thread carries. [] when
+                             // there are none, OR when the deployment hasn't wired the
+                             // attachment read-path deps (config-gated, absent by default
+                             // — same posture as open tracking, §4g)
   createdAt: string          // ISO-8601
+}
+
+interface AttachmentView {
+  id: string                 // uuid
+  filename: string | null    // null when the attachment arrived with no filename
+  contentType: string
+  size: number                // bytes
+  url: string                 // a time-limited signed URL (never a stable/public path)
 }
 ```
 
@@ -366,12 +379,19 @@ above.
 - No customer-side / self-service surface (a separate future API, designed native when
   there are customers to serve).
 - No mailbox management, no search, no realtime, no webhooks-out, no tag-filtered listing.
-- No attachment upload on reply yet (the blob seam exists; wiring is later).
+- No attachment upload on reply yet (HT-46 wired the READ side — inbound attachments
+  surfaced via `ThreadView.attachments` — but an Agent still cannot attach a file to an
+  outbound reply).
 - Framework-agnostic by construction: handlers are `Request → Response`; a Vercel/Next
   adapter is a thin deploy-time wrapper, not part of this spec.
 
 ## 7. Changelog
 
+- **v1.1 (2026-07-16, HT-46).** `ThreadView.attachments`: inbound attachment metadata +
+  a signed `BlobStore` URL, `[]` by default and config-gated (absent `attachments` deps
+  at the composition root, §4's `InboxApiDeps`, same posture as open tracking) — a
+  deployment that hasn't wired a `ThreadAttachmentStore` + `BlobStore` never surfaces
+  attachments. No attachment upload on reply (§6, unchanged).
 - **v1.1 (2026-07-11, HT-25).** Adopted the contract the Agent Inbox UI was designed
   against (the Claude Design prototype's `mock-api.js`, whose additions were each marked
   `CONTRACT ADDITION`), after review of the drift between the designed surface and v1.0.

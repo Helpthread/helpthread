@@ -85,10 +85,23 @@ Ordered, applied to each received message. Idempotent by step 1, so a whole re-r
    - The store write **and** the ledger row's `received → stored` transition (recording the
      resulting `threadId`) commit in **one transaction** — see §4.
 
-**Attachments belong to the pipeline, not the transport** (§2). After the parse (step 2),
-attachment bytes are written to the `BlobStore` under a **mailbox-namespaced** key
-(`src/providers/blob.ts` makes namespacing the caller's responsibility) as part of the
-step-5 store, and the stored thread carries blob references, never inline bytes.
+**Attachments belong to the pipeline, not the transport** (§2). After the parse (step 2)
+and the loop guard (step 3) — a suppressed reflection never writes attachment blobs it
+would then have nothing to reference — each attachment's bytes are written to the
+`BlobStore` under a **mailbox-namespaced** key, `<mailboxId>/<attachmentId>/<filename>`
+(`src/providers/blob.ts` makes namespacing the caller's responsibility; `attachmentId` is
+a freshly minted UUID, formable before any row id exists). This write happens **before**
+step 5's transaction opens — `BlobStore.put` is a non-transactional external side effect,
+so it cannot be undone if that transaction later aborts — and only the resulting blob-key
+**reference** (`thread_attachments`, migration 015) is persisted inside the transaction,
+stamped with the thread id that same transaction mints. HT-46 implements this: a
+step-5 abort after a successful blob write leaves that blob orphaned (unreferenced by any
+`thread_attachments` row, since the insert never committed) — exactly the partial-failure
+mode this section's next paragraph already blesses, and a retry re-parses, re-decides, and
+writes fresh blobs under fresh attachment ids rather than reusing or cleaning up the
+orphan. Orphaned blobs are tolerable and GC-able (a future sweep cross-referencing
+`thread_attachments` against the bucket — not built here) but never a correctness
+problem: an orphan is simply never referenced, so it is never served.
 
 ## 4. Idempotency, the delivery ledger, and retries
 
@@ -268,7 +281,12 @@ engine's existing store/keyring fakes — no cloud required:
 - Two concurrent deliveries of the same key → exactly one conversation (the §3-step-1
   atomic claim; the second returns the first's outcome).
 - A simulated partial failure (transaction aborts after a blob write) → ledger `failed`,
-  retried to `stored`, no orphaned/duplicate conversation.
+  retried to `stored`, no orphaned/duplicate conversation. HT-46: the ORIGINAL blob write
+  is left orphaned (never referenced), and the successful retry's `thread_attachments` rows
+  point at a FRESH blob write, not the orphan.
+- A message with multiple attachments → one `thread_attachments` row per attachment, each
+  with its own blob key, all inserted in the same step-5 transaction as the thread they
+  belong to (HT-46).
 - A verifiable own-message loop → `suppressed`, nothing created; a message that merely
   *claims* our `From` without a verifiable correlation → **ingested**, not dropped.
 - `append→deleted` → falls back to a fresh conversation, mail never lost.

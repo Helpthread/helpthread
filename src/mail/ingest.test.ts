@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db, type Queryable } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { BlobStore, RawInboundMessage } from '../providers/index.js'
+import { createThreadAttachmentStore } from '../store/attachments.js'
 import { createInboundDeliveryStore } from '../store/inbound-deliveries.js'
 import {
   type IngestDeps,
@@ -9,6 +10,7 @@ import {
   ingestInboundMessage,
   isOwnMessageReflection,
   MAX_INGEST_ATTEMPTS,
+  sanitizeAttachmentFilename,
 } from './ingest.js'
 import type { ParsedEmail } from './parse.js'
 import { type Keyring, mintReplyMessageId, type SigningKey } from './reply-token.js'
@@ -97,6 +99,75 @@ function fakeBlobStore(initial: Record<string, Uint8Array> = {}): BlobStore {
       return store.has(key)
     },
   }
+}
+
+/**
+ * Wraps a `BlobStore` fake to record every `put` key, in call order — used by
+ * the attachment retry/orphan test to distinguish the FIRST (failed-attempt,
+ * orphaned) blob write from the SECOND (retry, referenced) one without
+ * needing to predict the random attachment id `src/mail/ingest.ts` mints for
+ * each write.
+ */
+function trackingBlobStore(inner: BlobStore): BlobStore & { putKeys: string[] } {
+  const putKeys: string[] = []
+  return {
+    putKeys,
+    async put(key, data, opts) {
+      putKeys.push(key)
+      await inner.put(key, data, opts)
+    },
+    get: (key) => inner.get(key),
+    getSignedUrl: (key, expiresInSeconds) => inner.getSignedUrl(key, expiresInSeconds),
+    delete: (key) => inner.delete(key),
+    exists: (key) => inner.exists(key),
+  }
+}
+
+/**
+ * Build a raw `multipart/mixed` RFC5322 message with one plain-text body part
+ * plus one base64-encoded attachment per entry in `attachments` — the same
+ * shape as `tests/mail/fixtures/attachment.eml` (plain `\n` line endings;
+ * postal-mime, verified by that fixture's own test, tolerates them).
+ */
+function rawMessageWithAttachments(
+  overrides: Record<string, string> = {},
+  attachments: { filename: string; contentType: string; content: string }[] = [
+    { filename: 'hello.txt', contentType: 'text/plain', content: 'Hello, world!' },
+  ],
+): Uint8Array {
+  const boundary = 'BOUNDARY-INGEST-TEST'
+  const headers: Record<string, string> = {
+    From: 'customer@example.test',
+    To: 'support@example.test',
+    Subject: 'Message with attachment',
+    'Message-ID': '<cust-attach-1@customer.example.test>',
+    'MIME-Version': '1.0',
+    'Content-Type': `multipart/mixed; boundary="${boundary}"`,
+    ...overrides,
+  }
+  const headerText = Object.entries(headers)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join('\n')
+
+  const bodyParts = [
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'See attached.',
+  ]
+  for (const attachment of attachments) {
+    bodyParts.push(
+      `--${boundary}`,
+      `Content-Type: ${attachment.contentType}; name="${attachment.filename}"`,
+      `Content-Disposition: attachment; filename="${attachment.filename}"`,
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from(attachment.content, 'utf-8').toString('base64'),
+    )
+  }
+  bodyParts.push(`--${boundary}--`)
+
+  return new TextEncoder().encode(`${headerText}\n\n${bodyParts.join('\n')}\n`)
 }
 
 /** Insert a `mailboxes` row directly — `inbound_deliveries.mailbox_id` is a real FK, and creating mailboxes is not this ticket's concern. */
@@ -657,5 +728,224 @@ describe('ingestInboundMessage', () => {
 
     expect(outcome.kind).toBe('stored')
     expect(await countRows(db, 'conversations')).toBe(1)
+  })
+
+  // --- HT-46: attachment blob persistence. ----------------------------------
+
+  describe('sanitizeAttachmentFilename (pure unit)', () => {
+    /** Exactly the adapter-valid charset `src/providers/adapters/supabase-storage/` accepts in an object key segment. */
+    const ADAPTER_SAFE = /^[A-Za-z0-9._-]+$/
+
+    it('leaves a plain ASCII filename untouched', () => {
+      expect(sanitizeAttachmentFilename('hello.txt')).toBe('hello.txt')
+    })
+
+    it('null and empty-string filenames both fall back to the fixed placeholder', () => {
+      // `null` is the "no filename at all" case; `''` is the "client sent an
+      // empty filename attribute" case — `?? 'attachment'` alone only catches
+      // the former, which is exactly the must-fix this test guards against.
+      expect(sanitizeAttachmentFilename(null)).toBe('attachment')
+      expect(sanitizeAttachmentFilename('')).toBe('attachment')
+    })
+
+    it('replaces "/" and "\\" so a crafted filename cannot add a segment inside the blob key', () => {
+      expect(sanitizeAttachmentFilename('a/b.txt')).toBe('a_b.txt')
+      expect(sanitizeAttachmentFilename('..\\..\\evil.txt')).toBe('.._.._evil.txt')
+      expect(sanitizeAttachmentFilename('a/b.txt')).not.toContain('/')
+    })
+
+    it('replaces non-ASCII and other adapter-unsafe characters (unicode, "#", "%", quotes, control chars)', () => {
+      expect(sanitizeAttachmentFilename('Résumé.pdf')).toBe('R_sum_.pdf')
+      expect(sanitizeAttachmentFilename('a#b%c".txt')).toBe('a_b_c_.txt')
+      // A literal NUL (not an escaped placeholder) previously sat here by
+      // accident — invisible in most editors/diffs and enough to make this
+      // file read as binary to tools that sniff for one (e.g. `grep -I`).
+      // Written as an explicit escape so the control-character case this
+      // test's name promises is actually legible.
+      expect(sanitizeAttachmentFilename('a\x00b.txt')).toBe('a_b.txt')
+    })
+
+    it('every result matches the adapter-safe charset and is non-empty, for a battery of hostile inputs', () => {
+      for (const filename of [
+        null,
+        '',
+        '/',
+        '\\',
+        '///',
+        'Résumé.pdf',
+        'a/b/../c.txt',
+        '文件.txt',
+      ]) {
+        const sanitized = sanitizeAttachmentFilename(filename)
+        expect(sanitized.length).toBeGreaterThan(0)
+        expect(sanitized).toMatch(ADAPTER_SAFE)
+      }
+    })
+  })
+
+  describe('attachments (HT-46)', () => {
+    it('a message with one attachment writes its bytes to the BlobStore and persists exactly one blob-key reference', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const raw = inboundDelivery(mailboxId, 'provider-msg-1', rawMessageWithAttachments())
+
+      const outcome = await ingestInboundMessage(raw, deps)
+
+      expect(outcome.kind).toBe('stored')
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+
+      const attachmentStore = createThreadAttachmentStore(db)
+      const rows = await attachmentStore.listByConversationId(outcome.conversationId)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({
+        threadId: outcome.threadId,
+        filename: 'hello.txt',
+        contentType: 'text/plain',
+        size: 13,
+      })
+      // The blob key is mailbox-namespaced (<mailboxId>/<attachmentId>/<filename>).
+      expect(rows[0].blobKey.startsWith(`${mailboxId}/`)).toBe(true)
+      expect(rows[0].blobKey.endsWith('/hello.txt')).toBe(true)
+
+      // The bytes actually landed in the BlobStore, byte-exact.
+      const storedBytes = await deps.blobStore.get(rows[0].blobKey)
+      expect(new TextDecoder().decode(storedBytes)).toBe('Hello, world!')
+    })
+
+    it('a message with multiple attachments persists one thread_attachments row per attachment, each with its own blob key', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const raw = inboundDelivery(
+        mailboxId,
+        'provider-msg-1',
+        rawMessageWithAttachments({}, [
+          { filename: 'one.txt', contentType: 'text/plain', content: 'first file' },
+          { filename: 'two.txt', contentType: 'text/plain', content: 'second file, longer' },
+        ]),
+      )
+
+      const outcome = await ingestInboundMessage(raw, deps)
+
+      expect(outcome.kind).toBe('stored')
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+
+      const attachmentStore = createThreadAttachmentStore(db)
+      const rows = await attachmentStore.listByConversationId(outcome.conversationId)
+      expect(rows).toHaveLength(2)
+      // Distinct blob keys — no collision between the two attachments.
+      expect(new Set(rows.map((r) => r.blobKey)).size).toBe(2)
+
+      const byFilename = new Map(rows.map((r) => [r.filename, r]))
+      const one = byFilename.get('one.txt')
+      const two = byFilename.get('two.txt')
+      expect(one).toBeDefined()
+      expect(two).toBeDefined()
+      if (one === undefined || two === undefined) throw new Error('unreachable')
+      expect(new TextDecoder().decode(await deps.blobStore.get(one.blobKey))).toBe('first file')
+      expect(new TextDecoder().decode(await deps.blobStore.get(two.blobKey))).toBe(
+        'second file, longer',
+      )
+    })
+
+    it('a slash-bearing, unicode attachment filename is sanitized in the actual blob key the pipeline writes (not just in the unit-tested sanitizer)', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const raw = inboundDelivery(
+        mailboxId,
+        'provider-msg-1',
+        rawMessageWithAttachments({}, [
+          { filename: 'a/../évil.pdf', contentType: 'application/pdf', content: 'bytes' },
+        ]),
+      )
+
+      const outcome = await ingestInboundMessage(raw, deps)
+
+      expect(outcome.kind).toBe('stored')
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+
+      const attachmentStore = createThreadAttachmentStore(db)
+      const rows = await attachmentStore.listByConversationId(outcome.conversationId)
+      expect(rows).toHaveLength(1)
+      // The stored `filename` COLUMN keeps the original, verbatim filename —
+      // only the blob KEY segment is sanitized.
+      expect(rows[0].filename).toBe('a/../évil.pdf')
+
+      // The blob key stays exactly three `/`-segments deep — the crafted
+      // filename cannot add a fourth segment or escape the mailbox/attachment
+      // namespace — and every segment is non-empty and adapter-safe ASCII.
+      const segments = rows[0].blobKey.split('/')
+      expect(segments).toHaveLength(3)
+      for (const segment of segments) {
+        expect(segment.length).toBeGreaterThan(0)
+        expect(segment).toMatch(/^[A-Za-z0-9._-]+$/)
+      }
+
+      // The bytes are still retrievable at the sanitized key.
+      expect(new TextDecoder().decode(await deps.blobStore.get(rows[0].blobKey))).toBe('bytes')
+    })
+
+    it('a message with no attachments persists no thread_attachments rows', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const outcome = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+        deps,
+      )
+
+      expect(outcome.kind).toBe('stored')
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+      expect(
+        await createThreadAttachmentStore(db).listByConversationId(outcome.conversationId),
+      ).toEqual([])
+    })
+
+    it('the retry/orphan story: a step-5 abort after the blob write leaves that blob orphaned, and the retry writes a FRESH blob the stored reference actually points at', async () => {
+      const { db, mailboxId } = await freshDeps()
+      const blobStore = trackingBlobStore(fakeBlobStore())
+      // 1st .transaction() call = the claim (succeeds); 2nd = step 5's
+      // store-write + ledger-mark transaction — fails exactly ONCE (see the
+      // module-level doc comment on dbFailingOnCall). The attachment blob
+      // write happens between steps 4 and 5, OUTSIDE any transaction, so it
+      // is NOT counted here and always runs on every attempt.
+      const faultyDb = dbFailingOnCall(db, 2)
+      const faultyDeps: IngestDeps = {
+        db: faultyDb,
+        inboundDeliveryStore: createInboundDeliveryStore(faultyDb),
+        blobStore,
+        keyring,
+      }
+      const raw = inboundDelivery(mailboxId, 'provider-msg-1', rawMessageWithAttachments())
+
+      const failedOutcome = await ingestInboundMessage(raw, faultyDeps)
+      expect(failedOutcome).toMatchObject({ kind: 'failed', attempts: 1 })
+      // The blob write for this FIRST attempt already happened (it precedes
+      // the aborted transaction) — orphaned: written, but referenced by no
+      // thread_attachments row, since the transaction that would have
+      // inserted one rolled back along with the thread it belonged to.
+      expect(blobStore.putKeys).toHaveLength(1)
+      const orphanKey = blobStore.putKeys[0]
+      expect(await blobStore.exists(orphanKey)).toBe(true)
+      expect(await countRows(db, 'conversations')).toBe(0)
+
+      const retried = await ingestInboundMessage(raw, faultyDeps)
+      expect(retried.kind).toBe('stored')
+      if (retried.kind !== 'stored') throw new Error('unreachable')
+
+      // The retry wrote a SECOND, fresh blob (a new attachment id each
+      // attempt, per src/mail/ingest.ts's writeAttachmentBlobs) rather than
+      // reusing or repairing the orphan.
+      expect(blobStore.putKeys).toHaveLength(2)
+      const liveKey = blobStore.putKeys[1]
+      expect(liveKey).not.toBe(orphanKey)
+
+      const rows = await createThreadAttachmentStore(db).listByConversationId(
+        retried.conversationId,
+      )
+      expect(rows).toHaveLength(1)
+      // The persisted reference points at the SECOND (retry) blob, not the
+      // orphaned first one.
+      expect(rows[0].blobKey).toBe(liveKey)
+
+      // The orphan is still sitting in the BlobStore, untouched and
+      // unreferenced — tolerable per the ticket's design, not cleaned up
+      // here (a future GC pass, not built by this ticket).
+      expect(await blobStore.exists(orphanKey)).toBe(true)
+    })
   })
 })
