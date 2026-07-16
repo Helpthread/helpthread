@@ -134,6 +134,20 @@ describe('createMailboxStore', () => {
     await expect(store.markNeedsReconnect(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
   })
 
+  it('does NOT downgrade a disconnected mailbox — guard holds, silent no-op, no throw (review fix)', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'disconnected' })
+
+    // The guarded row exists, so this must NOT throw the "no mailbox" error
+    // — only a genuinely missing row does that (see the previous test).
+    await expect(store.markNeedsReconnect(mailboxId)).resolves.toBeUndefined()
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('disconnected')
+  })
+
   it('getMailboxById finds an existing mailbox by id', async () => {
     const { db, store } = await freshStore()
     const mailboxId = await insertMailbox(db, { address: 'support@example.test' })
@@ -211,6 +225,85 @@ describe('createMailboxStore', () => {
   it('markPaused throws for a mailbox id that does not exist', async () => {
     const { store } = await freshStore()
     await expect(store.markPaused(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
+  })
+
+  it('markPaused does NOT downgrade a disconnected mailbox — guard holds, silent no-op, no throw (review fix)', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'disconnected' })
+
+    await expect(store.markPaused(mailboxId)).resolves.toBeUndefined()
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('disconnected')
+  })
+
+  // --- markDisconnected (HT-47, gmail-connect.md's disconnect section) -------
+
+  it('markDisconnected flips an active mailbox to disconnected', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'active' })
+
+    await store.markDisconnected(mailboxId)
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('disconnected')
+  })
+
+  it('markDisconnected is idempotent — marking an already disconnected mailbox succeeds', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'disconnected' })
+
+    await expect(store.markDisconnected(mailboxId)).resolves.toBeUndefined()
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('disconnected')
+  })
+
+  it('markDisconnected throws for a mailbox id that does not exist', async () => {
+    const { store } = await freshStore()
+    await expect(store.markDisconnected(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
+  })
+
+  it('markDisconnected runs against a caller-supplied tx when given', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'needs_reconnect' })
+
+    await db.transaction(async (tx) => {
+      await store.markDisconnected(mailboxId, tx)
+    })
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('disconnected')
+  })
+
+  it('markDisconnected PARTICIPATES in the caller-supplied tx — a rollback takes the status write with it (review fix)', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'needs_reconnect' })
+
+    // The commit test above would pass even if markDisconnected ignored `tx`
+    // and wrote through its bound `db` — only a rollback can prove the write
+    // actually rode the transaction, which is what the disconnect flow's
+    // atomic-cleanup contract (`../mail/gmail-disconnect.ts`'s step-3
+    // transaction) depends on.
+    await expect(
+      db.transaction(async (tx) => {
+        await store.markDisconnected(mailboxId, tx)
+        throw new Error('force rollback')
+      }),
+    ).rejects.toThrow('force rollback')
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('needs_reconnect')
   })
 
   // --- upsertConnectedMailbox (HT-40, gmail-connect.md §4-§5) -----------------

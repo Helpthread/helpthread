@@ -50,6 +50,7 @@ import {
   handleGmailConnect,
   handleGmailConnectCallback,
 } from './gmail-connect.js'
+import { type GmailDisconnectDeps, handleGmailDisconnect } from './gmail-disconnect.js'
 import { type GmailPushDeps, gmailPushRejected, handleGmailPushWebhook } from './gmail-webhook.js'
 import type { ApiError } from './responses.js'
 import { apiError } from './responses.js'
@@ -125,6 +126,18 @@ export interface InboxApiDeps {
    * ordinary "no such route" answer either way).
    */
   gmailConnect?: GmailConnectDeps
+  /**
+   * The Gmail disconnect admin action (HT-47; gmail-connect.md's disconnect
+   * section): ABSENT BY DEFAULT — same "a deployment that hasn't
+   * provisioned Gmail OAuth yet simply never configures this" stance as
+   * `gmailConnect`. When present, `POST /api/v1/inbound/gmail/disconnect`
+   * (Bearer-gated — an ORDINARY route, unlike the pre-auth `/callback`; see
+   * `src/api/gmail-disconnect.ts`) revokes the mailbox's OAuth grant, stops
+   * its Gmail push watch, and deactivates it locally. When absent, the
+   * route 404s exactly like `gmailConnect`'s own absent-case (no
+   * route-table special-casing needed, since it's Bearer-gated either way).
+   */
+  gmailDisconnect?: GmailDisconnectDeps
   /**
    * Attachment read-path deps (HT-46; specs/api/agent-inbox-v1.md §2's
    * `ThreadView.attachments`): ABSENT BY DEFAULT — a deployment that hasn't
@@ -302,6 +315,11 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
         case 'gmail-connect':
           return deps.gmailConnect !== undefined
             ? await handleGmailConnect(request, deps.gmailConnect)
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'gmail-disconnect':
+          return deps.gmailDisconnect !== undefined
+            ? await handleGmailDisconnect(request, deps.gmailDisconnect)
             : apiError(404, 'not_found', 'No such route.')
       }
     } catch (err) {

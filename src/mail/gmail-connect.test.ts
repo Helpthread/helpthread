@@ -74,6 +74,11 @@ function fakeWatchClient(overrides: Partial<GmailWatchClient> = {}): GmailWatchC
     watch:
       overrides.watch ??
       (async () => ({ historyId: 'watch-hid', expiration: new Date('2026-08-01T00:00:00.000Z') })),
+    stop:
+      overrides.stop ??
+      (async () => {
+        throw new Error('stop: not used by the connect flow')
+      }),
   }
 }
 
@@ -495,6 +500,9 @@ describe('createGmailConnectService', () => {
       },
       releaseReconcileLease: async () => {
         throw new Error('releaseReconcileLease: not used by the connect flow')
+      },
+      deleteState: async () => {
+        throw new Error('deleteState: not used by the connect flow')
       },
     }
     const { fetchImpl } = fakeTokenEndpoint(200, DEFAULT_TOKEN_RESPONSE)

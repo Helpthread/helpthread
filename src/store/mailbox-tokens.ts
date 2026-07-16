@@ -80,6 +80,37 @@ export interface MailboxTokenStore {
   upsertTokens(mailboxId: string, input: UpsertTokensInput, tx?: Queryable): Promise<void>
 
   /**
+   * {@link upsertTokens}, but fenced against HT-47's disconnect
+   * (`../mail/gmail-disconnect.ts`): the mailbox-status check and the token
+   * write are ONE SQL statement, so no disconnect can slip between them the
+   * way it can between a JS-level read and a separate write. Returns `true`
+   * when the row was written, `false` when the fence held — the mailbox is
+   * `disconnected` (or no `mailboxes` row exists at all) and NOTHING was
+   * written. Same full-row-replace semantics as {@link upsertTokens}
+   * otherwise.
+   *
+   * This is the refresh path's half of the anti-resurrection fence
+   * (`../mail/gmail-oauth.ts`'s `refresh()` — a token refresh whose Google
+   * round-trip straddles an in-flight `disconnect()` must not re-create the
+   * token row that disconnect just deleted). It is the same SQL-level
+   * optimistic-guard discipline as the outbound queue's stale-outcome fence
+   * (`../providers/adapters/postgres-queue/index.ts`, PR #44): the predicate
+   * rides ON the write statement, and zero rows back means the write lost —
+   * the caller applies no fallback write of its own.
+   *
+   * The statement's `SELECT ... FROM mailboxes ... FOR UPDATE` locks the
+   * mailbox row for the statement's duration, and the disconnect
+   * transaction takes that SAME row lock as its FIRST statement (its
+   * `markDisconnected` `UPDATE` — see `gmail-disconnect.ts`'s step-3
+   * ordering comment). With both sides serializing on one lock, every
+   * interleaving is safe: a guarded write that commits first leaves a row
+   * the disconnect transaction's subsequent `DELETE` sweeps; a guarded
+   * write that hits the lock second blocks, re-evaluates the predicate
+   * against the committed `disconnected` status, and writes nothing.
+   */
+  upsertTokensUnlessDisconnected(mailboxId: string, input: UpsertTokensInput): Promise<boolean>
+
+  /**
    * Read back `mailboxId`'s tokens, decrypted. Returns `null` if no row
    * exists (the mailbox has never completed an OAuth grant). Throws if
    * decryption fails (wrong key, or the stored ciphertext is corrupted/
@@ -87,6 +118,19 @@ export interface MailboxTokenStore {
    * silently-wrong value.
    */
   getTokens(mailboxId: string): Promise<StoredMailboxTokens | null>
+
+  /**
+   * Delete `mailboxId`'s token row (HT-47's disconnect action — the inverse
+   * of `upsertTokens`: once a mailbox is disconnected, its refresh/access
+   * tokens must not persist even as ciphertext). Idempotent: deleting a
+   * mailbox with no token row is a harmless no-op, matching {@link
+   * upsertTokens}'s and {@link seedBaseline}'s (`gmail-watch-state.ts`) own
+   * "never surprise on repeat" convention. Optionally runs against a
+   * caller-supplied `tx` so the disconnect service can commit this alongside
+   * the watch-state delete and the mailbox status flip as ONE atomic unit
+   * (`../mail/gmail-disconnect.ts`).
+   */
+  deleteTokens(mailboxId: string, tx?: Queryable): Promise<void>
 }
 
 /** Raw `mailbox_oauth_tokens` row shape, before mapping to {@link StoredMailboxTokens}. */
@@ -136,6 +180,41 @@ export function createMailboxTokenStore(db: Db, encryptionKey: Buffer): MailboxT
       )
     },
 
+    async upsertTokensUnlessDisconnected(mailboxId, input) {
+      const refreshTokenCiphertext = encrypt(input.refreshToken, encryptionKey)
+      const accessTokenCiphertext =
+        input.accessToken !== undefined ? encrypt(input.accessToken, encryptionKey) : null
+
+      // The INSERT's source SELECT carries the status predicate AND the
+      // `FOR UPDATE` row lock — see the interface doc for why this single
+      // statement (rather than a getMailboxById re-check followed by
+      // `upsertTokens`) is what actually closes the disconnect race.
+      // `RETURNING` only yields rows the statement inserted or updated, so
+      // an empty result IS the "fence held, nothing written" signal.
+      const written = await db.query<{ mailbox_id: string }>(
+        `INSERT INTO mailbox_oauth_tokens (mailbox_id, refresh_token_ciphertext, access_token_ciphertext, access_token_expires_at, scopes, updated_at)
+         SELECT m.id, $2, $3, $4, $5, now()
+           FROM mailboxes m
+          WHERE m.id = $1 AND m.status <> 'disconnected'
+            FOR UPDATE
+         ON CONFLICT (mailbox_id) DO UPDATE SET
+           refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+           access_token_ciphertext = EXCLUDED.access_token_ciphertext,
+           access_token_expires_at = EXCLUDED.access_token_expires_at,
+           scopes = EXCLUDED.scopes,
+           updated_at = now()
+         RETURNING mailbox_id`,
+        [
+          mailboxId,
+          refreshTokenCiphertext,
+          accessTokenCiphertext,
+          input.accessTokenExpiresAt ?? null,
+          input.scopes ?? null,
+        ],
+      )
+      return written.length > 0
+    },
+
     async getTokens(mailboxId) {
       const rows = await db.query<MailboxTokenRow>(
         `SELECT ${TOKEN_COLUMNS} FROM mailbox_oauth_tokens WHERE mailbox_id = $1`,
@@ -158,6 +237,10 @@ export function createMailboxTokenStore(db: Db, encryptionKey: Buffer): MailboxT
         scopes: row.scopes,
         updatedAt: toDate(row.updated_at),
       }
+    },
+
+    async deleteTokens(mailboxId, tx) {
+      await (tx ?? db).query('DELETE FROM mailbox_oauth_tokens WHERE mailbox_id = $1', [mailboxId])
     },
   }
 }

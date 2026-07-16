@@ -46,6 +46,16 @@
  *   `watch()` re-armed (a `paused` mailbox isn't being ingested; a
  *   `needs_reconnect` one has a dead grant `watch()` can't fix) nor a
  *   reconcile job enqueued, for the same reason.
+ * - {@link MailboxStore.markDisconnected} (HT-47; specs/mail/gmail-connect.md's
+ *   disconnect section): mark a mailbox `disconnected` — the terminal,
+ *   operator-initiated state the disconnect admin action puts a mailbox into
+ *   (migration 017 widens the `status` CHECK to allow it). Distinct from
+ *   `paused`/`needs_reconnect` (both are states the PIPELINE puts a mailbox
+ *   into automatically); `disconnected` only ever follows an explicit
+ *   operator disconnect (`../mail/gmail-disconnect.ts`), which runs this
+ *   alongside deleting the mailbox's `mailbox_oauth_tokens`/
+ *   `gmail_watch_state` rows in ONE transaction — same `tx?` pattern as
+ *   {@link upsertConnectedMailbox}.
  *
  * A fuller `mailboxes` CRUD surface (beyond the operations above) is still
  * narrower than a general CRUD module — add operations as the ticket that
@@ -54,8 +64,8 @@
 
 import type { Db, Queryable } from '../db/client.js'
 
-/** A mailbox's lifecycle state (migration 009's CHECK constraint). */
-export type MailboxStatus = 'active' | 'paused' | 'needs_reconnect'
+/** A mailbox's lifecycle state (migration 009's CHECK constraint, widened by migration 017 to add `'disconnected'`). */
+export type MailboxStatus = 'active' | 'paused' | 'needs_reconnect' | 'disconnected'
 
 /** A connected mailbox, as read back from storage. */
 export interface MailboxRecord {
@@ -93,13 +103,28 @@ export interface MailboxStore {
    * RETURNING id`; idempotent (marking an already-`needs_reconnect` mailbox
    * again is a harmless no-op write, still bumping `updated_at`).
    *
-   * Throws if no mailbox exists with this id. Every caller reaches this
-   * method with a `mailboxId` it just read a `mailbox_oauth_tokens` row for,
-   * and `mailbox_oauth_tokens.mailbox_id` is a `REFERENCES mailboxes(id)`
-   * foreign key (migration 010), so a missing mailbox row here is
-   * structurally unreachable in practice — thrown rather than silently
-   * no-op'd, matching `ConversationStore.setThreadDeliveryStatus`'s same
-   * throw-on-zero-rows convention (`src/store/conversations.ts`).
+   * Guarded with `AND status <> 'disconnected'`: `disconnected` is terminal
+   * (§8c) and only an explicit operator disconnect
+   * (`../mail/gmail-disconnect.ts`) may leave it — an automatic pipeline
+   * transition (a dead OAuth grant, a failed `watch()` renewal) must never
+   * silently overwrite it. This is exactly the race an HT-47 disconnect can
+   * trigger: revoking the grant is what makes a concurrent in-flight
+   * refresh fail with `invalid_grant`, so without the guard that failure's
+   * `markNeedsReconnect` call would immediately undo the operator's
+   * disconnect. When the guard holds (the row exists but is already
+   * `disconnected`), this is a silent no-op — NOT the missing-row case
+   * below, which still throws.
+   *
+   * Throws if no mailbox exists with this id at all. Every caller reaches
+   * this method with a `mailboxId` it just read a `mailbox_oauth_tokens` row
+   * for, and `mailbox_oauth_tokens.mailbox_id` is a `REFERENCES
+   * mailboxes(id)` foreign key (migration 010), so a genuinely missing
+   * mailbox row here is structurally unreachable in practice — thrown
+   * rather than silently no-op'd, matching
+   * `ConversationStore.setThreadDeliveryStatus`'s same throw-on-zero-rows
+   * convention (`src/store/conversations.ts`). Distinguishing "no such row"
+   * from "row exists but guard held" costs one extra `SELECT`, taken only
+   * when the `UPDATE` matches zero rows (the uncommon path).
    */
   markNeedsReconnect(mailboxId: string): Promise<void>
 
@@ -107,13 +132,28 @@ export interface MailboxStore {
    * Mark `mailboxId` `paused` — gmail-push.md §5's dogfood response to an
    * expired (404) Gmail history cursor: "pause the mailbox and flag it for
    * manual rebaseline," rather than an automatic full-mailbox resync. Same
-   * shape as {@link markNeedsReconnect}: a single `UPDATE ... RETURNING
-   * id`, idempotent, throws if no mailbox exists with this id (the
-   * reconcile handler always reaches this with a `mailboxId` it just read a
-   * mailbox row for, so a missing row here is structurally unreachable in
-   * practice).
+   * shape as {@link markNeedsReconnect}, INCLUDING its `AND status <>
+   * 'disconnected'` guard and the same "guard held → silent no-op, row
+   * missing entirely → throw" split — see that method's doc for the full
+   * rationale (a reconcile job's cursor-expiry pause is just as capable of
+   * racing an operator disconnect as a token-refresh failure is).
    */
   markPaused(mailboxId: string): Promise<void>
+
+  /**
+   * Mark `mailboxId` `disconnected` — the terminal state HT-47's disconnect
+   * admin action puts a mailbox into (see the module doc). Same shape as
+   * {@link markNeedsReconnect}/{@link markPaused}: a single `UPDATE ...
+   * RETURNING id`, idempotent, throws if no mailbox exists with this id.
+   *
+   * Optionally runs against a caller-supplied `tx` (`Db.transaction`'s
+   * `Queryable`) instead of the bound `db`, so the disconnect service can
+   * commit this alongside deleting the mailbox's token and watch-state rows
+   * as ONE atomic unit (`../mail/gmail-disconnect.ts`) — the same reason
+   * {@link upsertConnectedMailbox} takes `tx`. Omitted, it runs standalone on
+   * `db`.
+   */
+  markDisconnected(mailboxId: string, tx?: Queryable): Promise<void>
 
   /**
    * Insert a new connected mailbox, or — on a **reconnect** for an address
@@ -185,21 +225,33 @@ export function createMailboxStore(db: Db): MailboxStore {
 
     async markNeedsReconnect(mailboxId) {
       const updated = await db.query<{ id: string }>(
-        "UPDATE mailboxes SET status = 'needs_reconnect', updated_at = now() WHERE id = $1 RETURNING id",
+        "UPDATE mailboxes SET status = 'needs_reconnect', updated_at = now() " +
+          "WHERE id = $1 AND status <> 'disconnected' RETURNING id",
         [mailboxId],
       )
       if (updated.length === 0) {
-        throw new Error(`markNeedsReconnect: no mailbox with id ${mailboxId}`)
+        await assertMailboxExists(db, mailboxId, 'markNeedsReconnect')
       }
     },
 
     async markPaused(mailboxId) {
       const updated = await db.query<{ id: string }>(
-        "UPDATE mailboxes SET status = 'paused', updated_at = now() WHERE id = $1 RETURNING id",
+        "UPDATE mailboxes SET status = 'paused', updated_at = now() " +
+          "WHERE id = $1 AND status <> 'disconnected' RETURNING id",
         [mailboxId],
       )
       if (updated.length === 0) {
-        throw new Error(`markPaused: no mailbox with id ${mailboxId}`)
+        await assertMailboxExists(db, mailboxId, 'markPaused')
+      }
+    },
+
+    async markDisconnected(mailboxId, tx) {
+      const updated = await (tx ?? db).query<{ id: string }>(
+        "UPDATE mailboxes SET status = 'disconnected', updated_at = now() WHERE id = $1 RETURNING id",
+        [mailboxId],
+      )
+      if (updated.length === 0) {
+        throw new Error(`markDisconnected: no mailbox with id ${mailboxId}`)
       }
     },
 
@@ -223,6 +275,21 @@ export function createMailboxStore(db: Db): MailboxStore {
       )
       return rows.map(toMailboxRecord)
     },
+  }
+}
+
+/**
+ * Throws `<label>: no mailbox with id <mailboxId>` unless a `mailboxes` row
+ * with that id exists — called only when `markNeedsReconnect`/`markPaused`'s
+ * guarded `UPDATE` matched zero rows, to tell "no such mailbox" (throw) apart
+ * from "the row exists but its `AND status <> 'disconnected'` guard held"
+ * (silent no-op — see those methods' docs). One extra `SELECT`, only on that
+ * already-uncommon path.
+ */
+async function assertMailboxExists(db: Db, mailboxId: string, label: string): Promise<void> {
+  const rows = await db.query<{ id: string }>('SELECT id FROM mailboxes WHERE id = $1', [mailboxId])
+  if (rows.length === 0) {
+    throw new Error(`${label}: no mailbox with id ${mailboxId}`)
   }
 }
 

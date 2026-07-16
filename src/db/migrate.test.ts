@@ -56,6 +56,7 @@ describe('migrate', () => {
       { id: 14, name: 'inbound_delivery_lease' },
       { id: 15, name: 'thread_attachments' },
       { id: 16, name: 'gmail_reconcile_lease' },
+      { id: 17, name: 'mailboxes_disconnected_status' },
     ])
   })
 
@@ -82,6 +83,7 @@ describe('migrate', () => {
       { id: 14 },
       { id: 15 },
       { id: 16 },
+      { id: 17 },
     ])
   })
 

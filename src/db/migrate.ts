@@ -788,6 +788,35 @@ ALTER TABLE gmail_watch_state ADD COLUMN claimed_until timestamptz;
 `
 
 /**
+ * Migration 017 — `mailboxes` grows a `'disconnected'` lifecycle status
+ * (HT-47; specs/mail/gmail-connect.md's disconnect section). The inverse of
+ * HT-40's connect flow (migration 009's original `active`/`paused`/
+ * `needs_reconnect` set) needs a FOURTH state: a mailbox an operator has
+ * explicitly disconnected, as distinct from `paused` (an automatic,
+ * resumable pause the ingest pipeline itself applies, gmail-push.md §5) or
+ * `needs_reconnect` (a dead grant awaiting reconnection). `'disconnected'` is
+ * a terminal, operator-initiated state — the DEFAULT this ticket chose is to
+ * keep the `mailboxes` row (not delete it, preserving the address's history
+ * and its `UNIQUE` claim) while deleting its `mailbox_oauth_tokens` and
+ * `gmail_watch_state` rows (the disconnect service's own job, `src/mail/
+ * gmail-disconnect.ts`) — this migration only widens the CHECK that row's
+ * `status` column accepts.
+ *
+ * Same DROP-then-ADD shape as migration 004/006's own CHECK-constraint
+ * widenings: `mailboxes_status_check` is Postgres's default `<table>_
+ * <column>_check` name for migration 009's inline column CHECK (no rename,
+ * no rewrite needed here — see the module doc's precedent for the exact
+ * naming logic). No backfill/UPDATE statement is needed, unlike migration
+ * 004's status widening: `'disconnected'` is a brand-new value no existing
+ * row could already hold, so there is nothing to migrate INTO the new set,
+ * only room to grow.
+ */
+const MIGRATION_017_MAILBOXES_DISCONNECTED_STATUS = `
+ALTER TABLE mailboxes DROP CONSTRAINT mailboxes_status_check;
+ALTER TABLE mailboxes ADD CONSTRAINT mailboxes_status_check CHECK (status IN ('active','paused','needs_reconnect','disconnected'));
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -868,6 +897,11 @@ const MIGRATIONS: Migration[] = [
     id: 16,
     name: 'gmail_reconcile_lease',
     sql: MIGRATION_016_GMAIL_RECONCILE_LEASE,
+  },
+  {
+    id: 17,
+    name: 'mailboxes_disconnected_status',
+    sql: MIGRATION_017_MAILBOXES_DISCONNECTED_STATUS,
   },
 ]
 

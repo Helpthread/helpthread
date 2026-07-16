@@ -152,6 +152,30 @@ describe('buildApp — end-to-end wiring over PGlite', () => {
     expect(body.consentUrl).toContain(encodeURIComponent(`${ORIGIN}/api/v1/inbound/gmail/callback`))
   })
 
+  it('wires gmailDisconnect: POST /inbound/gmail/disconnect (Bearer) → reaches the handler (404 for an unconnected address, no real network call needed to prove it)', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/gmail/disconnect`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: 'nobody@example.test' }),
+      }),
+    )
+    expect(res.status).toBe(404)
+    const body = (await res.json()) as { error: { code: string } }
+    expect(body.error.code).toBe('not_found')
+  })
+
+  it('rejects a disconnect request without the service Bearer token → 401', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/gmail/disconnect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: 'nobody@example.test' }),
+      }),
+    )
+    expect(res.status).toBe(401)
+  })
+
   it('wires the Gmail push webhook: POST /inbound/gmail with no valid OIDC JWT → uniform 403 (route handled, not 404)', async () => {
     const res = await handler(
       new Request(`${ORIGIN}/api/v1/inbound/gmail`, {

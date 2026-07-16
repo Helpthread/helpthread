@@ -92,6 +92,9 @@ function fakeCreateWatchClient(
     async getProfile() {
       throw new Error('fakeCreateWatchClient: getProfile not used by maintenance')
     },
+    async stop() {
+      throw new Error('fakeCreateWatchClient: stop not used by maintenance')
+    },
   })
 }
 

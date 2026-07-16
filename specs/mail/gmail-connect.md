@@ -241,3 +241,121 @@ store fakes — no cloud, no real consent:
 
 The **live** proof — a real consent, a real `watch()`, a real push threading a
 real reply — is HT-44's, not this fake-backed suite's.
+
+## 8. Disconnect (HT-47) — the admin action that undoes §2-§5
+
+The inverse of the connect flow above: an admin action that cleanly
+disconnects a connected Gmail mailbox. Implemented by
+`src/mail/gmail-disconnect.ts` (`GmailDisconnectService`), the `GmailWatchClient.stop`
+method (`src/providers/adapters/gmail/watch.ts`), and migration 017 (extends
+migration 009's `mailboxes.status` CHECK).
+
+### 8a. `POST /api/v1/inbound/gmail/disconnect` — Bearer-gated, an ORDINARY route
+
+Unlike `/callback` (§2b), disconnect has **no pre-auth carve-out at all**: it
+is initiated by the same operator credential as `/connect` (§2a), sits in the
+normal authenticated route table (`src/api/router.ts`), and needs no
+alternate authentication mechanism — there is no third party (like Google's
+redirect) landing on this path.
+
+```
+POST /api/v1/inbound/gmail/disconnect   Authorization: Bearer <service token>
+  { "address": "mailbox@example.test" }
+  → 200 { mailboxId, address, alreadyDisconnected, revoked, watchStopped }
+```
+
+The mailbox is identified by its connected `address` (the same resolution key
+`MailboxStore.getMailboxByAddress` already serves elsewhere — the push
+webhook, gmail-push.md §3), not an internal `mailboxId` an operator has no way
+to know.
+
+### 8b. The three steps, and the best-effort ordering decision
+
+1. **Stop the watch** (`GmailWatchClient.stop`, `users.stop`) using a LIVE
+   access token (`GmailOAuthTokenService.getAccessToken`, HT-38). This runs
+   FIRST — see the ordering rationale below.
+2. **Revoke the refresh token** (`revokeToken`, Google's
+   `https://oauth2.googleapis.com/revoke`, RFC 7009 §2.1) — the grant itself.
+3. **Deactivate locally, UNCONDITIONALLY**: mark the mailbox `disconnected`
+   (migration 017) and delete its `mailbox_oauth_tokens` and
+   `gmail_watch_state` rows, in ONE transaction — regardless of whether steps
+   1/2 succeeded.
+
+**Ordering decision**: `stop()` runs *before* revoke, not after, because
+revoking the refresh token can invalidate every access token issued under
+that grant immediately — calling `stop()` afterward would likely fail
+against a token Google has already killed.
+
+**Best-effort decision**: steps 1 and 2 are best-effort. A failure in either
+is caught, reported on the response (`watchStopped`/`revoked: false`), and
+does **not** abort step 3. This is the deliberate asymmetry with the connect
+flow (§4, which aborts on the first failure and persists nothing): a
+revoked-at-Google-but-active-locally mailbox is worse than the reverse. An
+operator who disconnects a mailbox wants it OFF locally no matter what — a
+Google-side hiccup (a network blip on revoke, a watch that already lapsed)
+must never leave Helpthread still ingesting or sending as that mailbox.
+**Local state always wins.**
+
+### 8c. The `disconnected` status (migration 017)
+
+The DEFAULT this ticket chose: keep the `mailboxes` row (don't delete it —
+preserving the address's history and its `UNIQUE(address)` claim) and add a
+FOURTH lifecycle status, `'disconnected'`, to migration 009's CHECK
+(`active`/`paused`/`needs_reconnect`). `disconnected` is distinct from
+`paused` (an automatic, resumable pause the ingest pipeline applies,
+gmail-push.md §5) and `needs_reconnect` (a dead grant awaiting reconnection):
+it only ever follows an explicit operator disconnect, and — unlike those two
+— reconnecting from it goes through the same `upsertConnectedMailbox` path
+(§4 step 5) as any other reconnect, since a fresh consent grant is required
+either way.
+
+### 8d. Idempotency and the unknown-mailbox case
+
+Disconnecting an already-`disconnected` mailbox is a **no-op success**
+(`200 { alreadyDisconnected: true, revoked: false, watchStopped: false }`):
+no remote call is ever attempted against Google (a resurrected token row
+still belongs to a grant this mailbox's FIRST disconnect already tried to
+revoke — re-revoking on every retry would just be repeat work for no added
+safety). Its token/watch-state rows are normally already gone too. A
+`GmailOAuthTokenService.getAccessToken` refresh (`src/mail/gmail-oauth.ts`)
+already in flight when a disconnect commits cannot resurrect a token row:
+the refresh's status check and token write are ONE guarded SQL statement
+(`MailboxTokenStore.upsertTokensUnlessDisconnected`, which locks the
+`mailboxes` row), and the disconnect transaction takes that same row lock
+FIRST (the status flip is its first statement) — every interleaving either
+commits the refresh's row before disconnect's deletes sweep it, or writes
+nothing (a review fix, in two rounds: a JS-level re-check narrowed the
+race; moving the predicate into the write statement closed it). This
+idempotent path STILL re-runs the step-3 deletes on every call, as cheap
+defense-in-depth rather than a required recovery path. An unknown `address`
+is `404 not_found`.
+
+### 8e. Acceptance
+
+Against a **faked** Google (injected `fetch` standing in for the revoke
+endpoint and a faked `GmailWatchClient.stop`) and the engine's PGlite-backed
+stores — no cloud, no real credentials:
+
+- A connected mailbox, valid Bearer → `200`; the mailbox row's `status`
+  becomes `disconnected`, its `mailbox_oauth_tokens` and `gmail_watch_state`
+  rows are gone, and `revoked`/`watchStopped` are both `true`.
+- `stop()` is called with a getAccessToken bound to THIS mailbox, and BEFORE
+  the revoke call (the ordering decision above), proven directly.
+- A revoke failure (non-2xx) → still `200`, still deactivated locally, still
+  rows deleted; `revoked: false` reported.
+- A `stop()` failure → still `200`, still deactivated locally, still rows
+  deleted; `watchStopped: false` reported.
+- Both failing → still `200`, still deactivated locally (local state always
+  wins).
+- Repeating disconnect on an already-`disconnected` mailbox → `200
+  { alreadyDisconnected: true }`, no remote calls; a token row resurrected by
+  a racing refresh in the meantime is deleted by this same call.
+- An unknown address → `404 not_found`.
+- Without the Bearer token → `401`, before the handler ever runs.
+- The stored refresh token is never present in any log line or error message
+  (the sacred check, verified directly) — revoke reads it once from
+  `MailboxTokenStore.getTokens` and never logs it, even on a revoke failure.
+
+The **live** proof — a real revoke, a real `users.stop`, confirmed against a
+real Google account — is deferred the same way §7's live connect proof is
+(HT-44 territory), not this fake-backed suite's.

@@ -269,6 +269,46 @@ describe('createGmailOAuthTokenService', () => {
     expect(stored?.scopes).toBe('https://www.googleapis.com/auth/gmail.send')
   })
 
+  // --- HT-47: never resurrect a disconnected mailbox's token row -------------
+
+  it('a refresh that completes after the mailbox is disconnected still returns the fresh token, but does not persist it', async () => {
+    const { db, tokenStore, mailboxStore } = await freshStores()
+    const mailboxId = await insertMailbox(db)
+    await tokenStore.upsertTokens(mailboxId, {
+      refreshToken: 'refresh-token',
+      accessToken: 'stale-access-token',
+      accessTokenExpiresAt: new Date(Date.now() + 60 * 1000), // inside the default skew -> refresh fires
+    })
+    // Simulates gmail-disconnect.ts's step-3 transaction having committed
+    // (mailbox flipped to `disconnected`) WHILE this refresh's Google
+    // round-trip was already in flight — the exact race the module doc's
+    // "Never resurrect a disconnected mailbox's token row" section
+    // describes.
+    await mailboxStore.markDisconnected(mailboxId)
+    const { fetchImpl } = fakeTokenEndpoint(200, {
+      access_token: 'fresh-access-token',
+      expires_in: 3600,
+    })
+    const service = createGmailOAuthTokenService({
+      tokenStore,
+      mailboxStore,
+      clientId: CLIENT_ID,
+      clientSecret: CLIENT_SECRET,
+      fetchImpl,
+    })
+
+    const token = await service.getAccessToken(mailboxId)
+
+    // The in-flight caller still gets its token — that HTTP call already
+    // happened and cannot be un-requested.
+    expect(token).toBe('fresh-access-token')
+    // But nothing was written back: the store still holds the STALE
+    // pre-refresh value, proving the fresh token was never persisted for a
+    // mailbox that is now disconnected.
+    const stored = await tokenStore.getTokens(mailboxId)
+    expect(stored?.accessToken).toBe('stale-access-token')
+  })
+
   // --- invalid_grant → needs_reconnect ----------------------------------------
 
   it('on invalid_grant: marks the mailbox needs_reconnect, throws a clear error, and never leaks secrets', async () => {

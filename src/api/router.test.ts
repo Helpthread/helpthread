@@ -81,6 +81,26 @@ describe('matchRoute', () => {
   it('does not match the list route with a trailing slash', () => {
     expect(matchRoute('GET', '/api/v1/conversations/')).toEqual({ kind: 'not-found' })
   })
+
+  // --- gmail disconnect (HT-47) ---------------------------------------------
+
+  it('matches POST /api/v1/inbound/gmail/disconnect', () => {
+    expect(matchRoute('POST', '/api/v1/inbound/gmail/disconnect')).toEqual({
+      kind: 'gmail-disconnect',
+    })
+  })
+
+  it('returns method-not-allowed for a wrong method on the disconnect route, naming POST', () => {
+    expect(matchRoute('GET', '/api/v1/inbound/gmail/disconnect')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+  })
+
+  it('does not confuse disconnect with connect or the push webhook path', () => {
+    expect(matchRoute('POST', '/api/v1/inbound/gmail/connect')).toEqual({ kind: 'gmail-connect' })
+    expect(matchRoute('POST', '/api/v1/inbound/gmail')).toEqual({ kind: 'not-found' })
+  })
 })
 
 describe('matchGmailPushWebhook', () => {

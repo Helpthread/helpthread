@@ -50,6 +50,9 @@ function fakeMailboxes(records: MailboxRecord[]): MailboxStore {
     async markPaused() {
       throw new Error('markPaused: not used by the push-webhook path')
     },
+    async markDisconnected() {
+      throw new Error('markDisconnected: not used by the push-webhook path')
+    },
     async upsertConnectedMailbox() {
       throw new Error('upsertConnectedMailbox: not used by the push-webhook path')
     },
@@ -279,6 +282,21 @@ describe('handleGmailPushWebhook', () => {
         }),
       }),
     },
+    {
+      // HT-47 review fix: this status value did not exist when the original
+      // `status !== 'active'` gate (an allowlist, not a denylist of the
+      // three pre-HT-47 statuses) was written, but the gate already covers
+      // it correctly — pinned here so a future rewrite of this check into an
+      // explicit denylist can't silently start letting `disconnected`
+      // mailboxes back in.
+      name: 'mailbox exists but is disconnected (HT-47)',
+      build: () => ({
+        request: pushRequest(),
+        deps: baseDeps({
+          mailboxes: fakeMailboxes([{ ...ACTIVE_MAILBOX, status: 'disconnected' }]),
+        }),
+      }),
+    },
   ]
 
   let referenceRejection: { status: number; body: unknown } | undefined
@@ -375,6 +393,9 @@ describe('handleGmailPushWebhook', () => {
         },
         async markPaused() {
           throw new Error('markPaused: not used by the push-webhook path')
+        },
+        async markDisconnected() {
+          throw new Error('markDisconnected: not used by the push-webhook path')
         },
         async upsertConnectedMailbox() {
           throw new Error('upsertConnectedMailbox: not used by the push-webhook path')

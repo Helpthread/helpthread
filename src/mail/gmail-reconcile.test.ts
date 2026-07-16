@@ -61,6 +61,11 @@ function fakeMailboxStore(initial: MailboxRecord): {
         if (r === undefined) throw new Error(`no mailbox ${id}`)
         records.set(id, { ...r, status: 'paused' })
       },
+      async markDisconnected(id) {
+        const r = records.get(id)
+        if (r === undefined) throw new Error(`no mailbox ${id}`)
+        records.set(id, { ...r, status: 'disconnected' })
+      },
       async upsertConnectedMailbox() {
         throw new Error('upsertConnectedMailbox: not used by the reconcile handler')
       },
@@ -129,6 +134,9 @@ function fakeWatchStateStore(initial: Record<string, string> = {}): {
         if (current !== undefined && current.token === leaseToken) {
           leases.delete(mailboxId)
         }
+      },
+      async deleteState() {
+        throw new Error('deleteState: not used by the reconcile handler')
       },
     },
     cursors,
@@ -472,6 +480,24 @@ describe('createGmailReconcileHandler', () => {
     expect(ingest).not.toHaveBeenCalled()
   })
 
+  it('a disconnected mailbox is acked without acquiring a token or touching the Gmail client (HT-47 review fix, mirrors the paused case)', async () => {
+    const { store: mailboxStore } = fakeMailboxStore(activeMailbox({ status: 'disconnected' }))
+    const getAccessToken = vi.fn(async () => 'token')
+    const createHistoryClient = vi.fn()
+    const ingest = vi.fn()
+
+    const handler = createGmailReconcileHandler(
+      baseDeps({ mailboxStore, tokenService: { getAccessToken }, ingest, createHistoryClient }),
+    )
+
+    const result = await handler(job())
+
+    expect(result).toEqual({ kind: 'ack' })
+    expect(getAccessToken).not.toHaveBeenCalled()
+    expect(createHistoryClient).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+  })
+
   it('an unknown mailbox id (mailbox row gone) is acked, same as not-active', async () => {
     const { store: mailboxStore } = fakeMailboxStore(activeMailbox())
     const createHistoryClient = vi.fn()
@@ -755,6 +781,9 @@ describe('createGmailReconcileHandler', () => {
         },
         async markPaused() {
           throw new Error('markPaused: not used by this test')
+        },
+        async markDisconnected() {
+          throw new Error('markDisconnected: not used by this test')
         },
         async upsertConnectedMailbox() {
           throw new Error('upsertConnectedMailbox: not used by this test')
