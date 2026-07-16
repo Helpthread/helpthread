@@ -141,6 +141,34 @@ replay re-fetching and re-ingesting the same still-un-advanced message, which re
 subsequent reconcile run for as long as the cursor cannot pass it, bounded above by that
 transport's own periodic maintenance sweep (gmail-push.md §6) even with no new mail at all.
 
+**A lease is advisory, not exclusive — so every commit is fenced.** Nothing stops a
+slow-but-still-alive owner from finishing its work and committing *after* another worker has
+already reclaimed its lapsed lease — the previous paragraph's reclaim exists precisely because
+a crashed owner is indistinguishable from a merely slow one until the lease lapses. Committing
+that late write unconditionally would reintroduce the same corruption the lease closes: two
+live owners, two commits, two conversations for one email. So `attempts` doubles as a claim
+generation: every successful claim returns the row's current `attempts`, the caller carries
+that number for as long as it processes the delivery, and every ledger-write method
+(`markStoredInTx`, `markSuppressed`, `markFailed`, `markDeadLetter`) requires that same number
+back and fences its `UPDATE` on `status = 'received' AND attempts = $claimedAttempts`. A
+`received`-lease reclaim bumps `attempts` (next paragraph), and any `markFailed`/`markDeadLetter`
+bumps it too, so a stale owner's write always matches zero rows and is rejected — the same
+optimistic-concurrency shape the outbound queue adapter (`src/providers/adapters/
+postgres-queue/index.ts`) already uses. A rejected write reports `in-progress`, never a forced
+`failed`/`dead-letter` outcome that would just collide with whichever generation now legitimately
+owns the row.
+
+**The reclaim counts toward the retry budget too.** A `received`-lease reclaim also bumps
+`attempts` — a lapsed lease is itself evidence of an abandoned attempt (the owner crashed,
+OOM'd, or otherwise never reached a recorded outcome), which is exactly what a message that
+hard-crashes the ingest process on every attempt looks like. Without this, such a message would
+retry forever: it never reaches the `failed`/`dead-letter` catch paths that are the only other
+place `attempts` increments, so `MAX_INGEST_ATTEMPTS` would never engage and the mailbox's
+reconcile cursor would stay wedged behind it permanently — the very symptom this section exists
+to close, recurring instead of stranded. The pipeline checks the post-reclaim `attempts` against
+`MAX_INGEST_ATTEMPTS` before spending another parse/store cycle on a message already proven to
+keep crashing, and dead-letters it immediately once the budget is exhausted.
+
 **At-least-once, with honest partial-failure handling.** Ingest can still fail partway —
 an unparseable message, a blob write that succeeds then a transaction that aborts, an
 `append→deleted` whose fallback-create then fails. The pipeline mirrors the outbound
@@ -250,3 +278,11 @@ engine's existing store/keyring fakes — no cloud required:
   reclaims and fully reprocesses it — exactly one conversation, ledger ends `stored` (§4's
   lease). Two concurrent re-deliveries of the same lapsed row → exactly one reclaim wins,
   same as the fresh-key concurrent-claim case above.
+- A stale owner that outlives its lease and only THEN tries to commit, after another worker
+  has already reclaimed the lapsed lease → the fenced write is rejected (`LeaseLostError`),
+  reported as `in-progress`; the reclaiming worker's own commit is the one that lands, and no
+  duplicate conversation is created.
+- A message that hard-crashes the ingest process on every attempt (never reaching a recorded
+  `failed`/`dead-letter` outcome, only ever a lapsed lease) → the reclaim's own `attempts`
+  bump still exhausts `MAX_INGEST_ATTEMPTS`, converging to `dead-letter` the same as a message
+  that always throws — not retried forever.

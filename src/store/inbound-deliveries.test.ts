@@ -5,6 +5,7 @@ import { createConversationStore } from './conversations.js'
 import {
   createInboundDeliveryStore,
   type InboundDeliveryStore,
+  LeaseLostError,
   markStoredInTx,
 } from './inbound-deliveries.js'
 
@@ -109,7 +110,7 @@ describe('createInboundDeliveryStore', () => {
     const { store, mailboxId } = await freshStore()
     const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
-    const updated = await store.markSuppressed(delivery.id, 'own-message-loop')
+    const updated = await store.markSuppressed(delivery.id, 'own-message-loop', delivery.attempts)
 
     expect(updated).toMatchObject({
       id: delivery.id,
@@ -124,7 +125,7 @@ describe('createInboundDeliveryStore', () => {
     const { store, mailboxId } = await freshStore()
     const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
-    const updated = await store.markFailed(delivery.id, 'parse: boom')
+    const updated = await store.markFailed(delivery.id, 'parse: boom', delivery.attempts)
 
     expect(updated).toMatchObject({
       id: delivery.id,
@@ -138,7 +139,11 @@ describe('createInboundDeliveryStore', () => {
     const { store, mailboxId } = await freshStore()
     const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
-    const updated = await store.markDeadLetter(delivery.id, 'store: still broken')
+    const updated = await store.markDeadLetter(
+      delivery.id,
+      'store: still broken',
+      delivery.attempts,
+    )
 
     expect(updated).toMatchObject({
       id: delivery.id,
@@ -150,15 +155,81 @@ describe('createInboundDeliveryStore', () => {
 
   it('every mark* method throws for an unknown id', async () => {
     const { store } = await freshStore()
-    await expect(store.markSuppressed(RANDOM_UUID, 'x')).rejects.toThrow(/no delivery with id/)
-    await expect(store.markFailed(RANDOM_UUID, 'x')).rejects.toThrow(/no delivery with id/)
-    await expect(store.markDeadLetter(RANDOM_UUID, 'x')).rejects.toThrow(/no delivery with id/)
+    await expect(store.markSuppressed(RANDOM_UUID, 'x', 0)).rejects.toThrow(/no delivery with id/)
+    await expect(store.markFailed(RANDOM_UUID, 'x', 0)).rejects.toThrow(/no delivery with id/)
+    await expect(store.markDeadLetter(RANDOM_UUID, 'x', 0)).rejects.toThrow(/no delivery with id/)
+  })
+
+  // --- HT-45 review fix: the `attempts` fence (must-fix). -------------------
+
+  it('a mark* write whose claimed-attempts fence no longer matches throws LeaseLostError, and does NOT touch the row', async () => {
+    const { db, store, mailboxId } = await freshStore()
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+
+    // Simulate a concurrent reclaim having moved the row's generation on
+    // (e.g. a received-lease reclaim bumped attempts) — this stale caller's
+    // captured fence (0) is no longer current.
+    await store.markFailed(delivery.id, 'boom', delivery.attempts)
+
+    await expect(
+      store.markSuppressed(delivery.id, 'own-message-loop', delivery.attempts),
+    ).rejects.toThrow(LeaseLostError)
+
+    // The row was NOT overwritten by the stale write — read it directly
+    // rather than via `claim()`, which would itself reclaim the 'failed' row.
+    const row = await db.query<{ status: string }>(
+      'SELECT status FROM inbound_deliveries WHERE id = $1',
+      [delivery.id],
+    )
+    expect(row[0].status).toBe('failed')
+  })
+
+  it('a stale owner cannot commit markStoredInTx after another worker reclaimed its lapsed lease (the must-fix scenario)', async () => {
+    const { db, store, mailboxId } = await freshStore()
+    const first = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    await expireLease(db, first.delivery.id)
+
+    // Worker B reclaims the lapsed lease — a NEW claim generation, attempts
+    // bumped 0 -> 1.
+    const reclaimed = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    expect(reclaimed.claimed).toBe(true)
+    expect(reclaimed.delivery.attempts).toBe(1)
+
+    // Worker A — the original, stale owner — was slow but alive, and only
+    // now finishes and tries to commit using the fence IT captured at ITS
+    // OWN claim time (attempts: 0), unaware it was ever reclaimed. This is
+    // the exact "two live owners, two commits" scenario the fence exists to
+    // prevent (module doc's "The fence" section).
+    const { threadId } = await createConversationStore(db).createConversation({
+      subject: 'Help with my order',
+      customerEmail: 'customer@example.test',
+      firstMessage: {
+        direction: 'inbound',
+        messageId: '<cust-1@customer.example.test>',
+        fromAddress: 'customer@example.test',
+        bodyText: 'Where is my order?',
+      },
+    })
+    await expect(
+      db.transaction((tx) =>
+        markStoredInTx(tx, first.delivery.id, threadId, first.delivery.attempts),
+      ),
+    ).rejects.toThrow(LeaseLostError)
+
+    // B's claim is untouched: still 'received', still holding attempts: 1 —
+    // A's stale write did not overwrite it, and no duplicate conversation
+    // was left behind (Db.transaction rolled the whole attempt back).
+    const row = await db.query<{ status: string; attempts: number }>(
+      'SELECT status, attempts FROM inbound_deliveries WHERE id = $1',
+      [first.delivery.id],
+    )
+    expect(row[0]).toMatchObject({ status: 'received', attempts: 1 })
   })
 
   it('claim on a FAILED row reclaims it: flips back to received, claimed: true', async () => {
     const { store, mailboxId } = await freshStore()
     const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
-    await store.markFailed(delivery.id, 'parse: boom')
+    await store.markFailed(delivery.id, 'parse: boom', delivery.attempts)
 
     const retryClaim = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
@@ -173,7 +244,7 @@ describe('createInboundDeliveryStore', () => {
   it('claim on a SUPPRESSED row does NOT reclaim it — claimed: false, status unchanged', async () => {
     const { store, mailboxId } = await freshStore()
     const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
-    await store.markSuppressed(delivery.id, 'own-message-loop')
+    await store.markSuppressed(delivery.id, 'own-message-loop', delivery.attempts)
 
     const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
@@ -184,7 +255,7 @@ describe('createInboundDeliveryStore', () => {
   it('claim on a DEAD-LETTER row does NOT reclaim it — claimed: false, status unchanged', async () => {
     const { store, mailboxId } = await freshStore()
     const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
-    await store.markDeadLetter(delivery.id, 'store: still broken')
+    await store.markDeadLetter(delivery.id, 'store: still broken', delivery.attempts)
 
     const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
@@ -220,9 +291,13 @@ describe('createInboundDeliveryStore', () => {
     expect(reclaimed.claimed).toBe(true)
     expect(reclaimed.delivery.id).toBe(first.delivery.id)
     expect(reclaimed.delivery.status).toBe('received')
-    // The reclaim itself is not a failure — attempts is untouched, same as
-    // the failed-row reclaim's contract above.
-    expect(reclaimed.delivery.attempts).toBe(0)
+    // Unlike the failed-row reclaim above, a received-lease reclaim DOES bump
+    // attempts (HT-45 review fix): a lapsed lease is itself evidence of an
+    // abandoned attempt, and the new value becomes the next owner's fence
+    // (module doc's "The fence" section) — see the ingest-level dead-letter
+    // test in src/mail/ingest.test.ts for why this must count toward the
+    // retry budget.
+    expect(reclaimed.delivery.attempts).toBe(1)
     expect(reclaimed.delivery.claimedUntil).not.toEqual(first.delivery.claimedUntil)
   })
 
@@ -269,7 +344,7 @@ describe('createInboundDeliveryStore', () => {
         bodyText: 'Where is my order?',
       },
     })
-    await db.transaction(async (tx) => markStoredInTx(tx, delivery.id, threadId))
+    await db.transaction(async (tx) => markStoredInTx(tx, delivery.id, threadId, delivery.attempts))
     await expireLease(db, delivery.id)
 
     const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
@@ -298,7 +373,7 @@ describe('createInboundDeliveryStore', () => {
     // the caller (src/mail/ingest.ts, in real use) supplies one; here a
     // single-statement transaction is enough to prove the SQL is correct.
     await db.transaction(async (tx) => {
-      const updated = await markStoredInTx(tx, delivery.id, threadId)
+      const updated = await markStoredInTx(tx, delivery.id, threadId, delivery.attempts)
       expect(updated).toMatchObject({ id: delivery.id, status: 'stored', threadId })
     })
 
@@ -313,7 +388,7 @@ describe('createInboundDeliveryStore', () => {
   it('markStoredInTx throws for an unknown id', async () => {
     const { db } = await freshStore()
     await expect(
-      db.transaction(async (tx) => markStoredInTx(tx, RANDOM_UUID, RANDOM_UUID)),
+      db.transaction(async (tx) => markStoredInTx(tx, RANDOM_UUID, RANDOM_UUID, 0)),
     ).rejects.toThrow(/no delivery with id/)
   })
 })
