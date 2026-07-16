@@ -22,7 +22,10 @@
  * 3. **Deactivate locally, UNCONDITIONALLY** — mark the mailbox
  *    `disconnected` (migration 017) and delete its `mailbox_oauth_tokens`
  *    and `gmail_watch_state` rows, in ONE transaction, regardless of
- *    whether steps 1/2 succeeded.
+ *    whether steps 1/2 succeeded. The status flip runs FIRST inside that
+ *    transaction — its row lock is what fences out a concurrent token
+ *    refresh (see the step-3 comment in `disconnect()` and
+ *    `MailboxTokenStore.upsertTokensUnlessDisconnected`'s doc).
  *
  * Steps 1 and 2 being best-effort is a deliberate asymmetry with the connect
  * flow (gmail-connect.md §4, which aborts on the FIRST failure and persists
@@ -41,13 +44,14 @@
  * `alreadyDisconnected: true`, no remote calls attempted (its token/
  * watch-state rows are normally already gone — there's nothing left to
  * revoke or stop). It STILL re-runs the step-3 transactional deletes,
- * though: a concurrent refresh (`./gmail-oauth.ts`'s `refresh()`) that was
- * already in flight when an EARLIER disconnect committed can upsert a fresh
- * token row moments later, and without re-running the (idempotent) deletes
- * on every disconnect call, that resurrected row would strand permanently —
- * an operator retrying disconnect on an already-`disconnected` mailbox is
- * exactly the recovery path for that race. An unknown address throws
- * {@link GmailDisconnectError} `not_found`, which the API layer
+ * though — as belt-and-braces cleanup, not a required recovery path: the
+ * token-resurrection race a concurrent refresh (`./gmail-oauth.ts`'s
+ * `refresh()`) used to be able to win is closed at the SQL layer
+ * (`MailboxTokenStore.upsertTokensUnlessDisconnected`'s guarded write plus
+ * this module's flip-first transaction ordering), so re-running the
+ * (idempotent, cheap) deletes here just means an operator retry also
+ * sweeps anything an unforeseen writer might strand. An unknown address
+ * throws {@link GmailDisconnectError} `not_found`, which the API layer
  * (`src/api/gmail-disconnect.ts`) maps to `404`.
  *
  * ## Never log or leak a token
@@ -55,7 +59,11 @@
  * Same discipline as `./gmail-connect.ts`/`./gmail-oauth.ts`: the refresh
  * token is read once (via `tokenStore.getTokens`) to hand to
  * {@link revokeToken} and never appears in a thrown error or a log line —
- * failures are logged with the mailbox id and the caught error only.
+ * failures are logged with the mailbox id and the caught error only, and
+ * {@link revokeToken} keeps that caught error token-free structurally: a
+ * non-2xx revoke response's body is never read into the thrown error at
+ * all, since an error body can echo the submitted token back (see the
+ * comment on its throw).
  */
 
 import type { Db } from '../db/client.js'
@@ -70,9 +78,6 @@ const GOOGLE_REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke'
 
 /** Default bound on the revoke HTTP call, matching `./gmail-oauth.ts`'s own default. */
 const DEFAULT_TIMEOUT_MS = 30_000
-
-/** Cap on how much of a non-2xx response body we fold into a thrown error — matches `../providers/adapters/gmail/watch.ts`'s identical constant. */
-const MAX_ERROR_BODY_CHARS = 500
 
 /** Options for {@link revokeToken}. */
 export interface RevokeTokenOptions {
@@ -90,9 +95,10 @@ export interface RevokeTokenOptions {
  * 7009 §2.2 and Google's own documentation, Google answers `200` for BOTH
  * "the token was revoked" and "the client submitted an already-invalid
  * token" — so a `200` here proves Google no longer honors this value, not
- * that the grant was ever live. Throws a plain `Error` (built from the HTTP
- * status and a bounded response-body snippet only — never the token) on any
- * other non-2xx.
+ * that the grant was ever live. Throws a plain `Error` on any other non-2xx,
+ * built from the HTTP status line ONLY — the response body is never read
+ * into it (see the comment on the throw for why that is structural, not
+ * just a length bound).
  */
 export async function revokeToken(options: RevokeTokenOptions): Promise<void> {
   const { token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = options
@@ -107,17 +113,15 @@ export async function revokeToken(options: RevokeTokenOptions): Promise<void> {
   })
 
   if (!response.ok) {
-    let bodySnippet = ''
-    try {
-      bodySnippet = (await response.text()).slice(0, MAX_ERROR_BODY_CHARS)
-    } catch {
-      // Body unreadable — proceed without it; the status code alone is
-      // still informative.
-    }
-    throw new Error(
-      `revokeToken: revoke failed with ${response.status} ${response.statusText}` +
-        (bodySnippet ? `: ${bodySnippet}` : ''),
-    )
+    // The response body is deliberately NEVER read into this error — not
+    // even a bounded snippet (a review fix; a length cap bounds, it does
+    // not redact). A revocation error body can echo the submitted request
+    // back — token included — and anything folded into this message ends up
+    // in the caller's failure log (`disconnect`'s `console.error`),
+    // breaking the module doc's "never log or leak a token" guarantee. The
+    // status line alone is the diagnostic; it never carries request
+    // material.
+    throw new Error(`revokeToken: revoke failed with ${response.status} ${response.statusText}`)
   }
 }
 
@@ -227,10 +231,14 @@ export function createGmailDisconnectService(
       // disconnect already tried to revoke, and re-revoking on every retry
       // would just be repeat work for no added safety. ---
       if (mailbox.status === 'disconnected') {
+        // Same flip-first statement order as the main step-3 transaction
+        // below (and for the same lock-fence reason — see its comment);
+        // markDisconnected on an already-`disconnected` row is an idempotent
+        // no-op write that still takes the row lock.
         await db.transaction(async (tx) => {
+          await mailboxStore.markDisconnected(mailbox.id, tx)
           await tokenStore.deleteTokens(mailbox.id, tx)
           await watchStateStore.deleteState(mailbox.id, tx)
-          await mailboxStore.markDisconnected(mailbox.id, tx)
         })
         return {
           mailboxId: mailbox.id,
@@ -268,11 +276,22 @@ export function createGmailDisconnectService(
       }
 
       // --- Step 3: deactivate locally, UNCONDITIONALLY (module doc: local
-      // state always wins) — one transaction. ---
+      // state always wins) — one transaction. The status flip runs FIRST,
+      // not last: its UPDATE takes the `mailboxes` row lock for the rest of
+      // the transaction, which is this side's half of the anti-resurrection
+      // fence (`../store/mailbox-tokens.ts`'s
+      // `upsertTokensUnlessDisconnected` locks the SAME row before writing).
+      // A concurrent refresh's guarded token write therefore either commits
+      // before this lock is taken — leaving a row the deleteTokens below
+      // sweeps — or blocks on it and re-evaluates its status predicate to
+      // `disconnected` after this commits, writing nothing. With the flip
+      // LAST (the original ordering), a refresh could take the row lock
+      // between this transaction's deletes and its flip and persist a row
+      // the deletes had already run past. ---
       await db.transaction(async (tx) => {
+        await mailboxStore.markDisconnected(mailbox.id, tx)
         await tokenStore.deleteTokens(mailbox.id, tx)
         await watchStateStore.deleteState(mailbox.id, tx)
-        await mailboxStore.markDisconnected(mailbox.id, tx)
       })
 
       return {

@@ -284,6 +284,28 @@ describe('createMailboxStore', () => {
     expect(rows[0].status).toBe('disconnected')
   })
 
+  it('markDisconnected PARTICIPATES in the caller-supplied tx — a rollback takes the status write with it (review fix)', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'needs_reconnect' })
+
+    // The commit test above would pass even if markDisconnected ignored `tx`
+    // and wrote through its bound `db` — only a rollback can prove the write
+    // actually rode the transaction, which is what the disconnect flow's
+    // atomic-cleanup contract (`../mail/gmail-disconnect.ts`'s step-3
+    // transaction) depends on.
+    await expect(
+      db.transaction(async (tx) => {
+        await store.markDisconnected(mailboxId, tx)
+        throw new Error('force rollback')
+      }),
+    ).rejects.toThrow('force rollback')
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('needs_reconnect')
+  })
+
   // --- upsertConnectedMailbox (HT-40, gmail-connect.md §4-§5) -----------------
 
   describe('upsertConnectedMailbox', () => {

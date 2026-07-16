@@ -88,9 +88,16 @@ describe('revokeToken', () => {
     await expect(revokeToken({ token: 'already-dead-token', fetchImpl })).resolves.toBeUndefined()
   })
 
-  it('throws on a non-2xx, without leaking the token', async () => {
+  it('throws on a non-2xx, without leaking the token — even when the error body ECHOES the token back', async () => {
     const secretToken = 'super-secret-refresh-token-do-not-leak'
-    const { fetchImpl } = fakeRevokeEndpoint(400, 'malformed request')
+    // A revocation error body can reflect the submitted request — token
+    // included (review fix: bounding the body's length does not redact it).
+    // This fixture proves the thrown error is built without reading the
+    // body at all.
+    const { fetchImpl } = fakeRevokeEndpoint(
+      400,
+      `{"error":"invalid_request","error_description":"token ${secretToken} is malformed"}`,
+    )
 
     let caught: unknown
     try {
@@ -101,6 +108,7 @@ describe('revokeToken', () => {
 
     expect(caught).toBeInstanceOf(Error)
     expect((caught as Error).message).toContain('400')
+    expect((caught as Error).message).not.toContain(secretToken)
     expect(String(caught)).not.toContain(secretToken)
   })
 
@@ -533,7 +541,7 @@ describe('createGmailDisconnectService', () => {
 
   // --- never leaks the token -------------------------------------------------
 
-  it('none of the console.error logs on a revoke/stop failure ever contain the stored refresh token', async () => {
+  it('none of the console.error logs on a revoke/stop failure ever contain the stored refresh token — even when the revoke error body echoes it', async () => {
     const watchClient = fakeWatchClient({
       stop: async () => {
         throw new Error('stop failed')
@@ -541,15 +549,26 @@ describe('createGmailDisconnectService', () => {
     })
     const { mailboxStore, tokenStore, watchStateStore, service } = await freshService({
       watchClient,
-      revokeResponse: { status: 400 },
+      // The revoke endpoint reflecting the submitted token in its error body
+      // is exactly the leak vector the review flagged: without structural
+      // redaction in revokeToken, this body would ride the thrown error into
+      // the console.error below.
+      revokeResponse: { status: 400, body: 'invalid token: stored-refresh-token' },
     })
     await connectedMailbox(mailboxStore, tokenStore, watchStateStore, 'leak-check@example.test')
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     await service.disconnect('leak-check@example.test')
 
+    expect(errorSpy).toHaveBeenCalled()
     for (const call of errorSpy.mock.calls) {
-      expect(JSON.stringify(call)).not.toContain('stored-refresh-token')
+      // Render each logged argument the way a real console would (Error
+      // objects JSON.stringify to '{}', which would hide a leaking message
+      // from this assertion).
+      const rendered = call
+        .map((arg) => (arg instanceof Error ? `${arg.name}: ${arg.message}` : JSON.stringify(arg)))
+        .join(' ')
+      expect(rendered).not.toContain('stored-refresh-token')
     }
     errorSpy.mockRestore()
   })

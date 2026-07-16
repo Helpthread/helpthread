@@ -234,4 +234,80 @@ describe('createMailboxTokenStore', () => {
     expect(await store.getTokens(mailboxA)).toBeNull()
     expect((await store.getTokens(mailboxB))?.refreshToken).toBe('refresh-b')
   })
+
+  // --- upsertTokensUnlessDisconnected (HT-47's anti-resurrection fence) -------
+
+  it('upsertTokensUnlessDisconnected writes the row and returns true for a non-disconnected mailbox', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db)
+    const expiresAt = new Date('2026-08-01T00:00:00.000Z')
+
+    const written = await store.upsertTokensUnlessDisconnected(mailboxId, {
+      refreshToken: 'refresh-token-value',
+      accessToken: 'access-token-value',
+      accessTokenExpiresAt: expiresAt,
+      scopes: 'https://www.googleapis.com/auth/gmail.send',
+    })
+
+    expect(written).toBe(true)
+    const tokens = await store.getTokens(mailboxId)
+    expect(tokens?.refreshToken).toBe('refresh-token-value')
+    expect(tokens?.accessToken).toBe('access-token-value')
+    expect(tokens?.accessTokenExpiresAt?.toISOString()).toBe(expiresAt.toISOString())
+    expect(tokens?.scopes).toBe('https://www.googleapis.com/auth/gmail.send')
+  })
+
+  it('upsertTokensUnlessDisconnected replaces an existing row (ON CONFLICT DO UPDATE) and returns true', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db)
+    await store.upsertTokens(mailboxId, { refreshToken: 'refresh-v1', accessToken: 'access-v1' })
+
+    const written = await store.upsertTokensUnlessDisconnected(mailboxId, {
+      refreshToken: 'refresh-v2',
+      accessToken: 'access-v2',
+    })
+
+    expect(written).toBe(true)
+    const rows = await db.query(
+      'SELECT mailbox_id FROM mailbox_oauth_tokens WHERE mailbox_id = $1',
+      [mailboxId],
+    )
+    expect(rows).toHaveLength(1)
+    const tokens = await store.getTokens(mailboxId)
+    expect(tokens?.refreshToken).toBe('refresh-v2')
+    expect(tokens?.accessToken).toBe('access-v2')
+  })
+
+  it('upsertTokensUnlessDisconnected writes NOTHING for a disconnected mailbox — no new row, an existing row untouched, returns false', async () => {
+    const { db, store } = await freshStore()
+    // One disconnected mailbox WITH a leftover row (should not normally
+    // exist, but proves the fence guards the upsert's UPDATE arm, not just
+    // its INSERT arm) and one without any row.
+    const withRow = await insertMailbox(db, 'with-row@example.test')
+    await store.upsertTokens(withRow, { refreshToken: 'pre-disconnect' })
+    const withoutRow = await insertMailbox(db, 'without-row@example.test')
+    await db.query("UPDATE mailboxes SET status = 'disconnected' WHERE id = $1 OR id = $2", [
+      withRow,
+      withoutRow,
+    ])
+
+    expect(await store.upsertTokensUnlessDisconnected(withRow, { refreshToken: 'poke' })).toBe(
+      false,
+    )
+    expect(await store.upsertTokensUnlessDisconnected(withoutRow, { refreshToken: 'poke' })).toBe(
+      false,
+    )
+
+    expect((await store.getTokens(withRow))?.refreshToken).toBe('pre-disconnect')
+    expect(await store.getTokens(withoutRow)).toBeNull()
+  })
+
+  it('upsertTokensUnlessDisconnected returns false (and writes nothing) for a mailbox id with no mailboxes row at all', async () => {
+    const { store } = await freshStore()
+
+    expect(
+      await store.upsertTokensUnlessDisconnected(RANDOM_UUID, { refreshToken: 'orphan' }),
+    ).toBe(false)
+    expect(await store.getTokens(RANDOM_UUID)).toBeNull()
+  })
 })

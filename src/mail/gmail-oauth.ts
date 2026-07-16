@@ -96,16 +96,18 @@
  *
  * One specific race IS worth guarding, unlike the harmless one above: a
  * refresh already in flight when `src/mail/gmail-disconnect.ts`'s
- * `disconnect()` commits (deletes the token/watch-state rows, marks the
- * mailbox `disconnected`) must not then persist its own freshly-fetched
+ * `disconnect()` commits (marks the mailbox `disconnected`, deletes the
+ * token/watch-state rows) must not then persist its own freshly-fetched
  * token — that would re-create exactly the row disconnect just deleted, for
- * a mailbox an operator explicitly took offline. `refresh()` re-checks the
- * mailbox's CURRENT status immediately before writing and skips the write
- * (but still returns the fetched access token to its caller) when it reads
- * `disconnected` — see the guard in `refresh()` below and
- * `gmail-disconnect.ts`'s own module doc for the other half of this defense
- * (disconnect re-running its deletes even on an already-`disconnected`
- * mailbox, so a resurrected row is cleaned up on the next retry either way).
+ * a mailbox an operator explicitly took offline. `refresh()` persists via
+ * `MailboxTokenStore.upsertTokensUnlessDisconnected`, whose status
+ * predicate rides ON the write statement itself (with the mailbox row
+ * locked — see that method's doc for the lock ordering against disconnect's
+ * transaction), so there is no check-to-write gap a disconnect can land in;
+ * a write the fence rejects is silently skipped, and the fetched access
+ * token is still returned to the caller. `gmail-disconnect.ts`'s module doc
+ * carries the other half of this defense (disconnect re-running its deletes
+ * even on an already-`disconnected` mailbox, as belt-and-braces cleanup).
  */
 
 import type { MailboxTokenStore, StoredMailboxTokens } from '../store/mailbox-tokens.js'
@@ -326,31 +328,32 @@ async function refresh(
   // Guard against resurrecting a token row for a mailbox an operator has
   // since disconnected (HT-47's `src/mail/gmail-disconnect.ts`; flagged in
   // its own review). This refresh's Google round-trip can straddle an
-  // in-flight `disconnect()` call: if THAT call's transaction (delete
-  // tokens, delete watch state, mark `disconnected`) commits while this
+  // in-flight `disconnect()` call: if THAT call's transaction (mark
+  // `disconnected`, delete tokens, delete watch state) commits while this
   // request is still in flight, persisting the freshly-fetched token below
   // would re-create the very row disconnect just deleted — "tokens must not
   // persist even as ciphertext" (`gmail-disconnect.ts`'s module doc) would
   // no longer hold, and outbound send would resolve a live token for a
-  // mailbox the operator explicitly took offline. Re-checking the mailbox's
-  // CURRENT status here (not the one this call started with) closes that
-  // window down to this one extra query; a disconnect that lands in the
-  // remaining gap between this check and the write below is caught on the
-  // NEXT `getAccessToken` or `disconnect()` retry (`gmail-disconnect.ts`'s
-  // idempotent-but-still-deletes handling of an already-`disconnected`
-  // mailbox). The freshly-fetched `accessToken` is still returned either
-  // way — this caller's own in-flight use of it (e.g. one `history.list`
-  // call already underway) cannot be un-requested, only its persistence can
-  // be skipped.
-  const currentMailbox = await mailboxStore.getMailboxById(mailboxId)
-  if (currentMailbox?.status !== 'disconnected') {
-    await tokenStore.upsertTokens(mailboxId, {
-      refreshToken,
-      accessToken,
-      accessTokenExpiresAt,
-      scopes,
-    })
-  }
+  // mailbox the operator explicitly took offline. The status check and the
+  // token write are ONE guarded SQL statement
+  // (`MailboxTokenStore.upsertTokensUnlessDisconnected` — see its doc for
+  // the lock ordering against disconnect's own transaction), NOT a JS-level
+  // read followed by a separate write, so there is no gap a disconnect can
+  // land in (a re-check-then-write here was round 1's fix; round 2 of the
+  // review correctly flagged the residual window, closed by moving the
+  // predicate into the write itself). A `false` return means the fence held
+  // — the write lost to a disconnect and nothing was persisted, which is
+  // exactly the intended outcome, so it is deliberately not treated as an
+  // error. The freshly-fetched `accessToken` is still returned either way —
+  // this caller's own in-flight use of it (e.g. one `history.list` call
+  // already underway) cannot be un-requested, only its persistence can be
+  // skipped.
+  await tokenStore.upsertTokensUnlessDisconnected(mailboxId, {
+    refreshToken,
+    accessToken,
+    accessTokenExpiresAt,
+    scopes,
+  })
 
   return accessToken
 }

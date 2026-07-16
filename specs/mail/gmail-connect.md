@@ -316,16 +316,19 @@ Disconnecting an already-`disconnected` mailbox is a **no-op success**
 no remote call is ever attempted against Google (a resurrected token row
 still belongs to a grant this mailbox's FIRST disconnect already tried to
 revoke — re-revoking on every retry would just be repeat work for no added
-safety). Its token/watch-state rows are normally already gone too — EXCEPT
-when a `GmailOAuthTokenService.getAccessToken` refresh
-(`src/mail/gmail-oauth.ts`) was already in flight when an earlier disconnect
-committed: that refresh's own re-check of the mailbox's current status
-(added as a review fix, alongside this same fix) closes most of that race,
-but a residual gap can still resurrect a token row moments after disconnect.
-This idempotent path therefore STILL re-runs the step-3 deletes on every
-call, rather than returning a bare no-op, specifically to clean up that
-residual case — an operator retrying disconnect is the recovery path. An
-unknown `address` is `404 not_found`.
+safety). Its token/watch-state rows are normally already gone too. A
+`GmailOAuthTokenService.getAccessToken` refresh (`src/mail/gmail-oauth.ts`)
+already in flight when a disconnect commits cannot resurrect a token row:
+the refresh's status check and token write are ONE guarded SQL statement
+(`MailboxTokenStore.upsertTokensUnlessDisconnected`, which locks the
+`mailboxes` row), and the disconnect transaction takes that same row lock
+FIRST (the status flip is its first statement) — every interleaving either
+commits the refresh's row before disconnect's deletes sweep it, or writes
+nothing (a review fix, in two rounds: a JS-level re-check narrowed the
+race; moving the predicate into the write statement closed it). This
+idempotent path STILL re-runs the step-3 deletes on every call, as cheap
+defense-in-depth rather than a required recovery path. An unknown `address`
+is `404 not_found`.
 
 ### 8e. Acceptance
 
