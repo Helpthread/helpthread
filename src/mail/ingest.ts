@@ -499,11 +499,19 @@ async function writeAttachmentBlobs(
  * stays exactly three segments deep and adapter-valid, whatever the filename
  * contains. A missing OR empty filename (`null`, `undefined`, or `''` — a
  * blank `''` is not caught by `??`) falls back to a fixed placeholder — the
- * key still needs SOME non-empty final segment.
+ * key still needs SOME non-empty final segment. Truncated to
+ * {@link MAX_SANITIZED_FILENAME_LENGTH} characters: `ParsedAttachment.filename`
+ * comes verbatim from an attacker-controlled `Content-Disposition` header
+ * with no length limit of its own, and an oversized key segment would
+ * otherwise make every retry of an ordinary message fail the SAME way at
+ * the `BlobStore` (most object-storage backends cap total key length).
  */
+const MAX_SANITIZED_FILENAME_LENGTH = 200
+
 export function sanitizeAttachmentFilename(filename: string | null): string {
   const sanitized = (filename ?? '').replaceAll(/[^A-Za-z0-9._-]/g, '_')
-  return sanitized === '' ? 'attachment' : sanitized
+  if (sanitized === '') return 'attachment'
+  return sanitized.slice(0, MAX_SANITIZED_FILENAME_LENGTH)
 }
 
 /**

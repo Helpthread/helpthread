@@ -269,12 +269,21 @@ async function attachmentViewsByThreadId(
   attachments: { store: ThreadAttachmentStore; blobStore: BlobStore },
 ): Promise<Map<string, AttachmentViewJson[]>> {
   const rows = await attachments.store.listByConversationId(conversationId)
+  // Mint every row's signed URL concurrently (independent BlobStore calls,
+  // no shared state) rather than one at a time — a conversation with many
+  // attachments would otherwise pay one signing round trip per attachment,
+  // serially, on every GET.
+  const entries = await Promise.all(
+    rows.map(
+      async (row) =>
+        [row.threadId, await toAttachmentViewJson(row, attachments.blobStore)] as const,
+    ),
+  )
   const byThreadId = new Map<string, AttachmentViewJson[]>()
-  for (const row of rows) {
-    const view = await toAttachmentViewJson(row, attachments.blobStore)
-    const existing = byThreadId.get(row.threadId)
+  for (const [threadId, view] of entries) {
+    const existing = byThreadId.get(threadId)
     if (existing === undefined) {
-      byThreadId.set(row.threadId, [view])
+      byThreadId.set(threadId, [view])
     } else {
       existing.push(view)
     }

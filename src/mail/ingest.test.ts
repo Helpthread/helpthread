@@ -757,7 +757,12 @@ describe('ingestInboundMessage', () => {
     it('replaces non-ASCII and other adapter-unsafe characters (unicode, "#", "%", quotes, control chars)', () => {
       expect(sanitizeAttachmentFilename('Résumé.pdf')).toBe('R_sum_.pdf')
       expect(sanitizeAttachmentFilename('a#b%c".txt')).toBe('a_b_c_.txt')
-      expect(sanitizeAttachmentFilename('a b.txt')).toBe('a_b.txt')
+      // A literal NUL (not an escaped placeholder) previously sat here by
+      // accident — invisible in most editors/diffs and enough to make this
+      // file read as binary to tools that sniff for one (e.g. `grep -I`).
+      // Written as an explicit escape so the control-character case this
+      // test's name promises is actually legible.
+      expect(sanitizeAttachmentFilename('a\x00b.txt')).toBe('a_b.txt')
     })
 
     it('every result matches the adapter-safe charset and is non-empty, for a battery of hostile inputs', () => {
