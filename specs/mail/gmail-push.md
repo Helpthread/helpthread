@@ -160,16 +160,31 @@ here the cursor itself is unrecoverable.)
   never doubled (inbound-ingestion.md §4). (Cadence is a tuning knob: daily bounds worst-case
   staleness to ~24h for a dropped tail notification; a tighter interval trades quota for
   freshness and can be revisited without changing the design.)
-- **Serialize reconciliation per mailbox — deferred to HT-48.** Push-triggered
-  reconciliation (§2–§3) and this sweep both advance the same mailbox's cursor, so a
-  mailbox's reconciliation runs *should* be serialized by a **reconciliation lease** (the
-  inbound analogue of the outbound delivery lease, sending.md §3a); different mailboxes
-  still reconcile concurrently. This is an efficiency guard, **not** a correctness one —
-  §4 already makes each run's cursor advance independently safe, so a push landing
-  mid-sweep is deduped, never doubled — it only avoids redundant
-  `history.list`/`messages.get` work. Because it is pure optimization and carries a
-  migration, it is **split out of HT-42 into HT-48**: HT-42 ships the renewal cron and the
-  sweep (which are correct without the lease); HT-48 adds the lease.
+- **Reconciliation is serialized per mailbox by a reconciliation lease (HT-48,
+  implemented).** Push-triggered reconciliation (§2–§3) and the daily sweep both advance
+  the same mailbox's cursor, so a mailbox's reconciliation runs are serialized by a
+  **reconciliation lease** — the inbound analogue of the outbound delivery lease
+  (sending.md §3a) — held on `gmail_watch_state.claimed_until` (migration 016,
+  `src/store/gmail-watch-state.ts`'s `claimReconcileLease`/`releaseReconcileLease`);
+  different mailboxes still reconcile concurrently, since the lease is keyed by
+  `mailboxId`. This is an efficiency guard, **not** a correctness one — §4 already makes
+  each run's cursor advance independently safe, so a push landing mid-sweep is deduped,
+  never doubled — it only avoids redundant `history.list`/`messages.get` work.
+
+  The lease lives entirely in the reconcile job's **consumer** (`src/mail/gmail-
+  reconcile.ts`), not in either producer (the push webhook or this sweep): a run claims
+  the lease once it has a confirmed stored cursor and before calling `history.list`; a run
+  that cannot claim it (another holder's lease is still live) SKIPS its own Gmail work and
+  acks immediately — the holder in flight will advance the cursor. The lease is released in
+  a `finally` around the `history.list`/fetch/ingest/cursor-advance block, so it is released
+  on every exit — the happy-path ack, the expired-cursor pause, the blocked-retry, and an
+  unexpected thrown error alike — *before* that error propagates to the handler's own
+  top-level catch. This was a deliberate choice: because the lease is a pure efficiency
+  guard, the one failure mode it must never produce is a mailbox permanently (or even
+  needlessly long) locked out of reconciliation after a crash; releasing on every path,
+  including a throw, means the next trigger can reconcile the mailbox immediately rather
+  than waiting out the lease's duration. The lease's own expiry remains as a backstop for
+  the one case a `finally` cannot reach — the process being killed outright before it runs.
 - **Failure handling — the token layer owns `needs_reconnect`.** A dead grant
   (revoked/expired, admin change) surfaces as an `invalid_grant` when the OAuth token
   service refreshes, and *that* is what marks the mailbox **needs-reconnect** (HT-38,

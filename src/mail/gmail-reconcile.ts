@@ -56,6 +56,45 @@
  * and reported as `{ kind: 'retry' }` — never as `ack`, and never after
  * advancing the cursor.
  *
+ * ## The reconciliation lease (HT-48; gmail-push.md §6)
+ *
+ * Between step 3 (a confirmed, non-null stored cursor) and step 4
+ * (`history.list`), this run claims `mailboxId`'s reconciliation lease
+ * (`GmailWatchStateStore.claimReconcileLease`, `claimed_until` on
+ * `gmail_watch_state`, migration 016) — the inbound analogue of the
+ * outbound delivery lease (`ConversationStore.claimThreadForDelivery`,
+ * sending.md §3a). It exists ONLY to stop a push-triggered reconcile
+ * (HT-41) and the daily sweep (HT-42) from doing the SAME `history.list`/
+ * `messages.get` work concurrently when both land on one mailbox at once —
+ * gmail-push.md §6 is explicit this is an efficiency guard, not a
+ * correctness one: step 6's cursor-advance rule and the ingest pipeline's
+ * dedup on `(mailboxId, providerMessageId)` (inbound-ingestion.md §4)
+ * already make either ordering safe with no lease at all. Different
+ * mailboxes never contend — the lease is keyed by `mailboxId`.
+ *
+ * A run that cannot claim the lease (another holder's `claimed_until` is
+ * still in the future) SKIPS: it acks immediately, doing no Gmail work at
+ * all, because the run that DOES hold the lease will advance the cursor —
+ * there is nothing this run needs to do that the holder won't already do.
+ *
+ * The lease is released in a `finally` wrapped around steps 4-6, so it is
+ * released on every path out of that block: the happy-path ack, the
+ * expired-cursor pause, the blocked-retry (non-terminal ingest outcome),
+ * AND an unexpected thrown error (network, Gmail client, ingest, store) —
+ * release happens BEFORE the throw propagates to this handler's own
+ * top-level catch. This is a deliberate choice: because the lease is purely
+ * an efficiency guard (never a correctness one), the failure mode it must
+ * never produce is "a mailbox that just threw is locked out of
+ * reconciliation until the lease naturally expires" — releasing
+ * immediately on every exit path, including a throw, means the NEXT
+ * trigger (a fresh push, or tomorrow's sweep) can reconcile this mailbox
+ * right away rather than waiting out `reconcileLeaseMs`. The release call
+ * itself is wrapped in its own try/catch that only logs — a release
+ * failure (a genuine DB error) must not override this run's own outcome
+ * (`ack`/`retry`) with something else, and IS still covered by the lease's
+ * own expiry as a backstop for the one case a `finally` block cannot help:
+ * the process being killed outright before the `finally` ever runs.
+ *
  * ## Never drop a message (charter §2; gmail-push.md §4)
  *
  * The cursor is the only thing that can make a message permanently
@@ -112,6 +151,21 @@ import type { IngestOutcome } from './ingest.js'
  */
 export const DEFAULT_MAX_INLINE_RAW_BYTES = 1_000_000
 
+/**
+ * How long one mailbox's reconciliation lease (module doc's "The
+ * reconciliation lease" section, HT-48) is held for. Not pinned to any spec
+ * number — chosen as a judgment call (flagged in this ticket's report),
+ * matching `./delivery-worker.ts`'s `DEFAULT_STALE_AFTER_MS` (5 minutes):
+ * long enough to cover a realistic `history.list` page plus a batch of
+ * `messages.get`/`ingest` calls, short enough that a crashed holder (the
+ * one case the `finally`-release in the module doc cannot reach) does not
+ * lock a mailbox out of reconciliation for long. Because this is a pure
+ * efficiency guard (never a correctness one — module doc), the exact value
+ * only trades a little redundant Gmail API work against lock-out latency,
+ * never data safety.
+ */
+export const DEFAULT_RECONCILE_LEASE_MS = 5 * 60_000
+
 /** Dependencies {@link createGmailReconcileHandler} needs. */
 export interface GmailReconcileHandlerDeps {
   /** Resolves a live Gmail API access token for one mailbox at a time (`./gmail-oauth.ts`). */
@@ -160,6 +214,9 @@ export interface GmailReconcileHandlerDeps {
 
   /** See {@link DEFAULT_MAX_INLINE_RAW_BYTES}. */
   maxInlineRawBytes?: number
+
+  /** See {@link DEFAULT_RECONCILE_LEASE_MS}. */
+  reconcileLeaseMs?: number
 }
 
 /** Build the `QueueMessageHandler<GmailReconcileJob>`. See the module doc for the full control flow. */
@@ -174,6 +231,7 @@ export function createGmailReconcileHandler(
     ingest,
     createHistoryClient,
     maxInlineRawBytes = DEFAULT_MAX_INLINE_RAW_BYTES,
+    reconcileLeaseMs = DEFAULT_RECONCILE_LEASE_MS,
   } = deps
 
   return async (message: QueueMessage<GmailReconcileJob>): Promise<QueueHandlerResult> => {
@@ -187,6 +245,7 @@ export function createGmailReconcileHandler(
         ingest,
         createHistoryClient,
         maxInlineRawBytes,
+        reconcileLeaseMs,
       })
     } catch (err) {
       // Any unexpected throw (network, timeout, a non-404 non-2xx from the
@@ -216,6 +275,7 @@ interface ReconcileDeps {
   ingest: (raw: RawInboundMessage) => Promise<IngestOutcome>
   createHistoryClient: (getAccessToken: () => Promise<string>) => GmailHistoryClient
   maxInlineRawBytes: number
+  reconcileLeaseMs: number
 }
 
 /** Run steps 1-6 (module doc) for one mailbox's reconcile job. */
@@ -232,6 +292,7 @@ async function reconcileOneMailbox(
     ingest,
     createHistoryClient,
     maxInlineRawBytes,
+    reconcileLeaseMs,
   } = deps
 
   // --- Step 1: re-read CURRENT status — never trust the job's snapshot. ---
@@ -285,71 +346,113 @@ async function reconcileOneMailbox(
     return { kind: 'ack' }
   }
 
-  // --- Step 4: history.list from the stored cursor. ---
-  const client = createHistoryClient(getAccessToken)
-  const listed = await client.listAddedMessageIds(cursor)
-  if (listed.kind === 'expired') {
-    await mailboxStore.markPaused(mailboxId)
-    logReconcileEvent('warn', {
+  // --- Step 3a: claim the reconciliation lease (HT-48; module doc's "The
+  // reconciliation lease" section). A run that cannot claim it SKIPS its
+  // own history.list — the current holder will advance the cursor. This is
+  // a pure efficiency guard: skipping here is always safe regardless of
+  // what the holder is doing, because step 6's cursor-advance rule and the
+  // ingest pipeline's dedup (inbound-ingestion.md §4) already make either
+  // ordering correct with no lease at all. ---
+  const claimedLease = await watchStateStore.claimReconcileLease(mailboxId, reconcileLeaseMs)
+  if (!claimedLease) {
+    logReconcileEvent('info', {
       mailboxId,
       outcome: 'ack',
-      reason: 'cursor-expired',
-      cursor,
-      note: 'cursor expired (404); mailbox paused for manual rebaseline per gmail-push.md §5',
+      reason: 'reconcile-lease-held',
+      note: 'another in-flight reconcile (push or sweep) holds this mailbox lease and will advance the cursor — gmail-push.md §6, HT-48',
     })
     return { kind: 'ack' }
   }
 
-  // --- Step 5: fetch + ingest each added message, in order. ---
-  const outcomes: IngestOutcome[] = []
-  for (const messageId of listed.messageIds) {
-    const fetched = await client.getRawMessage(messageId)
-    if (fetched === null) {
-      // Deleted between list and get — nothing to ingest, nothing to
-      // retry; skip (module doc, step 5).
-      continue
+  try {
+    // --- Step 4: history.list from the stored cursor. ---
+    const client = createHistoryClient(getAccessToken)
+    const listed = await client.listAddedMessageIds(cursor)
+    if (listed.kind === 'expired') {
+      await mailboxStore.markPaused(mailboxId)
+      logReconcileEvent('warn', {
+        mailboxId,
+        outcome: 'ack',
+        reason: 'cursor-expired',
+        cursor,
+        note: 'cursor expired (404); mailbox paused for manual rebaseline per gmail-push.md §5',
+      })
+      return { kind: 'ack' }
     }
 
-    const content = await buildRawMessageContent(fetched.rawBytes, {
-      mailboxId,
-      messageId,
-      maxInlineRawBytes,
-      blobStore,
-    })
+    // --- Step 5: fetch + ingest each added message, in order. ---
+    const outcomes: IngestOutcome[] = []
+    for (const messageId of listed.messageIds) {
+      const fetched = await client.getRawMessage(messageId)
+      if (fetched === null) {
+        // Deleted between list and get — nothing to ingest, nothing to
+        // retry; skip (module doc, step 5).
+        continue
+      }
 
-    const raw: RawInboundMessage = {
-      content,
-      mailboxId,
-      providerMessageId: messageId,
-      receivedAt: fetched.receivedAt,
+      const content = await buildRawMessageContent(fetched.rawBytes, {
+        mailboxId,
+        messageId,
+        maxInlineRawBytes,
+        blobStore,
+      })
+
+      const raw: RawInboundMessage = {
+        content,
+        mailboxId,
+        providerMessageId: messageId,
+        receivedAt: fetched.receivedAt,
+      }
+      outcomes.push(await ingest(raw))
     }
-    outcomes.push(await ingest(raw))
-  }
 
-  // --- Step 6: advance the cursor iff every outcome is terminal & ledgered. ---
-  const blocking = outcomes.find((o) => o.kind === 'failed' || o.kind === 'in-progress')
-  if (blocking !== undefined) {
-    logReconcileEvent('warn', {
+    // --- Step 6: advance the cursor iff every outcome is terminal & ledgered. ---
+    const blocking = outcomes.find((o) => o.kind === 'failed' || o.kind === 'in-progress')
+    if (blocking !== undefined) {
+      logReconcileEvent('warn', {
+        mailboxId,
+        outcome: 'retry',
+        reason: 'non-terminal-ingest-outcome',
+        blockingOutcomeKind: blocking.kind,
+        blockingProviderMessageId: blocking.providerMessageId,
+        batchSize: listed.messageIds.length,
+      })
+      return { kind: 'retry' }
+    }
+
+    await watchStateStore.setCursor(mailboxId, listed.newHistoryId)
+    logReconcileEvent('info', {
       mailboxId,
-      outcome: 'retry',
-      reason: 'non-terminal-ingest-outcome',
-      blockingOutcomeKind: blocking.kind,
-      blockingProviderMessageId: blocking.providerMessageId,
-      batchSize: listed.messageIds.length,
+      outcome: 'ack',
+      reason: 'reconciled',
+      messageCount: listed.messageIds.length,
+      previousCursor: cursor,
+      newHistoryId: listed.newHistoryId,
     })
-    return { kind: 'retry' }
+    return { kind: 'ack' }
+  } finally {
+    // Release on every exit from the try above — success, the
+    // expired-cursor pause, the blocked-retry, AND an unexpected throw
+    // (which this `finally` runs BEFORE the exception propagates to
+    // createGmailReconcileHandler's own top-level catch). See the module
+    // doc's "The reconciliation lease" section for why this must never be
+    // conditioned on the outcome: the lease is a pure efficiency guard, so
+    // a mailbox that just threw must not be locked out of reconciliation
+    // until reconcileLeaseMs elapses.
+    try {
+      await watchStateStore.releaseReconcileLease(mailboxId)
+    } catch (releaseErr) {
+      // A release failure must not override this run's own outcome (ack/
+      // retry, or the throw already in flight) — logged only. The lease's
+      // own expiry remains the backstop (module doc).
+      logReconcileEvent('error', {
+        mailboxId,
+        outcome: 'lease-release-failed',
+        reason: 'unexpected-error',
+        error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+      })
+    }
   }
-
-  await watchStateStore.setCursor(mailboxId, listed.newHistoryId)
-  logReconcileEvent('info', {
-    mailboxId,
-    outcome: 'ack',
-    reason: 'reconciled',
-    messageCount: listed.messageIds.length,
-    previousCursor: cursor,
-    newHistoryId: listed.newHistoryId,
-  })
-  return { kind: 'ack' }
 }
 
 /**

@@ -490,6 +490,12 @@ describe('createGmailConnectService', () => {
       setWatchExpiration: async () => {
         throw new Error('setWatchExpiration: not used by the connect flow')
       },
+      claimReconcileLease: async () => {
+        throw new Error('claimReconcileLease: not used by the connect flow')
+      },
+      releaseReconcileLease: async () => {
+        throw new Error('releaseReconcileLease: not used by the connect flow')
+      },
     }
     const { fetchImpl } = fakeTokenEndpoint(200, DEFAULT_TOKEN_RESPONSE)
     const service = createGmailConnectService({

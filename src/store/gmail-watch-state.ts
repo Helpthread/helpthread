@@ -3,8 +3,11 @@
  * (`gmail_watch_state`, migration 011, `src/db/migrate.ts`; gmail-push.md
  * §4 "the cursor"). One row per mailbox (`mailbox_id` is the PRIMARY KEY —
  * migration 011's doc comment), holding the `history_id` watermark
- * `history.list` resumes from, plus `watch_expiration` (the `watch()`
- * renewal deadline, gmail-push.md §6).
+ * `history.list` resumes from, `watch_expiration` (the `watch()` renewal
+ * deadline, gmail-push.md §6), and `claimed_until` (the per-mailbox
+ * reconciliation lease, HT-48, migration 016, gmail-push.md §6) —
+ * {@link GmailWatchStateStore.claimReconcileLease}/
+ * {@link GmailWatchStateStore.releaseReconcileLease} below.
  *
  * ## Why {@link GmailWatchStateStore.setCursor} upserts rather than a plain `UPDATE`
  *
@@ -96,6 +99,47 @@ export interface GmailWatchStateStore {
    * as a safe no-op.
    */
   setWatchExpiration(mailboxId: string, watchExpiration: Date): Promise<void>
+
+  /**
+   * Claim `mailboxId`'s reconciliation lease for `leaseMs` (HT-48, gmail-
+   * push.md §6): an atomic `UPDATE ... SET claimed_until = now() + leaseMs
+   * WHERE mailbox_id = $1 AND (claimed_until IS NULL OR claimed_until <
+   * now()) RETURNING mailbox_id` — the inbound analogue of
+   * `ConversationStore.claimThreadForDelivery` (sending.md §3a, migration
+   * 003). Ordinary Postgres row-level locking on the `UPDATE` makes "at
+   * most one claimant wins" hold under true concurrency exactly as it does
+   * there — no advisory lock needed.
+   *
+   * Returns `true` iff THIS call won the claim, `false` if another holder's
+   * lease is still live (or no `gmail_watch_state` row exists yet for this
+   * mailbox — `src/mail/gmail-reconcile.ts` only ever calls this after
+   * {@link getCursor} has already confirmed a row with a non-null cursor
+   * exists, so that case is not expected in practice). Unlike
+   * `claimThreadForDelivery`, there is no accompanying status re-check: this
+   * lease guards nothing but redundant Gmail API work (gmail-push.md §6),
+   * so a `false` return means "skip this run — the current holder will
+   * advance the cursor," never "this work already happened elsewhere and
+   * must not be repeated" (that correctness property is the ingest
+   * pipeline's dedup, inbound-ingestion.md §4, not this lease).
+   */
+  claimReconcileLease(mailboxId: string, leaseMs: number): Promise<boolean>
+
+  /**
+   * Release `mailboxId`'s reconciliation lease: `UPDATE gmail_watch_state
+   * SET claimed_until = NULL WHERE mailbox_id = $1 RETURNING mailbox_id`,
+   * throwing on zero rows updated (mirrors `ConversationStore
+   * .releaseThreadLease`'s throw-on-zero-rows contract — a silent no-op
+   * here would hide a mailbox row vanishing mid-reconcile). The caller
+   * (`src/mail/gmail-reconcile.ts`) wraps this in its own try/catch and logs
+   * rather than failing the reconcile outcome on a release failure — see
+   * that module's doc comment for why: this lease is a pure efficiency
+   * guard (gmail-push.md §6), so a failed release must never be allowed to
+   * turn an otherwise-successful reconcile into a reported failure; the
+   * lease's own `leaseMs` expiry is the backstop that keeps a mailbox from
+   * being locked out if release never runs at all (e.g. the process is
+   * killed before this call, rather than merely throwing).
+   */
+  releaseReconcileLease(mailboxId: string): Promise<void>
 }
 
 /** Create a {@link GmailWatchStateStore} backed by `db`. */
@@ -140,6 +184,33 @@ export function createGmailWatchStateStore(db: Db): GmailWatchStateStore {
            updated_at = now()`,
         [mailboxId, watchExpiration],
       )
+    },
+
+    async claimReconcileLease(mailboxId, leaseMs) {
+      // A single UPDATE is already atomic with respect to itself under
+      // Postgres row-level locking — see ConversationStore
+      // .claimThreadForDelivery's identical reasoning. No status re-check
+      // here (unlike that method): this lease has no outcome to protect,
+      // only redundant Gmail API work to avoid (see the interface doc).
+      const rows = await db.query<{ mailbox_id: string }>(
+        `UPDATE gmail_watch_state
+         SET claimed_until = now() + ($2::double precision * interval '1 millisecond')
+         WHERE mailbox_id = $1
+           AND (claimed_until IS NULL OR claimed_until < now())
+         RETURNING mailbox_id`,
+        [mailboxId, leaseMs],
+      )
+      return rows.length > 0
+    },
+
+    async releaseReconcileLease(mailboxId) {
+      const updated = await db.query<{ mailbox_id: string }>(
+        'UPDATE gmail_watch_state SET claimed_until = NULL WHERE mailbox_id = $1 RETURNING mailbox_id',
+        [mailboxId],
+      )
+      if (updated.length === 0) {
+        throw new Error(`releaseReconcileLease: no gmail_watch_state row for mailbox ${mailboxId}`)
+      }
     },
   }
 }
