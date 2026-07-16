@@ -11,10 +11,11 @@
  *
  * 1. **Claim, atomically** (`InboundDeliveryStore.claim`,
  *    `src/store/inbound-deliveries.ts`) — a fresh claim (or a reclaimed
- *    `failed` row, see that store's doc comment) means this call owns
- *    processing; any other outcome means a concurrent or prior delivery
- *    already does, so this function stops and returns THAT row's recorded
- *    outcome (never double-processes).
+ *    `failed` row, or a reclaimed lease-expired `received` row — HT-45, see
+ *    that store's doc comment) means this call owns processing; any other
+ *    outcome means a concurrent or prior delivery already does, so this
+ *    function stops and returns THAT row's recorded outcome (never
+ *    double-processes).
  * 2. **Parse** (`parseInboundEmail`, `src/mail/parse.ts`) — the pipeline's
  *    ONE parse (invariant #1). The raw bytes come either inline or via a
  *    `BlobStore.get` of a `blobRef` (`src/providers/inbound-email.ts`).
@@ -43,6 +44,7 @@ import type { BlobStore, RawInboundMessage, RawMessageContent } from '../provide
 import { appendThreadInTx, createConversationInTx, type NewThread } from '../store/conversations.js'
 import {
   type InboundDeliveryStore,
+  LeaseLostError,
   markStoredInTx,
   type StoredInboundDelivery,
 } from '../store/inbound-deliveries.js'
@@ -51,7 +53,9 @@ import { type Keyring, verifyReplyMessageId } from './reply-token.js'
 import { decideThreading, type ThreadingDecision } from './thread.js'
 
 /**
- * How many FAILED processing attempts a delivery may accumulate before this
+ * How many failed-or-abandoned processing attempts (`InboundDeliveryStore`'s
+ * `attempts` — every `markFailed`/`markDeadLetter`, AND every `received`-row
+ * lease reclaim, HT-45 review fix) a delivery may accumulate before this
  * pipeline gives up and marks it `dead-letter` for manual review (spec §4:
  * "a message that exhausts its retry budget"). Migration 012's doc comment
  * (`src/db/migrate.ts`) deliberately leaves this policy to "the worker that
@@ -60,6 +64,22 @@ import { decideThreading, type ThreadingDecision } from './thread.js'
  * reasonable default.
  */
 export const MAX_INGEST_ATTEMPTS = 5
+
+/**
+ * Default lease duration held on a delivery between {@link
+ * InboundDeliveryStore.claim} committing `'received'` and this pipeline's
+ * own step-5 store transaction (or its catch-block `markFailed`) — mirrors
+ * `src/mail/send.ts`'s `DEFAULT_LEASE_MS`, the outbound precedent for this
+ * exact claim/lease/reclaim shape (HT-45; `src/store/inbound-deliveries.ts`'s
+ * module doc, "received rows are ALSO reclaimed"). Unlike `DEFAULT_LEASE_MS`,
+ * this is not asserted against any external bounded call (`EmailSender.
+ * maxSendMs` has no inbound-side equivalent) — it is simply a generous
+ * ceiling on how long one `ingestInboundMessage` call should ever
+ * legitimately take (parse + threading decision + one store transaction),
+ * past which a claim is presumed abandoned (crashed) rather than merely
+ * slow.
+ */
+export const DEFAULT_INBOUND_LEASE_MS = 120_000
 
 /** Dependencies {@link ingestInboundMessage} needs, injected so it stays testable against fakes/in-memory stores. */
 export interface IngestDeps {
@@ -107,6 +127,15 @@ export type IngestOutcome =
  * the database being unreachable) — there is no ledger row yet to record it
  * against.
  *
+ * A {@link LeaseLostError} bubbling up from ANY mark* write below (a stale
+ * caller's lease was reclaimed by another worker mid-processing — see
+ * `src/store/inbound-deliveries.ts`'s "The fence" section) is caught here and
+ * reported as `in-progress`: this call's own claim generation is no longer
+ * current, so it must not force a `failed`/`dead-letter` write (that would
+ * itself just be fenced out, or — worse — land on whatever generation now
+ * legitimately owns the row). The row's actual outcome belongs to whichever
+ * worker holds the current generation; this call did nothing to it.
+ *
  * Idempotent by construction (spec §3: "idempotent by step 1, so a whole
  * re-run is safe") — calling this again with the SAME `raw.mailboxId`/
  * `raw.providerMessageId` is how a caller retries a `failed` delivery, and is
@@ -116,13 +145,29 @@ export async function ingestInboundMessage(
   raw: RawInboundMessage,
   deps: IngestDeps,
 ): Promise<IngestOutcome> {
-  const claimResult = await deps.inboundDeliveryStore.claim(raw.mailboxId, raw.providerMessageId)
+  const claimResult = await deps.inboundDeliveryStore.claim(
+    raw.mailboxId,
+    raw.providerMessageId,
+    DEFAULT_INBOUND_LEASE_MS,
+  )
 
   if (!claimResult.claimed) {
     return outcomeForExistingDelivery(claimResult.delivery, deps)
   }
 
-  return processClaimedDelivery(claimResult.delivery, raw, deps)
+  try {
+    return await processClaimedDelivery(claimResult.delivery, raw, deps)
+  } catch (err) {
+    if (err instanceof LeaseLostError) {
+      return {
+        deliveryId: claimResult.delivery.id,
+        mailboxId: claimResult.delivery.mailboxId,
+        providerMessageId: claimResult.delivery.providerMessageId,
+        kind: 'in-progress',
+      }
+    }
+    throw err
+  }
 }
 
 /**
@@ -201,8 +246,12 @@ async function outcomeForExistingDelivery(
         error: delivery.lastError ?? '',
       }
     case 'received':
-      // Another delivery's claim is (still) in flight — not our outcome to
-      // report; the caller must not touch this row.
+      // claim() only returns claimed:false for a 'received' row when its
+      // lease has NOT yet lapsed (src/store/inbound-deliveries.ts's "received
+      // rows are ALSO reclaimed", HT-45) — i.e. another delivery's claim is
+      // genuinely still in flight. Not our outcome to report; the caller
+      // must not touch this row. A lease-expired row is reclaimed by claim()
+      // instead and flows through processClaimedDelivery below, never here.
       return { ...base, kind: 'in-progress' }
     case 'failed':
       // claim() only returns claimed:false for a 'failed' row if its own
@@ -250,9 +299,13 @@ function fromAddressOf(parsed: ParsedEmail): string {
 
 /**
  * Run steps 2-5 of the pipeline for a delivery this call now owns (a fresh
- * claim, or a reclaimed `failed` row). Every failure path is caught and
- * recorded on the ledger rather than thrown — see {@link ingestInboundMessage}'s
- * doc comment.
+ * claim, or a reclaimed `failed`/`received` row). Every failure path is
+ * caught and recorded on the ledger rather than thrown — see {@link
+ * ingestInboundMessage}'s doc comment. A {@link LeaseLostError} from any mark*
+ * write is the one exception: it is deliberately NOT caught here (propagates
+ * to {@link ingestInboundMessage}'s own catch) because it means this call's
+ * claim generation is no longer current — forcing a `failed`/`dead-letter`
+ * write in that state would itself just be fenced out.
  */
 async function processClaimedDelivery(
   delivery: StoredInboundDelivery,
@@ -263,6 +316,32 @@ async function processClaimedDelivery(
     deliveryId: delivery.id,
     mailboxId: delivery.mailboxId,
     providerMessageId: delivery.providerMessageId,
+  }
+
+  // --- Lease-reclaim retry budget (HT-45 review fix). A `received`-row
+  // lease reclaim bumps `attempts` (src/store/inbound-deliveries.ts's "The
+  // fence" section) precisely so a message that hard-crashes the process on
+  // every attempt — never reaching a recorded `failed`/`dead-letter` outcome
+  // via the catch blocks below — still converges to dead-letter, the same as
+  // one that always throws. Checked BEFORE parsing so a message proven to
+  // keep crashing doesn't burn another parse/store cycle first. -------------
+  if (delivery.attempts >= MAX_INGEST_ATTEMPTS) {
+    const message =
+      `lease reclaimed ${delivery.attempts} times without completing ` +
+      `(exceeded MAX_INGEST_ATTEMPTS = ${MAX_INGEST_ATTEMPTS})`
+    const updated = await deps.inboundDeliveryStore.markDeadLetter(
+      delivery.id,
+      message,
+      delivery.attempts,
+    )
+    logIngestEvent({
+      ...base,
+      outcome: 'dead-letter',
+      stage: 'lease-reclaim-budget',
+      attempts: updated.attempts,
+      error: message,
+    })
+    return { ...base, kind: 'dead-letter', attempts: updated.attempts, error: message }
   }
 
   // --- Step 2: parse (invariant #1: the pipeline's ONE parse). -------------
@@ -279,7 +358,11 @@ async function processClaimedDelivery(
   // --- Step 3: loop guard (spec §5). ----------------------------------------
   if (isOwnMessageReflection(parsed, deps.keyring)) {
     const reason = 'own-message-loop'
-    const updated = await deps.inboundDeliveryStore.markSuppressed(delivery.id, reason)
+    const updated = await deps.inboundDeliveryStore.markSuppressed(
+      delivery.id,
+      reason,
+      delivery.attempts,
+    )
     logIngestEvent({
       ...base,
       outcome: 'suppressed',
@@ -296,7 +379,13 @@ async function processClaimedDelivery(
   // --- Step 5: store + mark stored, ONE transaction (the crux — see
   // storeAndMarkDelivered's doc comment). ------------------------------------
   try {
-    const written = await storeAndMarkDelivered(deps.db, delivery.id, decision, parsed)
+    const written = await storeAndMarkDelivered(
+      deps.db,
+      delivery.id,
+      decision,
+      parsed,
+      delivery.attempts,
+    )
     logIngestEvent({
       ...base,
       outcome: 'stored',
@@ -314,6 +403,12 @@ async function processClaimedDelivery(
       threadId: written.threadId,
     }
   } catch (err) {
+    // A LeaseLostError here means markStoredInTx's fenced write lost the
+    // race (module doc reference above) — propagate it as-is rather than
+    // routing it through recordFailure, which would attempt an ALSO-fenced
+    // markFailed/markDeadLetter write against a generation this call no
+    // longer owns.
+    if (err instanceof LeaseLostError) throw err
     return recordFailure(delivery, deps, 'store', err, base)
   }
 }
@@ -322,7 +417,11 @@ async function processClaimedDelivery(
  * Record a caught processing failure on the ledger — `dead-letter` once
  * `MAX_INGEST_ATTEMPTS` would be reached, otherwise the retryable `failed`
  * (spec §4). Emits the same structured observability record as the success
- * paths (spec §6).
+ * paths (spec §6). `delivery.attempts` is passed as the fence
+ * (`src/store/inbound-deliveries.ts`'s "The fence" section) — if it no longer
+ * matches (this call's lease was reclaimed while parse/store was running),
+ * the mark* write throws {@link LeaseLostError}, which is deliberately left
+ * uncaught here and propagates to {@link ingestInboundMessage}'s own catch.
  */
 async function recordFailure(
   delivery: StoredInboundDelivery,
@@ -335,8 +434,8 @@ async function recordFailure(
   const willDeadLetter = delivery.attempts + 1 >= MAX_INGEST_ATTEMPTS
 
   const updated = willDeadLetter
-    ? await deps.inboundDeliveryStore.markDeadLetter(delivery.id, message)
-    : await deps.inboundDeliveryStore.markFailed(delivery.id, message)
+    ? await deps.inboundDeliveryStore.markDeadLetter(delivery.id, message, delivery.attempts)
+    : await deps.inboundDeliveryStore.markFailed(delivery.id, message, delivery.attempts)
 
   logIngestEvent({
     ...base,
@@ -383,16 +482,24 @@ async function recordFailure(
  * FRESH `createConversationInTx` on `{ ok: false, reason: 'deleted' |
  * 'not-found' }` — never resurrects a deleted conversation, never drops the
  * mail (threading.md §5, mirrored here for the ingest path).
+ *
+ * `claimedAttempts` is threaded straight through to `markStoredInTx` as its
+ * fence (`src/store/inbound-deliveries.ts`'s "The fence" section): if it no
+ * longer matches, `markStoredInTx` throws `LeaseLostError` and `Db.transaction`
+ * rolls back the conversation/thread write this call just made along with it
+ * — a stale, lease-lost caller can never leave behind a conversation with no
+ * matching ledger mark.
  */
 async function storeAndMarkDelivered(
   db: Db,
   deliveryId: string,
   decision: ThreadingDecision,
   parsed: ParsedEmail,
+  claimedAttempts: number,
 ): Promise<{ conversationId: string; threadId: string }> {
   return db.transaction(async (tx) => {
     const written = await writeParsedEmail(tx, decision, parsed)
-    await markStoredInTx(tx, deliveryId, written.threadId)
+    await markStoredInTx(tx, deliveryId, written.threadId, claimedAttempts)
     return written
   })
 }
