@@ -45,6 +45,34 @@
  * time, so a handler that crashes or times out mid-run still counts
  * against the retry ceiling instead of retrying forever for free.
  *
+ * ## Stale-outcome fence: `attempts` as an optimistic-concurrency generation
+ *
+ * `drainOnce` leases a whole batch upfront, then processes its rows one at a
+ * time. If a handler run outlives the lease (`leaseMs`), the row becomes
+ * claimable again while this worker is still on it, and a concurrent
+ * `drainOnce` — an overlapping cron tick, a retry racing a slow run — can
+ * reclaim it, bumping `attempts` a second time. Without a guard, THIS
+ * worker's later outcome write still matches `WHERE id = $1`, so a stale ack
+ * would DELETE, or a stale retry would reset `locked_until`/`run_after` on, a
+ * row another worker now owns — at best redundant processing, at worst (a
+ * stale ack landing on a row the new owner had rescheduled) a DROPPED job.
+ *
+ * The claim's post-increment `attempts` is therefore used as an
+ * optimistic-concurrency generation: every outcome write (the ack `DELETE`,
+ * the retry `UPDATE`, and `deadLetterJob`'s `UPDATE`) carries `AND attempts =
+ * <the value this worker claimed>` and `RETURNING id`. A reclaim has since
+ * bumped `attempts` past that value, so a stale write matches 0 rows and
+ * touches nothing. Zero affected rows is treated as "reclaimed, not mine":
+ * logged (`queue_stale_skip`), counted as {@link DrainReport.staleSkipped},
+ * and NOT counted as ack/retry/deadLetter — the row is left exactly as its
+ * new owner left it. This holds the never-drop invariant (charter §2)
+ * structurally, independent of handler idempotency: a stale worker can never
+ * delete or overwrite a job another worker is responsible for. (The RIQ
+ * deployment ALSO caps the function `maxDuration` (`vercel.json`, 50s) below
+ * `DEFAULT_LEASE_MS`/the cron interval so a lease never expires mid-run under
+ * normal operation — this fence is the SQL-level guarantee that survives even
+ * if that config changes.)
+ *
  * ## Dedupe
  *
  * `enqueue`'s `INSERT ... ON CONFLICT (topic, dedupe_key) WHERE dedupe_key
@@ -164,7 +192,11 @@ export interface DrainOnceOptions {
   maxAttempts?: number
 }
 
-/** Outcome tally for one {@link PostgresQueue.drainOnce} call. */
+/**
+ * Outcome tally for one {@link PostgresQueue.drainOnce} call. The four
+ * terminal outcomes plus `staleSkipped` partition the batch exactly:
+ * `claimed === acked + retried + deadLettered + staleSkipped`.
+ */
 export interface DrainReport {
   /** Jobs claimed (leased) this pass — the batch actually obtained, which may be smaller than requested. */
   claimed: number
@@ -174,6 +206,16 @@ export interface DrainReport {
   retried: number
   /** Claimed jobs that reached a terminal failure this pass (explicit `deadLetter`, or `retry` past the ceiling) — row retained, never reprocessed. */
   deadLettered: number
+  /**
+   * Claimed jobs whose outcome write was fenced out because the row had been
+   * reclaimed by a concurrent drainer after this worker's lease expired (the
+   * module doc's "Stale-outcome fence" section) — this worker applied NO
+   * write, and the row belongs to whoever reclaimed it. Normally 0; a
+   * sustained non-zero count means drains are overlapping and handlers are
+   * outliving their lease (raise the lease, shrink the batch, or cap the
+   * function's `maxDuration` below the lease).
+   */
+  staleSkipped: number
 }
 
 /** Point-in-time queue health — see {@link PostgresQueue.getStats}. */
@@ -260,13 +302,48 @@ async function claimBatch(
   )
 }
 
-/** Mark `id` dead-lettered: terminal, retained, never reclaimed (module doc's "Dead-lettering" section). */
-async function deadLetterJob(db: Db, id: string, reason: string): Promise<void> {
-  await db.query(
+/**
+ * Mark `id` dead-lettered: terminal, retained, never reclaimed (module doc's
+ * "Dead-lettering" section). Fenced by `claimedAttempts` (module doc's
+ * "Stale-outcome fence" section): returns `true` if it dead-lettered the row,
+ * `false` if a concurrent reclaim had already bumped `attempts` past the
+ * claimed generation — in which case it wrote nothing and the caller must
+ * treat the job as no longer its responsibility.
+ */
+async function deadLetterJob(
+  db: Db,
+  id: string,
+  claimedAttempts: number,
+  reason: string,
+): Promise<boolean> {
+  const affected = await db.query<{ id: string }>(
     `UPDATE queue_jobs
      SET dead_lettered_at = now(), locked_until = NULL, last_error = $2, updated_at = now()
-     WHERE id = $1`,
-    [id, reason],
+     WHERE id = $1 AND attempts = $3
+     RETURNING id`,
+    [id, reason, claimedAttempts],
+  )
+  return affected.length > 0
+}
+
+/**
+ * Emit one structured log line when an outcome write is fenced out (0 rows) —
+ * the claimed row was reclaimed by another drainer after this worker's lease
+ * expired (module doc's "Stale-outcome fence" section). A plain `console.warn`
+ * of a JSON-serializable record, matching `src/mail/gmail-reconcile.ts`'s
+ * `logReconcileEvent` (no custom logger in this codebase yet). Never logs the
+ * payload — a stale skip is a concurrency event, not a payload problem, and
+ * payloads can carry PII.
+ */
+function logStaleSkip(row: QueueJobRow, intendedOutcome: 'ack' | 'retry' | 'deadLetter'): void {
+  console.warn(
+    JSON.stringify({
+      event: 'queue_stale_skip',
+      jobId: row.id,
+      topic: row.topic,
+      claimedAttempts: row.attempts,
+      intendedOutcome,
+    }),
   )
 }
 
@@ -292,7 +369,13 @@ export function createPostgresQueue(db: Db, options?: PostgresQueueOptions): Pos
 
     async drainOnce(deps: DrainDeps, opts?: DrainOnceOptions): Promise<DrainReport> {
       const topics = Object.keys(deps.handlers)
-      const report: DrainReport = { claimed: 0, acked: 0, retried: 0, deadLettered: 0 }
+      const report: DrainReport = {
+        claimed: 0,
+        acked: 0,
+        retried: 0,
+        deadLettered: 0,
+        staleSkipped: 0,
+      }
       if (topics.length === 0) {
         // Nothing registered — nothing to claim. Also sidesteps building a
         // claim query with an empty `IN ()` list, which is a syntax error.
@@ -337,13 +420,29 @@ export function createPostgresQueue(db: Db, options?: PostgresQueueOptions): Pos
         }
 
         if (result.kind === 'ack') {
-          await db.query('DELETE FROM queue_jobs WHERE id = $1', [row.id])
+          // Fenced by the claimed `attempts` generation (module doc's
+          // "Stale-outcome fence"): a reclaim would have bumped `attempts`, so
+          // this DELETE matches 0 rows and cannot remove a job another worker
+          // now owns — the corruption path an unfenced `WHERE id = $1` allowed.
+          const deleted = await db.query<{ id: string }>(
+            'DELETE FROM queue_jobs WHERE id = $1 AND attempts = $2 RETURNING id',
+            [row.id, row.attempts],
+          )
+          if (deleted.length === 0) {
+            logStaleSkip(row, 'ack')
+            report.staleSkipped++
+            continue
+          }
           report.acked++
           continue
         }
 
         if (result.kind === 'deadLetter') {
-          await deadLetterJob(db, row.id, result.reason)
+          if (!(await deadLetterJob(db, row.id, row.attempts, result.reason))) {
+            logStaleSkip(row, 'deadLetter')
+            report.staleSkipped++
+            continue
+          }
           report.deadLettered++
           continue
         }
@@ -351,11 +450,18 @@ export function createPostgresQueue(db: Db, options?: PostgresQueueOptions): Pos
         // result.kind === 'retry': dead-letter once the effective ceiling is
         // reached, otherwise reschedule with exponential backoff (module doc).
         if (row.attempts >= maxAttempts) {
-          await deadLetterJob(
-            db,
-            row.id,
-            caughtErrorMessage ?? `createPostgresQueue: exceeded maxAttempts (${maxAttempts})`,
-          )
+          if (
+            !(await deadLetterJob(
+              db,
+              row.id,
+              row.attempts,
+              caughtErrorMessage ?? `createPostgresQueue: exceeded maxAttempts (${maxAttempts})`,
+            ))
+          ) {
+            logStaleSkip(row, 'deadLetter')
+            report.staleSkipped++
+            continue
+          }
           report.deadLettered++
           continue
         }
@@ -365,12 +471,21 @@ export function createPostgresQueue(db: Db, options?: PostgresQueueOptions): Pos
           base * 2 ** Math.max(0, row.attempts - 1),
           maxBackoffSeconds,
         )
-        await db.query(
+        // Same fence as the ack path: a reclaim would have moved `attempts`
+        // past the claimed generation, so this reschedule cannot clear the
+        // lease / reset `run_after` on a row the new owner is actively holding.
+        const rescheduled = await db.query<{ id: string }>(
           `UPDATE queue_jobs
            SET locked_until = NULL, run_after = now() + make_interval(secs => $2::float8), last_error = $3, updated_at = now()
-           WHERE id = $1`,
-          [row.id, backoffSeconds, caughtErrorMessage],
+           WHERE id = $1 AND attempts = $4
+           RETURNING id`,
+          [row.id, backoffSeconds, caughtErrorMessage, row.attempts],
         )
+        if (rescheduled.length === 0) {
+          logStaleSkip(row, 'retry')
+          report.staleSkipped++
+          continue
+        }
         report.retried++
       }
 

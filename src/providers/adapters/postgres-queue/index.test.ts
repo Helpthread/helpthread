@@ -123,7 +123,7 @@ describe('createPostgresQueue', () => {
     const { handler, calls } = fakeHandler({ kind: 'ack' })
     const report = await queue.drainOnce({ handlers: { [TOPIC]: handler } })
 
-    expect(report).toEqual({ claimed: 0, acked: 0, retried: 0, deadLettered: 0 })
+    expect(report).toEqual({ claimed: 0, acked: 0, retried: 0, deadLettered: 0, staleSkipped: 0 })
     expect(calls).toHaveLength(0)
     expect(await countRows(db, 'queue_jobs')).toBe(1)
   })
@@ -135,7 +135,7 @@ describe('createPostgresQueue', () => {
     const { handler, calls } = fakeHandler({ kind: 'ack' })
     const report = await queue.drainOnce({ handlers: { [TOPIC]: handler } })
 
-    expect(report).toEqual({ claimed: 1, acked: 1, retried: 0, deadLettered: 0 })
+    expect(report).toEqual({ claimed: 1, acked: 1, retried: 0, deadLettered: 0, staleSkipped: 0 })
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({ topic: TOPIC, payload: reconcileJob(1), attempts: 1 })
     expect(calls[0].id).toEqual(expect.any(String))
@@ -154,7 +154,7 @@ describe('createPostgresQueue', () => {
     }
 
     const first = await queue.drainOnce({ handlers: { [TOPIC]: handler } })
-    expect(first).toEqual({ claimed: 1, acked: 0, retried: 1, deadLettered: 0 })
+    expect(first).toEqual({ claimed: 1, acked: 0, retried: 1, deadLettered: 0, staleSkipped: 0 })
 
     const [afterRetry] = await allJobRows(db)
     expect(afterRetry.attempts).toBe(1)
@@ -170,7 +170,7 @@ describe('createPostgresQueue', () => {
     await forceAllDue(db)
 
     const second = await queue.drainOnce({ handlers: { [TOPIC]: handler } })
-    expect(second).toEqual({ claimed: 1, acked: 1, retried: 0, deadLettered: 0 })
+    expect(second).toEqual({ claimed: 1, acked: 1, retried: 0, deadLettered: 0, staleSkipped: 0 })
     expect(invocation).toBe(2)
   })
 
@@ -183,7 +183,7 @@ describe('createPostgresQueue', () => {
     }
 
     const report = await queue.drainOnce({ handlers: { [TOPIC]: handler } })
-    expect(report).toEqual({ claimed: 1, acked: 0, retried: 1, deadLettered: 0 })
+    expect(report).toEqual({ claimed: 1, acked: 0, retried: 1, deadLettered: 0, staleSkipped: 0 })
 
     const [row] = await allJobRows(db)
     expect(row.attempts).toBe(1)
@@ -200,13 +200,13 @@ describe('createPostgresQueue', () => {
 
     // maxAttempts: 2 — first drain retries (attempts -> 1, below ceiling).
     const first = await queue.drainOnce({ handlers: { [TOPIC]: handler } }, { maxAttempts: 2 })
-    expect(first).toEqual({ claimed: 1, acked: 0, retried: 1, deadLettered: 0 })
+    expect(first).toEqual({ claimed: 1, acked: 0, retried: 1, deadLettered: 0, staleSkipped: 0 })
 
     await forceAllDue(db)
 
     // Second drain: attempts -> 2, at the ceiling -> dead-letter instead of retry.
     const second = await queue.drainOnce({ handlers: { [TOPIC]: handler } }, { maxAttempts: 2 })
-    expect(second).toEqual({ claimed: 1, acked: 0, retried: 0, deadLettered: 1 })
+    expect(second).toEqual({ claimed: 1, acked: 0, retried: 0, deadLettered: 1, staleSkipped: 0 })
 
     const [row] = await allJobRows(db)
     expect(row.attempts).toBe(2)
@@ -217,7 +217,7 @@ describe('createPostgresQueue', () => {
     // Force due again — a dead-lettered row must never be re-claimed.
     await forceAllDue(db)
     const third = await queue.drainOnce({ handlers: { [TOPIC]: handler } }, { maxAttempts: 2 })
-    expect(third).toEqual({ claimed: 0, acked: 0, retried: 0, deadLettered: 0 })
+    expect(third).toEqual({ claimed: 0, acked: 0, retried: 0, deadLettered: 0, staleSkipped: 0 })
   })
 
   it('an explicit deadLetter result dead-letters the job immediately and records the reason', async () => {
@@ -227,7 +227,7 @@ describe('createPostgresQueue', () => {
     const { handler } = fakeHandler({ kind: 'deadLetter', reason: 'malformed payload' })
     const report = await queue.drainOnce({ handlers: { [TOPIC]: handler } })
 
-    expect(report).toEqual({ claimed: 1, acked: 0, retried: 0, deadLettered: 1 })
+    expect(report).toEqual({ claimed: 1, acked: 0, retried: 0, deadLettered: 1, staleSkipped: 0 })
 
     const [row] = await allJobRows(db)
     expect(row.attempts).toBe(1)
@@ -244,7 +244,7 @@ describe('createPostgresQueue', () => {
     const { handler, calls } = fakeHandler({ kind: 'ack' })
     const report = await queue.drainOnce({ handlers: { [TOPIC]: handler } })
 
-    expect(report).toEqual({ claimed: 0, acked: 0, retried: 0, deadLettered: 0 })
+    expect(report).toEqual({ claimed: 0, acked: 0, retried: 0, deadLettered: 0, staleSkipped: 0 })
     expect(calls).toHaveLength(0)
     expect(await countRows(db, 'queue_jobs')).toBe(1)
   })
@@ -258,7 +258,7 @@ describe('createPostgresQueue', () => {
     const { handler, calls } = fakeHandler({ kind: 'ack' })
     const report = await queue.drainOnce({ handlers: { [TOPIC]: handler } }, { batchSize: 2 })
 
-    expect(report).toEqual({ claimed: 2, acked: 2, retried: 0, deadLettered: 0 })
+    expect(report).toEqual({ claimed: 2, acked: 2, retried: 0, deadLettered: 0, staleSkipped: 0 })
     expect(calls).toHaveLength(2)
     expect(await countRows(db, 'queue_jobs')).toBe(3)
   })
