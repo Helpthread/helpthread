@@ -772,9 +772,11 @@ CREATE INDEX thread_attachments_thread_id_idx ON thread_attachments (thread_id);
  * `src/mail/gmail-reconcile.ts`'s own cursor-advance rule (step 6) and the
  * ingest pipeline's dedup on `(mailboxId, providerMessageId)`
  * (inbound-ingestion.md §4) already make either ordering safe with no lease
- * at all. A run that cannot claim it simply SKIPS its own `history.list`
- * call — the holder in flight will advance the cursor — never blocks or
- * retries because of the lease alone.
+ * at all. A run that cannot claim it retries shortly (a short
+ * `backoffSeconds` hint, not an ack) rather than skipping outright — see
+ * `src/mail/gmail-reconcile.ts`'s module doc ("Why a failed claim retries
+ * instead of acking") for why an unconditional skip can silently drop a
+ * message that arrives after the holder's own `history.list` snapshot.
  *
  * No `NOT NULL`/CHECK: `NULL` is "unclaimed," matching `threads.claimed_
  * until`'s own nullability. No index: this column is only ever read via an

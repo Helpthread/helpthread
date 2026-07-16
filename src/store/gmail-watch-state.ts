@@ -104,42 +104,90 @@ export interface GmailWatchStateStore {
    * Claim `mailboxId`'s reconciliation lease for `leaseMs` (HT-48, gmail-
    * push.md §6): an atomic `UPDATE ... SET claimed_until = now() + leaseMs
    * WHERE mailbox_id = $1 AND (claimed_until IS NULL OR claimed_until <
-   * now()) RETURNING mailbox_id` — the inbound analogue of
+   * now()) RETURNING claimed_until` — the inbound analogue of
    * `ConversationStore.claimThreadForDelivery` (sending.md §3a, migration
    * 003). Ordinary Postgres row-level locking on the `UPDATE` makes "at
    * most one claimant wins" hold under true concurrency exactly as it does
    * there — no advisory lock needed.
    *
-   * Returns `true` iff THIS call won the claim, `false` if another holder's
-   * lease is still live (or no `gmail_watch_state` row exists yet for this
-   * mailbox — `src/mail/gmail-reconcile.ts` only ever calls this after
-   * {@link getCursor} has already confirmed a row with a non-null cursor
-   * exists, so that case is not expected in practice). Unlike
-   * `claimThreadForDelivery`, there is no accompanying status re-check: this
-   * lease guards nothing but redundant Gmail API work (gmail-push.md §6),
-   * so a `false` return means "skip this run — the current holder will
-   * advance the cursor," never "this work already happened elsewhere and
-   * must not be repeated" (that correctness property is the ingest
-   * pipeline's dedup, inbound-ingestion.md §4, not this lease).
+   * Returns an opaque **lease token** (the exact `claimed_until` value THIS
+   * call just wrote, as Postgres's own `::text` rendering of it — see below
+   * for why text, not a `Date`) iff this call won the claim, or `null` if
+   * another holder's lease is still live (or no `gmail_watch_state` row
+   * exists yet for this mailbox — `src/mail/gmail-reconcile.ts` only ever
+   * calls this after {@link getCursor} has already confirmed a row with a
+   * non-null cursor exists, so that case is not expected in practice).
+   * Unlike `claimThreadForDelivery`, there is no accompanying status
+   * re-check: this lease guards nothing but redundant Gmail API work
+   * (gmail-push.md §6), so a `null` return means "another run already holds
+   * this mailbox — try again shortly," never "this work already happened
+   * elsewhere and must not be repeated" (that correctness property is the
+   * ingest pipeline's dedup, inbound-ingestion.md §4, not this lease).
+   *
+   * The caller MUST pass this token back to {@link releaseReconcileLease}
+   * to prove it still owns the lease it is releasing — see that method's
+   * doc for the stale-holder scenario this guards against.
+   *
+   * ## Why the token is `claimed_until` rendered as text, not a `Date`
+   *
+   * `claimed_until` is `timestamptz`, which Postgres stores with
+   * microsecond precision; `now()` routinely produces a non-zero
+   * microsecond remainder. A `pg`-wire-protocol driver parses a `timestamptz`
+   * column into a JS `Date`, which only carries MILLISECOND precision — the
+   * sub-millisecond remainder is silently truncated on the way out. If
+   * {@link releaseReconcileLease} compared `claimed_until = $2` against a
+   * `Date` round-tripped through JS, the truncated value would almost never
+   * bit-for-bit equal what is actually stored, and every legitimate release
+   * would silently fail to match (falling into the "already superseded"
+   * no-op path below) — reintroducing the exact lock-out this token exists
+   * to prevent, but permanently, since the lease would then never be
+   * released until natural expiry. Casting to `::text` in the `RETURNING`
+   * clause instead hands back Postgres's own full-precision textual
+   * rendering; passing that same string back and casting it `::timestamptz`
+   * in the release `WHERE` clause compares against the identical value with
+   * no lossy JS `Date` round-trip in between. Callers must treat this return
+   * value as an opaque token — never parse it as a `Date` or do arithmetic
+   * on it.
    */
-  claimReconcileLease(mailboxId: string, leaseMs: number): Promise<boolean>
+  claimReconcileLease(mailboxId: string, leaseMs: number): Promise<string | null>
 
   /**
-   * Release `mailboxId`'s reconciliation lease: `UPDATE gmail_watch_state
-   * SET claimed_until = NULL WHERE mailbox_id = $1 RETURNING mailbox_id`,
-   * throwing on zero rows updated (mirrors `ConversationStore
-   * .releaseThreadLease`'s throw-on-zero-rows contract — a silent no-op
-   * here would hide a mailbox row vanishing mid-reconcile). The caller
-   * (`src/mail/gmail-reconcile.ts`) wraps this in its own try/catch and logs
-   * rather than failing the reconcile outcome on a release failure — see
-   * that module's doc comment for why: this lease is a pure efficiency
-   * guard (gmail-push.md §6), so a failed release must never be allowed to
-   * turn an otherwise-successful reconcile into a reported failure; the
-   * lease's own `leaseMs` expiry is the backstop that keeps a mailbox from
-   * being locked out if release never runs at all (e.g. the process is
-   * killed before this call, rather than merely throwing).
+   * Release `mailboxId`'s reconciliation lease — but ONLY if `leaseToken`
+   * (the value {@link claimReconcileLease} returned when it granted this
+   * run's claim) still matches the row's CURRENT `claimed_until`: `UPDATE
+   * gmail_watch_state SET claimed_until = NULL WHERE mailbox_id = $1 AND
+   * claimed_until = $2::timestamptz`.
+   *
+   * ## Why this must be conditioned on the token, not unconditional
+   *
+   * An unconditional release (`WHERE mailbox_id = $1` alone) has a
+   * stale-holder hole: if THIS run overran `leaseMs` (e.g. a large backlog's
+   * `history.list`/`messages.get` batch), the lease already expired and a
+   * SUCCESSOR run may have claimed it and be actively working. This run's
+   * release would then clear the successor's LIVE lease out from under it,
+   * letting a third trigger claim and duplicate the successor's in-flight
+   * `history.list`/`messages.get` work — exactly the redundant-work case
+   * the lease exists to prevent, and worst under the fat-batch load that
+   * makes overrunning `leaseMs` most likely. Scoping the release to the
+   * token this call was granted makes it a no-op once that token no longer
+   * matches — this run's lease was already superseded, so there is nothing
+   * of ITS to release.
+   *
+   * Zero rows matched (the token doesn't match the current `claimed_until`,
+   * because it was already released and reclaimed by a successor, or the
+   * `gmail_watch_state` row no longer exists) is therefore a SILENT no-op,
+   * not an error — unlike `ConversationStore.releaseThreadLease`'s
+   * throw-on-zero-rows contract, which this deliberately does NOT mirror:
+   * that method's zero-rows case signals a genuine anomaly (the outbound
+   * lease is unconditional, so zero rows there can only mean the row
+   * vanished), whereas here zero rows is the routine, expected outcome of
+   * "our lease was already superseded" and must not be escalated into a
+   * caller-visible failure — the caller (`src/mail/gmail-reconcile.ts`)
+   * already wraps this in its own try/catch purely as a backstop for
+   * genuine, unexpected DB errors (a connection failure, say), not for this
+   * expected case.
    */
-  releaseReconcileLease(mailboxId: string): Promise<void>
+  releaseReconcileLease(mailboxId: string, leaseToken: string): Promise<void>
 }
 
 /** Create a {@link GmailWatchStateStore} backed by `db`. */
@@ -192,25 +240,32 @@ export function createGmailWatchStateStore(db: Db): GmailWatchStateStore {
       // .claimThreadForDelivery's identical reasoning. No status re-check
       // here (unlike that method): this lease has no outcome to protect,
       // only redundant Gmail API work to avoid (see the interface doc).
-      const rows = await db.query<{ mailbox_id: string }>(
+      //
+      // `claimed_until::text` hands back the FULL-PRECISION value this call
+      // just wrote, as a plain string — see the interface doc's "Why the
+      // token is text, not a Date" for why the release side must compare
+      // against this exact textual round-trip rather than a JS `Date`.
+      const rows = await db.query<{ claimed_until: string }>(
         `UPDATE gmail_watch_state
          SET claimed_until = now() + ($2::double precision * interval '1 millisecond')
          WHERE mailbox_id = $1
            AND (claimed_until IS NULL OR claimed_until < now())
-         RETURNING mailbox_id`,
+         RETURNING claimed_until::text AS claimed_until`,
         [mailboxId, leaseMs],
       )
-      return rows.length > 0
+      return rows.length > 0 ? rows[0].claimed_until : null
     },
 
-    async releaseReconcileLease(mailboxId) {
-      const updated = await db.query<{ mailbox_id: string }>(
-        'UPDATE gmail_watch_state SET claimed_until = NULL WHERE mailbox_id = $1 RETURNING mailbox_id',
-        [mailboxId],
+    async releaseReconcileLease(mailboxId, leaseToken) {
+      // Scoped to the token this call was granted (interface doc's "Why
+      // this must be conditioned on the token" section) — zero rows matched
+      // means our lease was already superseded (expired and reclaimed by a
+      // successor) or the row is gone, and is a silent no-op either way,
+      // never a throw (unlike ConversationStore.releaseThreadLease).
+      await db.query(
+        'UPDATE gmail_watch_state SET claimed_until = NULL WHERE mailbox_id = $1 AND claimed_until = $2::timestamptz',
+        [mailboxId, leaseToken],
       )
-      if (updated.length === 0) {
-        throw new Error(`releaseReconcileLease: no gmail_watch_state row for mailbox ${mailboxId}`)
-      }
     },
   }
 }

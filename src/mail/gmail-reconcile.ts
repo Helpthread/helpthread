@@ -73,9 +73,43 @@
  * mailboxes never contend — the lease is keyed by `mailboxId`.
  *
  * A run that cannot claim the lease (another holder's `claimed_until` is
- * still in the future) SKIPS: it acks immediately, doing no Gmail work at
- * all, because the run that DOES hold the lease will advance the cursor —
- * there is nothing this run needs to do that the holder won't already do.
+ * still in the future) does NOT ack — it returns `{ kind: 'retry',
+ * backoffSeconds: DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS }` and does
+ * no Gmail work of its own this attempt.
+ *
+ * ## Why a failed claim retries instead of acking (correction, flagged in review)
+ *
+ * An earlier version of this handler acked on a failed claim, reasoning
+ * "the holder will advance the cursor — there is nothing this run needs to
+ * do that the holder won't already do." That reasoning is false for
+ * anything that arrives AFTER the holder's `history.list` snapshot: the
+ * holder's `listAddedMessageIds` call fixes its batch and its eventual
+ * `newHistoryId` the moment it runs; a message that lands in Gmail's
+ * history a moment later is invisible to that in-flight run and will not
+ * be swept up by its cursor advance. Concretely — a sweep-triggered run
+ * claims the lease and lists history up to `H1`, then spends the
+ * fetch/ingest phase on that batch; a NEW customer message arrives at
+ * `H2 > H1` and Gmail pushes a notification for it; that push's reconcile
+ * job is consumed by a second run WHILE the first still holds the lease,
+ * so the second run's claim fails. Acking there — as this handler used
+ * to — discards that notification outright: the holder's `setCursor` only
+ * advances to `H1`, so the message at `H2` is not reconciled until the
+ * NEXT trigger (a further push, or the daily sweep, gmail-push.md §6) —
+ * up to ~24h of silent added latency on an otherwise-quiet mailbox. This
+ * is a correctness-adjacent latency regression, not covered by the
+ * `(mailboxId, providerMessageId)` ingest dedup (inbound-ingestion.md §4),
+ * which guards against DOUBLING work, not against a run's snapshot simply
+ * predating the message. Returning `retry` with a short backoff instead
+ * means the SAME job is redelivered after the holder has very likely
+ * released (see {@link DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS} for
+ * how the backoff is sized against `reconcileLeaseMs` and the queue's own
+ * `maxAttempts` dead-letter ceiling); that retried attempt claims the
+ * now-free lease and runs its OWN `history.list` from the cursor the
+ * holder just advanced to, which trivially and cheaply picks up `H2`. The
+ * lease therefore remains a pure efficiency guard in the COMMON case (no
+ * new mail mid-run: the retry's `history.list` comes back empty, `newHistoryId`
+ * unchanged) while no longer silently dropping the promptness of the RARE
+ * arrives-mid-run case.
  *
  * The lease is released in a `finally` wrapped around steps 4-6, so it is
  * released on every path out of that block: the happy-path ack, the
@@ -94,6 +128,13 @@
  * (`ack`/`retry`) with something else, and IS still covered by the lease's
  * own expiry as a backstop for the one case a `finally` block cannot help:
  * the process being killed outright before the `finally` ever runs.
+ *
+ * The release itself is now scoped to the exact lease this run was granted
+ * (`GmailWatchStateStore.claimReconcileLease`'s returned token, passed back
+ * to `releaseReconcileLease`) rather than an unconditional clear — see that
+ * store module's doc comment for the stale-holder scenario (an overrunning
+ * run's release clobbering a legitimate successor's live lease) this
+ * closes.
  *
  * ## Never drop a message (charter §2; gmail-push.md §4)
  *
@@ -166,6 +207,41 @@ export const DEFAULT_MAX_INLINE_RAW_BYTES = 1_000_000
  */
 export const DEFAULT_RECONCILE_LEASE_MS = 5 * 60_000
 
+/**
+ * `backoffSeconds` hint returned with `{ kind: 'retry' }` when a run cannot
+ * claim the reconciliation lease (module doc's "Why a failed claim retries
+ * instead of acking"). Not pinned to any spec number — chosen as a judgment
+ * call (flagged in this ticket's report), sized against TWO other numbers
+ * this file does not otherwise control:
+ *
+ * - `DEFAULT_RECONCILE_LEASE_MS` (5 minutes) — the longest a legitimate
+ *   holder can keep the lease before releasing it.
+ * - The queue adapter's retry-until-dead-letter ceiling
+ *   (`createPostgresQueue`'s `maxAttempts`, default 5, and its exponential
+ *   backoff growth — `src/providers/adapters/postgres-queue/index.ts`):
+ *   returning `backoffSeconds: b` makes `b` the exponential BASE for this
+ *   job's own subsequent retries (`b, 2b, 4b, 8b` before the 5th and final
+ *   attempt), so the total window this job keeps retrying before the queue
+ *   gives up and dead-letters it is `15b` seconds.
+ *
+ * `25` seconds makes that total window `375s` (~6.25 minutes) — comfortably
+ * longer than `DEFAULT_RECONCILE_LEASE_MS`, so a claim that keeps losing the
+ * race against a legitimately slow holder still gets one attempt after that
+ * holder is GUARANTEED to have released (its lease cannot outlive
+ * `reconcileLeaseMs`). Even in the pathological case where every retry
+ * still loses the race and the job is eventually dead-lettered, no message
+ * is dropped: cursor-advance (step 6) and ingest dedup (inbound-
+ * ingestion.md §4) mean the next trigger — a further push, or the daily
+ * sweep (gmail-push.md §6) — reconciles this mailbox from wherever the
+ * holder left the cursor, exactly as before this lease existed at all. This
+ * constant only trades a little redundant queue churn against how quickly a
+ * message that arrived mid-holder-run gets reconciled, never data safety.
+ * If `reconcileLeaseMs` is overridden well above its default at the
+ * composition root, this constant (or the queue's own `maxAttempts`/backoff
+ * options) should be reconsidered alongside it.
+ */
+export const DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS = 25
+
 /** Dependencies {@link createGmailReconcileHandler} needs. */
 export interface GmailReconcileHandlerDeps {
   /** Resolves a live Gmail API access token for one mailbox at a time (`./gmail-oauth.ts`). */
@@ -217,6 +293,9 @@ export interface GmailReconcileHandlerDeps {
 
   /** See {@link DEFAULT_RECONCILE_LEASE_MS}. */
   reconcileLeaseMs?: number
+
+  /** See {@link DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS}. */
+  reconcileLeaseRetryBackoffSeconds?: number
 }
 
 /** Build the `QueueMessageHandler<GmailReconcileJob>`. See the module doc for the full control flow. */
@@ -232,6 +311,7 @@ export function createGmailReconcileHandler(
     createHistoryClient,
     maxInlineRawBytes = DEFAULT_MAX_INLINE_RAW_BYTES,
     reconcileLeaseMs = DEFAULT_RECONCILE_LEASE_MS,
+    reconcileLeaseRetryBackoffSeconds = DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS,
   } = deps
 
   return async (message: QueueMessage<GmailReconcileJob>): Promise<QueueHandlerResult> => {
@@ -246,6 +326,7 @@ export function createGmailReconcileHandler(
         createHistoryClient,
         maxInlineRawBytes,
         reconcileLeaseMs,
+        reconcileLeaseRetryBackoffSeconds,
       })
     } catch (err) {
       // Any unexpected throw (network, timeout, a non-404 non-2xx from the
@@ -276,6 +357,7 @@ interface ReconcileDeps {
   createHistoryClient: (getAccessToken: () => Promise<string>) => GmailHistoryClient
   maxInlineRawBytes: number
   reconcileLeaseMs: number
+  reconcileLeaseRetryBackoffSeconds: number
 }
 
 /** Run steps 1-6 (module doc) for one mailbox's reconcile job. */
@@ -293,6 +375,7 @@ async function reconcileOneMailbox(
     createHistoryClient,
     maxInlineRawBytes,
     reconcileLeaseMs,
+    reconcileLeaseRetryBackoffSeconds,
   } = deps
 
   // --- Step 1: re-read CURRENT status — never trust the job's snapshot. ---
@@ -347,21 +430,20 @@ async function reconcileOneMailbox(
   }
 
   // --- Step 3a: claim the reconciliation lease (HT-48; module doc's "The
-  // reconciliation lease" section). A run that cannot claim it SKIPS its
-  // own history.list — the current holder will advance the cursor. This is
-  // a pure efficiency guard: skipping here is always safe regardless of
-  // what the holder is doing, because step 6's cursor-advance rule and the
-  // ingest pipeline's dedup (inbound-ingestion.md §4) already make either
-  // ordering correct with no lease at all. ---
-  const claimedLease = await watchStateStore.claimReconcileLease(mailboxId, reconcileLeaseMs)
-  if (!claimedLease) {
+  // reconciliation lease" section). A run that cannot claim it retries
+  // shortly rather than acking — module doc's "Why a failed claim retries
+  // instead of acking" explains why acking here can silently drop a
+  // message that arrived after the holder's own history.list snapshot. ---
+  const leaseToken = await watchStateStore.claimReconcileLease(mailboxId, reconcileLeaseMs)
+  if (leaseToken === null) {
     logReconcileEvent('info', {
       mailboxId,
-      outcome: 'ack',
+      outcome: 'retry',
       reason: 'reconcile-lease-held',
-      note: 'another in-flight reconcile (push or sweep) holds this mailbox lease and will advance the cursor — gmail-push.md §6, HT-48',
+      backoffSeconds: reconcileLeaseRetryBackoffSeconds,
+      note: "another in-flight reconcile (push or sweep) holds this mailbox lease; retrying shortly rather than acking, so anything past the holder's own history.list snapshot is not silently dropped — gmail-push.md §6, HT-48",
     })
-    return { kind: 'ack' }
+    return { kind: 'retry', backoffSeconds: reconcileLeaseRetryBackoffSeconds }
   }
 
   try {
@@ -440,7 +522,11 @@ async function reconcileOneMailbox(
     // a mailbox that just threw must not be locked out of reconciliation
     // until reconcileLeaseMs elapses.
     try {
-      await watchStateStore.releaseReconcileLease(mailboxId)
+      // Scoped to `leaseToken` — the exact lease THIS run was granted — so
+      // an overrunning run's release can never clobber a legitimate
+      // successor's live lease (`GmailWatchStateStore.releaseReconcileLease`'s
+      // doc comment for the stale-holder scenario this closes).
+      await watchStateStore.releaseReconcileLease(mailboxId, leaseToken)
     } catch (releaseErr) {
       // A release failure must not override this run's own outcome (ack/
       // retry, or the throw already in flight) — logged only. The lease's
