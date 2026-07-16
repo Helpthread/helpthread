@@ -31,7 +31,8 @@
 
 import { TRANSPARENT_GIF, verifyViewToken } from '../mail/open-tracking.js'
 import type { Keyring } from '../mail/reply-token.js'
-import type { EmailSender } from '../providers/index.js'
+import type { BlobStore, EmailSender } from '../providers/index.js'
+import type { ThreadAttachmentStore } from '../store/attachments.js'
 import type { ConversationStore } from '../store/conversations.js'
 import { authenticateRequest } from './auth.js'
 import {
@@ -124,6 +125,15 @@ export interface InboxApiDeps {
    * ordinary "no such route" answer either way).
    */
   gmailConnect?: GmailConnectDeps
+  /**
+   * Attachment read-path deps (HT-46; specs/api/agent-inbox-v1.md §2's
+   * `ThreadView.attachments`): ABSENT BY DEFAULT — a deployment that hasn't
+   * wired a `ThreadAttachmentStore` + `BlobStore` here simply never surfaces
+   * attachments, and `GET /api/v1/conversations/{id}` returns `[]` for every
+   * thread's `attachments`, exactly like `openTracking`'s absent-by-default
+   * posture above.
+   */
+  attachments?: { store: ThreadAttachmentStore; blobStore: BlobStore }
 }
 
 /**
@@ -256,7 +266,10 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
           return await handleListConversations(request, { store: deps.store })
 
         case 'conversation-item':
-          return await handleGetConversation(route.id, { store: deps.store })
+          return await handleGetConversation(route.id, {
+            store: deps.store,
+            ...(deps.attachments !== undefined ? { attachments: deps.attachments } : {}),
+          })
 
         case 'conversation-patch':
           return await handlePatchConversation(route.id, request, { store: deps.store })

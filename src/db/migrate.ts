@@ -715,6 +715,46 @@ ALTER TABLE inbound_deliveries ADD COLUMN claimed_until timestamptz;
 `
 
 /**
+ * Migration 015 — `thread_attachments` (HT-46): blob-reference rows for
+ * inbound attachment bytes.
+ *
+ * `src/mail/parse.ts`'s `ParsedEmail.attachments` carries bytes; this table
+ * carries the reference to where those bytes actually live once the ingest
+ * pipeline writes them to the `BlobStore` (specs/mail/inbound-ingestion.md
+ * §3's closing paragraph) — never the bytes themselves. One row per
+ * attachment, `thread_id` a plain FK (a thread has zero or many), `ON DELETE
+ * CASCADE` matching `threads.conversation_id`'s own cascade (migration 001):
+ * deleting a thread's row deletes its attachment references with it, the
+ * same "storage row lifetime tracks its parent" policy already used
+ * throughout this schema. This table does NOT delete the underlying blob
+ * object on cascade — `BlobStore` cleanup for an orphaned/cascaded key is
+ * left to a future GC pass (see `src/mail/ingest.ts`'s doc comment on why an
+ * orphaned blob from an aborted ingest attempt is tolerable), not built here.
+ *
+ * `blob_key` is the mailbox-namespaced `BlobStore` key
+ * (`<mailboxId>/<attachmentId>/<filename>`, `src/mail/ingest.ts`) — an opaque
+ * string as far as this table and `BlobStore` itself are concerned (`src/
+ * providers/blob.ts`'s key-namespacing contract). `filename` is nullable
+ * because `ParsedAttachment.filename` (`src/mail/parse.ts`) is: some
+ * attachments (e.g. an inline image referenced only by `Content-Id`) arrive
+ * with no `Content-Disposition` filename at all. `size` is `integer`
+ * (bytes) — ample headroom below Gmail's ~25MB message cap, the only inbound
+ * transport this engine has today.
+ */
+const MIGRATION_015_THREAD_ATTACHMENTS = `
+CREATE TABLE thread_attachments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  thread_id uuid NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  filename text,
+  content_type text NOT NULL,
+  size integer NOT NULL,
+  blob_key text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX thread_attachments_thread_id_idx ON thread_attachments (thread_id);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -785,6 +825,11 @@ const MIGRATIONS: Migration[] = [
     id: 14,
     name: 'inbound_delivery_lease',
     sql: MIGRATION_014_INBOUND_DELIVERY_LEASE,
+  },
+  {
+    id: 15,
+    name: 'thread_attachments',
+    sql: MIGRATION_015_THREAD_ATTACHMENTS,
   },
 ]
 

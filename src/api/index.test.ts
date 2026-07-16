@@ -6,11 +6,13 @@ import { createGmailConnectService } from '../mail/gmail-connect.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { GmailWatchClient } from '../providers/adapters/gmail/index.js'
 import type {
+  BlobStore,
   EmailSender,
   EnqueueOptions,
   OutboundEmail,
   QueueProvider,
 } from '../providers/index.js'
+import { createThreadAttachmentStore, insertThreadAttachmentsInTx } from '../store/attachments.js'
 import {
   type ConversationStore,
   createConversationStore,
@@ -52,6 +54,30 @@ function createThrowingSender(): EmailSender {
     maxSendMs: 30_000,
     async send() {
       throw new Error('provider rejected the message (must never leak to the client)')
+    },
+  }
+}
+
+/** An in-memory `BlobStore` fake, matching `src/mail/ingest.test.ts`'s — `getSignedUrl` returns a deterministic, inspectable URL. */
+function fakeBlobStore(initial: Record<string, Uint8Array> = {}): BlobStore {
+  const store = new Map(Object.entries(initial))
+  return {
+    async put(key, data) {
+      store.set(key, data)
+    },
+    async get(key) {
+      const data = store.get(key)
+      if (data === undefined) throw new Error(`fakeBlobStore: no object at key ${key}`)
+      return data
+    },
+    async getSignedUrl(key, expiresInSeconds) {
+      return `https://blob.example.test/${key}?expires=${expiresInSeconds}`
+    },
+    async delete(key) {
+      store.delete(key)
+    },
+    async exists(key) {
+      return store.has(key)
     },
   }
 }
@@ -180,6 +206,8 @@ describe('createInboxApi', () => {
       openTracking?: { publicBaseUrl: string }
       gmailPush?: InboxApiDeps['gmailPush']
       gmailConnect?: InboxApiDeps['gmailConnect']
+      /** When given, wires `attachments: { store: createThreadAttachmentStore(db), blobStore }` — this fake's `db` doesn't exist until this function creates it, so the `ThreadAttachmentStore` is built HERE rather than by the caller. */
+      attachmentsBlobStore?: BlobStore
     } = {},
   ): Promise<{
     db: Db
@@ -202,6 +230,14 @@ describe('createInboxApi', () => {
       ...(overrides.openTracking !== undefined ? { openTracking: overrides.openTracking } : {}),
       ...(overrides.gmailPush !== undefined ? { gmailPush: overrides.gmailPush } : {}),
       ...(overrides.gmailConnect !== undefined ? { gmailConnect: overrides.gmailConnect } : {}),
+      ...(overrides.attachmentsBlobStore !== undefined
+        ? {
+            attachments: {
+              store: createThreadAttachmentStore(db),
+              blobStore: overrides.attachmentsBlobStore,
+            },
+          }
+        : {}),
     })
     return { db, store, api, sent }
   }
@@ -479,6 +515,95 @@ describe('createInboxApi', () => {
 
       const res = await api(get(`/api/v1/conversations/${conversationId}`))
       expect(res.status).toBe(404)
+    })
+
+    // --- attachments (HT-46) -------------------------------------------------
+
+    it('every thread carries attachments: [] when the deployment has no `attachments` deps wired (absent-by-default, like openTracking)', async () => {
+      const { store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(get(`/api/v1/conversations/${conversationId}`))
+      const body = (await res.json()) as { threads: Array<{ attachments: unknown[] }> }
+      expect(body.threads).toHaveLength(1)
+      expect(body.threads[0].attachments).toEqual([])
+    })
+
+    it('surfaces attachment metadata + a signed URL when `attachments` deps ARE wired', async () => {
+      const blobStore = fakeBlobStore()
+      const { db, store, api } = await freshApi({ attachmentsBlobStore: blobStore })
+      const { conversationId, threadId } = await store.createConversation(newConversation())
+      await db.transaction((tx) =>
+        insertThreadAttachmentsInTx(tx, [
+          {
+            threadId,
+            filename: 'invoice.pdf',
+            contentType: 'application/pdf',
+            size: 1234,
+            blobKey: `mbox-1/attach-1/invoice.pdf`,
+          },
+        ]),
+      )
+
+      const res = await api(get(`/api/v1/conversations/${conversationId}`))
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as {
+        threads: Array<{
+          id: string
+          attachments: Array<{
+            id: string
+            filename: string | null
+            contentType: string
+            size: number
+            url: string
+          }>
+        }>
+      }
+      expect(body.threads).toHaveLength(1)
+      expect(body.threads[0].attachments).toHaveLength(1)
+      expect(body.threads[0].attachments[0]).toMatchObject({
+        filename: 'invoice.pdf',
+        contentType: 'application/pdf',
+        size: 1234,
+        url: 'https://blob.example.test/mbox-1/attach-1/invoice.pdf?expires=3600',
+      })
+    })
+
+    it('scopes attachments to the right thread when a conversation has multiple threads', async () => {
+      const blobStore = fakeBlobStore()
+      const { db, store, api } = await freshApi({ attachmentsBlobStore: blobStore })
+      const { conversationId, threadId: firstThreadId } = await store.createConversation(
+        newConversation(),
+      )
+      const appendResult = await store.appendThread(conversationId, {
+        direction: 'outbound',
+        messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+        fromAddress: 'support@example.test',
+        bodyText: 'Looking into it!',
+      })
+      if (!appendResult.ok) throw new Error('unreachable')
+
+      await db.transaction((tx) =>
+        insertThreadAttachmentsInTx(tx, [
+          {
+            threadId: firstThreadId,
+            filename: 'first.txt',
+            contentType: 'text/plain',
+            size: 1,
+            blobKey: 'mbox-1/a/first.txt',
+          },
+        ]),
+      )
+
+      const res = await api(get(`/api/v1/conversations/${conversationId}`))
+      const body = (await res.json()) as {
+        threads: Array<{ id: string; attachments: Array<{ filename: string | null }> }>
+      }
+      expect(body.threads).toHaveLength(2)
+      const first = body.threads.find((t) => t.id === firstThreadId)
+      const second = body.threads.find((t) => t.id === appendResult.threadId)
+      expect(first?.attachments.map((a) => a.filename)).toEqual(['first.txt'])
+      expect(second?.attachments).toEqual([])
     })
   })
 
