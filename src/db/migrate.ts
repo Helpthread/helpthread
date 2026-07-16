@@ -755,6 +755,39 @@ CREATE INDEX thread_attachments_thread_id_idx ON thread_attachments (thread_id);
 `
 
 /**
+ * Migration 016 — the per-mailbox Gmail reconciliation lease (HT-48;
+ * specs/mail/gmail-push.md §6, "reconciliation lease → HT-48"). Adds
+ * `claimed_until` to `gmail_watch_state` (migration 011) — the inbound
+ * analogue of migration 003's `threads.claimed_until` outbound delivery
+ * lease, same column name and same `UPDATE ... WHERE claimed_until IS NULL
+ * OR claimed_until < now()` claim shape (`GmailWatchStateStore
+ * .claimReconcileLease`/`.releaseReconcileLease`, `src/store/gmail-watch-
+ * state.ts`).
+ *
+ * Unlike the outbound lease, there is no accompanying "status" to record on
+ * release — this lease guards nothing but redundant Gmail API work
+ * (`history.list`/`messages.get`) between a push-triggered reconcile
+ * (HT-41) and the daily sweep (HT-42) landing on the SAME mailbox at
+ * overlapping times. It is a pure efficiency guard, not a correctness one:
+ * `src/mail/gmail-reconcile.ts`'s own cursor-advance rule (step 6) and the
+ * ingest pipeline's dedup on `(mailboxId, providerMessageId)`
+ * (inbound-ingestion.md §4) already make either ordering safe with no lease
+ * at all. A run that cannot claim it retries shortly (a short
+ * `backoffSeconds` hint, not an ack) rather than skipping outright — see
+ * `src/mail/gmail-reconcile.ts`'s module doc ("Why a failed claim retries
+ * instead of acking") for why an unconditional skip can silently drop a
+ * message that arrives after the holder's own `history.list` snapshot.
+ *
+ * No `NOT NULL`/CHECK: `NULL` is "unclaimed," matching `threads.claimed_
+ * until`'s own nullability. No index: this column is only ever read via an
+ * equality match on the `mailbox_id` PRIMARY KEY (migration 011), which
+ * already has its own index.
+ */
+const MIGRATION_016_GMAIL_RECONCILE_LEASE = `
+ALTER TABLE gmail_watch_state ADD COLUMN claimed_until timestamptz;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -830,6 +863,11 @@ const MIGRATIONS: Migration[] = [
     id: 15,
     name: 'thread_attachments',
     sql: MIGRATION_015_THREAD_ATTACHMENTS,
+  },
+  {
+    id: 16,
+    name: 'gmail_reconcile_lease',
+    sql: MIGRATION_016_GMAIL_RECONCILE_LEASE,
   },
 ]
 

@@ -80,18 +80,22 @@
  * fresh `historyId` is AHEAD of the stored cursor, and overwriting the
  * cursor with it would silently skip un-reconciled mail).
  *
- * ## No reconciliation lease here — deferred to HT-48
+ * ## The reconciliation lease lives in the CONSUMER, not here (HT-48)
  *
  * Push-triggered reconciliation and this sweep both advance the same
  * mailbox's cursor. gmail-push.md §6 calls serializing them a pure
  * efficiency guard (avoiding redundant `history.list`/`messages.get`
  * work), NOT a correctness requirement — the ingest pipeline's own dedup
- * (inbound-ingestion.md §4) already makes either ordering safe. The lease
- * is out of scope for this ticket (HT-48); this sweep enqueues its
- * reconcile job with NO `dedupeKey` on purpose (see
- * {@link maintainOneMailbox}) — a daily sweep of an already-current, quiet
+ * (inbound-ingestion.md §4) already makes either ordering safe. HT-48
+ * implements that lease entirely in the reconcile job's CONSUMER
+ * (`./gmail-reconcile.ts`'s `claimReconcileLease`/`releaseReconcileLease`
+ * around `history.list`), not in this PRODUCER — this sweep still enqueues
+ * its reconcile job with NO `dedupeKey` on purpose (see
+ * {@link maintainOneMailbox}): a daily sweep of an already-current, quiet
  * mailbox must still run, not be silently suppressed as a duplicate of an
- * earlier job.
+ * earlier job. Whether the resulting job actually does any Gmail work, or
+ * skips because another in-flight reconcile already holds the lease, is
+ * decided entirely on the consumer side, once the job is dequeued.
  */
 
 import { GMAIL_RECONCILE_TOPIC, type GmailReconcileJob } from '../api/gmail-webhook.js'
@@ -294,8 +298,10 @@ async function maintainOneMailbox(
   // only renews the expiration). NO dedupeKey (module doc): a daily sweep
   // of an already-current, quiet mailbox must still run, never be
   // suppressed as a duplicate of an earlier job — redundant reconcile work
-  // here is exactly what HT-48's lease will optimize away, and is safe
-  // today because ingest dedups on (mailboxId, providerMessageId). ---
+  // here is exactly what the consumer's lease (HT-48, ./gmail-reconcile.ts)
+  // now optimizes away when this job lands while another reconcile of the
+  // same mailbox is already in flight, and is otherwise safe because
+  // ingest dedups on (mailboxId, providerMessageId). ---
   const cursor = await watchStateStore.getCursor(mailboxId)
   if (cursor === null) {
     logMaintenanceEvent('info', {

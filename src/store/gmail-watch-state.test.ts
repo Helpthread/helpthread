@@ -346,4 +346,163 @@ describe('createGmailWatchStateStore', () => {
       expect(await store.getCursor(mailboxB)).toBe('b-1')
     })
   })
+
+  // --- claimReconcileLease / releaseReconcileLease (HT-48, gmail-push.md §6) ---
+
+  /** Directly rewinds a mailbox's claimed_until into the past — mirrors conversations.test.ts's expireLease for the outbound lease, exercising expiry without a real sleep. */
+  async function expireReconcileLease(db: Db, mailboxId: string) {
+    await db.query(
+      "UPDATE gmail_watch_state SET claimed_until = now() - interval '1 second' WHERE mailbox_id = $1",
+      [mailboxId],
+    )
+  }
+
+  describe('claimReconcileLease / releaseReconcileLease', () => {
+    it('claims an unclaimed mailbox, setting claimed_until in the future and returning it as the lease token', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.setCursor(mailboxId, 'cursor-1')
+
+      const before = new Date()
+      const token = await store.claimReconcileLease(mailboxId, 30_000)
+
+      expect(token).not.toBeNull()
+      const rows = await db.query<{ claimed_until: Date | null }>(
+        'SELECT claimed_until FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows[0].claimed_until).not.toBeNull()
+      expect((rows[0].claimed_until as Date).getTime()).toBeGreaterThan(before.getTime())
+      // The returned token is Postgres's own textual rendering of the exact
+      // claimed_until it just wrote (store module doc's "Why the token is
+      // text, not a Date") — round-tripping it back through ::timestamptz
+      // must land on the identical instant.
+      const roundTripped = await db.query<{ matches: boolean }>(
+        'SELECT claimed_until = $2::timestamptz AS matches FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId, token as string],
+      )
+      expect(roundTripped[0].matches).toBe(true)
+    })
+
+    it('a second claim attempt while the lease is held returns null', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.setCursor(mailboxId, 'cursor-1')
+
+      const first = await store.claimReconcileLease(mailboxId, 30_000)
+      expect(first).not.toBeNull()
+
+      const second = await store.claimReconcileLease(mailboxId, 30_000)
+      expect(second).toBeNull()
+    })
+
+    it('claiming succeeds again once the previous lease has expired, returning a NEW token', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.setCursor(mailboxId, 'cursor-1')
+
+      const first = await store.claimReconcileLease(mailboxId, 30_000)
+      expect(first).not.toBeNull()
+      await expireReconcileLease(db, mailboxId)
+
+      const second = await store.claimReconcileLease(mailboxId, 30_000)
+      expect(second).not.toBeNull()
+      expect(second).not.toBe(first)
+    })
+
+    it('different mailboxes claim independently — one holding its lease does not block another', async () => {
+      const { db, store } = await freshStore()
+      const mailboxA = await insertMailbox(db, 'lease-a@example.test')
+      const mailboxB = await insertMailbox(db, 'lease-b@example.test')
+      await store.setCursor(mailboxA, 'a-1')
+      await store.setCursor(mailboxB, 'b-1')
+
+      const claimedA = await store.claimReconcileLease(mailboxA, 30_000)
+      const claimedB = await store.claimReconcileLease(mailboxB, 30_000)
+
+      expect(claimedA).not.toBeNull()
+      expect(claimedB).not.toBeNull()
+    })
+
+    it('returns null for a mailbox with no gmail_watch_state row at all', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      // No setCursor/seedBaseline call — no gmail_watch_state row exists yet.
+
+      expect(await store.claimReconcileLease(mailboxId, 30_000)).toBeNull()
+    })
+
+    it('releaseReconcileLease clears claimed_until when the token matches the current holder', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.setCursor(mailboxId, 'cursor-1')
+      const token = await store.claimReconcileLease(mailboxId, 30_000)
+
+      await store.releaseReconcileLease(mailboxId, token as string)
+
+      const rows = await db.query<{ claimed_until: Date | null }>(
+        'SELECT claimed_until FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows[0].claimed_until).toBeNull()
+    })
+
+    it('releaseReconcileLease is a silent no-op (never throws) for a mailbox with no gmail_watch_state row', async () => {
+      const { store } = await freshStore()
+      // A syntactically valid `timestamptz` text (the shape every real
+      // token takes — see the store module doc's "Why the token is text,
+      // not a Date") that simply cannot match any row, since none exists.
+      await expect(
+        store.releaseReconcileLease(
+          '00000000-0000-4000-8000-000000000000',
+          '2020-01-01 00:00:00+00',
+        ),
+      ).resolves.toBeUndefined()
+    })
+
+    it("releaseReconcileLease is a silent no-op when the token no longer matches — a stale holder cannot clobber a live successor's lease", async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.setCursor(mailboxId, 'cursor-1')
+
+      // Holder A claims, then (in the scenario this guards against) overruns
+      // its lease before ever calling release.
+      const tokenA = await store.claimReconcileLease(mailboxId, 30_000)
+      expect(tokenA).not.toBeNull()
+      await expireReconcileLease(db, mailboxId)
+
+      // Holder B — a legitimate successor — claims the now-expired lease and
+      // is actively working.
+      const tokenB = await store.claimReconcileLease(mailboxId, 30_000)
+      expect(tokenB).not.toBeNull()
+      expect(tokenB).not.toBe(tokenA)
+
+      // A finally reaches its own (deliberately delayed) release, using ITS
+      // stale token.
+      await store.releaseReconcileLease(mailboxId, tokenA as string)
+
+      // B's lease must still be held — A's stale release must not have
+      // cleared it out from under B.
+      const rows = await db.query<{ claimed_until: Date | null }>(
+        'SELECT claimed_until FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows[0].claimed_until).not.toBeNull()
+      // And a third claimant must still be blocked by B's live lease.
+      expect(await store.claimReconcileLease(mailboxId, 30_000)).toBeNull()
+    })
+
+    it('after release, the lease is immediately claimable again — no need to wait out leaseMs', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.setCursor(mailboxId, 'cursor-1')
+      const token = await store.claimReconcileLease(mailboxId, 10 * 60_000) // a long lease
+
+      await store.releaseReconcileLease(mailboxId, token as string)
+
+      // Reclaimable right away — release does not wait out the original
+      // leaseMs, exactly like ConversationStore.releaseThreadLease.
+      expect(await store.claimReconcileLease(mailboxId, 30_000)).not.toBeNull()
+    })
+  })
 })

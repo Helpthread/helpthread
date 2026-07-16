@@ -15,7 +15,11 @@ import type { QueueMessage } from '../providers/queue.js'
 import type { GmailWatchStateStore } from '../store/gmail-watch-state.js'
 import type { MailboxRecord, MailboxStore } from '../store/mailboxes.js'
 import type { GmailOAuthTokenService } from './gmail-oauth.js'
-import { createGmailReconcileHandler, type GmailReconcileHandlerDeps } from './gmail-reconcile.js'
+import {
+  createGmailReconcileHandler,
+  DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS,
+  type GmailReconcileHandlerDeps,
+} from './gmail-reconcile.js'
 import type { IngestOutcome } from './ingest.js'
 
 const MAILBOX_ID = '11111111-1111-4111-8111-111111111111'
@@ -68,13 +72,31 @@ function fakeMailboxStore(initial: MailboxRecord): {
   }
 }
 
+/**
+ * A `GmailWatchStateStore` fake backed by in-memory maps. `leases` tracks
+ * each mailbox's held lease as `{ until, token }` (absent = unclaimed) and
+ * is exposed directly so a test can rewind `until` into the past —
+ * mirroring `conversations.test.ts`'s `expireLease` helper for the outbound
+ * lease — to exercise lease expiry without a real sleep. `token` mirrors
+ * the real store's opaque lease-token contract (`src/store/gmail-watch-
+ * state.ts`): `claimReconcileLease` returns it on success,
+ * `releaseReconcileLease` clears the lease ONLY if the token passed back
+ * still matches, exactly like the real `claimed_until`-scoped `UPDATE`.
+ * `rows` mirrors the real store's "no `gmail_watch_state` row" case:
+ * `claimReconcileLease` requires a row to exist, exactly like the real
+ * `UPDATE`-only (non-upserting) SQL.
+ */
 function fakeWatchStateStore(initial: Record<string, string> = {}): {
   store: GmailWatchStateStore
   cursors: Map<string, string | null>
   setCalls: Array<{ mailboxId: string; historyId: string }>
+  leases: Map<string, { until: number; token: string }>
 } {
   const cursors = new Map<string, string | null>(Object.entries(initial))
+  const rows = new Set<string>(Object.keys(initial))
   const setCalls: Array<{ mailboxId: string; historyId: string }> = []
+  const leases = new Map<string, { until: number; token: string }>()
+  let leaseTokenCounter = 0
   return {
     store: {
       async getCursor(mailboxId) {
@@ -82,6 +104,7 @@ function fakeWatchStateStore(initial: Record<string, string> = {}): {
       },
       async setCursor(mailboxId, historyId) {
         cursors.set(mailboxId, historyId)
+        rows.add(mailboxId)
         setCalls.push({ mailboxId, historyId })
       },
       async seedBaseline() {
@@ -90,9 +113,27 @@ function fakeWatchStateStore(initial: Record<string, string> = {}): {
       async setWatchExpiration() {
         throw new Error('setWatchExpiration: not used by the reconcile handler')
       },
+      async claimReconcileLease(mailboxId, leaseMs) {
+        if (!rows.has(mailboxId)) return null
+        const current = leases.get(mailboxId)
+        if (current !== undefined && current.until > Date.now()) return null
+        const token = `lease-token-${++leaseTokenCounter}`
+        leases.set(mailboxId, { until: Date.now() + leaseMs, token })
+        return token
+      },
+      async releaseReconcileLease(mailboxId, leaseToken) {
+        // Mirrors the real store's `WHERE claimed_until = $2` scoping: a
+        // release whose token no longer matches the CURRENT holder (already
+        // superseded, or the row is gone) is a silent no-op, never a throw.
+        const current = leases.get(mailboxId)
+        if (current !== undefined && current.token === leaseToken) {
+          leases.delete(mailboxId)
+        }
+      },
     },
     cursors,
     setCalls,
+    leases,
   }
 }
 
@@ -641,5 +682,298 @@ describe('createGmailReconcileHandler', () => {
     expect(result).toEqual({ kind: 'retry' })
     expect(setCalls).toEqual([])
     consoleErrorSpy.mockRestore()
+  })
+
+  // --- The reconciliation lease (HT-48; gmail-push.md §6) ---------------------
+
+  describe('reconciliation lease', () => {
+    it('concurrent reconcile of the same mailbox does the Gmail work once — the loser retries instead of acking', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const listAddedMessageIds = vi.fn(async () => ({
+        kind: 'ok' as const,
+        messageIds: [],
+        newHistoryId: 'cursor-2',
+      }))
+      const historyClient: GmailHistoryClient = {
+        listAddedMessageIds,
+        async getRawMessage() {
+          return null
+        },
+      }
+      const ingest = vi.fn()
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      // Two triggers landing on the SAME mailbox at once — e.g. a push
+      // notification and the daily sweep both enqueuing/consuming a
+      // reconcile job for it around the same moment.
+      const [first, second] = await Promise.all([handler(job()), handler(job())])
+
+      // Which of the two wins the claim race is nondeterministic — assert
+      // on the pair, not on `first`/`second` individually. Exactly one acks
+      // (the holder); the other retries with the lease-held backoff hint
+      // rather than acking (module doc's "Why a failed claim retries
+      // instead of acking") — it did not do the Gmail work, but it also did
+      // not silently discard whatever notification it was carrying.
+      const results = [first, second]
+      expect(results).toContainEqual({ kind: 'ack' })
+      expect(results).toContainEqual({
+        kind: 'retry',
+        backoffSeconds: DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS,
+      })
+      // Only the lease-holder actually called history.list; the other run
+      // skipped its own Gmail work entirely (module doc's "The
+      // reconciliation lease" section).
+      expect(listAddedMessageIds).toHaveBeenCalledTimes(1)
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    it('different mailboxes reconcile concurrently — one mailbox holding the lease never blocks another', async () => {
+      const MAILBOX_A = MAILBOX_ID
+      const MAILBOX_B = '22222222-2222-4222-8222-222222222222'
+      const recordsByAddress = new Map<string, MailboxRecord>([
+        ['support@example.test', activeMailbox({ id: MAILBOX_A })],
+        [
+          'support-b@example.test',
+          activeMailbox({ id: MAILBOX_B, address: 'support-b@example.test' }),
+        ],
+      ])
+      const recordsById = new Map<string, MailboxRecord>(
+        [...recordsByAddress.values()].map((r) => [r.id, r]),
+      )
+      const mailboxStore: MailboxStore = {
+        async getMailboxByAddress(address) {
+          return recordsByAddress.get(address) ?? null
+        },
+        async getMailboxById(id) {
+          return recordsById.get(id) ?? null
+        },
+        async markNeedsReconnect() {
+          throw new Error('markNeedsReconnect: not used by this test')
+        },
+        async markPaused() {
+          throw new Error('markPaused: not used by this test')
+        },
+        async upsertConnectedMailbox() {
+          throw new Error('upsertConnectedMailbox: not used by this test')
+        },
+        async listActiveMailboxes() {
+          throw new Error('listActiveMailboxes: not used by this test')
+        },
+      }
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({
+        [MAILBOX_A]: 'cursor-a-1',
+        [MAILBOX_B]: 'cursor-b-1',
+      })
+      const listAddedMessageIds = vi.fn(async (cursor: string) => ({
+        kind: 'ok' as const,
+        messageIds: [],
+        newHistoryId: cursor === 'cursor-a-1' ? 'cursor-a-2' : 'cursor-b-2',
+      }))
+      const historyClient: GmailHistoryClient = {
+        listAddedMessageIds,
+        async getRawMessage() {
+          return null
+        },
+      }
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({
+          mailboxStore,
+          watchStateStore,
+          ingest: vi.fn(),
+          createHistoryClient: () => historyClient,
+        }),
+      )
+
+      const [a, b] = await Promise.all([
+        handler(job({ mailboxId: MAILBOX_A })),
+        handler(job({ mailboxId: MAILBOX_B })),
+      ])
+
+      expect(a).toEqual({ kind: 'ack' })
+      expect(b).toEqual({ kind: 'ack' })
+      // Both mailboxes did their OWN history.list — a lease is strictly
+      // per-mailbox, so mailbox A holding its lease never blocks mailbox B.
+      expect(listAddedMessageIds).toHaveBeenCalledTimes(2)
+      expect(setCalls).toEqual(
+        expect.arrayContaining([
+          { mailboxId: MAILBOX_A, historyId: 'cursor-a-2' },
+          { mailboxId: MAILBOX_B, historyId: 'cursor-b-2' },
+        ]),
+      )
+    })
+
+    it('a crashed holder lease expires and reconciliation resumes', async () => {
+      const {
+        store: watchStateStore,
+        setCalls,
+        leases,
+      } = fakeWatchStateStore({
+        [MAILBOX_ID]: 'cursor-1',
+      })
+      // Simulate a PRIOR run that claimed the lease and then crashed before
+      // ever reaching its own release (the one case the `finally` in
+      // gmail-reconcile.ts's module doc cannot help) — its claimed_until is
+      // already in the past, exactly as it would be once reconcileLeaseMs
+      // has elapsed with no release call ever having run.
+      leases.set(MAILBOX_ID, { until: Date.now() - 1000, token: 'stale-crashed-holder-token' })
+      const listAddedMessageIds = vi.fn(async () => ({
+        kind: 'ok' as const,
+        messageIds: [],
+        newHistoryId: 'cursor-2',
+      }))
+      const historyClient: GmailHistoryClient = {
+        listAddedMessageIds,
+        async getRawMessage() {
+          return null
+        },
+      }
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest: vi.fn(), createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(listAddedMessageIds).toHaveBeenCalledTimes(1)
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    it('a run that cannot claim the lease retries with a backoff hint, without touching the Gmail client at all', async () => {
+      const {
+        store: watchStateStore,
+        setCalls,
+        leases,
+      } = fakeWatchStateStore({
+        [MAILBOX_ID]: 'cursor-1',
+      })
+      // Held by someone else, unexpired.
+      leases.set(MAILBOX_ID, { until: Date.now() + 60_000, token: 'live-holder-token' })
+      const createHistoryClient = vi.fn()
+      const ingest = vi.fn()
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient }),
+      )
+
+      const result = await handler(job())
+
+      // NOT an ack: acking here would silently drop a message that arrives
+      // in Gmail's history after the holder's own history.list snapshot —
+      // see gmail-reconcile.ts's module doc ("Why a failed claim retries
+      // instead of acking"). Retrying with a backoff hint gives a later
+      // attempt (after the holder has very likely released) a chance to
+      // pick that message up.
+      expect(result).toEqual({
+        kind: 'retry',
+        backoffSeconds: DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS,
+      })
+      expect(createHistoryClient).not.toHaveBeenCalled()
+      expect(ingest).not.toHaveBeenCalled()
+      expect(setCalls).toEqual([])
+    })
+
+    it("the arrives-after-snapshot case: a message that lands after the holder's history.list is picked up on the retried attempt, not dropped", async () => {
+      const {
+        store: watchStateStore,
+        setCalls,
+        cursors,
+        leases,
+      } = fakeWatchStateStore({
+        [MAILBOX_ID]: 'cursor-1',
+      })
+      // Simulate holder A already in flight: it claimed the lease and — in
+      // the concrete scenario this guards against — has already called
+      // history.list (fixing its own snapshot) and is mid-fetch/ingest.
+      leases.set(MAILBOX_ID, { until: Date.now() + 60_000, token: 'holder-a-token' })
+      const createHistoryClient = vi.fn()
+      const ingest = vi.fn()
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient }),
+      )
+
+      // Worker B's job — enqueued by a push notification for message M,
+      // which arrived AFTER holder A's history.list snapshot — cannot claim
+      // the lease and gets a retry, not an ack.
+      const firstAttempt = await handler(job())
+      expect(firstAttempt).toEqual({
+        kind: 'retry',
+        backoffSeconds: DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS,
+      })
+      expect(createHistoryClient).not.toHaveBeenCalled()
+
+      // Holder A finishes its own run and releases with ITS token. The
+      // cursor is now at A's snapshot watermark, which does NOT yet cover
+      // message M (that is exactly the scenario: M arrived after A's list
+      // call, so A's own advance cannot have reached it).
+      await watchStateStore.releaseReconcileLease(MAILBOX_ID, 'holder-a-token')
+      cursors.set(MAILBOX_ID, 'cursor-after-a')
+
+      // The retried delivery of B's job now claims the free lease and runs
+      // its OWN history.list from the advanced cursor, picking up M.
+      const historyClient: GmailHistoryClient = {
+        listAddedMessageIds: vi.fn(async (cursor: string) => ({
+          kind: 'ok' as const,
+          messageIds: cursor === 'cursor-after-a' ? ['m-arrived-after-a'] : [],
+          newHistoryId: 'cursor-after-b',
+        })),
+        getRawMessage: vi.fn(async () => ({
+          rawBytes: textBytes('raw-M'),
+          receivedAt: new Date('2026-01-03T00:00:00Z'),
+        })),
+      }
+      const ingestedAfterRetry = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+      const retriedHandler = createGmailReconcileHandler(
+        baseDeps({
+          watchStateStore,
+          ingest: ingestedAfterRetry,
+          createHistoryClient: () => historyClient,
+        }),
+      )
+
+      const secondAttempt = await retriedHandler(job())
+
+      expect(secondAttempt).toEqual({ kind: 'ack' })
+      expect(ingestedAfterRetry).toHaveBeenCalledTimes(1)
+      expect((ingestedAfterRetry.mock.calls[0][0] as RawInboundMessage).providerMessageId).toBe(
+        'm-arrived-after-a',
+      )
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-after-b' }])
+    })
+
+    it('an unexpected throw releases the lease immediately — a next run need not wait out reconcileLeaseMs', async () => {
+      const { store: watchStateStore, leases } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient: GmailHistoryClient = {
+        async listAddedMessageIds() {
+          throw new Error('boom: transient network failure')
+        },
+        async getRawMessage() {
+          return null
+        },
+      }
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({
+          watchStateStore,
+          createHistoryClient: () => historyClient,
+          // A long lease — if release-on-throw did NOT happen, the lease
+          // would still read as held for a very long time.
+          reconcileLeaseMs: 10 * 60_000,
+        }),
+      )
+
+      const result = await handler(job())
+      expect(result).toEqual({ kind: 'retry' })
+
+      // The lease must already be free — released in the `finally` before
+      // the throw propagated — not still held for another ~10 minutes.
+      expect(leases.has(MAILBOX_ID)).toBe(false)
+      consoleErrorSpy.mockRestore()
+    })
   })
 })
