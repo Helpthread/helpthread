@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
+import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
+import type { GmailOAuthTokenService } from '../mail/gmail-oauth.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { GmailWatchClient } from '../providers/adapters/gmail/index.js'
 import type {
@@ -1700,6 +1702,9 @@ describe('createInboxApi', () => {
         async markPaused() {
           throw new Error('markPaused: not used by the push-webhook path')
         },
+        async markDisconnected() {
+          throw new Error('markDisconnected: not used by the push-webhook path')
+        },
         async upsertConnectedMailbox() {
           throw new Error('upsertConnectedMailbox: not used by the push-webhook path')
         },
@@ -1928,6 +1933,9 @@ describe('createInboxApi', () => {
           historyId: 'baseline-hid',
           expiration: new Date('2026-08-01T00:00:00.000Z'),
         }),
+        stop: async () => {
+          throw new Error('stop: not used by the connect flow')
+        },
       }
 
       const service = createGmailConnectService({
@@ -2126,6 +2134,148 @@ describe('createInboxApi', () => {
     it('existing routes are unaffected: /api/v1/conversations still 401s without a token', async () => {
       const { db } = await freshApi()
       const api = apiWithGmailConnect(db, realGmailConnect(db))
+
+      const res = await api(get('/api/v1/conversations', undefined))
+      expect(res.status).toBe(401)
+    })
+  })
+
+  // --- gmail disconnect (HT-47, gmail-connect.md's disconnect section) -------
+  //
+  // Focused on the WIRING contract createInboxApi owns: `POST .../disconnect`
+  // is an ORDINARY Bearer-gated route (no pre-auth carve-out at all, unlike
+  // `/callback`), and `deps.gmailDisconnect` absence 404s it — mirroring the
+  // "gmail connect" block above. Handler-level response-shape details (body
+  // validation, error-code mapping) live in `src/api/gmail-disconnect.test.ts`
+  // — this block does not re-derive those.
+  describe('gmail disconnect', () => {
+    const DISCONNECT_PATH = '/api/v1/inbound/gmail/disconnect'
+
+    /** A real `GmailDisconnectService` backed by `db`, with Google's revoke endpoint and the Gmail watch client both faked. */
+    function realGmailDisconnect(
+      db: Db,
+      options: {
+        revokeResponse?: { status: number }
+        watchClient?: GmailWatchClient
+      } = {},
+    ): { service: ReturnType<typeof createGmailDisconnectService> } {
+      const revokeResp = options.revokeResponse ?? { status: 200 }
+      const fetchImpl = (async () =>
+        new Response('', { status: revokeResp.status })) as unknown as typeof fetch
+      const watchClient: GmailWatchClient = options.watchClient ?? {
+        getProfile: async () => {
+          throw new Error('getProfile: not used by disconnect')
+        },
+        watch: async () => {
+          throw new Error('watch: not used by disconnect')
+        },
+        stop: async () => {},
+      }
+      const tokenService: GmailOAuthTokenService = {
+        getAccessToken: async () => 'fresh-access-token',
+      }
+
+      const service = createGmailDisconnectService({
+        db,
+        mailboxStore: createMailboxStore(db),
+        tokenStore: createMailboxTokenStore(db, TOKEN_ENC_KEY),
+        watchStateStore: createGmailWatchStateStore(db),
+        tokenService,
+        createWatchClient: () => watchClient,
+        fetchImpl,
+      })
+      return { service }
+    }
+
+    /** Build a full `createInboxApi` instance wired to `db`, with `gmailDisconnect` present (or, if omitted, absent entirely — for the "not configured" tests). */
+    function apiWithGmailDisconnect(
+      db: Db,
+      gmailDisconnect?: InboxApiDeps['gmailDisconnect'],
+    ): (request: Request) => Promise<Response> {
+      return createInboxApi({
+        store: createConversationStore(db),
+        apiToken: TOKEN,
+        sender: createFakeSender().sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+        ...(gmailDisconnect !== undefined ? { gmailDisconnect } : {}),
+      })
+    }
+
+    function disconnectPost(address: string, ...tokenArg: [string | undefined] | []): Request {
+      const token = tokenArg.length > 0 ? tokenArg[0] : TOKEN
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token !== undefined) {
+        headers.Authorization = `Bearer ${token}`
+      }
+      return new Request(`https://x.example.test${DISCONNECT_PATH}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ address }),
+      })
+    }
+
+    it('POST .../disconnect with a valid Bearer token disconnects a connected mailbox: 200, deactivated in the db', async () => {
+      const { db } = await freshApi()
+      await createMailboxStore(db).upsertConnectedMailbox({
+        address: 'connected@example.test',
+        provider: 'gmail',
+      })
+      const api = apiWithGmailDisconnect(db, realGmailDisconnect(db))
+
+      const res = await api(disconnectPost('connected@example.test'))
+
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { alreadyDisconnected: boolean; address: string }
+      expect(body.address).toBe('connected@example.test')
+      expect(body.alreadyDisconnected).toBe(false)
+
+      const rows = await db.query<{ status: string }>(
+        "SELECT status FROM mailboxes WHERE address = 'connected@example.test'",
+      )
+      expect(rows[0].status).toBe('disconnected')
+    })
+
+    it('POST .../disconnect WITHOUT a Bearer token → 401, before the handler ever runs', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailDisconnect(db, realGmailDisconnect(db))
+
+      const res = await api(disconnectPost('connected@example.test', undefined))
+      expect(res.status).toBe(401)
+    })
+
+    it('POST .../disconnect with the WRONG Bearer token → 401', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailDisconnect(db, realGmailDisconnect(db))
+
+      const res = await api(disconnectPost('connected@example.test', 'the-wrong-token'))
+      expect(res.status).toBe(401)
+    })
+
+    it('deps.gmailDisconnect absent: POST .../disconnect 404s (no pre-auth carve-out — Bearer-gated either way)', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailDisconnect(db) // no gmailDisconnect
+
+      const res = await api(disconnectPost('connected@example.test'))
+      expect(res.status).toBe(404)
+    })
+
+    it('an unknown address → 404 not_found', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailDisconnect(db, realGmailDisconnect(db))
+
+      const res = await api(disconnectPost('nobody@example.test'))
+
+      expect(res.status).toBe(404)
+      expect(await res.json()).toEqual({
+        error: { code: 'not_found', message: expect.any(String) },
+      })
+    })
+
+    it('existing routes are unaffected: /api/v1/conversations still 401s without a token', async () => {
+      const { db } = await freshApi()
+      const api = apiWithGmailDisconnect(db, realGmailDisconnect(db))
 
       const res = await api(get('/api/v1/conversations', undefined))
       expect(res.status).toBe(401)

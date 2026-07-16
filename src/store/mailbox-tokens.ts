@@ -87,6 +87,19 @@ export interface MailboxTokenStore {
    * silently-wrong value.
    */
   getTokens(mailboxId: string): Promise<StoredMailboxTokens | null>
+
+  /**
+   * Delete `mailboxId`'s token row (HT-47's disconnect action — the inverse
+   * of `upsertTokens`: once a mailbox is disconnected, its refresh/access
+   * tokens must not persist even as ciphertext). Idempotent: deleting a
+   * mailbox with no token row is a harmless no-op, matching {@link
+   * upsertTokens}'s and {@link seedBaseline}'s (`gmail-watch-state.ts`) own
+   * "never surprise on repeat" convention. Optionally runs against a
+   * caller-supplied `tx` so the disconnect service can commit this alongside
+   * the watch-state delete and the mailbox status flip as ONE atomic unit
+   * (`../mail/gmail-disconnect.ts`).
+   */
+  deleteTokens(mailboxId: string, tx?: Queryable): Promise<void>
 }
 
 /** Raw `mailbox_oauth_tokens` row shape, before mapping to {@link StoredMailboxTokens}. */
@@ -158,6 +171,10 @@ export function createMailboxTokenStore(db: Db, encryptionKey: Buffer): MailboxT
         scopes: row.scopes,
         updatedAt: toDate(row.updated_at),
       }
+    },
+
+    async deleteTokens(mailboxId, tx) {
+      await (tx ?? db).query('DELETE FROM mailbox_oauth_tokens WHERE mailbox_id = $1', [mailboxId])
     },
   }
 }

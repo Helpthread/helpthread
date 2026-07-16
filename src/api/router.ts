@@ -75,6 +75,20 @@ const GMAIL_CONNECT: RouteDef = {
   methods: ['POST'],
 }
 
+/**
+ * `/api/v1/inbound/gmail/disconnect` — the inverse admin action (HT-47;
+ * gmail-connect.md's disconnect section), POST only. An ORDINARY
+ * Bearer-gated route, same as {@link GMAIL_CONNECT} (disconnect has no
+ * pre-auth carve-out — see `src/api/gmail-disconnect.ts`'s module doc). Its
+ * pattern is anchored (`disconnect$`) so it can never collide with
+ * `GMAIL_CONNECT`'s `connect$` or the push webhook's exact
+ * `/api/v1/inbound/gmail` match.
+ */
+const GMAIL_DISCONNECT: RouteDef = {
+  pattern: /^\/api\/v1\/inbound\/gmail\/disconnect$/,
+  methods: ['POST'],
+}
+
 /** Every route this API recognizes, checked in order. */
 const ROUTES: readonly RouteDef[] = [
   CONVERSATIONS_LIST,
@@ -84,6 +98,7 @@ const ROUTES: readonly RouteDef[] = [
   CONVERSATION_TAGS,
   CONVERSATION_ASSIGNEE,
   GMAIL_CONNECT,
+  GMAIL_DISCONNECT,
 ]
 
 /** The outcome of matching a `(method, pathname)` pair against {@link ROUTES}. */
@@ -97,6 +112,7 @@ export type RouteMatch =
   | { kind: 'conversation-tags'; id: string }
   | { kind: 'conversation-assignee'; id: string }
   | { kind: 'gmail-connect' }
+  | { kind: 'gmail-disconnect' }
   | { kind: 'method-not-allowed'; allow: string[] }
   | { kind: 'not-found' }
 
@@ -197,6 +213,9 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     }
     if (route === GMAIL_CONNECT) {
       return { kind: 'gmail-connect' }
+    }
+    if (route === GMAIL_DISCONNECT) {
+      return { kind: 'gmail-disconnect' }
     }
 
     // Both CONVERSATION_ITEM and CONVERSATION_REPLIES guarantee a present,

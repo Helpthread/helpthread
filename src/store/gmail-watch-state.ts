@@ -188,6 +188,26 @@ export interface GmailWatchStateStore {
    * expected case.
    */
   releaseReconcileLease(mailboxId: string, leaseToken: string): Promise<void>
+
+  /**
+   * Delete `mailboxId`'s watch-state row (HT-47's disconnect action — the
+   * inverse of {@link seedBaseline}: once a mailbox is disconnected, its
+   * cursor and `watch()` expiration are stale and must not linger for a
+   * future reconnect to accidentally read). Idempotent: deleting a mailbox
+   * with no watch-state row is a harmless no-op. Optionally runs against a
+   * caller-supplied `tx` so the disconnect service can commit this alongside
+   * the token delete and the mailbox status flip as ONE atomic unit
+   * (`../mail/gmail-disconnect.ts`).
+   *
+   * Deleting the row also discards any LIVE reconciliation lease on it
+   * (`claimed_until`, HT-48) — deliberately: a disconnected mailbox has no
+   * watch state left to reconcile, and both lease methods already tolerate
+   * the row vanishing underneath them ({@link claimReconcileLease} returns
+   * `null` on zero rows; {@link releaseReconcileLease}'s zero-rows case is
+   * a documented silent no-op), so an in-flight reconcile run simply winds
+   * down without error.
+   */
+  deleteState(mailboxId: string, tx?: Queryable): Promise<void>
 }
 
 /** Create a {@link GmailWatchStateStore} backed by `db`. */
@@ -266,6 +286,10 @@ export function createGmailWatchStateStore(db: Db): GmailWatchStateStore {
         'UPDATE gmail_watch_state SET claimed_until = NULL WHERE mailbox_id = $1 AND claimed_until = $2::timestamptz',
         [mailboxId, leaseToken],
       )
+    },
+
+    async deleteState(mailboxId, tx) {
+      await (tx ?? db).query('DELETE FROM gmail_watch_state WHERE mailbox_id = $1', [mailboxId])
     },
   }
 }

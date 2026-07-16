@@ -505,4 +505,72 @@ describe('createGmailWatchStateStore', () => {
       expect(await store.claimReconcileLease(mailboxId, 30_000)).not.toBeNull()
     })
   })
+
+  // --- deleteState (HT-47, gmail-connect.md's disconnect section) ------------
+
+  describe('deleteState', () => {
+    it('removes the watch-state row — getCursor returns null afterward', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.seedBaseline(mailboxId, {
+        historyId: '555',
+        watchExpiration: new Date('2026-08-01T00:00:00.000Z'),
+      })
+
+      await store.deleteState(mailboxId)
+
+      expect(await store.getCursor(mailboxId)).toBeNull()
+      const rows = await db.query(
+        'SELECT mailbox_id FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows).toHaveLength(0)
+    })
+
+    it('is idempotent — deleting a mailbox with no watch-state row is a harmless no-op', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+
+      await expect(store.deleteState(mailboxId)).resolves.toBeUndefined()
+    })
+
+    it('only removes the targeted mailbox — a sibling mailbox keeps its state', async () => {
+      const { db, store } = await freshStore()
+      const mailboxA = await insertMailbox(db, 'delete-a@example.test')
+      const mailboxB = await insertMailbox(db, 'delete-b@example.test')
+      const expiration = new Date('2026-08-01T00:00:00.000Z')
+      await store.seedBaseline(mailboxA, { historyId: 'a-1', watchExpiration: expiration })
+      await store.seedBaseline(mailboxB, { historyId: 'b-1', watchExpiration: expiration })
+
+      await store.deleteState(mailboxA)
+
+      expect(await store.getCursor(mailboxA)).toBeNull()
+      expect(await store.getCursor(mailboxB)).toBe('b-1')
+    })
+
+    it('deletion wins over a live reconcile lease — the row goes, and a stale release of the discarded lease stays a silent no-op', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.seedBaseline(mailboxId, {
+        historyId: '555',
+        watchExpiration: new Date('2026-08-01T00:00:00.000Z'),
+      })
+      const token = await store.claimReconcileLease(mailboxId, 30_000)
+      expect(token).not.toBeNull()
+
+      // Disconnect lands while a reconcile run still holds the lease: the
+      // row (and the lease with it) is simply gone — a disconnected mailbox
+      // has no watch state left to reconcile (interface doc on deleteState).
+      await store.deleteState(mailboxId)
+
+      const rows = await db.query(
+        'SELECT mailbox_id FROM gmail_watch_state WHERE mailbox_id = $1',
+        [mailboxId],
+      )
+      expect(rows).toHaveLength(0)
+      // The in-flight holder's eventual release hits zero rows — the same
+      // documented silent no-op as any superseded lease, never a throw.
+      await expect(store.releaseReconcileLease(mailboxId, token as string)).resolves.toBeUndefined()
+    })
+  })
 })

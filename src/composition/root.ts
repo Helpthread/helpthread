@@ -15,9 +15,10 @@
  * - the Gmail OAuth token service + the outbound `EmailSender`,
  * - the Gmail push signature verifier (JWKS source built ONCE — see below),
  * - the durable Postgres job queue,
- * - the Gmail connect/consent service,
- * - `createInboxApi` with `gmailPush` + `gmailConnect` PRESENT (they are
- *   absent-by-default on the engine; this root is where they get wired), and
+ * - the Gmail connect/consent service and its disconnect counterpart (HT-47),
+ * - `createInboxApi` with `gmailPush` + `gmailConnect` + `gmailDisconnect`
+ *   PRESENT (they are absent-by-default on the engine; this root is where
+ *   they get wired), and
  * - the two internal cron closures (queue drain, watch maintenance),
  *
  * then hands them to {@link createAppHandler} (`./app.ts`) as one
@@ -39,6 +40,7 @@
  */
 
 import type { GmailConnectDeps } from '../api/gmail-connect.js'
+import type { GmailDisconnectDeps } from '../api/gmail-disconnect.js'
 import {
   GMAIL_RECONCILE_TOPIC,
   type GmailPushDeps,
@@ -48,6 +50,7 @@ import { createInboxApi } from '../api/index.js'
 import type { Db } from '../db/client.js'
 import { createPostgresDb } from '../db/postgres.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
+import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
 import { createGmailOAuthTokenService } from '../mail/gmail-oauth.js'
 import { createGmailReconcileHandler } from '../mail/gmail-reconcile.js'
 import {
@@ -203,10 +206,21 @@ export async function buildApp(
   })
   const gmailConnect: GmailConnectDeps = { service: connectService }
 
-  // --- The Agent Inbox API, with gmailPush + gmailConnect PRESENT (the engine
-  // leaves them absent by default; this root is the one place they are wired).
-  // openTracking is intentionally OMITTED — the shipped privacy default is OFF
-  // (v1.1 designed contract). ---
+  // --- Gmail disconnect admin action (HT-47) — the inverse of connect. ---
+  const disconnectService = createGmailDisconnectService({
+    db,
+    mailboxStore,
+    tokenStore,
+    watchStateStore,
+    tokenService,
+    createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
+  })
+  const gmailDisconnect: GmailDisconnectDeps = { service: disconnectService }
+
+  // --- The Agent Inbox API, with gmailPush + gmailConnect + gmailDisconnect
+  // PRESENT (the engine leaves them absent by default; this root is the one
+  // place they are wired). openTracking is intentionally OMITTED — the
+  // shipped privacy default is OFF (v1.1 designed contract). ---
   const inboxApi = createInboxApi({
     store,
     apiToken: config.apiToken,
@@ -216,6 +230,7 @@ export async function buildApp(
     supportAddress: config.supportAddress,
     gmailPush,
     gmailConnect,
+    gmailDisconnect,
     attachments: { store: attachmentStore, blobStore },
   })
 

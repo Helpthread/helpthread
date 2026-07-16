@@ -232,4 +232,69 @@ describe('createGmailWatchClient', () => {
       expect(getAccessToken).toHaveBeenCalledTimes(2)
     })
   })
+
+  describe('stop', () => {
+    it('POSTs to users/{userId}/stop with Bearer auth and resolves with no value on a 2xx', async () => {
+      const { fetchImpl, calls } = sequencedFetch([{ status: 200, text: '' }])
+      const client = createGmailWatchClient({ getAccessToken: async () => 'token-xyz', fetchImpl })
+
+      await expect(client.stop()).resolves.toBeUndefined()
+
+      expect(calls).toHaveLength(1)
+      const url = new URL(calls[0].url)
+      expect(url.pathname).toBe('/gmail/v1/users/me/stop')
+      expect(calls[0].init.method).toBe('POST')
+      const headers = new Headers(calls[0].init.headers)
+      expect(headers.get('Authorization')).toBe('Bearer token-xyz')
+    })
+
+    it('uses the given userId in the endpoint URL instead of the default "me"', async () => {
+      const { fetchImpl, calls } = sequencedFetch([{ status: 200, text: '' }])
+      const client = createGmailWatchClient({
+        getAccessToken: async () => 'token',
+        fetchImpl,
+        userId: 'mailbox@example.test',
+      })
+
+      await client.stop()
+
+      expect(new URL(calls[0].url).pathname).toBe('/gmail/v1/users/mailbox%40example.test/stop')
+    })
+
+    it('throws on a non-2xx response, with a bounded snippet and NO token in the message', async () => {
+      const { fetchImpl } = sequencedFetch([{ status: 404, text: 'no active watch' }])
+      const secretToken = 'super-secret-stop-token'
+      const client = createGmailWatchClient({ getAccessToken: async () => secretToken, fetchImpl })
+
+      let caught: unknown
+      try {
+        await client.stop()
+      } catch (err) {
+        caught = err
+      }
+
+      expect(caught).toBeInstanceOf(Error)
+      expect((caught as Error).message).toContain('404')
+      expect((caught as Error).message).toContain('no active watch')
+      expect(String(caught)).not.toContain(secretToken)
+    })
+
+    it('passes an abort signal to fetch and rejects when the call outlives timeoutMs', async () => {
+      const fetchImpl = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            const signal = init?.signal
+            expect(signal).toBeDefined()
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+          }),
+      ) as unknown as typeof fetch
+      const client = createGmailWatchClient({
+        getAccessToken: async () => 'token',
+        fetchImpl,
+        timeoutMs: 20,
+      })
+
+      await expect(client.stop()).rejects.toThrow(/timeout|timed out|aborted/i)
+    })
+  })
 })

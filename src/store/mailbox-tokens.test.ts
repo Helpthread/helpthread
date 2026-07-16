@@ -197,4 +197,41 @@ describe('createMailboxTokenStore', () => {
 
     await expect(store.getTokens(mailboxId)).rejects.toThrow(/decrypt failed/)
   })
+
+  // --- deleteTokens (HT-47, gmail-connect.md's disconnect section) -----------
+
+  it('deleteTokens removes the token row — getTokens returns null afterward', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db)
+    await store.upsertTokens(mailboxId, { refreshToken: 'refresh-token-value' })
+
+    await store.deleteTokens(mailboxId)
+
+    expect(await store.getTokens(mailboxId)).toBeNull()
+    const rows = await db.query(
+      'SELECT mailbox_id FROM mailbox_oauth_tokens WHERE mailbox_id = $1',
+      [mailboxId],
+    )
+    expect(rows).toHaveLength(0)
+  })
+
+  it('deleteTokens is idempotent — deleting a mailbox with no token row is a harmless no-op', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db)
+
+    await expect(store.deleteTokens(mailboxId)).resolves.toBeUndefined()
+  })
+
+  it('deleteTokens only removes the targeted mailbox — a sibling mailbox keeps its tokens', async () => {
+    const { db, store } = await freshStore()
+    const mailboxA = await insertMailbox(db, 'a4@example.test')
+    const mailboxB = await insertMailbox(db, 'b4@example.test')
+    await store.upsertTokens(mailboxA, { refreshToken: 'refresh-a' })
+    await store.upsertTokens(mailboxB, { refreshToken: 'refresh-b' })
+
+    await store.deleteTokens(mailboxA)
+
+    expect(await store.getTokens(mailboxA)).toBeNull()
+    expect((await store.getTokens(mailboxB))?.refreshToken).toBe('refresh-b')
+  })
 })

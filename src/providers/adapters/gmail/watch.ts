@@ -1,8 +1,9 @@
 /**
- * Gmail `users.watch` + `users.getProfile` HTTP client (specs/mail/
- * gmail-connect.md §4 steps 3-4) — the transport the connect/consent
- * orchestration (`src/mail/gmail-connect.ts`, HT-40) uses to resolve a
- * freshly-granted mailbox's address and arm Gmail push for it. Mirrors
+ * Gmail `users.watch` + `users.getProfile` + `users.stop` HTTP client
+ * (specs/mail/gmail-connect.md §4 steps 3-4, and its disconnect section) —
+ * the transport both the connect/consent orchestration (`src/mail/
+ * gmail-connect.ts`, HT-40; `watch`/`getProfile`) and the disconnect
+ * orchestration (`src/mail/gmail-disconnect.ts`, HT-47; `stop`) use. Mirrors
  * `./history.ts`'s shape (itself mirroring `./sender.ts`): injectable
  * `fetchImpl`, `userId` (default `'me'`), `AbortSignal.timeout`, Bearer
  * auth, throwing on any unexpected non-2xx with a bounded response-body
@@ -10,10 +11,14 @@
  * error — see `history.ts`'s module doc for the shared rationale, not
  * repeated here.
  *
- * Unlike `history.ts`, neither method here has an expected/typed non-throw
+ * Unlike `history.ts`, no method here has an expected/typed non-throw
  * outcome: gmail-connect.md §4 treats a `watch()` or `getProfile()` failure
  * as a hard abort of the whole connect attempt (nothing persisted — see
- * that spec's step 4), so every non-2xx from either call throws.
+ * that spec's step 4), so every non-2xx from any of the three calls throws.
+ * `stop()`'s caller (`gmail-disconnect.ts`) treats that throw as BEST-EFFORT
+ * rather than a hard abort — see that module's doc — but the throwing
+ * contract here is identical either way; only the caller's response to it
+ * differs.
  */
 
 /** Options for {@link createGmailWatchClient}. Mirrors `GmailHistoryClientOptions` (`./history.ts`). */
@@ -80,6 +85,17 @@ export interface GmailWatchClient {
    * Throws on any non-2xx.
    */
   getProfile(): Promise<GmailProfileResult>
+
+  /**
+   * Unarm Gmail push for this mailbox (`POST users.stop`) — the inverse of
+   * {@link watch}, called by the disconnect orchestration
+   * (`src/mail/gmail-disconnect.ts`, HT-47) before it revokes the OAuth
+   * grant (that module's doc explains the ordering). Google's `users.stop`
+   * returns an empty body on success, so there is nothing to parse — this
+   * resolves with no value. Throws on any non-2xx, exactly like
+   * {@link watch}/{@link getProfile}.
+   */
+  stop(): Promise<void>
 }
 
 /** Gmail API base URL. Kept as a constant so the endpoint is grep-able/testable in one place — matches `history.ts`/`sender.ts`. */
@@ -189,6 +205,14 @@ export function createGmailWatchClient(options: GmailWatchClientOptions): GmailW
       }
 
       return { emailAddress: parsed.emailAddress, historyId: parsed.historyId }
+    },
+
+    async stop() {
+      const response = await authedFetch(`${usersBase}/stop`, { method: 'POST' })
+
+      if (!response.ok) {
+        throw await unexpectedStatusError(response, 'stop')
+      }
     },
   }
 }

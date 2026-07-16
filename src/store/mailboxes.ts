@@ -46,6 +46,16 @@
  *   `watch()` re-armed (a `paused` mailbox isn't being ingested; a
  *   `needs_reconnect` one has a dead grant `watch()` can't fix) nor a
  *   reconcile job enqueued, for the same reason.
+ * - {@link MailboxStore.markDisconnected} (HT-47; specs/mail/gmail-connect.md's
+ *   disconnect section): mark a mailbox `disconnected` — the terminal,
+ *   operator-initiated state the disconnect admin action puts a mailbox into
+ *   (migration 017 widens the `status` CHECK to allow it). Distinct from
+ *   `paused`/`needs_reconnect` (both are states the PIPELINE puts a mailbox
+ *   into automatically); `disconnected` only ever follows an explicit
+ *   operator disconnect (`../mail/gmail-disconnect.ts`), which runs this
+ *   alongside deleting the mailbox's `mailbox_oauth_tokens`/
+ *   `gmail_watch_state` rows in ONE transaction — same `tx?` pattern as
+ *   {@link upsertConnectedMailbox}.
  *
  * A fuller `mailboxes` CRUD surface (beyond the operations above) is still
  * narrower than a general CRUD module — add operations as the ticket that
@@ -54,8 +64,8 @@
 
 import type { Db, Queryable } from '../db/client.js'
 
-/** A mailbox's lifecycle state (migration 009's CHECK constraint). */
-export type MailboxStatus = 'active' | 'paused' | 'needs_reconnect'
+/** A mailbox's lifecycle state (migration 009's CHECK constraint, widened by migration 017 to add `'disconnected'`). */
+export type MailboxStatus = 'active' | 'paused' | 'needs_reconnect' | 'disconnected'
 
 /** A connected mailbox, as read back from storage. */
 export interface MailboxRecord {
@@ -114,6 +124,21 @@ export interface MailboxStore {
    * practice).
    */
   markPaused(mailboxId: string): Promise<void>
+
+  /**
+   * Mark `mailboxId` `disconnected` — the terminal state HT-47's disconnect
+   * admin action puts a mailbox into (see the module doc). Same shape as
+   * {@link markNeedsReconnect}/{@link markPaused}: a single `UPDATE ...
+   * RETURNING id`, idempotent, throws if no mailbox exists with this id.
+   *
+   * Optionally runs against a caller-supplied `tx` (`Db.transaction`'s
+   * `Queryable`) instead of the bound `db`, so the disconnect service can
+   * commit this alongside deleting the mailbox's token and watch-state rows
+   * as ONE atomic unit (`../mail/gmail-disconnect.ts`) — the same reason
+   * {@link upsertConnectedMailbox} takes `tx`. Omitted, it runs standalone on
+   * `db`.
+   */
+  markDisconnected(mailboxId: string, tx?: Queryable): Promise<void>
 
   /**
    * Insert a new connected mailbox, or — on a **reconnect** for an address
@@ -200,6 +225,16 @@ export function createMailboxStore(db: Db): MailboxStore {
       )
       if (updated.length === 0) {
         throw new Error(`markPaused: no mailbox with id ${mailboxId}`)
+      }
+    },
+
+    async markDisconnected(mailboxId, tx) {
+      const updated = await (tx ?? db).query<{ id: string }>(
+        "UPDATE mailboxes SET status = 'disconnected', updated_at = now() WHERE id = $1 RETURNING id",
+        [mailboxId],
+      )
+      if (updated.length === 0) {
+        throw new Error(`markDisconnected: no mailbox with id ${mailboxId}`)
       }
     },
 

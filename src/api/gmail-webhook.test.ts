@@ -50,6 +50,9 @@ function fakeMailboxes(records: MailboxRecord[]): MailboxStore {
     async markPaused() {
       throw new Error('markPaused: not used by the push-webhook path')
     },
+    async markDisconnected() {
+      throw new Error('markDisconnected: not used by the push-webhook path')
+    },
     async upsertConnectedMailbox() {
       throw new Error('upsertConnectedMailbox: not used by the push-webhook path')
     },
@@ -375,6 +378,9 @@ describe('handleGmailPushWebhook', () => {
         },
         async markPaused() {
           throw new Error('markPaused: not used by the push-webhook path')
+        },
+        async markDisconnected() {
+          throw new Error('markDisconnected: not used by the push-webhook path')
         },
         async upsertConnectedMailbox() {
           throw new Error('upsertConnectedMailbox: not used by the push-webhook path')

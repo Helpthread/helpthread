@@ -61,6 +61,11 @@ function fakeMailboxStore(initial: MailboxRecord): {
         if (r === undefined) throw new Error(`no mailbox ${id}`)
         records.set(id, { ...r, status: 'paused' })
       },
+      async markDisconnected(id) {
+        const r = records.get(id)
+        if (r === undefined) throw new Error(`no mailbox ${id}`)
+        records.set(id, { ...r, status: 'disconnected' })
+      },
       async upsertConnectedMailbox() {
         throw new Error('upsertConnectedMailbox: not used by the reconcile handler')
       },
@@ -129,6 +134,9 @@ function fakeWatchStateStore(initial: Record<string, string> = {}): {
         if (current !== undefined && current.token === leaseToken) {
           leases.delete(mailboxId)
         }
+      },
+      async deleteState() {
+        throw new Error('deleteState: not used by the reconcile handler')
       },
     },
     cursors,
@@ -755,6 +763,9 @@ describe('createGmailReconcileHandler', () => {
         },
         async markPaused() {
           throw new Error('markPaused: not used by this test')
+        },
+        async markDisconnected() {
+          throw new Error('markDisconnected: not used by this test')
         },
         async upsertConnectedMailbox() {
           throw new Error('upsertConnectedMailbox: not used by this test')
