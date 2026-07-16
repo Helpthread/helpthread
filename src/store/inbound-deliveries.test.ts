@@ -12,6 +12,9 @@ import {
 
 const RANDOM_UUID = '00000000-0000-4000-8000-000000000000'
 
+/** A representative lease duration for these tests — the exact value is never asserted on, only "still held" vs. "expired" (via {@link expireLease}). */
+const LEASE_MS = 30_000
+
 /** Insert a `mailboxes` row directly — `inbound_deliveries.mailbox_id` is a real FK, and creating mailboxes is not this ticket's concern. */
 async function createMailbox(db: Db, address = 'support@example.test'): Promise<string> {
   const rows = await db.query<{ id: string }>(
@@ -19,6 +22,14 @@ async function createMailbox(db: Db, address = 'support@example.test'): Promise<
     [address],
   )
   return rows[0].id
+}
+
+/** Directly rewinds a delivery's claimed_until into the past — for exercising lease-expiry (HT-45) without a real sleep, mirroring `conversations.test.ts`'s identical `expireLease` helper for `threads.claimed_until`. */
+async function expireLease(db: Db, deliveryId: string): Promise<void> {
+  await db.query(
+    "UPDATE inbound_deliveries SET claimed_until = now() - interval '1 second' WHERE id = $1",
+    [deliveryId],
+  )
 }
 
 // --- suite ---------------------------------------------------------------------
@@ -41,7 +52,7 @@ describe('createInboundDeliveryStore', () => {
   it('claim on a fresh key inserts a received row and returns claimed: true', async () => {
     const { store, mailboxId } = await freshStore()
 
-    const result = await store.claim(mailboxId, 'provider-msg-1')
+    const result = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     expect(result.claimed).toBe(true)
     expect(result.delivery).toMatchObject({
@@ -53,15 +64,16 @@ describe('createInboundDeliveryStore', () => {
       threadId: null,
     })
     expect(result.delivery.id).toEqual(expect.any(String))
+    expect(result.delivery.claimedUntil).toBeInstanceOf(Date)
     expect(result.delivery.createdAt).toBeInstanceOf(Date)
     expect(result.delivery.updatedAt).toBeInstanceOf(Date)
   })
 
-  it('claim on the SAME key twice returns claimed: false with the first row, unmodified', async () => {
+  it('claim on the SAME key twice, within the lease, returns claimed: false with the first row, unmodified', async () => {
     const { store, mailboxId } = await freshStore()
 
-    const first = await store.claim(mailboxId, 'provider-msg-1')
-    const second = await store.claim(mailboxId, 'provider-msg-1')
+    const first = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    const second = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     expect(first.claimed).toBe(true)
     expect(second.claimed).toBe(false)
@@ -73,8 +85,8 @@ describe('createInboundDeliveryStore', () => {
     const { db, store, mailboxId: mailboxA } = await freshStore()
     const mailboxB = await createMailbox(db, 'other@example.test')
 
-    const a = await store.claim(mailboxA, 'provider-msg-1')
-    const b = await store.claim(mailboxB, 'provider-msg-1')
+    const a = await store.claim(mailboxA, 'provider-msg-1', LEASE_MS)
+    const b = await store.claim(mailboxB, 'provider-msg-1', LEASE_MS)
 
     expect(a.claimed).toBe(true)
     expect(b.claimed).toBe(true)
@@ -85,8 +97,8 @@ describe('createInboundDeliveryStore', () => {
     const { store, mailboxId } = await freshStore()
 
     const [a, b] = await Promise.all([
-      store.claim(mailboxId, 'provider-msg-1'),
-      store.claim(mailboxId, 'provider-msg-1'),
+      store.claim(mailboxId, 'provider-msg-1', LEASE_MS),
+      store.claim(mailboxId, 'provider-msg-1', LEASE_MS),
     ])
 
     expect([a.claimed, b.claimed].sort()).toEqual([false, true])
@@ -95,7 +107,7 @@ describe('createInboundDeliveryStore', () => {
 
   it('markSuppressed sets status suppressed and stores the reason in lastError', async () => {
     const { store, mailboxId } = await freshStore()
-    const { delivery } = await store.claim(mailboxId, 'provider-msg-1')
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     const updated = await store.markSuppressed(delivery.id, 'own-message-loop')
 
@@ -110,7 +122,7 @@ describe('createInboundDeliveryStore', () => {
 
   it('markFailed sets status failed, increments attempts, and records the error', async () => {
     const { store, mailboxId } = await freshStore()
-    const { delivery } = await store.claim(mailboxId, 'provider-msg-1')
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     const updated = await store.markFailed(delivery.id, 'parse: boom')
 
@@ -124,7 +136,7 @@ describe('createInboundDeliveryStore', () => {
 
   it('markDeadLetter sets status dead-letter and increments attempts', async () => {
     const { store, mailboxId } = await freshStore()
-    const { delivery } = await store.claim(mailboxId, 'provider-msg-1')
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     const updated = await store.markDeadLetter(delivery.id, 'store: still broken')
 
@@ -145,10 +157,10 @@ describe('createInboundDeliveryStore', () => {
 
   it('claim on a FAILED row reclaims it: flips back to received, claimed: true', async () => {
     const { store, mailboxId } = await freshStore()
-    const { delivery } = await store.claim(mailboxId, 'provider-msg-1')
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
     await store.markFailed(delivery.id, 'parse: boom')
 
-    const retryClaim = await store.claim(mailboxId, 'provider-msg-1')
+    const retryClaim = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     expect(retryClaim.claimed).toBe(true)
     expect(retryClaim.delivery.id).toBe(delivery.id)
@@ -160,10 +172,10 @@ describe('createInboundDeliveryStore', () => {
 
   it('claim on a SUPPRESSED row does NOT reclaim it — claimed: false, status unchanged', async () => {
     const { store, mailboxId } = await freshStore()
-    const { delivery } = await store.claim(mailboxId, 'provider-msg-1')
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
     await store.markSuppressed(delivery.id, 'own-message-loop')
 
-    const replay = await store.claim(mailboxId, 'provider-msg-1')
+    const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     expect(replay.claimed).toBe(false)
     expect(replay.delivery.status).toBe('suppressed')
@@ -171,30 +183,104 @@ describe('createInboundDeliveryStore', () => {
 
   it('claim on a DEAD-LETTER row does NOT reclaim it — claimed: false, status unchanged', async () => {
     const { store, mailboxId } = await freshStore()
-    const { delivery } = await store.claim(mailboxId, 'provider-msg-1')
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
     await store.markDeadLetter(delivery.id, 'store: still broken')
 
-    const replay = await store.claim(mailboxId, 'provider-msg-1')
+    const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     expect(replay.claimed).toBe(false)
     expect(replay.delivery.status).toBe('dead-letter')
   })
 
-  it('claim on a RECEIVED (in-flight) row does NOT reclaim it — claimed: false, status unchanged', async () => {
+  it('claim on a RECEIVED row whose lease is still held does NOT reclaim it — claimed: false, status unchanged', async () => {
     const { store, mailboxId } = await freshStore()
-    // Fresh claim leaves the row 'received' — simulating "another worker's
-    // claim is still in flight" (nothing has marked it yet).
-    await store.claim(mailboxId, 'provider-msg-1')
+    // Fresh claim leaves the row 'received' with a live lease — simulating
+    // "another worker's claim is still in flight" (nothing has marked it
+    // yet, and the lease has not lapsed).
+    await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
-    const concurrent = await store.claim(mailboxId, 'provider-msg-1')
+    const concurrent = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
 
     expect(concurrent.claimed).toBe(false)
     expect(concurrent.delivery.status).toBe('received')
   })
 
+  // --- HT-45: the crash-recovery gap this ticket closes. --------------------
+
+  it('claim reclaims a RECEIVED row whose lease has EXPIRED — simulating a crash between claim() and the step-5 store/markFailed', async () => {
+    const { db, store, mailboxId } = await freshStore()
+    const first = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    // Nothing ever marked this row — as if the process crashed right after
+    // the claim committed. Rewind the lease into the past to simulate time
+    // having passed without a real sleep.
+    await expireLease(db, first.delivery.id)
+
+    const reclaimed = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+
+    expect(reclaimed.claimed).toBe(true)
+    expect(reclaimed.delivery.id).toBe(first.delivery.id)
+    expect(reclaimed.delivery.status).toBe('received')
+    // The reclaim itself is not a failure — attempts is untouched, same as
+    // the failed-row reclaim's contract above.
+    expect(reclaimed.delivery.attempts).toBe(0)
+    expect(reclaimed.delivery.claimedUntil).not.toEqual(first.delivery.claimedUntil)
+  })
+
+  it('a pre-existing RECEIVED row with no recorded lease (claimed_until IS NULL) is immediately reclaimable', async () => {
+    const { db, store, mailboxId } = await freshStore()
+    const first = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    // Simulate a row stranded before migration 014 shipped: no lease was
+    // ever recorded for it.
+    await db.query('UPDATE inbound_deliveries SET claimed_until = NULL WHERE id = $1', [
+      first.delivery.id,
+    ])
+
+    const reclaimed = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+
+    expect(reclaimed.claimed).toBe(true)
+    expect(reclaimed.delivery.id).toBe(first.delivery.id)
+  })
+
+  it('two concurrent reclaim attempts on a lease-expired RECEIVED row resolve to exactly one claimed: true', async () => {
+    const { db, store, mailboxId } = await freshStore()
+    const first = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    await expireLease(db, first.delivery.id)
+
+    const [a, b] = await Promise.all([
+      store.claim(mailboxId, 'provider-msg-1', LEASE_MS),
+      store.claim(mailboxId, 'provider-msg-1', LEASE_MS),
+    ])
+
+    expect([a.claimed, b.claimed].sort()).toEqual([false, true])
+    expect(a.delivery.id).toBe(first.delivery.id)
+    expect(b.delivery.id).toBe(first.delivery.id)
+  })
+
+  it('claim on a STORED row does NOT reclaim it, even with an expired lease — terminal rows are never reclaimed', async () => {
+    const { db, store, mailboxId } = await freshStore()
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    const { threadId } = await createConversationStore(db).createConversation({
+      subject: 'Help with my order',
+      customerEmail: 'customer@example.test',
+      firstMessage: {
+        direction: 'inbound',
+        messageId: '<cust-1@customer.example.test>',
+        fromAddress: 'customer@example.test',
+        bodyText: 'Where is my order?',
+      },
+    })
+    await db.transaction(async (tx) => markStoredInTx(tx, delivery.id, threadId))
+    await expireLease(db, delivery.id)
+
+    const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+
+    expect(replay.claimed).toBe(false)
+    expect(replay.delivery.status).toBe('stored')
+  })
+
   it('markStoredInTx (run inside a transaction) sets status stored and records threadId', async () => {
     const { db, store, mailboxId } = await freshStore()
-    const { delivery } = await store.claim(mailboxId, 'provider-msg-1')
+    const { delivery } = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
     // thread_id is a real FK (`threads(id)`) — a genuine conversation/thread
     // must exist first; which store produced it is irrelevant to this test.
     const { threadId } = await createConversationStore(db).createConversation({
@@ -217,7 +303,7 @@ describe('createInboundDeliveryStore', () => {
     })
 
     // claim() replay after a commit confirms it persisted.
-    const replay = await store.claim(mailboxId, 'provider-msg-1')
+    const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
     expect(replay).toMatchObject({
       claimed: false,
       delivery: { status: 'stored', threadId },

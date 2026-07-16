@@ -11,10 +11,11 @@
  *
  * 1. **Claim, atomically** (`InboundDeliveryStore.claim`,
  *    `src/store/inbound-deliveries.ts`) — a fresh claim (or a reclaimed
- *    `failed` row, see that store's doc comment) means this call owns
- *    processing; any other outcome means a concurrent or prior delivery
- *    already does, so this function stops and returns THAT row's recorded
- *    outcome (never double-processes).
+ *    `failed` row, or a reclaimed lease-expired `received` row — HT-45, see
+ *    that store's doc comment) means this call owns processing; any other
+ *    outcome means a concurrent or prior delivery already does, so this
+ *    function stops and returns THAT row's recorded outcome (never
+ *    double-processes).
  * 2. **Parse** (`parseInboundEmail`, `src/mail/parse.ts`) — the pipeline's
  *    ONE parse (invariant #1). The raw bytes come either inline or via a
  *    `BlobStore.get` of a `blobRef` (`src/providers/inbound-email.ts`).
@@ -61,6 +62,22 @@ import { decideThreading, type ThreadingDecision } from './thread.js'
  */
 export const MAX_INGEST_ATTEMPTS = 5
 
+/**
+ * Default lease duration held on a delivery between {@link
+ * InboundDeliveryStore.claim} committing `'received'` and this pipeline's
+ * own step-5 store transaction (or its catch-block `markFailed`) — mirrors
+ * `src/mail/send.ts`'s `DEFAULT_LEASE_MS`, the outbound precedent for this
+ * exact claim/lease/reclaim shape (HT-45; `src/store/inbound-deliveries.ts`'s
+ * module doc, "received rows are ALSO reclaimed"). Unlike `DEFAULT_LEASE_MS`,
+ * this is not asserted against any external bounded call (`EmailSender.
+ * maxSendMs` has no inbound-side equivalent) — it is simply a generous
+ * ceiling on how long one `ingestInboundMessage` call should ever
+ * legitimately take (parse + threading decision + one store transaction),
+ * past which a claim is presumed abandoned (crashed) rather than merely
+ * slow.
+ */
+export const DEFAULT_INBOUND_LEASE_MS = 120_000
+
 /** Dependencies {@link ingestInboundMessage} needs, injected so it stays testable against fakes/in-memory stores. */
 export interface IngestDeps {
   /**
@@ -75,6 +92,8 @@ export interface IngestDeps {
   inboundDeliveryStore: InboundDeliveryStore
   blobStore: BlobStore
   keyring: Keyring
+  /** Lease duration passed to `InboundDeliveryStore.claim` (default {@link DEFAULT_INBOUND_LEASE_MS}). */
+  leaseMs?: number
 }
 
 /** Fields every {@link IngestOutcome} variant carries. */
@@ -116,7 +135,11 @@ export async function ingestInboundMessage(
   raw: RawInboundMessage,
   deps: IngestDeps,
 ): Promise<IngestOutcome> {
-  const claimResult = await deps.inboundDeliveryStore.claim(raw.mailboxId, raw.providerMessageId)
+  const claimResult = await deps.inboundDeliveryStore.claim(
+    raw.mailboxId,
+    raw.providerMessageId,
+    deps.leaseMs ?? DEFAULT_INBOUND_LEASE_MS,
+  )
 
   if (!claimResult.claimed) {
     return outcomeForExistingDelivery(claimResult.delivery, deps)
@@ -201,8 +224,12 @@ async function outcomeForExistingDelivery(
         error: delivery.lastError ?? '',
       }
     case 'received':
-      // Another delivery's claim is (still) in flight — not our outcome to
-      // report; the caller must not touch this row.
+      // claim() only returns claimed:false for a 'received' row when its
+      // lease has NOT yet lapsed (src/store/inbound-deliveries.ts's "received
+      // rows are ALSO reclaimed", HT-45) — i.e. another delivery's claim is
+      // genuinely still in flight. Not our outcome to report; the caller
+      // must not touch this row. A lease-expired row is reclaimed by claim()
+      // instead and flows through processClaimedDelivery below, never here.
       return { ...base, kind: 'in-progress' }
     case 'failed':
       // claim() only returns claimed:false for a 'failed' row if its own

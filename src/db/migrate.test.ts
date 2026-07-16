@@ -53,6 +53,7 @@ describe('migrate', () => {
       { id: 11, name: 'gmail_watch_state' },
       { id: 12, name: 'inbound_deliveries' },
       { id: 13, name: 'queue_jobs' },
+      { id: 14, name: 'inbound_delivery_lease' },
     ])
   })
 
@@ -76,6 +77,7 @@ describe('migrate', () => {
       { id: 11 },
       { id: 12 },
       { id: 13 },
+      { id: 14 },
     ])
   })
 

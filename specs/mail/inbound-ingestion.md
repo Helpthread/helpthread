@@ -64,10 +64,10 @@ Ordered, applied to each received message. Idempotent by step 1, so a whole re-r
    `appendThread` uses for outbound idempotency (sending.md §3a). A fresh insert means we
    own processing; a **conflict** means a concurrent or prior delivery already owns it, so
    we **stop and return that row's outcome** — a terminal `stored`/`suppressed` row is a
-   completed replay, an in-flight `received` row is another worker's claim (do not
-   double-process). A non-atomic read-then-insert would let two concurrent deliveries of
-   the same key both pass a dedup check and both create a conversation; the unique-key
-   claim is what closes that race.
+   completed replay, an in-flight `received` row **whose lease has not lapsed** is another
+   worker's claim (do not double-process; §4's lease). A non-atomic read-then-insert would
+   let two concurrent deliveries of the same key both pass a dedup check and both create a
+   conversation; the unique-key claim is what closes that race.
 2. **Parse.** `parseInboundEmail(raw) → ParsedEmail` (invariant #1). A message that cannot
    be parsed at all is a ledger `failed`/dead-letter case (§4), never a guess.
 3. **Loop/auto-responder gate (§5).** A suppressed message is recorded `suppressed` and
@@ -118,6 +118,28 @@ then duplicate conversation on retry" window — the write and its record are ne
 separately durable. It is the inbound mirror of the outbound get-or-insert in sending.md
 §3a, keyed on `(mailboxId, providerMessageId)` rather than `(conversationId,
 idempotencyKey)`.
+
+**The claim carries a lease, so a crash mid-unit is reclaimed, not stranded (HT-45).** The
+previous paragraph's "the retry redoes the whole unit cleanly" only holds if a retry's
+§3-step-1 claim is actually willing to re-claim a `received` row that never made it to the
+step-5 commit — a hard process crash (SIGKILL / OOM / redeploy) between the claim committing
+`received` and that commit (or the catch-block's `markFailed`) otherwise strands the row at
+`received` forever: nothing ever transitions it to `failed`, so an ordinary re-delivery finds
+a `received` row and — correctly, per this section's own "in-flight, do not double-process"
+rule — refuses to touch it, on every subsequent redelivery, permanently. The delivery ledger's
+`claimed_until` column is what breaks that permanence: every successful claim (fresh insert,
+or a `failed`/`received` reclaim) stamps a lease `leaseMs` into the future, and a `received`
+row becomes reclaimable — by the ordinary §3-step-1 claim path, no separate sweep — once
+`claimed_until IS NULL OR claimed_until < now()`. A single row-locked `UPDATE` performs the
+reclaim, so two concurrent reclaim attempts on the same lapsed lease can never both win — the
+same atomicity this ledger already relies on for the `failed`-row reclaim and that
+`ConversationStore.claimThreadForDelivery` (sending.md) relies on for the outbound lease. The
+retry that actually performs the reclaim is whatever next calls into ingest for this key: a
+redelivered provider notification, or — since a stuck `received` row also blocks this
+mailbox's transport cursor from advancing (gmail-push.md §4) — the transport's own history
+replay re-fetching and re-ingesting the same still-un-advanced message, which recurs on every
+subsequent reconcile run for as long as the cursor cannot pass it, bounded above by that
+transport's own periodic maintenance sweep (gmail-push.md §6) even with no new mail at all.
 
 **At-least-once, with honest partial-failure handling.** Ingest can still fail partway —
 an unparseable message, a blob write that succeeds then a transaction that aborts, an
@@ -222,3 +244,9 @@ engine's existing store/keyring fakes — no cloud required:
 - A verifiable own-message loop → `suppressed`, nothing created; a message that merely
   *claims* our `From` without a verifiable correlation → **ingested**, not dropped.
 - `append→deleted` → falls back to a fresh conversation, mail never lost.
+- A simulated crash (a delivery claimed, then never marked `stored`/`failed`) → while its
+  lease still holds, re-delivery reports `in-progress` and touches nothing (indistinguishable
+  from a genuinely concurrent in-flight claim); once the lease has lapsed, re-delivery
+  reclaims and fully reprocesses it — exactly one conversation, ledger ends `stored` (§4's
+  lease). Two concurrent re-deliveries of the same lapsed row → exactly one reclaim wins,
+  same as the fresh-key concurrent-claim case above.

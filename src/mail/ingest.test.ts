@@ -306,6 +306,81 @@ describe('ingestInboundMessage', () => {
     expect(await countRows(db, 'threads')).toBe(1)
   })
 
+  // --- HT-45: a crash strands a delivery at 'received'; the lease closes it. ---
+
+  it('a delivery still within its lease reports in-progress and is NOT reprocessed (a genuinely concurrent claim, not a crash)', async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+    const raw = inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw())
+    // Claim directly against the ledger, as a concurrent ingestInboundMessage
+    // call's own step 1 would — and never mark it, simulating that call
+    // still being genuinely in flight.
+    const stuck = await deps.inboundDeliveryStore.claim(mailboxId, 'provider-msg-1', 30_000)
+    expect(stuck.claimed).toBe(true)
+
+    const outcome = await ingestInboundMessage(raw, deps)
+
+    expect(outcome).toMatchObject({ kind: 'in-progress', deliveryId: stuck.delivery.id })
+    expect(await countRows(db, 'conversations')).toBe(0)
+  })
+
+  it("a delivery stranded at 'received' by a simulated crash (claimed, never marked) is reclaimed and reprocessed once its lease expires", async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+    const raw = inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw())
+
+    // Simulate the crash this ticket closes: claim the delivery (exactly
+    // ingestInboundMessage's own step 1) but never run parse/store/mark —
+    // the window between claim() committing 'received' and step 5's store
+    // transaction (or the catch-block markFailed), if the process died
+    // right there.
+    const stuck = await deps.inboundDeliveryStore.claim(mailboxId, 'provider-msg-1', 30_000)
+    expect(stuck.claimed).toBe(true)
+    await db.query(
+      "UPDATE inbound_deliveries SET claimed_until = now() - interval '1 second' WHERE id = $1",
+      [stuck.delivery.id],
+    )
+
+    // Nothing has processed this message yet: no conversation exists, the
+    // ledger row is still 'received'.
+    expect(await countRows(db, 'conversations')).toBe(0)
+
+    // Re-delivery (a redelivered push notification, or the reconcile sweep
+    // re-listing the same stuck message because the cursor never advanced
+    // past it — HT-41) calls ingestInboundMessage again for the SAME key.
+    // With the lease lapsed, this must reclaim and fully reprocess it, not
+    // report 'in-progress' forever.
+    const outcome = await ingestInboundMessage(raw, deps)
+
+    expect(outcome).toMatchObject({ kind: 'stored', deliveryId: stuck.delivery.id })
+    expect(await countRows(db, 'conversations')).toBe(1)
+    expect(await countRows(db, 'threads')).toBe(1)
+
+    const ledgerRows = await db.query<{ status: string }>(
+      'SELECT status FROM inbound_deliveries WHERE id = $1',
+      [stuck.delivery.id],
+    )
+    expect(ledgerRows[0].status).toBe('stored')
+  })
+
+  it('two concurrent re-deliveries of a lease-expired stranded row resolve to exactly one conversation (the reclaim itself is claim-safe)', async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+    const raw = inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw())
+    const stuck = await deps.inboundDeliveryStore.claim(mailboxId, 'provider-msg-1', 30_000)
+    expect(stuck.claimed).toBe(true)
+    await db.query(
+      "UPDATE inbound_deliveries SET claimed_until = now() - interval '1 second' WHERE id = $1",
+      [stuck.delivery.id],
+    )
+
+    const [a, b] = await Promise.all([
+      ingestInboundMessage(raw, deps),
+      ingestInboundMessage(raw, deps),
+    ])
+
+    expect([a.kind, b.kind]).toContain('stored')
+    expect(await countRows(db, 'conversations')).toBe(1)
+    expect(await countRows(db, 'threads')).toBe(1)
+  })
+
   // --- spec §8: a partial failure → failed → retried → stored. -------------
 
   it('a partial failure in step 5 (the store+ledger transaction aborts) → failed, then a retry → stored, with no orphaned/duplicate conversation', async () => {

@@ -680,6 +680,41 @@ CREATE INDEX queue_jobs_ready_idx ON queue_jobs (topic, run_after) WHERE dead_le
 `
 
 /**
+ * Migration 014 — `inbound_deliveries.claimed_until`, the inbound delivery
+ * lease (HT-45; `src/store/inbound-deliveries.ts`, specs/mail/inbound-
+ * ingestion.md §4).
+ *
+ * Closes the never-drop gap HT-37 shipped without: a process crash (SIGKILL
+ * / OOM / redeploy) between `InboundDeliveryStore.claim` committing
+ * `'received'` and the ingest pipeline's step-5 store transaction (or the
+ * catch-block `markFailed`) stranded the delivery at `'received'` forever —
+ * `claim()` reclaimed a `'failed'` row but had no notion of a `'received'`
+ * row's claim ever going stale, so re-delivery just replayed the same stuck
+ * `'in-progress'` outcome, and (HT-41's cursor coupling) could block the
+ * mailbox's reconcile cursor from ever advancing past it.
+ *
+ * This is the inbound mirror of migration 003's `threads.claimed_until`
+ * (the outbound send lease `ConversationStore.claimThreadForDelivery` reads
+ * and writes): a nullable lease timestamp, `NULL` or in the past meaning
+ * "free to claim." Unlike migration 003, no new index is added — every
+ * lookup here is still by the existing `(mailbox_id, provider_message_id)`
+ * unique key (`InboundDeliveryStore.claim`'s own get-or-insert), never a
+ * batch scan over `claimed_until`, so there is no query this column needs
+ * to speed up.
+ *
+ * A pre-existing `'received'` row from before this migration has
+ * `claimed_until IS NULL` — `InboundDeliveryStore.claim`'s reclaim check
+ * treats `NULL` as an already-expired lease (see that module's doc comment),
+ * so any delivery already stranded at `'received'` in production becomes
+ * immediately reclaimable on its next claim() call, not just newly-stranded
+ * ones — a deliberate, desirable side effect of the `NULL`-is-free
+ * semantics, not a special backfill case.
+ */
+const MIGRATION_014_INBOUND_DELIVERY_LEASE = `
+ALTER TABLE inbound_deliveries ADD COLUMN claimed_until timestamptz;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -745,6 +780,11 @@ const MIGRATIONS: Migration[] = [
     id: 13,
     name: 'queue_jobs',
     sql: MIGRATION_013_QUEUE_JOBS,
+  },
+  {
+    id: 14,
+    name: 'inbound_delivery_lease',
+    sql: MIGRATION_014_INBOUND_DELIVERY_LEASE,
   },
 ]
 
