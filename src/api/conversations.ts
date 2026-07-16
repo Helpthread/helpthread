@@ -178,6 +178,16 @@ export async function handleListConversations(
 }
 
 /**
+ * How long a minted attachment signed URL stays valid (`BlobStore.getSignedUrl`'s
+ * `expiresInSeconds`, HT-46). One hour: long enough to cover an Agent opening
+ * the conversation and viewing/downloading an attachment in one sitting,
+ * short enough that a URL copied out of a stale API response doesn't stay a
+ * standing credential. Not tuned against any measured usage — a reasonable
+ * default, re-minted fresh on every `GET` since nothing here caches it.
+ */
+const ATTACHMENT_SIGNED_URL_EXPIRY_SECONDS = 3600
+
+/**
  * Handle `GET /api/v1/conversations/{id}` — fetch the conversation and
  * shape it as a `ConversationDetail` (spec §3b). `id` is whatever the
  * router extracted from the path; it is passed straight to
@@ -194,16 +204,6 @@ export async function handleListConversations(
  * (see uuid.ts); and the store is asked to exclude deleted rows at the
  * lookup so no threads are loaded for one (no latency side-channel, §5).
  */
-/**
- * How long a minted attachment signed URL stays valid (`BlobStore.getSignedUrl`'s
- * `expiresInSeconds`, HT-46). One hour: long enough to cover an Agent opening
- * the conversation and viewing/downloading an attachment in one sitting,
- * short enough that a URL copied out of a stale API response doesn't stay a
- * standing credential. Not tuned against any measured usage — a reasonable
- * default, re-minted fresh on every `GET` since nothing here caches it.
- */
-const ATTACHMENT_SIGNED_URL_EXPIRY_SECONDS = 3600
-
 export async function handleGetConversation(
   id: string,
   deps: {

@@ -490,16 +490,20 @@ async function writeAttachmentBlobs(
  * The filename segment of an attachment's blob key — NOT the `filename`
  * column value (that stays the original, verbatim `ParsedAttachment.filename`,
  * `null` included). `BlobStore` implementations (e.g. Supabase Storage,
- * `src/providers/adapters/supabase-storage/`) treat `/` in a key as a path
- * separator, so an attacker- or client-supplied filename containing `/`
- * could otherwise nest the object under an unintended "folder" inside this
- * attachment's own namespace slot; stripping it (and any other key-reserved
- * character) keeps every attachment's key exactly three segments deep,
- * whatever the filename contains. A missing filename falls back to a fixed
- * placeholder — the key still needs SOME final segment.
+ * `src/providers/adapters/supabase-storage/`) reject object keys containing
+ * anything outside a restricted ASCII allowlist (letters, digits, `_`, `.`,
+ * `-`) — no unicode, no `/` (a path separator, which would otherwise let an
+ * attacker- or client-supplied filename nest the object under an unintended
+ * "folder" inside this attachment's own namespace slot), no `%`/`#`/quotes/
+ * control characters. Every other character is replaced with `_` so the key
+ * stays exactly three segments deep and adapter-valid, whatever the filename
+ * contains. A missing OR empty filename (`null`, `undefined`, or `''` — a
+ * blank `''` is not caught by `??`) falls back to a fixed placeholder — the
+ * key still needs SOME non-empty final segment.
  */
-function sanitizeAttachmentFilename(filename: string | null): string {
-  return (filename ?? 'attachment').replaceAll(/[/\\]/g, '_')
+export function sanitizeAttachmentFilename(filename: string | null): string {
+  const sanitized = (filename ?? '').replaceAll(/[^A-Za-z0-9._-]/g, '_')
+  return sanitized === '' ? 'attachment' : sanitized
 }
 
 /**

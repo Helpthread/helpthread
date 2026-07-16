@@ -10,6 +10,7 @@ import {
   ingestInboundMessage,
   isOwnMessageReflection,
   MAX_INGEST_ATTEMPTS,
+  sanitizeAttachmentFilename,
 } from './ingest.js'
 import type { ParsedEmail } from './parse.js'
 import { type Keyring, mintReplyMessageId, type SigningKey } from './reply-token.js'
@@ -731,6 +732,52 @@ describe('ingestInboundMessage', () => {
 
   // --- HT-46: attachment blob persistence. ----------------------------------
 
+  describe('sanitizeAttachmentFilename (pure unit)', () => {
+    /** Exactly the adapter-valid charset `src/providers/adapters/supabase-storage/` accepts in an object key segment. */
+    const ADAPTER_SAFE = /^[A-Za-z0-9._-]+$/
+
+    it('leaves a plain ASCII filename untouched', () => {
+      expect(sanitizeAttachmentFilename('hello.txt')).toBe('hello.txt')
+    })
+
+    it('null and empty-string filenames both fall back to the fixed placeholder', () => {
+      // `null` is the "no filename at all" case; `''` is the "client sent an
+      // empty filename attribute" case — `?? 'attachment'` alone only catches
+      // the former, which is exactly the must-fix this test guards against.
+      expect(sanitizeAttachmentFilename(null)).toBe('attachment')
+      expect(sanitizeAttachmentFilename('')).toBe('attachment')
+    })
+
+    it('replaces "/" and "\\" so a crafted filename cannot add a segment inside the blob key', () => {
+      expect(sanitizeAttachmentFilename('a/b.txt')).toBe('a_b.txt')
+      expect(sanitizeAttachmentFilename('..\\..\\evil.txt')).toBe('.._.._evil.txt')
+      expect(sanitizeAttachmentFilename('a/b.txt')).not.toContain('/')
+    })
+
+    it('replaces non-ASCII and other adapter-unsafe characters (unicode, "#", "%", quotes, control chars)', () => {
+      expect(sanitizeAttachmentFilename('Résumé.pdf')).toBe('R_sum_.pdf')
+      expect(sanitizeAttachmentFilename('a#b%c".txt')).toBe('a_b_c_.txt')
+      expect(sanitizeAttachmentFilename('a b.txt')).toBe('a_b.txt')
+    })
+
+    it('every result matches the adapter-safe charset and is non-empty, for a battery of hostile inputs', () => {
+      for (const filename of [
+        null,
+        '',
+        '/',
+        '\\',
+        '///',
+        'Résumé.pdf',
+        'a/b/../c.txt',
+        '文件.txt',
+      ]) {
+        const sanitized = sanitizeAttachmentFilename(filename)
+        expect(sanitized.length).toBeGreaterThan(0)
+        expect(sanitized).toMatch(ADAPTER_SAFE)
+      }
+    })
+  })
+
   describe('attachments (HT-46)', () => {
     it('a message with one attachment writes its bytes to the BlobStore and persists exactly one blob-key reference', async () => {
       const { db, deps, mailboxId } = await freshDeps()
@@ -791,6 +838,42 @@ describe('ingestInboundMessage', () => {
       expect(new TextDecoder().decode(await deps.blobStore.get(two.blobKey))).toBe(
         'second file, longer',
       )
+    })
+
+    it('a slash-bearing, unicode attachment filename is sanitized in the actual blob key the pipeline writes (not just in the unit-tested sanitizer)', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const raw = inboundDelivery(
+        mailboxId,
+        'provider-msg-1',
+        rawMessageWithAttachments({}, [
+          { filename: 'a/../évil.pdf', contentType: 'application/pdf', content: 'bytes' },
+        ]),
+      )
+
+      const outcome = await ingestInboundMessage(raw, deps)
+
+      expect(outcome.kind).toBe('stored')
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+
+      const attachmentStore = createThreadAttachmentStore(db)
+      const rows = await attachmentStore.listByConversationId(outcome.conversationId)
+      expect(rows).toHaveLength(1)
+      // The stored `filename` COLUMN keeps the original, verbatim filename —
+      // only the blob KEY segment is sanitized.
+      expect(rows[0].filename).toBe('a/../évil.pdf')
+
+      // The blob key stays exactly three `/`-segments deep — the crafted
+      // filename cannot add a fourth segment or escape the mailbox/attachment
+      // namespace — and every segment is non-empty and adapter-safe ASCII.
+      const segments = rows[0].blobKey.split('/')
+      expect(segments).toHaveLength(3)
+      for (const segment of segments) {
+        expect(segment.length).toBeGreaterThan(0)
+        expect(segment).toMatch(/^[A-Za-z0-9._-]+$/)
+      }
+
+      // The bytes are still retrievable at the sanitized key.
+      expect(new TextDecoder().decode(await deps.blobStore.get(rows[0].blobKey))).toBe('bytes')
     })
 
     it('a message with no attachments persists no thread_attachments rows', async () => {
