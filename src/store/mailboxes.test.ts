@@ -134,6 +134,20 @@ describe('createMailboxStore', () => {
     await expect(store.markNeedsReconnect(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
   })
 
+  it('does NOT downgrade a disconnected mailbox — guard holds, silent no-op, no throw (review fix)', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'disconnected' })
+
+    // The guarded row exists, so this must NOT throw the "no mailbox" error
+    // — only a genuinely missing row does that (see the previous test).
+    await expect(store.markNeedsReconnect(mailboxId)).resolves.toBeUndefined()
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('disconnected')
+  })
+
   it('getMailboxById finds an existing mailbox by id', async () => {
     const { db, store } = await freshStore()
     const mailboxId = await insertMailbox(db, { address: 'support@example.test' })
@@ -211,6 +225,18 @@ describe('createMailboxStore', () => {
   it('markPaused throws for a mailbox id that does not exist', async () => {
     const { store } = await freshStore()
     await expect(store.markPaused(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
+  })
+
+  it('markPaused does NOT downgrade a disconnected mailbox — guard holds, silent no-op, no throw (review fix)', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db, { status: 'disconnected' })
+
+    await expect(store.markPaused(mailboxId)).resolves.toBeUndefined()
+
+    const rows = await db.query<{ status: string }>('SELECT status FROM mailboxes WHERE id = $1', [
+      mailboxId,
+    ])
+    expect(rows[0].status).toBe('disconnected')
   })
 
   // --- markDisconnected (HT-47, gmail-connect.md's disconnect section) -------

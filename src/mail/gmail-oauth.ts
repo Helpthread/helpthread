@@ -91,6 +91,21 @@
  * a lock/single-flight guard would be a reasonable follow-up if refresh
  * volume ever makes the duplicate calls matter, but is speculative
  * complexity this ticket does not add — see the HT-38 implementation report.
+ *
+ * ## Never resurrect a disconnected mailbox's token row (HT-47)
+ *
+ * One specific race IS worth guarding, unlike the harmless one above: a
+ * refresh already in flight when `src/mail/gmail-disconnect.ts`'s
+ * `disconnect()` commits (deletes the token/watch-state rows, marks the
+ * mailbox `disconnected`) must not then persist its own freshly-fetched
+ * token — that would re-create exactly the row disconnect just deleted, for
+ * a mailbox an operator explicitly took offline. `refresh()` re-checks the
+ * mailbox's CURRENT status immediately before writing and skips the write
+ * (but still returns the fetched access token to its caller) when it reads
+ * `disconnected` — see the guard in `refresh()` below and
+ * `gmail-disconnect.ts`'s own module doc for the other half of this defense
+ * (disconnect re-running its deletes even on an already-`disconnected`
+ * mailbox, so a resurrected row is cleaned up on the next retry either way).
  */
 
 import type { MailboxTokenStore, StoredMailboxTokens } from '../store/mailbox-tokens.js'
@@ -308,12 +323,34 @@ async function refresh(
       : (tokens.scopes ?? undefined)
   const accessTokenExpiresAt = new Date(Date.now() + expiresIn * 1000)
 
-  await tokenStore.upsertTokens(mailboxId, {
-    refreshToken,
-    accessToken,
-    accessTokenExpiresAt,
-    scopes,
-  })
+  // Guard against resurrecting a token row for a mailbox an operator has
+  // since disconnected (HT-47's `src/mail/gmail-disconnect.ts`; flagged in
+  // its own review). This refresh's Google round-trip can straddle an
+  // in-flight `disconnect()` call: if THAT call's transaction (delete
+  // tokens, delete watch state, mark `disconnected`) commits while this
+  // request is still in flight, persisting the freshly-fetched token below
+  // would re-create the very row disconnect just deleted — "tokens must not
+  // persist even as ciphertext" (`gmail-disconnect.ts`'s module doc) would
+  // no longer hold, and outbound send would resolve a live token for a
+  // mailbox the operator explicitly took offline. Re-checking the mailbox's
+  // CURRENT status here (not the one this call started with) closes that
+  // window down to this one extra query; a disconnect that lands in the
+  // remaining gap between this check and the write below is caught on the
+  // NEXT `getAccessToken` or `disconnect()` retry (`gmail-disconnect.ts`'s
+  // idempotent-but-still-deletes handling of an already-`disconnected`
+  // mailbox). The freshly-fetched `accessToken` is still returned either
+  // way — this caller's own in-flight use of it (e.g. one `history.list`
+  // call already underway) cannot be un-requested, only its persistence can
+  // be skipped.
+  const currentMailbox = await mailboxStore.getMailboxById(mailboxId)
+  if (currentMailbox?.status !== 'disconnected') {
+    await tokenStore.upsertTokens(mailboxId, {
+      refreshToken,
+      accessToken,
+      accessTokenExpiresAt,
+      scopes,
+    })
+  }
 
   return accessToken
 }

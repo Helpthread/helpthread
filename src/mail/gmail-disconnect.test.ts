@@ -320,7 +320,7 @@ describe('createGmailDisconnectService', () => {
 
   // --- idempotency: already disconnected --------------------------------
 
-  it('disconnecting an already-disconnected mailbox is a no-op: no remote calls, no store writes', async () => {
+  it('disconnecting an already-disconnected mailbox is a no-op: no remote calls (its own local writes are a no-op re-run)', async () => {
     const { db, mailboxStore, service, revokeCalls, createWatchClient } = await freshService()
     const mailboxId = await mailboxStore
       .upsertConnectedMailbox({ address: 'gone@example.test', provider: 'gmail' })
@@ -338,6 +338,54 @@ describe('createGmailDisconnectService', () => {
     })
     expect(revokeCalls).toHaveLength(0)
     expect(createWatchClient).not.toHaveBeenCalled()
+    const mailboxRows = await db.query<{ status: string }>(
+      'SELECT status FROM mailboxes WHERE id = $1',
+      [mailboxId],
+    )
+    expect(mailboxRows[0].status).toBe('disconnected')
+  })
+
+  it('a repeat disconnect on an already-disconnected mailbox cleans up a RESURRECTED token row (review fix: the idempotent no-op path re-runs the step-3 deletes)', async () => {
+    const {
+      db,
+      mailboxStore,
+      tokenStore,
+      watchStateStore,
+      service,
+      revokeCalls,
+      createWatchClient,
+    } = await freshService()
+    const mailboxId = await mailboxStore
+      .upsertConnectedMailbox({ address: 'resurrected@example.test', provider: 'gmail' })
+      .then((m) => m.id)
+    await mailboxStore.markDisconnected(mailboxId)
+    // Simulates a concurrent refresh (`gmail-oauth.ts`'s `refresh()`) that was
+    // already in flight when a FIRST disconnect call committed, upserting a
+    // token row for this now-`disconnected` mailbox moments later — the race
+    // this fix targets.
+    await tokenStore.upsertTokens(mailboxId, { refreshToken: 'resurrected-refresh-token' })
+    await watchStateStore.seedBaseline(mailboxId, {
+      historyId: 'resurrected-hid',
+      watchExpiration: new Date('2026-08-01T00:00:00.000Z'),
+    })
+
+    const result = await service.disconnect('resurrected@example.test')
+
+    expect(result).toEqual({
+      mailboxId,
+      address: 'resurrected@example.test',
+      alreadyDisconnected: true,
+      revoked: false,
+      watchStopped: false,
+    })
+    // No remote calls attempted, even though a token row existed — see the
+    // module doc's rationale (re-revoking on every retry is repeat work with
+    // no added safety, since the FIRST disconnect already tried).
+    expect(revokeCalls).toHaveLength(0)
+    expect(createWatchClient).not.toHaveBeenCalled()
+    // The resurrected rows ARE cleaned up.
+    expect(await tokenStore.getTokens(mailboxId)).toBeNull()
+    expect(await watchStateStore.getCursor(mailboxId)).toBeNull()
     const mailboxRows = await db.query<{ status: string }>(
       'SELECT status FROM mailboxes WHERE id = $1',
       [mailboxId],

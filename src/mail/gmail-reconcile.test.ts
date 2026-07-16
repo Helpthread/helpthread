@@ -480,6 +480,24 @@ describe('createGmailReconcileHandler', () => {
     expect(ingest).not.toHaveBeenCalled()
   })
 
+  it('a disconnected mailbox is acked without acquiring a token or touching the Gmail client (HT-47 review fix, mirrors the paused case)', async () => {
+    const { store: mailboxStore } = fakeMailboxStore(activeMailbox({ status: 'disconnected' }))
+    const getAccessToken = vi.fn(async () => 'token')
+    const createHistoryClient = vi.fn()
+    const ingest = vi.fn()
+
+    const handler = createGmailReconcileHandler(
+      baseDeps({ mailboxStore, tokenService: { getAccessToken }, ingest, createHistoryClient }),
+    )
+
+    const result = await handler(job())
+
+    expect(result).toEqual({ kind: 'ack' })
+    expect(getAccessToken).not.toHaveBeenCalled()
+    expect(createHistoryClient).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+  })
+
   it('an unknown mailbox id (mailbox row gone) is acked, same as not-active', async () => {
     const { store: mailboxStore } = fakeMailboxStore(activeMailbox())
     const createHistoryClient = vi.fn()

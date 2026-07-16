@@ -39,8 +39,14 @@
  *
  * Disconnecting an already-`disconnected` mailbox is a no-op success:
  * `alreadyDisconnected: true`, no remote calls attempted (its token/
- * watch-state rows are already gone — there's nothing left to revoke or
- * stop), no store writes. An unknown address throws
+ * watch-state rows are normally already gone — there's nothing left to
+ * revoke or stop). It STILL re-runs the step-3 transactional deletes,
+ * though: a concurrent refresh (`./gmail-oauth.ts`'s `refresh()`) that was
+ * already in flight when an EARLIER disconnect committed can upsert a fresh
+ * token row moments later, and without re-running the (idempotent) deletes
+ * on every disconnect call, that resurrected row would strand permanently —
+ * an operator retrying disconnect on an already-`disconnected` mailbox is
+ * exactly the recovery path for that race. An unknown address throws
  * {@link GmailDisconnectError} `not_found`, which the API layer
  * (`src/api/gmail-disconnect.ts`) maps to `404`.
  *
@@ -207,9 +213,25 @@ export function createGmailDisconnectService(
         throw new GmailDisconnectError('not_found', `No mailbox is connected at ${address}.`)
       }
 
-      // --- Idempotent no-op: already disconnected means its tokens/watch
-      // state are already gone — nothing to revoke or stop (module doc). ---
+      // --- Idempotent no-op, BUT still runs the step-3 deletes (module doc's
+      // "Idempotency" section): an already-disconnected mailbox's tokens/
+      // watch-state rows are normally already gone, so there's nothing to
+      // revoke or stop and this transaction is usually a true no-op — EXCEPT
+      // when a token row was RESURRECTED after the fact (a concurrent
+      // refresh — `./gmail-oauth.ts`'s `refresh()` — that was already
+      // in-flight when the FIRST disconnect committed can still upsert a
+      // fresh token row moments later). Re-running the deletes here converts
+      // that resurrection from a permanent strand into something a retried
+      // operator disconnect cleans up. No remote calls are attempted either
+      // way: a resurrected token belongs to a grant this mailbox's FIRST
+      // disconnect already tried to revoke, and re-revoking on every retry
+      // would just be repeat work for no added safety. ---
       if (mailbox.status === 'disconnected') {
+        await db.transaction(async (tx) => {
+          await tokenStore.deleteTokens(mailbox.id, tx)
+          await watchStateStore.deleteState(mailbox.id, tx)
+          await mailboxStore.markDisconnected(mailbox.id, tx)
+        })
         return {
           mailboxId: mailbox.id,
           address: mailbox.address,
