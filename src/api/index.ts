@@ -31,6 +31,7 @@
 
 import { TRANSPARENT_GIF, verifyViewToken } from '../mail/open-tracking.js'
 import type { Keyring } from '../mail/reply-token.js'
+import type { SelfEchoGuardDeps } from '../mail/send.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
 import type { ThreadAttachmentStore } from '../store/attachments.js'
 import type { ConversationStore } from '../store/conversations.js'
@@ -147,6 +148,17 @@ export interface InboxApiDeps {
    * posture above.
    */
   attachments?: { store: ThreadAttachmentStore; blobStore: BlobStore }
+  /**
+   * The self-echo guard `sendReply` accepts (HT-49 review fix; `src/mail/
+   * send.ts`'s `SelfEchoGuardDeps`): ABSENT BY DEFAULT — a deployment with no
+   * self-reflecting transport configured (no Gmail mailbox connected) simply
+   * never sets this, and reply-sending behaves exactly as before this guard
+   * existed. When present, a successful reply's own sent-message echo is
+   * pre-suppressed in the inbound delivery ledger so a transport that
+   * delivers sent mail back into its own mailbox (Gmail, confirmed live)
+   * never has that echo re-ingested as a phantom inbound message.
+   */
+  selfEchoGuard?: SelfEchoGuardDeps
 }
 
 /**
@@ -310,6 +322,7 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             mailDomain: deps.mailDomain,
             supportAddress: deps.supportAddress,
             ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
+            ...(deps.selfEchoGuard !== undefined ? { selfEchoGuard: deps.selfEchoGuard } : {}),
           })
 
         case 'gmail-connect':

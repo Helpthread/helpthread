@@ -190,6 +190,24 @@ in order by every adapter (unchanged by HT-49); the fix is in what the engine
 puts into `References` before handing it to the adapter, not in the adapter
 contract itself.
 
+**Review-fix amendment: a self-reflecting transport requires ALSO suppressing the sent
+message's own echo (`src/mail/send.ts`'s "The reply token's own self-echo" section).**
+Placing the reply token in `References` unconditionally has a consequence the paragraph
+above does not by itself address: Gmail (confirmed live) delivers the SENT message back
+into the mailbox it was sent from, and that self-echo now carries a verifiable token —
+one `inbound-ingestion.md` §5's `Message-ID`-only loop guard cannot recognize, for the
+exact same reason as above (Gmail rewrites the echo's `Message-ID` too). Left alone, the
+echo would `append` into its own conversation as a phantom inbound message. `sendReply`
+closes this immediately after a successful send: if `EmailSender.send()` returned an
+`EmailSendResult.providerMessageId` (`src/providers/email-sender.ts`) — the SAME id the
+transport later reports for that message during reconcile — it resolves `SendReplyInput.
+from` to its `MailboxRecord` and pre-seeds `(mailboxId, providerMessageId)` as an
+already-`suppressed` row in the inbound delivery ledger (`InboundDeliveryStore.
+preSuppressOwnSend`; `inbound-ingestion.md` §5's HT-49 amendment has the full mechanism
+and its one known residual race). This is OPTIONAL (`SendReplyDeps.selfEchoGuard`) and a
+no-op wherever absent or wherever the sender reports no `providerMessageId` — a deployment
+with no self-reflecting transport configured behaves exactly as before this guard existed.
+
 **Recommended: a provider SHOULD de-duplicate on `Message-ID` (HT-16).** This
 is not a precondition the engine requires — at-least-once delivery (§3a) holds
 with or without it — but it is not an aside either: it is the one thing

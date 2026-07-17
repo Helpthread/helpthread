@@ -147,6 +147,27 @@
  * spec §5 asks for — "recorded in the ledger (suppressed, with the reason)"
  * — just sharing a column with the failure-path's error text rather than
  * owning a dedicated one.
+ *
+ * ## Pre-seeded suppression (HT-49 review fix): suppressing before a claim exists
+ *
+ * Every mark* method above requires a row already `claim()`-ed to `received`
+ * — the ordinary "ingest ran, then decided to suppress" order. {@link
+ * InboundDeliveryStore.preSuppressOwnSend} is the one exception: it creates
+ * an ALREADY-`suppressed` row from scratch, before any `claim()` for that key
+ * has ever happened. This exists for exactly one caller, `src/mail/send.ts`'s
+ * self-echo guard (see that module's doc comment): some transports (Gmail
+ * confirmed — HT-49 live evidence) deliver the sent copy of an outbound
+ * reply back into the SAME mailbox it was sent from, where the reconcile
+ * pipeline (`src/mail/gmail-reconcile.ts`) would otherwise ingest it as a
+ * genuine new inbound message — and by the time that happens, the token this
+ * fix added to `References` (threading.md §2a) makes that self-echo `append`
+ * to the very conversation it belongs to, duplicating the agent's own reply
+ * as a phantom customer message. Pre-seeding `(mailboxId,
+ * providerMessageId)` — using the SAME provider id (`EmailSendResult.
+ * providerMessageId`) the transport will later report for that exact message
+ * during reconcile — means `claim()`'s ordinary "terminal row, do not
+ * double-process" branch absorbs the echo with zero heuristics and zero
+ * changes to `decideThreading`.
  */
 
 import type { Db, Queryable } from '../db/client.js'
@@ -234,6 +255,28 @@ export interface InboundDeliveryStore {
    * `Error` if no row exists with `id` at all.
    */
   markDeadLetter(id: string, error: string, claimedAttempts: number): Promise<StoredInboundDelivery>
+
+  /**
+   * Pre-seed `(mailboxId, providerMessageId)` as ALREADY `suppressed`,
+   * before any `claim()` for that key has happened — see the module doc's
+   * "Pre-seeded suppression" section for why this exists and who calls it.
+   *
+   * A plain `INSERT ... ON CONFLICT (mailbox_id, provider_message_id) DO
+   * NOTHING` — there is no row to `RETURNING`, and nothing for the caller to
+   * act on either way. If a row ALREADY exists for this key — the race where
+   * a reconcile run's `claim()` won first, ingesting the message before this
+   * call could pre-seed the suppression (module doc) — this is a SILENT
+   * no-op: whatever status that row already reached (`received`, `stored`,
+   * or `suppressed` from a genuine concurrent path) is left completely
+   * untouched. This method must NEVER overwrite an existing row: doing so
+   * could silently flip an already-committed `stored` row (with its own
+   * `thread_id` a conversation now depends on) to `suppressed`, corrupting a
+   * message that merely happened to reuse this `providerMessageId` first.
+   * Losing this race reproduces the pre-HT-49-fix failure (a phantom inbound
+   * self-echo) rather than a NEW one — a known, accepted residual (see the
+   * caller's doc comment), not silently hidden.
+   */
+  preSuppressOwnSend(mailboxId: string, providerMessageId: string, reason: string): Promise<void>
 }
 
 /**
@@ -411,6 +454,18 @@ export function createInboundDeliveryStore(db: Db): InboundDeliveryStore {
         [id, error, claimedAttempts],
       )
       return oneOrFenced(db, rows, 'markDeadLetter', id)
+    },
+
+    async preSuppressOwnSend(mailboxId, providerMessageId, reason) {
+      // No RETURNING, no fence — see the interface doc comment. A conflict
+      // means another path (an ordinary claim()) already owns this key;
+      // this call must never touch that row.
+      await db.query(
+        `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status, last_error)
+         VALUES ($1, $2, 'suppressed', $3)
+         ON CONFLICT (mailbox_id, provider_message_id) DO NOTHING`,
+        [mailboxId, providerMessageId, reason],
+      )
     },
   }
 }

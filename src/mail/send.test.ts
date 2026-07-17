@@ -3,6 +3,8 @@ import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import { type ConversationStore, createConversationStore } from '../store/conversations.js'
+import { createInboundDeliveryStore } from '../store/inbound-deliveries.js'
+import { createMailboxStore } from '../store/mailboxes.js'
 import { verifyViewToken } from './open-tracking.js'
 import type { ParsedEmail } from './parse.js'
 import type { Keyring, SigningKey } from './reply-token.js'
@@ -415,6 +417,167 @@ describe('sendReply', () => {
 
     expect(result).toEqual({ ok: false, reason: 'conversation-not-found' })
     expect(sendSpy).not.toHaveBeenCalled()
+  })
+})
+
+// --- self-echo guard (HT-49 review fix) -------------------------------------
+//
+// Gmail delivers a sent reply's own copy back into the SAME mailbox it was
+// sent from; without this guard, the reply token this fix (HT-49) puts in
+// EVERY outbound References would make that self-echo `append` into the very
+// conversation it belongs to (module doc's "The reply token's own self-echo"
+// section). These tests exercise `selfEchoGuard` directly against a real
+// `InboundDeliveryStore`/`MailboxStore`, rather than a fake, so the
+// suppressed row's shape (and `claim()`'s later behavior against it) is
+// verified, not assumed.
+
+describe('sendReply self-echo guard (HT-49 review fix)', () => {
+  let db: Db | undefined
+
+  afterEach(async () => {
+    await db?.close()
+    db = undefined
+  })
+
+  async function freshDeps() {
+    db = await createPgliteDb()
+    await migrate(db)
+    const store = createConversationStore(db)
+    const mailboxStore = createMailboxStore(db)
+    const inboundDeliveryStore = createInboundDeliveryStore(db)
+    await db.query("INSERT INTO mailboxes (address, provider) VALUES ($1, 'gmail')", [
+      'support@example.test',
+    ])
+    const { conversationId } = await store.createConversation({
+      subject: 'Help with my order',
+      customerEmail: 'customer@example.test',
+      firstMessage: {
+        direction: 'inbound',
+        messageId: '<inbound-1@customer.example.test>',
+        fromAddress: 'customer@example.test',
+        bodyText: 'Where is my order?',
+      },
+    })
+    return { db, store, mailboxStore, inboundDeliveryStore, conversationId }
+  }
+
+  it("a successful send whose sender returns a providerMessageId pre-suppresses that id in the FROM mailbox's inbound delivery ledger", async () => {
+    const { store, mailboxStore, inboundDeliveryStore, conversationId } = await freshDeps()
+    const sender = fakeSender() // returns { providerMessageId: 'provider-1' }
+    const deps: SendReplyDeps = {
+      store,
+      sender,
+      keyring,
+      mailDomain,
+      selfEchoGuard: { mailboxStore, inboundDeliveryStore },
+    }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+    if (!result.ok) throw new Error('unreachable')
+
+    // The exact self-echo Gmail would later report via history.list for
+    // THIS send is already suppressed — claim() reports it as terminal,
+    // never as a fresh 'received' row ingest would append.
+    const mailbox = await mailboxStore.getMailboxByAddress('support@example.test')
+    const claim = await inboundDeliveryStore.claim(mailbox?.id ?? '', 'provider-1', 30_000)
+    expect(claim).toMatchObject({
+      claimed: false,
+      delivery: { status: 'suppressed', lastError: 'own-outbound-self-echo' },
+    })
+  })
+
+  it('no selfEchoGuard configured: send succeeds exactly as before, no ledger row is created', async () => {
+    const { db, store, conversationId } = await freshDeps()
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+
+    expect(result.ok).toBe(true)
+    // No mailbox lookup or ledger write ever happens without a configured guard.
+    const rows = await db.query('SELECT id FROM inbound_deliveries')
+    expect(rows).toHaveLength(0)
+  })
+
+  it('sender returns no providerMessageId: guard is configured but a no-op (nothing to correlate against)', async () => {
+    const { store, mailboxStore, inboundDeliveryStore, conversationId } = await freshDeps()
+    const sender: EmailSender = {
+      maxSendMs: 30_000,
+      async send() {
+        return {} // no providerMessageId
+      },
+    }
+    const deps: SendReplyDeps = {
+      store,
+      sender,
+      keyring,
+      mailDomain,
+      selfEchoGuard: { mailboxStore, inboundDeliveryStore },
+    }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+
+    expect(result.ok).toBe(true)
+    const mailbox = await mailboxStore.getMailboxByAddress('support@example.test')
+    expect(mailbox).not.toBeNull()
+    // Nothing to correlate against without a providerMessageId — no row was seeded.
+    const claim = await inboundDeliveryStore.claim(mailbox?.id ?? '', 'whatever', 30_000)
+    expect(claim.claimed).toBe(true) // fresh — proves nothing was pre-seeded.
+  })
+
+  it('a failed send never pre-suppresses anything (nothing was delivered, so there is no self-echo to guard against)', async () => {
+    const { store, mailboxStore, inboundDeliveryStore, conversationId } = await freshDeps()
+    const sender = failingSender()
+    const deps: SendReplyDeps = {
+      store,
+      sender,
+      keyring,
+      mailDomain,
+      selfEchoGuard: { mailboxStore, inboundDeliveryStore },
+    }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+
+    expect(result.ok).toBe(false)
+    const mailbox = await mailboxStore.getMailboxByAddress('support@example.test')
+    const claim = await inboundDeliveryStore.claim(mailbox?.id ?? '', 'provider-1', 30_000)
+    expect(claim.claimed).toBe(true) // fresh — nothing was pre-seeded for a rejected send.
   })
 })
 

@@ -136,11 +136,46 @@
  * changed: verified, not assumed — `src/mail/thread.ts` is untouched by this
  * fix, and a fixture reproducing tonight's exact failure (`src/mail/
  * ingest.test.ts`) threads correctly through the existing scan unmodified.
+ *
+ * ## The reply token's own self-echo, and how it is suppressed (HT-49 review fix)
+ *
+ * Putting a verifiable token in EVERY outbound reply's `References` (above)
+ * has a sharp edge: some transports (Gmail, confirmed live) deliver the SENT
+ * message back into the very mailbox it was sent from, where the reconcile
+ * pipeline (`src/mail/gmail-reconcile.ts`) ingests it like any other inbound
+ * message. `src/mail/ingest.ts`'s loop guard (`isOwnMessageReflection`) only
+ * recognizes a reflection whose OWN `Message-ID` is our token — but Gmail
+ * rewrites the wire `Message-ID` (this file's own module doc, above), so the
+ * guard never fires for this transport. Without a second guard, that
+ * self-echo carries our valid token as the LAST `References` entry,
+ * `decideThreading` finds it and returns `'append'`, and the agent's own
+ * reply gets stored a second time as a phantom `direction: 'inbound'`
+ * message in the very conversation it belongs to — reopening it if it was
+ * closed (`appendThreadInTx`, `src/store/conversations.ts`).
+ *
+ * `selfEchoGuard` (optional — {@link SelfEchoGuardDeps}) closes this WITHOUT
+ * touching `decideThreading` or adding a threading heuristic: immediately
+ * after a successful send, if the sender returned a `providerMessageId`
+ * (`EmailSendResult.providerMessageId` — Gmail's `body.id`, the SAME id
+ * `gmail-reconcile.ts` will later see for this exact message during
+ * `history.list`), this module resolves `input.from` to its `MailboxRecord`
+ * (`MailboxStore.getMailboxByAddress`) and pre-seeds `(mailboxId,
+ * providerMessageId)` as an already-`suppressed` row in the inbound delivery
+ * ledger (`InboundDeliveryStore.preSuppressOwnSend`, `src/store/inbound-
+ * deliveries.ts`). When reconcile later lists that SAME provider id and
+ * calls `ingestInboundMessage`, its `claim()` finds the pre-seeded
+ * `suppressed` row and reports the terminal outcome as-is — the existing
+ * "do not double-process a terminal row" path, never a new code path in
+ * `ingest.ts`. This is best-effort and never affects the send's own outcome
+ * (the message is already delivered by the time this runs) — see {@link
+ * suppressSelfEcho}'s doc comment for the failure modes this accepts.
  */
 
 import { randomUUID } from 'node:crypto'
 import type { EmailSender } from '../providers/index.js'
 import type { ConversationStore, SendEnvelope, StoredThread } from '../store/conversations.js'
+import type { InboundDeliveryStore } from '../store/inbound-deliveries.js'
+import type { MailboxStore } from '../store/mailboxes.js'
 import { injectTrackingPixel, mintViewToken, pixelUrlFor } from './open-tracking.js'
 import { type Keyring, mintReplyMessageId } from './reply-token.js'
 
@@ -206,6 +241,21 @@ export function assertLeaseExceedsSenderBound(sender: EmailSender, leaseMs: numb
   }
 }
 
+/**
+ * Dependencies for the self-echo guard (module doc's "The reply token's own
+ * self-echo" section, HT-49 review fix). Optional in {@link SendReplyDeps} —
+ * a deployment with no Gmail (or other self-reflecting) transport configured
+ * simply never sets this, and every existing test/caller is unaffected: with
+ * it absent, {@link suppressSelfEcho} is a complete no-op, byte-identical to
+ * before this guard existed.
+ */
+export interface SelfEchoGuardDeps {
+  /** Resolves `SendReplyInput.from` to the mailbox it belongs to (`MailboxStore.getMailboxByAddress`). */
+  mailboxStore: MailboxStore
+  /** Where the pre-seeded suppression row is written (`InboundDeliveryStore.preSuppressOwnSend`). */
+  inboundDeliveryStore: InboundDeliveryStore
+}
+
 /** Dependencies `sendReply` needs, injected so it stays testable against fakes/in-memory stores. */
 export interface SendReplyDeps {
   store: ConversationStore
@@ -226,6 +276,8 @@ export interface SendReplyDeps {
    * pixel with no extra logic.
    */
   openTracking?: { publicBaseUrl: string }
+  /** See {@link SelfEchoGuardDeps}. ABSENT BY DEFAULT — see that interface's doc comment. */
+  selfEchoGuard?: SelfEchoGuardDeps
 }
 
 /** One outbound reply to an existing conversation (specs/mail/sending.md §5: reply-only in this increment). */
@@ -446,7 +498,11 @@ export async function sendReply(
     return { ok: false, reason: 'retry-in-progress' }
   }
 
-  return attemptDeliveryOfClaimedThread(claimed, { store, sender })
+  return attemptDeliveryOfClaimedThread(claimed, {
+    store,
+    sender,
+    selfEchoGuard: deps.selfEchoGuard,
+  })
 }
 
 /**
@@ -465,9 +521,10 @@ async function sendFreshAndMark(
   deps: SendReplyDeps,
 ): Promise<SendReplyResult> {
   const { store, sender } = deps
+  let sendResult: Awaited<ReturnType<EmailSender['send']>>
 
   try {
-    await sender.send({
+    sendResult = await sender.send({
       messageId,
       inReplyTo: input.inReplyTo,
       references: input.references,
@@ -513,7 +570,49 @@ async function sendFreshAndMark(
       markErr,
     )
   }
+  await suppressSelfEcho(input.from, sendResult.providerMessageId, deps.selfEchoGuard)
   return { ok: true, threadId, messageId, delivery: 'sent' }
+}
+
+/**
+ * Best-effort: pre-seed the pending self-echo of this JUST-SENT message as
+ * suppressed in the inbound delivery ledger — module doc's "The reply
+ * token's own self-echo" section. A no-op when `guard` is absent (no
+ * self-reflecting transport configured) or `providerMessageId` is absent
+ * (the sender didn't report one — nothing to correlate against later).
+ *
+ * Deliberately never throws: this runs AFTER the message is already
+ * delivered (`sendFreshAndMark`/`attemptDeliveryOfClaimedThread` only call it
+ * once `sender.send()` has resolved), so a failure here must never turn an
+ * already-successful send into a reported failure — it would invite a
+ * resend of mail that already went out. Losing this race (or a lookup/write
+ * error) just means the pre-HT-49-fix failure mode (a phantom inbound
+ * self-echo, if this transport reflects sent mail back to its own mailbox)
+ * can still occur for this one send — logged, not silently swallowed.
+ */
+async function suppressSelfEcho(
+  fromAddress: string,
+  providerMessageId: string | undefined,
+  guard: SelfEchoGuardDeps | undefined,
+): Promise<void> {
+  if (guard === undefined || providerMessageId === undefined) return
+
+  try {
+    const mailbox = await guard.mailboxStore.getMailboxByAddress(fromAddress)
+    if (mailbox === null) return
+    await guard.inboundDeliveryStore.preSuppressOwnSend(
+      mailbox.id,
+      providerMessageId,
+      'own-outbound-self-echo',
+    )
+  } catch (err) {
+    console.error(
+      "[sendReply] failed to pre-suppress this send's self-echo in the inbound delivery " +
+        'ledger; if this transport reflects sent mail back into its own mailbox, reconcile may ' +
+        'ingest it as a phantom inbound message (HT-49)',
+      err,
+    )
+  }
 }
 
 /**
@@ -538,7 +637,7 @@ async function sendFreshAndMark(
  */
 export async function attemptDeliveryOfClaimedThread(
   thread: StoredThread,
-  deps: { store: ConversationStore; sender: EmailSender },
+  deps: { store: ConversationStore; sender: EmailSender; selfEchoGuard?: SelfEchoGuardDeps },
 ): Promise<
   | { ok: true; threadId: string; messageId: string; delivery: 'sent' }
   | {
@@ -558,9 +657,10 @@ export async function attemptDeliveryOfClaimedThread(
   }
   const messageId = thread.messageId
   const envelope = thread.sendEnvelope
+  let sendResult: Awaited<ReturnType<EmailSender['send']>>
 
   try {
-    await sender.send({
+    sendResult = await sender.send({
       messageId,
       inReplyTo: thread.inReplyTo ?? undefined,
       references: envelope.references,
@@ -604,5 +704,6 @@ export async function attemptDeliveryOfClaimedThread(
       markErr,
     )
   }
+  await suppressSelfEcho(thread.fromAddress, sendResult.providerMessageId, deps.selfEchoGuard)
   return { ok: true, threadId: thread.id, messageId, delivery: 'sent' }
 }

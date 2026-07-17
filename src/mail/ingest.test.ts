@@ -397,6 +397,83 @@ describe('ingestInboundMessage', () => {
     expect(await countRows(db, 'threads')).toBe(2)
   })
 
+  // --- HT-49 review fix: the OUTBOUND reply's own self-echo, ingested by the
+  // SAME mailbox it was sent from, must not be re-appended as a phantom
+  // inbound message. ----------------------------------------------------------
+  //
+  // Without the self-echo guard (`src/mail/send.ts`'s `SelfEchoGuardDeps`),
+  // this is EXACTLY the fixture above minus the customer ever replying: the
+  // self-echo carries our own token as its final References entry — a
+  // provider that rewrites Message-ID (Gmail, live-confirmed) means the loop
+  // guard (`isOwnMessageReflection`, which only checks the message's OWN
+  // Message-ID) never fires — so decideThreading finds the token and
+  // `append`s the agent's own sent reply into its own conversation a SECOND
+  // time, as a phantom `direction: 'inbound'` message whose `fromAddress` is
+  // the mailbox's own support address. This test proves that once
+  // `send.ts` has pre-seeded `(mailboxId, providerMessageId)` as suppressed
+  // (`InboundDeliveryStore.preSuppressOwnSend`), reconcile's later `ingest`
+  // call for that SAME provider id is suppressed instead — never appended.
+  it("HT-49 review fix: a self-echo of the agent's own sent reply — From the mailbox's OWN address, a foreign (Gmail-rewritten) Message-ID, our token as the FINAL References entry — is suppressed, not appended, once send.ts has pre-seeded its providerMessageId", async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+
+    const first = await ingestInboundMessage(
+      inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+      deps,
+    )
+    if (first.kind !== 'stored') throw new Error('unreachable')
+
+    // The agent's own reply: send.ts mints this token and places it as the
+    // FINAL References entry of the outbound mail (module doc, threading.md
+    // §2a) — this is what a raw self-echo of that SAME reply would carry.
+    const replyToken = mintReplyMessageId(
+      { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+      keyring,
+    )
+    // Gmail's own substitute for the wire Message-ID of that outbound
+    // send — never one of our tokens (live-confirmed, HT-49).
+    const gmailRewrittenId = '<CAKWkAL3-gmail-generated-id@mail.gmail.com>'
+    // The SAME id Gmail's users.messages.send returned as EmailSendResult.
+    // providerMessageId for that send (src/providers/adapters/gmail/
+    // sender.ts) — and the id gmail-reconcile.ts's history.list later
+    // reports for the self-echo. send.ts's self-echo guard pre-seeds
+    // EXACTLY this key before this ever reaches ingest.
+    const selfEchoProviderMessageId = 'gmail-self-echo-msg-id'
+
+    // --- The pre-seed send.ts's selfEchoGuard performs right after the send
+    // succeeds (src/mail/send.ts's suppressSelfEcho). -----------------------
+    await deps.inboundDeliveryStore.preSuppressOwnSend(
+      mailboxId,
+      selfEchoProviderMessageId,
+      'own-outbound-self-echo',
+    )
+
+    // --- The self-echo itself: From is the MAILBOX'S OWN address (never a
+    // customer), Message-ID is Gmail's foreign substitute, and References
+    // ends with our own token — exactly what Gmail delivers back into the
+    // mailbox for the agent's own sent reply. ------------------------------
+    const selfEchoRaw = rawMessage(
+      {
+        From: 'support@example.test',
+        To: 'customer@example.test',
+        Subject: 'Re: Help with my order',
+        'Message-ID': gmailRewrittenId,
+        References: `<cust-1@customer.example.test> ${replyToken}`,
+      },
+      "We're looking into it!",
+    )
+
+    const echoOutcome = await ingestInboundMessage(
+      inboundDelivery(mailboxId, selfEchoProviderMessageId, selfEchoRaw),
+      deps,
+    )
+
+    expect(echoOutcome).toMatchObject({ kind: 'suppressed' })
+    // No second thread, no reopened/duplicated conversation — the pre-seeded
+    // ledger row absorbed the echo before decideThreading ever ran on it.
+    expect(await countRows(db, 'conversations')).toBe(1)
+    expect(await countRows(db, 'threads')).toBe(1)
+  })
+
   // --- spec §8: re-delivery of the same key → a no-op. ----------------------
 
   it('re-delivery of the same (mailboxId, providerMessageId) is a no-op: one conversation, one thread, one stored ledger row', async () => {

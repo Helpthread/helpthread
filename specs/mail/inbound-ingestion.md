@@ -240,6 +240,50 @@ loop yet; the suppression that matters now is the verifiable own-message loop ru
 A suppressed message is recorded in the ledger (`suppressed`, with the reason) — visible,
 auditable, never a silent drop.
 
+**HT-49 amendment: the `Message-ID` loop-suppression correlation is defeated for a
+provider that rewrites it (Gmail, confirmed live) — a second, ledger-level guard closes
+the resulting gap.** The rule above ("our exact outbound `Message-ID` ... appearing as
+this message's `Message-ID`") assumes the provider transmits `Message-ID` unaltered end
+to end. `specs/mail/sending.md`'s HT-49 amendment records live evidence that Gmail's
+`users.messages.send` does not: it accepts the engine's verbatim `Message-ID` but
+substitutes its own generated id on the wire. Concretely, this means: (1) every outbound
+reply now also carries the reply token as the FINAL entry of its own `References` chain
+(threading.md §2a) — a second, provider-durable channel for the SAME token — and (2) when
+that reply's own sent copy is reflected back into the mailbox it was sent from (Gmail
+delivers a sent message into the same mailbox; the reconcile pipeline, `src/mail/
+gmail-reconcile.ts`, ingests it like any other inbound message), `isOwnMessageReflection`
+above never fires for it — the message's OWN `Message-ID` is Gmail's substitute, not our
+token, so the one correlation this rule implements finds nothing. Without a further guard,
+`decideThreading` would then find the token in `References` and `append` — the agent's own
+sent reply stored a second time as a phantom `direction: 'inbound'` message in the very
+conversation it belongs to.
+
+The closing guard is NOT an extension of the `Message-ID`/`References`/`In-Reply-To`
+correlation above (deliberately — see this section's own warning against trusting
+sender-controlled headers, and the `isOwnMessageReflection` doc comment's note that a
+customer's own out-of-office reply legitimately carries our token in exactly the same
+`References` position and must still be ingested). Instead, `src/mail/send.ts` — right
+after a successful send whose sender reports a `providerMessageId`
+(`EmailSendResult.providerMessageId`, the SAME id the transport later reports for that
+exact message during reconcile) — pre-seeds `(mailboxId, providerMessageId)` as an
+ALREADY-`suppressed` row in the delivery ledger itself
+(`InboundDeliveryStore.preSuppressOwnSend`, §4's idempotency/claim machinery, unchanged).
+When reconcile later lists that same provider id, `claim()`'s ordinary "terminal row, do
+not double-process" branch (§4) absorbs it — no new suppression code path, no change to
+`decideThreading`, no heuristic on message content. This is a ledger-level, `providerMessageId`-keyed
+correlation — a DIFFERENT (and more precise) mechanism than the `Message-ID` correlation
+this section otherwise describes, chosen precisely because it does not touch the
+customer-autoresponder case above at all.
+
+**Known residual: a race, conceded rather than corrected.** The pre-seed happens
+AFTER the send resolves; if reconcile's own `claim()` for the same provider id wins that
+race first (an unusually fast push-triggered reconcile), the message ingests normally
+before the pre-seed ever runs — `preSuppressOwnSend` then finds the key already claimed
+and is a no-op (it never overwrites an existing row, `src/store/inbound-deliveries.ts`'s
+doc comment). This reproduces the PRE-HT-49-fix failure mode for that one send, not a new
+one, and is not silently hidden: the phantom message is still recorded and visible in the
+conversation, exactly as it would have been before this guard existed.
+
 ## 6. Observability and the forged-token signal
 
 Each ingest emits a structured record: `mailboxId`, `providerMessageId`, the transport

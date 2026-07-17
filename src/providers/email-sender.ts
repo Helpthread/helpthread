@@ -40,6 +40,16 @@
  * or bounce webhooks in that provider's dashboard/API later). It carries no
  * threading authority and is never compared against `messageId` — the two
  * ids serve entirely different purposes and must not be confused.
+ *
+ * As of HT-49's review fix, `src/mail/send.ts` ALSO reads this field for one
+ * additional purpose that is likewise not threading authority: when present,
+ * it pre-seeds this exact send's self-echo as suppressed in the inbound
+ * delivery ledger (`InboundDeliveryStore.preSuppressOwnSend`), because it is
+ * the SAME id a self-reflecting transport (Gmail, confirmed live) later
+ * reports for that message during reconcile — see `src/mail/send.ts`'s "The
+ * reply token's own self-echo" section and `specs/mail/inbound-ingestion.md`
+ * §5's HT-49 amendment. This is a ledger dedup key, not a threading
+ * correlation — `decideThreading` still never reads it.
  */
 
 /** One fully-formed outbound email, ready to transmit. */
