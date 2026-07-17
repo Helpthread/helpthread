@@ -13,10 +13,15 @@
  * — so `createInboxApi`'s framework-agnostic `Request => Response` shape wires
  * in with no `node:http` bridge at all (the dev harness's bridge,
  * `src/dev/http-adapter.ts`, exists only because a bare `node:http` server
- * gives `(req, res)`; Vercel does not). A catch-all `[...path]` file receives
- * every `/api/v1/...` path with `request.url` intact, so the engine's own
- * router (and the composition root's internal-cron routing) does all path
- * dispatch — no per-route function files duplicating that knowledge.
+ * gives `(req, res)`; Vercel does not). Every `/api/**` request reaches this
+ * one function via the explicit `rewrites` rule in `vercel.json` (a rewrite
+ * selects the serving function but leaves `request.url` as the original
+ * client path), so the engine's own router (and the composition root's
+ * internal-cron routing) does all path dispatch — no per-route function files
+ * duplicating that knowledge. An explicit rewrite, not a `[...path]`
+ * catch-all file: the Vercel CLI's zero-config route generation (observed on
+ * CLI 55/56) emits a single-segment route (`^/api/([^/]+)$`) for a bracketed
+ * catch-all filename, 404ing every multi-segment `/api/v1/...` path.
  *
  * This file is deliberately thin: all wiring lives in the typechecked
  * `src/composition/**`. It only awaits the memoized handler and guards against
