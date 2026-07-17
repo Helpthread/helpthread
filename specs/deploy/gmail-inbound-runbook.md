@@ -1,6 +1,8 @@
 # Gmail inbound — deployment & provisioning runbook (HT-43)
 
-Status: draft (HT-43). The one-time operator steps to take the merged engine
+Status: executed 2026-07-17, live-verified (HT-44 threading round-trip
+passed — on the second run, after the first run live-detected two Gmail
+transport bugs fixed same-day as HT-49/HT-50, PRs #52/#53). The one-time operator steps to take the merged engine
 code (HT-34…HT-42) live: a deployed Vercel environment where **RIQ's own
 inbound Gmail flows end-to-end** into a Helpthread conversation. This is the
 "deployed, end-to-end" acceptance HT-43 owns; the actual **real Google
@@ -16,6 +18,22 @@ come to exist.
 > Read alongside [gmail-push.md](../mail/gmail-push.md) §2/§7 (the webhook
 > auth + the provisioning checklist this expands) and
 > [gmail-connect.md](../mail/gmail-connect.md) §3 (the OAuth app + scopes).
+
+## As deployed (RIQ dogfood, 2026-07-17)
+
+The concrete, non-secret values from the live provisioning run (no client IDs,
+no keys — those stay in Vercel env only):
+
+- **GCP project**: `helpthread-desk` (org `resonantiq.app`). Not to be
+  confused with the unrelated personal `gmail-mcp-personal` GCP project
+  (personal-Gmail QA MCP, RIQAPP-1035) — different org, different purpose.
+- **Pub/Sub topic**: `projects/helpthread-desk/topics/gmail-push`
+- **Pub/Sub subscription**: `projects/helpthread-desk/subscriptions/gmail-push-sub`
+- **Push service account**: `gmail-push-invoker@helpthread-desk.iam.gserviceaccount.com`
+- **Vercel project**: `helpthread` (team Resonant IQ) → https://desk.resonantiq.app
+- **Supabase project**: `Helpthread` (ref `ytpqyteltabveygzcfcq`, `us-east-1`)
+- **Storage bucket**: `helpthread-blobs`
+- **Mailbox**: `help@resonantiq.app` (alias `support@`)
 
 ## 0. Architecture being deployed
 
@@ -103,6 +121,28 @@ privilege).
 
 > The initial `users.watch()` (which points the mailbox at the topic) is armed
 > automatically by the **connect flow** (Part E) — you do not call it by hand.
+
+### A4. Console/CLI gotchas hit during live provisioning (2026-07-17)
+
+1. **Domain-restricted sharing blocks the Gmail publisher grant.** If the org
+   enforces `constraints/iam.allowedPolicyMemberDomains`, granting
+   `gmail-api-push@system.gserviceaccount.com` (A3.2) fails — that principal
+   isn't in the allowed domain. Fix: enable `orgpolicy.googleapis.com`, then
+   add a **project-scoped** override on the constraint (allow-all) for this
+   project only. The policy change propagates eventually (~90s observed) — the
+   grant may fail once right after the override and just needs a retry.
+   The override is deliberately left in place (project-scoped): IAM policy is
+   checked at write time, but leaving it avoids surprises if the topic's IAM
+   ever needs re-applying; revisit if the project ever holds anything beyond
+   this push plumbing.
+2. **CLI-created push subscriptions don't auto-grant the token-creator role.**
+   Creating the subscription (A3.4) via `gcloud`/API, unlike the console flow,
+   does **not** grant the Pub/Sub service agent
+   (`service-<project-number>@gcp-sa-pubsub.iam.gserviceaccount.com`) the
+   `roles/iam.serviceAccountTokenCreator` role on the OIDC service account
+   (A3.3). Without it, Pub/Sub can't mint the push JWT and delivery fails
+   silently (no error surfaced to the subscription). Grant that role on the
+   service account explicitly.
 
 ---
 
