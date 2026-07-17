@@ -5,6 +5,12 @@
       "maxDuration": 50
     }
   },
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api"
+    }
+  ],
   "crons": [
     {
       "path": "/api/v1/internal/queue/drain",
