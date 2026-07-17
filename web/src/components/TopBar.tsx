@@ -13,8 +13,9 @@
 
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useTransition } from 'react'
 import type { ConversationSummary } from '../lib/api-types'
+import { logoutAction } from '../lib/auth-actions'
 import { nameFromEmail, relativeTime } from '../lib/format'
 import { Avatar } from './ds/core/Avatar'
 import { DropdownMenu } from './ds/core/DropdownMenu'
@@ -115,6 +116,7 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
   const showToast = useToast()
   const { open: openShortcuts } = useShortcutsOverlay()
   const [openMenu, setOpenMenu] = useState<MenuKey | null>(null)
+  const [, startLogoutTransition] = useTransition()
 
   useEffect(() => {
     if (openMenu === null) return
@@ -328,10 +330,10 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
             destructive
             onClick={() => {
               setOpenMenu(null)
-              showToast({
-                title: 'No session to log out of',
-                detail:
-                  'v1 authenticates the deployment, not a user — sessions arrive with multi-Agent.',
+              // logoutAction clears the session cookie and redirects to
+              // /login server-side (HT-51) — nothing left to do here.
+              startLogoutTransition(async () => {
+                await logoutAction()
               })
             }}
           >
