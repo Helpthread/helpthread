@@ -21,7 +21,9 @@ inbox's "Mine" folder works without inventing users. Multi-Agent identity is a l
 increment, added when there is a second Agent.
 
 This document covers the whole v1 surface. **HT-17 implemented §3's read paths and the
-conventions below; HT-18 implemented §4a–4b; HT-16 amended §4a with send idempotency.**
+conventions below; HT-18 implemented §4a–4b; HT-16 amended §4a with send idempotency; HT-49
+amended §4a's `References` derivation to append the reply's own minted id (a provider —
+Gmail, confirmed live — can rewrite `Message-ID` on send; threading.md §2a).**
 The v1.1 additions land per-ticket: HT-26 (status model), HT-27 (`preview` + `number`),
 HT-28 (notes), HT-29 (tags), HT-30 (delete), HT-31 (assignee), HT-32 (open tracking).
 
@@ -198,11 +200,19 @@ from the conversation, so the client never sets recipients or threading headers:
 - **`subject`** = the conversation's `subject`, prefixed with `Re:` plus a space if it
   isn't already (case-insensitive check — never double-prefix to `Re: Re:`).
 - **`In-Reply-To`** = the `messageId` of the conversation's most-recent INBOUND thread (the
-  customer message being answered), if it has one; **`References`** = the `messageId`s of
-  all prior threads in chronological order that have one. These are for the customer's mail
-  client to thread the reply in THEIR inbox — Helpthread's own threading never depends on
-  them (it is outbound-token-anchored; threading.md §2). Omitted when no prior message-id
-  exists (e.g. an inbound message that arrived without a `Message-ID`).
+  customer message being answered), if it has one; omitted when no prior message-id exists
+  (e.g. an inbound message that arrived without a `Message-ID`).
+- **`References`** = the `messageId`s of all prior threads in chronological order that have
+  one, followed by this reply's OWN freshly-minted `messageId` as the FINAL entry — appended
+  by `sendReply` itself (`src/mail/send.ts`), unconditionally, even when no prior thread has a
+  `messageId` at all (a first reply then gets a one-element `References: [messageId]`, never
+  omitted the way `In-Reply-To` can be). These are for the customer's mail client to thread
+  the reply in THEIR inbox — Helpthread's own threading never depends on them (it is
+  outbound-token-anchored; threading.md §2) — but the reply's own minted id riding in
+  `References` is now load-bearing in one specific way (HT-49, threading.md §2a): some
+  providers (Gmail, confirmed live) rewrite the wire `Message-ID` to their own generated id,
+  so `References` — which such providers do NOT rewrite — is the channel that actually gets
+  the signed token back into the customer's reply when that happens.
 
 The handler then calls `sendReply` (`src/mail/send.ts`), passing the `Idempotency-Key` value
 through. `sendReply` mints the reply token into the outbound `Message-ID` (on a genuinely
@@ -387,6 +397,11 @@ above.
 
 ## 7. Changelog
 
+- **v1.1 (2026-07-17, HT-49).** §4a's `References` derivation now appends the reply's own
+  freshly-minted `messageId` as the final entry, after the derived ancestor chain — fixing
+  live-observed thread splits where a provider (Gmail, confirmed) rewrites the outbound
+  wire `Message-ID`, discarding the token from its one prior channel. See
+  threading.md §2a and sending.md §4 for the full mechanism; no other §4a behavior changed.
 - **v1.1 (2026-07-16, HT-46).** `ThreadView.attachments`: inbound attachment metadata +
   a signed `BlobStore` URL, `[]` by default and config-gated (absent `attachments` deps
   at the composition root, §4's `InboxApiDeps`, same posture as open tracking) — a

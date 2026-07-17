@@ -100,6 +100,42 @@
  * emits canonical ids and callers pass those straight through, so this holds
  * by construction; it is called out because the token carries the string, not
  * a parsed UUID.
+ *
+ * ## References carries the reply token, not just Message-ID (HT-49)
+ *
+ * Live production evidence (2026-07-17, first HT-44 run against real Gmail):
+ * Gmail's `users.messages.send` accepted our verbatim-set `Message-ID` on the
+ * request but REPLACED it on the wire with a Gmail-generated id
+ * (`<CAKWkAL3...@mail.gmail.com>`) — confirmed from the raw copy Gmail itself
+ * returned on reconcile of the sent message's self-echo. Every
+ * `EmailSender` adapter is still required to transmit `OutboundEmail.messageId`
+ * verbatim (`src/providers/email-sender.ts`'s module doc) — this is a
+ * provider-side rewrite downstream of that verbatim transmission, not a
+ * violation of it, and no adapter change closes it. The customer's reply
+ * therefore carried `In-Reply-To`/`References` pointing at GMAIL's id, with
+ * our minted token nowhere on the wire — `decideThreading` correctly found no
+ * verified token and (per invariant #5) started a NEW conversation instead of
+ * appending, splitting the thread.
+ *
+ * `References`, unlike `Message-ID`, is NOT rewritten by Gmail — and an
+ * RFC-5322-compliant reply's own `References` is built as
+ * `{original References} + {original Message-ID}` (§3.6.4). So this function
+ * appends its own freshly-minted `messageId` as the FINAL entry of the
+ * outbound `References` chain, after any ancestor ids — giving the token a
+ * second, provider-durable channel out onto the wire. When the customer
+ * replies, their client's own References becomes
+ * `[...ourReferences, gmailRewrittenId]` — i.e.
+ * `[...ancestors, ourMintedToken, gmailRewrittenId]` — and `decideThreading`'s
+ * existing newest-first scan (`src/mail/thread.ts`, `buildCandidates`) skips
+ * the foreign trailing id (no token, not ours to judge) and finds our token
+ * immediately behind it. `In-Reply-To` is left untouched: it still names the
+ * specific ancestor message being answered, not this reply's own id — see
+ * `specs/mail/threading.md` §2a for the full spec of this fix, and
+ * `specs/mail/sending.md`/`specs/api/agent-inbox-v1.md` §4a for the
+ * corresponding header-derivation wording. Zero threading-decision code
+ * changed: verified, not assumed — `src/mail/thread.ts` is untouched by this
+ * fix, and a fixture reproducing tonight's exact failure (`src/mail/
+ * ingest.test.ts`) threads correctly through the existing scan unmodified.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -203,7 +239,15 @@ export interface SendReplyInput {
   html?: string
   /** `In-Reply-To` of the inbound message being answered — caller-supplied (specs/mail/sending.md §5). */
   inReplyTo?: string
-  /** `References` chain of the inbound message being answered — caller-supplied (specs/mail/sending.md §5). */
+  /**
+   * `References` chain of the inbound message being answered — caller-supplied
+   * ANCESTOR ids only (specs/mail/sending.md §5). `sendReply` appends this
+   * call's own freshly-minted `messageId` as the FINAL entry before sending or
+   * persisting (HT-49; see the module doc's "References carries the reply
+   * token" section) — this field should never itself include the reply's own
+   * id, and the outbound `References` actually transmitted is always this
+   * array plus one more entry, even when this field is omitted entirely.
+   */
   references?: string[]
   /**
    * Optional caller-supplied dedup key (HT-16), scoped per-conversation. See
@@ -279,14 +323,23 @@ export async function sendReply(
     keyring,
   )
 
-  // Open tracking (spec §4g): with the feature OFF (the default), `input`
+  // HT-49: append this reply's OWN minted messageId as the FINAL References
+  // entry, after any ancestor ids the caller supplied — see the module doc's
+  // "References carries the reply token" section for why. Unconditional and
+  // always non-empty (even a first reply with no ancestors gets a one-element
+  // References: [messageId]): the token needs this durable channel onto the
+  // wire regardless of how many ancestors precede it.
+  const references = [...(input.references ?? []), messageId]
+
+  // Open tracking (spec §4g): with the feature OFF (the default), the body
   // passes through UNTOUCHED — this line is the whole off-path, and the
   // byte-identical-mail guarantee rests on it. With it on, only the HTML
   // body changes, before persist (see SendReplyDeps.openTracking). On a
   // keyed REPLAY the modified body is irrelevant either way — appendThread
-  // returns the ORIGINAL row's persisted body (§4a's replay rule).
-  const effectiveInput: SendReplyInput =
-    deps.openTracking !== undefined && input.html !== undefined
+  // returns the ORIGINAL row's persisted body (§4a's replay rule). References
+  // is always overridden to the HT-49 chain above, independent of tracking.
+  const effectiveInput: SendReplyInput = {
+    ...(deps.openTracking !== undefined && input.html !== undefined
       ? {
           ...input,
           html: injectTrackingPixel(
@@ -294,18 +347,21 @@ export async function sendReply(
             pixelUrlFor(deps.openTracking.publicBaseUrl, mintViewToken(threadId, keyring)),
           ),
         }
-      : input
+      : input),
+    references,
+  }
 
   // The envelope snapshot is built from THIS call's inputs and persisted
   // verbatim on insert, keyed or not — persisting it unconditionally (not
   // only when idempotencyKey is set) is what lets the delivery worker
   // reconstruct ANY eligible outbound row later, regardless of whether its
-  // original send carried a dedup key.
+  // original send carried a dedup key. `references` (never `input.references`)
+  // is always set, per HT-49 above.
   const sendEnvelope: SendEnvelope = {
     to: input.to,
     ...(input.cc !== undefined ? { cc: input.cc } : {}),
     subject: input.subject,
-    ...(input.references !== undefined ? { references: input.references } : {}),
+    references,
   }
 
   const appended = await store.appendThread(input.conversationId, {

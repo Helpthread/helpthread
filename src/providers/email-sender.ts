@@ -9,20 +9,31 @@
  * ## The `Message-ID` contract is load-bearing
  *
  * Outbound-anchored threading (specs/mail/threading.md §2, specs/mail/sending.md
- * §1) only works if the `Message-ID` a customer's reply eventually echoes
- * back in `In-Reply-To`/`References` is EXACTLY the signed-token id the
- * engine minted (`mintReplyMessageId`, `src/mail/reply-token.ts`) — not a
+ * §1) is designed around the `Message-ID` a customer's reply eventually
+ * echoes back in `In-Reply-To`/`References` being EXACTLY the signed-token id
+ * the engine minted (`mintReplyMessageId`, `src/mail/reply-token.ts`) — not a
  * provider-generated substitute. So every `EmailSender` implementation MUST
  * transmit `OutboundEmail.messageId` **verbatim** as the RFC 5322
  * `Message-ID` header, and MUST NOT generate or overwrite it with a
  * provider-assigned id. `inReplyTo` and `references`, when present, are
- * likewise engine-set (specs/mail/sending.md §5: caller-supplied from the
- * inbound message being answered) and must be transmitted as given, not
- * reinterpreted. A provider SDK that cannot set `Message-ID` explicitly
+ * likewise engine-set (specs/mail/sending.md §5: caller-supplied ancestor ids
+ * plus the reply's own minted id, HT-49) and must be transmitted as given,
+ * not reinterpreted. A provider SDK that cannot set `Message-ID` explicitly
  * (some transactional-email APIs only expose a "reply-to" concept and mint
  * their own `Message-ID` unconditionally) is unusable for Helpthread and
  * must not be adapted to this interface — there is no fallback path that
  * preserves threading correctness.
+ *
+ * **This is necessary, but — live evidence, HT-49 — not always sufficient.**
+ * An adapter that faithfully transmits `Message-ID` verbatim (satisfying the
+ * contract above) can still have it silently REWRITTEN by the provider's own
+ * infrastructure after transmission: Gmail's `users.messages.send` has been
+ * observed doing exactly this in production (2026-07-17), substituting its
+ * own generated id on the wire despite the Gmail adapter setting the engine's
+ * token correctly. This is not a contract violation — it happens downstream
+ * of what any adapter controls — but it is why `References` also carries the
+ * token as a provider-durable backup channel (specs/mail/threading.md §2a);
+ * see there for the full mechanism.
  *
  * `EmailSendResult.providerMessageId` is a SEPARATE, optional field for the
  * provider's own internal delivery id (e.g. for looking up delivery status

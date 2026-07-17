@@ -1,6 +1,6 @@
 # Outbound sending & the reply-token lifecycle
 
-Status: accepted (HT-15, HT-16). Companion to [threading.md](./threading.md) — that
+Status: accepted (HT-15, HT-16, HT-49). Companion to [threading.md](./threading.md) — that
 spec decides which conversation an *inbound* message joins; this one covers how an
 *outbound* reply is minted, persisted, and sent, and is where the threading
 model's authority actually originates.
@@ -174,6 +174,22 @@ accept raw MIME; reject any that will not carry `Message-ID` unaltered. The
 in-repo fake used by the engine tests proves only that `sendReply` *passes* the
 value to the seam — not that any given adapter preserves it on the wire.
 
+**A compliant adapter is not sufficient — the provider's OWN infrastructure can
+still rewrite `Message-ID` after transmission (HT-49, live production evidence,
+2026-07-17).** Gmail's `users.messages.send` accepted the Gmail adapter's
+verbatim `Message-ID` on the request and substituted its own generated id on
+the wire — a rewrite downstream of transmission, outside the adapter's control,
+and not a violation of the contract above (the Gmail adapter's own wire-level
+contract test still passes: it proves what it sends, not what Gmail's server
+does with it afterward). See threading.md §2a for the full story and the fix:
+`sendReply` (`src/mail/send.ts`) now ALSO places its own minted `messageId` as
+the final entry of that same reply's `References` header — a channel Gmail
+does not rewrite — so the token survives even when `Message-ID` itself does
+not. `References`, like `Message-ID`, must still be transmitted verbatim and
+in order by every adapter (unchanged by HT-49); the fix is in what the engine
+puts into `References` before handing it to the adapter, not in the adapter
+contract itself.
+
 **Recommended: a provider SHOULD de-duplicate on `Message-ID` (HT-16).** This
 is not a precondition the engine requires — at-least-once delivery (§3a) holds
 with or without it — but it is not an aside either: it is the one thing
@@ -213,10 +229,14 @@ Deliberately narrow; each deferral below has a named later home:
   directly (e.g. from a test or a manual trigger), never on a timer.
 - **Reply to an existing conversation only.** Agent-*initiated* brand-new
   conversations are a separate later flow.
-- **`In-Reply-To`/`References` are caller-supplied** (from the inbound message
-  being answered). Deriving the full `References` chain from stored threads is a
-  later refinement. Once persisted into `send_envelope` (§3a) that snapshot is
-  authoritative for every retry regardless of how it was originally derived.
+- **`In-Reply-To`/`References` are caller-supplied ANCESTOR ids** (from the
+  inbound message being answered; `agent-inbox-v1.md` §4a's `deriveReplyHeaders`
+  derives them from stored threads today). `sendReply` then APPENDS its own
+  freshly-minted `messageId` as the final `References` entry unconditionally
+  (HT-49; threading.md §2a) — the caller-supplied field is never itself the
+  reply's own id. Once persisted into `send_envelope` (§3a) that full chain,
+  own id included, is authoritative for every retry regardless of how the
+  ancestor portion was originally derived.
 - **A missing or deleted conversation is refused** — the token is minted first
   (before `appendThread` resolves) and then discarded on refusal; only
   persistence and sending are skipped, and the sender is never called (mirrors

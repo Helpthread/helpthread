@@ -634,13 +634,6 @@ describe('createInboxApi', () => {
       })
 
       expect(sent).toHaveLength(1)
-      expect(sent[0]).toMatchObject({
-        to: ['customer@example.test'],
-        from: SUPPORT_ADDRESS,
-        subject: 'Re: Help with my order',
-        inReplyTo: '<inbound-1@customer.example.test>',
-        references: ['<inbound-1@customer.example.test>'],
-      })
 
       const updated = await store.getConversation(conversationId, { includeDeleted: false })
       const outboundThread = updated?.threads.find((t) => t.id === body.id)
@@ -649,6 +642,18 @@ describe('createInboxApi', () => {
       expect(outboundThread?.deliveryStatus).toBe('sent')
       // The engine-minted Message-ID is transmitted verbatim (providers/email-sender.ts's contract).
       expect(sent[0].messageId).toBe(outboundThread?.messageId)
+
+      expect(sent[0]).toMatchObject({
+        to: ['customer@example.test'],
+        from: SUPPORT_ADDRESS,
+        subject: 'Re: Help with my order',
+        inReplyTo: '<inbound-1@customer.example.test>',
+        // HT-49: References carries the reply's OWN minted messageId as its
+        // FINAL entry (after the derived ancestor chain) — the durable
+        // channel for the reply token once a provider (Gmail) rewrites
+        // Message-ID on send. See send.ts's module doc.
+        references: ['<inbound-1@customer.example.test>', outboundThread?.messageId],
+      })
     })
 
     it('sent-but-mark-sent-fails still returns 201, not 502 (the message WAS delivered — never prompt a resend)', async () => {

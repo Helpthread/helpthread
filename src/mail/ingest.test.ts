@@ -332,6 +332,71 @@ describe('ingestInboundMessage', () => {
     expect(await countRows(db, 'threads')).toBe(2)
   })
 
+  // --- HT-49: the exact live-production failure, reproduced as a fixture ---
+  //
+  // Live evidence (2026-07-17, first HT-44 run against real Gmail): Gmail's
+  // `users.messages.send` REPLACED the engine-minted Message-ID with a
+  // Gmail-generated one on the wire. The customer's reply therefore carried
+  // `In-Reply-To`/a trailing `References` entry naming Gmail's FOREIGN id —
+  // our token was nowhere to be found by a scan that only checked those —
+  // and `decideThreading` (correctly, per invariant #5: no verified token ⇒
+  // new conversation) forked a new conversation instead of appending.
+  //
+  // The fix (`src/mail/send.ts`): the outbound reply's own minted messageId
+  // rides as the FINAL entry of the OUTBOUND References chain, which Gmail
+  // does NOT rewrite. An RFC-5322-compliant reply's own References becomes
+  // `{our outbound References} + {gmail's rewritten id}` — so the customer's
+  // reply carries our token ONE POSITION BEFORE the trailing foreign id,
+  // never in In-Reply-To, never last. `decideThreading`'s existing
+  // newest-first scan (`src/mail/thread.ts`, unmodified by this fix) skips
+  // the foreign trailing id and finds our token immediately behind it.
+  it('HT-49: a reply whose In-Reply-To is a FOREIGN (Gmail-rewritten) id and whose References carries our token mid-chain still threads into the original conversation', async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+
+    const first = await ingestInboundMessage(
+      inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+      deps,
+    )
+    if (first.kind !== 'stored') throw new Error('unreachable')
+
+    // The outbound reply this engine sent: its own minted token, which
+    // `send.ts` placed as the FINAL References entry of ITS outbound mail.
+    const replyToken = mintReplyMessageId(
+      { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+      keyring,
+    )
+    // Gmail's server-side substitute for the wire Message-ID of that SAME
+    // outbound reply (the id the customer's mail client actually observed as
+    // the message's Message-ID, and therefore what its own In-Reply-To/
+    // trailing References entry names) — never one of our tokens.
+    const gmailRewrittenId = '<CAKWkAL3-gmail-generated-id@mail.gmail.com>'
+
+    const replyRaw = rawMessage(
+      {
+        From: 'customer@example.test',
+        To: 'support@example.test',
+        Subject: 'Re: Help with my order',
+        'Message-ID': '<cust-2@customer.example.test>',
+        // Foreign — NOT our token. A scan that only checked In-Reply-To
+        // would find nothing and (wrongly) start a new conversation.
+        'In-Reply-To': gmailRewrittenId,
+        // Our token rides mid-chain: ancestor, then our token, then the
+        // foreign id the customer's client appended last.
+        References: `<cust-1@customer.example.test> ${replyToken} ${gmailRewrittenId}`,
+      },
+      'Still broken, please help.',
+    )
+
+    const second = await ingestInboundMessage(
+      inboundDelivery(mailboxId, 'provider-msg-2', replyRaw),
+      deps,
+    )
+
+    expect(second).toMatchObject({ kind: 'stored', conversationId: first.conversationId })
+    expect(await countRows(db, 'conversations')).toBe(1)
+    expect(await countRows(db, 'threads')).toBe(2)
+  })
+
   // --- spec §8: re-delivery of the same key → a no-op. ----------------------
 
   it('re-delivery of the same (mailboxId, providerMessageId) is a no-op: one conversation, one thread, one stored ledger row', async () => {
