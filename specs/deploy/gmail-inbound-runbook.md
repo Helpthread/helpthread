@@ -1,7 +1,8 @@
 # Gmail inbound — deployment & provisioning runbook (HT-43)
 
 Status: executed 2026-07-17, live-verified (HT-44 threading round-trip
-passed). The one-time operator steps to take the merged engine
+passed — on the second run, after the first run live-detected two Gmail
+transport bugs fixed same-day as HT-49/HT-50, PRs #52/#53). The one-time operator steps to take the merged engine
 code (HT-34…HT-42) live: a deployed Vercel environment where **RIQ's own
 inbound Gmail flows end-to-end** into a Helpthread conversation. This is the
 "deployed, end-to-end" acceptance HT-43 owns; the actual **real Google
@@ -130,6 +131,10 @@ privilege).
    add a **project-scoped** override on the constraint (allow-all) for this
    project only. The policy change propagates eventually (~90s observed) — the
    grant may fail once right after the override and just needs a retry.
+   The override is deliberately left in place (project-scoped): IAM policy is
+   checked at write time, but leaving it avoids surprises if the topic's IAM
+   ever needs re-applying; revisit if the project ever holds anything beyond
+   this push plumbing.
 2. **CLI-created push subscriptions don't auto-grant the token-creator role.**
    Creating the subscription (A3.4) via `gcloud`/API, unlike the console flow,
    does **not** grant the Pub/Sub service agent
