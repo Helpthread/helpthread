@@ -13,7 +13,9 @@
  *
  * Two deliberate departures from "compose only from `ds/**`", both because
  * the frozen design system genuinely lacks the piece needed, not because it
- * was inconvenient to use:
+ * was inconvenient to use. Tracked upstream as HT-52 (add a `type` prop to
+ * `TextInput`, a `type="submit"` option to `Button`) so these two workarounds
+ * have an expiry path instead of becoming a permanent fork:
  *
  * - The password field is a native `<input type="password">`, not
  *   `ds/core/TextInput` — that component hardcodes `type="text"` (see its
