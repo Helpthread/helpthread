@@ -676,6 +676,11 @@ export function ConversationScreen({
 
   const [deleteArmed, setDeleteArmed] = useState(false)
   const deleteDisarmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Guards changeStatus against concurrent status changes: while one request
+  // is in flight, a second click is a no-op rather than racing it — so
+  // `previous` (captured per-call for rollback) is always a value the server
+  // actually confirmed, never another in-flight call's unconfirmed optimism.
+  const statusChangeInFlight = useRef(false)
 
   const [openMessageMenuId, setOpenMessageMenuId] = useState<string | null>(null)
   const [originalMessage, setOriginalMessage] = useState<ThreadView | null>(null)
@@ -957,16 +962,30 @@ export function ConversationScreen({
   // it — never leave the Agent staring at a status that silently reverted
   // seconds later with no explanation.
   async function changeStatus(next: ConversationStatus): Promise<void> {
+    if (statusChangeInFlight.current) return
     const previous = status
+    statusChangeInFlight.current = true
     setStatusMenuOpen(false)
     setLocalStatus(next)
-    const result = await setStatusAction(conversation.id, next)
-    if (!result.ok) {
+    try {
+      const result = await setStatusAction(conversation.id, next)
+      if (!result.ok) {
+        setLocalStatus(previous)
+        showToast({ title: "Couldn't update the conversation", detail: 'Please try again.' })
+        return
+      }
+      showToast({ title: `Marked ${next}` })
+    } catch {
+      // The server-action POST itself never completed (offline, unreachable,
+      // deploy blip) — the client-side promise rejects rather than
+      // resolving {ok:false}. Treat exactly like a rejected update: roll
+      // back the optimistic pill and tell the Agent, instead of stranding
+      // the UI in a status the server never applied.
       setLocalStatus(previous)
       showToast({ title: "Couldn't update the conversation", detail: 'Please try again.' })
-      return
+    } finally {
+      statusChangeInFlight.current = false
     }
-    showToast({ title: `Marked ${next}` })
   }
 
   async function updateTags(nextTags: string[]): Promise<void> {
@@ -1573,52 +1592,50 @@ export function ConversationScreen({
                     (thread.bodyText ?? '')
                   )}
                   {/* HT-46 read path, TJ-approved addition beyond the design
-                      prototype (flagged for his sign-off). A missing field
-                      (pre-HT-46 API) or an empty list renders nothing — zero
-                      layout shift either way. Signed URLs expire, so this is
-                      always the URL exactly as the API gave it, opened fresh
-                      in a new tab rather than cached or re-derived. */}
-                  {kind === 'inbound' &&
-                    thread.attachments !== undefined &&
-                    thread.attachments.length > 0 && (
-                      <div
-                        style={{
-                          marginTop: 8,
-                          display: 'flex',
-                          flexWrap: 'wrap',
-                          gap: 6,
-                        }}
-                      >
-                        {thread.attachments.map((attachment) => (
-                          <a
-                            key={attachment.id}
-                            href={attachment.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            title={`Download ${attachment.filename ?? 'attachment'}`}
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: 6,
-                              fontSize: 12.5,
-                              color: 'var(--ht-ink-muted)',
-                              textDecoration: 'none',
-                              background: 'var(--ht-surface-2)',
-                              borderRadius: 999,
-                              padding: '4px 10px 4px 8px',
-                            }}
-                          >
-                            <PaperclipIcon />
-                            <span style={{ fontWeight: 600, color: 'var(--ht-ink)' }}>
-                              {attachment.filename ?? 'Attachment'}
-                            </span>
-                            <span style={{ color: 'var(--ht-ink-dim)' }}>
-                              {humanFileSize(attachment.size)}
-                            </span>
-                          </a>
-                        ))}
-                      </div>
-                    )}
+                      prototype (flagged for his sign-off). An empty list
+                      renders nothing — zero layout shift either way. Signed
+                      URLs expire, so this is always the URL exactly as the
+                      API gave it, opened fresh in a new tab rather than
+                      cached or re-derived. */}
+                  {kind === 'inbound' && thread.attachments.length > 0 && (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: 6,
+                      }}
+                    >
+                      {thread.attachments.map((attachment) => (
+                        <a
+                          key={attachment.id}
+                          href={attachment.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={`Download ${attachment.filename ?? 'attachment'}`}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            fontSize: 12.5,
+                            color: 'var(--ht-ink-muted)',
+                            textDecoration: 'none',
+                            background: 'var(--ht-surface-2)',
+                            borderRadius: 999,
+                            padding: '4px 10px 4px 8px',
+                          }}
+                        >
+                          <PaperclipIcon />
+                          <span style={{ fontWeight: 600, color: 'var(--ht-ink)' }}>
+                            {attachment.filename ?? 'Attachment'}
+                          </span>
+                          <span style={{ color: 'var(--ht-ink-dim)' }}>
+                            {humanFileSize(attachment.size)}
+                          </span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </MessageBand>
                 <MessageMenu
                   open={openMessageMenuId === thread.id}
