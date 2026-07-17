@@ -30,10 +30,12 @@
  * 4. `history.list` from that cursor. A 404 means the cursor expired
  *    (gmail-push.md §5) — pause the mailbox, do NOT advance the cursor,
  *    ack (a human must rebaseline; retrying a 404 forever helps nobody).
- * 5. `messages.get?format=raw` each added id, in order. A 404 here means
- *    the message was deleted between list and get — skip it, nothing to
- *    ingest or retry. Raw bytes at or under `maxInlineRawBytes` are handed
- *    to `ingest` inline; larger ones are written to `blobStore` first and
+ * 5. For each added message: first the self-echo filter (below) — a
+ *    SENT-not-INBOX message is skipped with no `messages.get`/`ingest` call
+ *    at all. Otherwise `messages.get?format=raw`. A 404 here means the
+ *    message was deleted between list and get — skip it, nothing to ingest
+ *    or retry. Raw bytes at or under `maxInlineRawBytes` are handed to
+ *    `ingest` inline; larger ones are written to `blobStore` first and
  *    handed over as a `blobRef` — the OOM guard on the RAW MESSAGE itself
  *    (`RawMessageContent`'s own module doc, `src/providers/inbound-
  *    email.ts`, names exactly this "one large message inside a Gmail
@@ -136,6 +138,88 @@
  * run's release clobbering a legitimate successor's live lease) this
  * closes.
  *
+ * ## The self-echo filter (HT-50)
+ *
+ * **Live-proven failure (2026-07-17, first HT-44 live run):** `history.list`
+ * surfaces the mailbox's OWN outbound sends — an Agent's reply, sent through
+ * Gmail — as `messagesAdded` entries exactly like a genuine inbound message.
+ * Ingesting one spawns a ghost `new` conversation "from" the desk's own
+ * address, because nothing upstream of `ingest` had ever distinguished "a
+ * message that arrived" from "a message we just sent that Gmail is
+ * reflecting back through history."
+ *
+ * The fix: before `messages.get`/`ingest` for a given added message, check
+ * the `labelIds` {@link GmailHistoryClient.listAddedMessageIds} already
+ * carried for it (`../providers/adapters/gmail/history.ts`'s module doc) —
+ * skip when `SENT` is present and `INBOX` is not, OR when `DRAFT` is present
+ * at all (see {@link isSelfEchoMessage}). This is a pure Gmail-label check,
+ * not a mail-semantics decision: it runs entirely on transport metadata,
+ * before the raw bytes are even fetched, so it never touches
+ * `parseInboundEmail` or `decideThreading` (charter invariant #5) and is
+ * unrelated to inbound-ingestion.md §5's own (different) loop-suppression
+ * rule, which runs INSIDE the pipeline on a verifiable Message-ID/reply-token
+ * correlation — that rule exists for the "our mail bounced or was
+ * auto-answered" case; this one exists for "Gmail's own history conflates
+ * sent and received."
+ *
+ * A self-ADDRESSED message (an Agent emailing the shared mailbox itself)
+ * carries BOTH labels — `SENT` (we sent it) and `INBOX` (it also landed in
+ * the inbox) — and is deliberately NOT skipped: it is exactly the shape of a
+ * customer message and Gmail gives us no other signal to tell the two apart
+ * at the transport layer. Getting this case wrong in the other direction —
+ * skipping anything with `SENT` at all — would silently drop that message
+ * forever, which invariant #1 forbids.
+ *
+ * **`DRAFT` (review round 2, HT-50):** the `SENT`/`INBOX` check alone leaves
+ * a gap the initial version of this filter did not cover — an Agent hitting
+ * Reply in the Gmail web UI and typing for a while. Gmail autosaves that
+ * compose as a NEW message id on every pause, each carrying `labelIds:
+ * ["DRAFT"]` (no `SENT`, no `INBOX`) and each surfacing in `history.list`
+ * before the Agent ever sends anything — every autosave would otherwise be
+ * ingested as a half-written "customer" message, potentially several per
+ * reply. Unlike the `SENT`/`INBOX` case this has no ambiguous edge to
+ * protect: genuine inbound mail can never carry the system `DRAFT` label, so
+ * skipping on its presence alone is safe in the drop direction with no risk
+ * to invariant #1. The final SENT copy (a different message id) is still
+ * caught by the existing `SENT`-without-`INBOX` check.
+ *
+ * **Alternative considered and rejected:** track the Gmail message id
+ * `users.messages.send` returns (`../providers/adapters/gmail/sender.ts`)
+ * and skip exactly those ids on reconcile. This is more precise for sends
+ * this engine itself issued, but it has a hole the label filter doesn't: an
+ * Agent replying directly from the Gmail web UI (not through Helpthread's
+ * own send path) produces a message this engine never minted an id for, so
+ * it would sail through un-filtered and become the exact same ghost
+ * conversation. `SENT`-not-`INBOX` (plus the `DRAFT` check above) catches
+ * BOTH origins — our own API sends and an Agent's direct Gmail-UI replies,
+ * autosaved drafts included — because Gmail applies these labels identically
+ * regardless of which client sent or drafted the mail.
+ *
+ * A skipped message is treated exactly like the existing "deleted between
+ * list and get" case (step 5): no `ingest` call, so no `inbound_deliveries`
+ * ledger row is ever created for it, and it contributes no outcome to the
+ * batch that step 6's cursor-advance check inspects (gmail-push.md §4 scopes
+ * "the batch" to messages actually handed to the pipeline for exactly this
+ * reason) — the cursor still advances past it normally, and it can never
+ * itself block or reclaim anything (nothing was ever leased or left
+ * `in-progress` on its behalf, so HT-45's stuck-received reclaim has
+ * nothing to reclaim here).
+ *
+ * **On the `SENT`+`INBOX` snapshot assumption (review round 2, HT-50):**
+ * this filter's `SENT`-without-`INBOX` check assumes a self-addressed send's
+ * `messagesAdded` record carries BOTH labels in one snapshot. If Gmail ever
+ * instead records `SENT` at send time and applies `INBOX` via a LATER,
+ * separate history event, this check alone would misread the message as a
+ * pure self-echo and skip it — a silent, permanent drop, which invariant #1
+ * forbids. `../providers/adapters/gmail/history.ts`'s `listAddedMessageIds`
+ * hardens against exactly that ordering by also reading `labelsAdded`
+ * history records for the same message id within the listed window and
+ * merging their added-label deltas in — see that module's doc for the
+ * mechanism. This has not been confirmed against a live self-addressed send
+ * (flagged in this ticket's report as still open); the hardening below is a
+ * defense against the *possible* split-record ordering, not a replacement
+ * for that live verification.
+ *
  * ## Never drop a message (charter §2; gmail-push.md §4)
  *
  * The cursor is the only thing that can make a message permanently
@@ -149,8 +233,8 @@
  * gmail-push.md §4's literal prose
  *
  * gmail-push.md §4 says the cursor "advances only after the ingest
- * pipeline confirms every message in the batch is `stored` or
- * `suppressed`," without mentioning `dead-letter`. This handler treats
+ * pipeline confirms every message HANDED TO IT is `stored` or `suppressed`,"
+ * without mentioning `dead-letter`. This handler treats
  * `dead-letter` as ALSO cursor-advancing, because `dead-letter` (inbound-
  * ingestion.md §4) is itself a TERMINAL, durably-recorded ledger outcome —
  * "a message that exhausts its retry budget lands in dead-letter for
@@ -462,9 +546,25 @@ async function reconcileOneMailbox(
       return { kind: 'ack' }
     }
 
-    // --- Step 5: fetch + ingest each added message, in order. ---
+    // --- Step 5: filter, then fetch + ingest each added message, in order. ---
     const outcomes: IngestOutcome[] = []
-    for (const messageId of listed.messageIds) {
+    for (const { id: messageId, labelIds } of listed.messages) {
+      if (isSelfEchoMessage(labelIds)) {
+        // Either the mailbox's own outbound send reflected back through
+        // history, or an Agent's in-progress Gmail-UI draft — skip before
+        // ever calling messages.get/ingest (module doc's "The self-echo
+        // filter (HT-50)"). No ledger row, no outcome, no effect on the
+        // cursor advance below.
+        logReconcileEvent('info', {
+          mailboxId,
+          outcome: 'skip',
+          reason: labelIds.includes('DRAFT') ? 'draft' : 'self-echo',
+          providerMessageId: messageId,
+          labelIds,
+        })
+        continue
+      }
+
       const fetched = await client.getRawMessage(messageId)
       if (fetched === null) {
         // Deleted between list and get — nothing to ingest, nothing to
@@ -497,7 +597,7 @@ async function reconcileOneMailbox(
         reason: 'non-terminal-ingest-outcome',
         blockingOutcomeKind: blocking.kind,
         blockingProviderMessageId: blocking.providerMessageId,
-        batchSize: listed.messageIds.length,
+        batchSize: listed.messages.length,
       })
       return { kind: 'retry' }
     }
@@ -507,7 +607,7 @@ async function reconcileOneMailbox(
       mailboxId,
       outcome: 'ack',
       reason: 'reconciled',
-      messageCount: listed.messageIds.length,
+      messageCount: listed.messages.length,
       previousCursor: cursor,
       newHistoryId: listed.newHistoryId,
     })
@@ -539,6 +639,29 @@ async function reconcileOneMailbox(
       })
     }
   }
+}
+
+/**
+ * True when `labelIds` (from `history.list`'s per-message data,
+ * `../providers/adapters/gmail/history.ts`) mark this as something that was
+ * never genuinely received mail — see the module doc's "The self-echo
+ * filter (HT-50)" section for the full reasoning, including why a
+ * self-addressed message (both `SENT` and `INBOX`) is deliberately NOT
+ * matched here. Two independent conditions, either sufficient on its own:
+ *
+ * - `SENT` without `INBOX` — the mailbox's own outbound send, reflected
+ *   back through history exactly like a genuine inbound message.
+ * - `DRAFT` present at all — an Agent's in-progress Gmail-UI compose or
+ *   reply. Gmail autosaves a draft as a NEW `DRAFT`-labeled message id on
+ *   every edit, each one surfacing in `history.list` before anything is
+ *   sent; unlike the `SENT`/`INBOX` case there is no ambiguous edge here —
+ *   genuine inbound mail can never carry the system `DRAFT` label, so this
+ *   check is safe in the drop direction with no risk of losing a real
+ *   message (invariant #1).
+ */
+function isSelfEchoMessage(labelIds: string[]): boolean {
+  if (labelIds.includes('DRAFT')) return true
+  return labelIds.includes('SENT') && !labelIds.includes('INBOX')
 }
 
 /**

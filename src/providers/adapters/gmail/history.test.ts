@@ -39,12 +39,19 @@ function sequencedFetch(responses: Array<{ status: number; body?: unknown; text?
 
 describe('createGmailHistoryClient', () => {
   describe('listAddedMessageIds', () => {
-    it('follows nextPageToken pagination to the end, de-duplicates ids, and returns the LAST page historyId', async () => {
+    it("follows nextPageToken pagination to the end, de-duplicates ids, returns the LAST page historyId, and lets a repeated id's labelIds be overwritten by the later record", async () => {
       const { fetchImpl, calls } = sequencedFetch([
         {
           status: 200,
           body: {
-            history: [{ messagesAdded: [{ message: { id: 'm1' } }, { message: { id: 'm2' } }] }],
+            history: [
+              {
+                messagesAdded: [
+                  { message: { id: 'm1', labelIds: ['INBOX'] } },
+                  { message: { id: 'm2', labelIds: ['INBOX'] } },
+                ],
+              },
+            ],
             historyId: 'h-page1', // should be overwritten by the final page's value
             nextPageToken: 'page-2-token',
           },
@@ -53,8 +60,17 @@ describe('createGmailHistoryClient', () => {
           status: 200,
           body: {
             // m2 repeated across pages (Gmail's own history records can
-            // repeat an id) — must be de-duplicated; m3 is genuinely new.
-            history: [{ messagesAdded: [{ message: { id: 'm2' } }, { message: { id: 'm3' } }] }],
+            // repeat an id) — must be de-duplicated, and its LATER labelIds
+            // (here: also labeled SENT) must win over the first page's; m3
+            // is genuinely new.
+            history: [
+              {
+                messagesAdded: [
+                  { message: { id: 'm2', labelIds: ['INBOX', 'SENT'] } },
+                  { message: { id: 'm3', labelIds: ['INBOX'] } },
+                ],
+              },
+            ],
             historyId: 'h-final',
             // no nextPageToken — last page.
           },
@@ -69,7 +85,11 @@ describe('createGmailHistoryClient', () => {
 
       expect(result).toEqual({
         kind: 'ok',
-        messageIds: ['m1', 'm2', 'm3'],
+        messages: [
+          { id: 'm1', labelIds: ['INBOX'] },
+          { id: 'm2', labelIds: ['INBOX', 'SENT'] },
+          { id: 'm3', labelIds: ['INBOX'] },
+        ],
         newHistoryId: 'h-final',
       })
       expect(calls).toHaveLength(2)
@@ -77,7 +97,11 @@ describe('createGmailHistoryClient', () => {
       const firstUrl = new URL(calls[0].url)
       expect(firstUrl.pathname).toBe('/gmail/v1/users/me/history')
       expect(firstUrl.searchParams.get('startHistoryId')).toBe('1000')
-      expect(firstUrl.searchParams.get('historyTypes')).toBe('messageAdded')
+      // Both historyTypes requested (repeated query param) — messageAdded
+      // for the primary listing, labelAdded so a message's INBOX label
+      // applied via a separate, later history event is still visible
+      // (history.ts's "Folding in labelsAdded" module-doc section, HT-50).
+      expect(firstUrl.searchParams.getAll('historyTypes')).toEqual(['messageAdded', 'labelAdded'])
       expect(firstUrl.searchParams.has('pageToken')).toBe(false)
 
       const secondUrl = new URL(calls[1].url)
@@ -103,7 +127,172 @@ describe('createGmailHistoryClient', () => {
 
       const result = await client.listAddedMessageIds('500')
 
-      expect(result).toEqual({ kind: 'ok', messageIds: [], newHistoryId: 'h-unchanged' })
+      expect(result).toEqual({ kind: 'ok', messages: [], newHistoryId: 'h-unchanged' })
+    })
+
+    // --- Folding in labelsAdded (review round 2, HT-50) — hardening
+    // against Gmail possibly recording a self-addressed send's SENT and
+    // INBOX labels as TWO separate history records instead of one
+    // messagesAdded snapshot carrying both. See history.ts's "Folding in
+    // labelsAdded" module-doc section. -------------------------------------
+
+    it("merges a LATER labelsAdded record's top-level labelIds delta into that id's labelIds, catching a split SENT-then-INBOX history ordering", async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [
+              // The message is first added as SENT-only...
+              { messagesAdded: [{ message: { id: 'self-1', labelIds: ['SENT'] } }] },
+              // ...then a LATER history record applies INBOX once delivery
+              // completes. Per Gmail's HistoryLabelAdded schema the added
+              // labels sit at the record's TOP LEVEL, beside `message` (the
+              // embedded message's own labelIds is not guaranteed to be
+              // populated). Without merging this delta in, self-1 would
+              // misread as a pure self-echo and be silently dropped forever.
+              { labelsAdded: [{ message: { id: 'self-1' }, labelIds: ['INBOX'] }] },
+            ],
+            historyId: 'h1',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'self-1', labelIds: ['SENT', 'INBOX'] }],
+        newHistoryId: 'h1',
+      })
+    })
+
+    it('ignores a labelsAdded record for an id with no messagesAdded entry in this window (an existing message being re-labeled, not newly added)', async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [
+              { messagesAdded: [{ message: { id: 'm1', labelIds: ['INBOX'] } }] },
+              // 'unrelated-1' was never added in this window — a stray
+              // labelsAdded record for it must not manufacture a tracked id.
+              { labelsAdded: [{ message: { id: 'unrelated-1' }, labelIds: ['INBOX'] }] },
+            ],
+            historyId: 'h1',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'm1', labelIds: ['INBOX'] }],
+        newHistoryId: 'h1',
+      })
+    })
+
+    it('merges a labelsAdded record that arrives on a LATER page into an id first seen via messagesAdded on an earlier page', async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [{ messagesAdded: [{ message: { id: 'self-1', labelIds: ['SENT'] } }] }],
+            historyId: 'h-page1',
+            nextPageToken: 'p2',
+          },
+        },
+        {
+          status: 200,
+          body: {
+            history: [{ labelsAdded: [{ message: { id: 'self-1' }, labelIds: ['INBOX'] }] }],
+            historyId: 'h-final',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'self-1', labelIds: ['SENT', 'INBOX'] }],
+        newHistoryId: 'h-final',
+      })
+    })
+
+    it("a labelsAdded record missing its top-level labelIds leaves the tracked snapshot intact — and the embedded message's labelIds is never read", async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [
+              { messagesAdded: [{ message: { id: 'self-1', labelIds: ['SENT'] } }] },
+              // No top-level labelIds — must not clobber ['SENT'] to [].
+              // The embedded message.labelIds ('TRASH' here, as a tracer) is
+              // not guaranteed to be populated in history records and must
+              // not be read as the delta either.
+              { labelsAdded: [{ message: { id: 'self-1', labelIds: ['TRASH'] } }] },
+            ],
+            historyId: 'h1',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'self-1', labelIds: ['SENT'] }],
+        newHistoryId: 'h1',
+      })
+    })
+
+    it('merging a delta that repeats an already-tracked label does not duplicate it', async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [
+              { messagesAdded: [{ message: { id: 'self-1', labelIds: ['SENT'] } }] },
+              { labelsAdded: [{ message: { id: 'self-1' }, labelIds: ['SENT', 'INBOX'] }] },
+            ],
+            historyId: 'h1',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'self-1', labelIds: ['SENT', 'INBOX'] }],
+        newHistoryId: 'h1',
+      })
+    })
+
+    it('defaults labelIds to [] when Gmail omits the field on a messagesAdded record', async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [{ messagesAdded: [{ message: { id: 'm1' } }] }],
+            historyId: 'h1',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'm1', labelIds: [] }],
+        newHistoryId: 'h1',
+      })
     })
 
     it('returns { kind: "expired" } on a 404, without throwing', async () => {

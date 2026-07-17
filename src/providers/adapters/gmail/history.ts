@@ -33,13 +33,74 @@
  * before returning. Gmail's history records can repeat a message id across
  * records (e.g. a message that is both added and labeled within the same
  * batch appears in more than one `history[]` entry), so ids are collected
- * into a `Set` and returned de-duplicated — a caller fetching each id
- * exactly once matters both for correctness (no redundant ingest attempt
- * per id) and for cost (no redundant `messages.get` call). `newHistoryId`
- * is taken from whichever page's top-level `historyId` field is read last
- * (Gmail includes it on every page as the mailbox's then-current watermark;
- * taking the LAST page's value is what "follow pagination to the end"
- * requires — see gmail-push.md §4, "the cursor").
+ * into a `Map` keyed on id and returned de-duplicated — a caller handling
+ * each id exactly once matters both for correctness (no redundant ingest
+ * attempt per id) and for cost (no redundant `messages.get` call). Where an
+ * id repeats across records, the LAST record's `labelIds` wins (mirrors
+ * `newHistoryId`'s own "last page wins" rule below — favor the freshest
+ * label snapshot Gmail gave us). `newHistoryId` is taken from whichever
+ * page's top-level `historyId` field is read last (Gmail includes it on
+ * every page as the mailbox's then-current watermark; taking the LAST
+ * page's value is what "follow pagination to the end" requires — see
+ * gmail-push.md §4, "the cursor").
+ *
+ * ## `labelIds` (HT-50)
+ *
+ * Each `messagesAdded` record's `message` object carries the same
+ * `labelIds` field `messages.get` returns — Gmail's History resource embeds
+ * the message's labels at record time, not just its id. {@link
+ * GmailHistoryClient.listAddedMessageIds} surfaces this per message (see
+ * {@link AddedGmailMessage}) purely so the reconcile handler
+ * (`src/mail/gmail-reconcile.ts`) can filter the mailbox's own outbound
+ * sends (and in-progress drafts) out of the batch BEFORE ever calling
+ * `messages.get`/`ingest` for them (gmail-push.md's reconcile section,
+ * HT-50) — this client itself does not interpret `labelIds`, it only
+ * carries the field through. Missing or absent `labelIds` on a record
+ * defaults to `[]` (never inferred as "definitely not sent") so a caller's
+ * filter fails open toward ingesting rather than toward silently dropping a
+ * message it can't confirm.
+ *
+ * ## Folding in `labelsAdded` — hardening against a split SENT/INBOX
+ * snapshot (review round 2, HT-50)
+ *
+ * The reconcile handler's self-echo filter assumes a self-addressed send's
+ * `messagesAdded` record already carries BOTH `SENT` and `INBOX` in one
+ * `labelIds` snapshot (`gmail-reconcile.ts`'s module doc). This has not been
+ * confirmed against a live self-addressed send — Gmail's docs do not rule
+ * out recording the message as `SENT`-only at insert time and applying
+ * `INBOX` via a LATER, separate history event once delivery completes. If
+ * that happens and this client only ever read `messagesAdded` records, the
+ * `INBOX` label would never reach the caller: the message would misread as
+ * a pure self-echo and be silently, permanently dropped — invariant #1
+ * forbids exactly that.
+ *
+ * To close that gap without depending on the unconfirmed one-record
+ * assumption, `listAddedMessageIds` also requests the `labelAdded` history
+ * type and reads each page's `labelsAdded` records. A `labelsAdded` record
+ * carries the labels applied by that event in its TOP-LEVEL `labelIds`
+ * field, beside `message` (the discovery schema's `HistoryLabelAdded`:
+ * "Label IDs added to the message.") — the embedded `message` object's own
+ * `labelIds` is NOT guaranteed to be populated in history records, so this
+ * client never reads it there. For any message id that already has a
+ * `messagesAdded` entry in this same listed window, each `labelsAdded`
+ * record's top-level `labelIds` is MERGED (set union) into the tracked
+ * entry's labels — never overwritten: an overwrite keyed off the embedded
+ * snapshot would, when Gmail omits it, clobber a real `['SENT']` down to
+ * `[]` and lose the one label the caller's self-echo filter keys on,
+ * whereas merging the schema-guaranteed delta can only ever ADD labels — it
+ * reveals the later `INBOX` without ever losing the earlier `SENT`. Label
+ * REMOVALS (`labelsRemoved`) are deliberately not folded in: the only
+ * removal that could change the caller's decision is `INBOX` (e.g. the
+ * message archived mid-window), and keeping a stale `INBOX` biases the
+ * filter toward ingesting — the safe direction. `labelsAdded` records for
+ * ids that never had a `messagesAdded` entry in this window are ignored:
+ * they describe a label change on a message that was NOT newly added since
+ * the cursor (e.g. an existing message re-labeled), which is out of scope
+ * for "messages added since the cursor" and must not manufacture a new
+ * tracked id. This closes the split-record ordering gap whichever way
+ * Gmail's history actually orders the two labels; it does not by itself
+ * confirm the assumption is even real — see gmail-reconcile.ts's module doc
+ * for the still-open live-verification item this ticket's report flagged.
  */
 
 /** Options for {@link createGmailHistoryClient}. Mirrors `GmailEmailSenderOptions` (`./sender.ts`). */
@@ -67,17 +128,27 @@ export interface GmailHistoryClientOptions {
 }
 
 /**
+ * One message id added to the mailbox since the cursor, plus the `labelIds`
+ * Gmail's history record carried for it at list time (module doc's
+ * "`labelIds` (HT-50)" section).
+ */
+export interface AddedGmailMessage {
+  id: string
+  labelIds: string[]
+}
+
+/**
  * The result of {@link GmailHistoryClient.listAddedMessageIds}: either the
- * de-duplicated ids added since `startHistoryId` plus the new watermark to
- * advance to, or an expired-cursor signal (module doc). Tagged on `kind` on
- * BOTH branches (unlike the brief's shorthand) so callers narrow with an
- * ordinary `kind` check — matching this codebase's discriminated-union
- * convention (see `RawMessageContent`, `src/providers/inbound-email.ts`)
- * rather than requiring an `in` check against a branch with no shared
- * field.
+ * de-duplicated messages added since `startHistoryId` plus the new
+ * watermark to advance to, or an expired-cursor signal (module doc). Tagged
+ * on `kind` on BOTH branches (unlike the brief's shorthand) so callers
+ * narrow with an ordinary `kind` check — matching this codebase's
+ * discriminated-union convention (see `RawMessageContent`,
+ * `src/providers/inbound-email.ts`) rather than requiring an `in` check
+ * against a branch with no shared field.
  */
 export type ListAddedMessageIdsResult =
-  | { kind: 'ok'; messageIds: string[]; newHistoryId: string }
+  | { kind: 'ok'; messages: AddedGmailMessage[]; newHistoryId: string }
   | { kind: 'expired' }
 
 /** One message's raw RFC822 bytes plus when Gmail recorded it. `null` (not this type) is returned when the message no longer exists — see the module doc. */
@@ -89,12 +160,12 @@ export interface RawGmailMessage {
 /** The Gmail history + raw-fetch client HT-41's reconcile handler consumes. See the module doc. */
 export interface GmailHistoryClient {
   /**
-   * List every message id added to the mailbox since `startHistoryId`
+   * List every message added to the mailbox since `startHistoryId`
    * (Gmail's own `history.list?startHistoryId=` semantics), following
-   * `nextPageToken` pagination to the end and de-duplicating ids (module
-   * doc). Returns `{ kind: 'expired' }` on a 404 (cursor older than
-   * Gmail's retention window, gmail-push.md §5); throws on any other
-   * non-2xx.
+   * `nextPageToken` pagination to the end, de-duplicating ids, and carrying
+   * each one's `labelIds` through (module doc). Returns `{ kind: 'expired' }`
+   * on a 404 (cursor older than Gmail's retention window, gmail-push.md §5);
+   * throws on any other non-2xx.
    */
   listAddedMessageIds(startHistoryId: string): Promise<ListAddedMessageIdsResult>
 
@@ -126,7 +197,14 @@ const BASE64URL_RE = /^[A-Za-z0-9_-]+={0,2}$/
 
 /** Shape of a `users.history.list` response body, narrowed to the fields this client reads. */
 interface HistoryListResponseBody {
-  history?: Array<{ messagesAdded?: Array<{ message?: { id?: string } }> }>
+  history?: Array<{
+    messagesAdded?: Array<{ message?: { id?: string; labelIds?: string[] } }>
+    // Only the record's TOP-LEVEL labelIds (the added-label delta Gmail's
+    // HistoryLabelAdded schema guarantees) and the message id are read; the
+    // embedded message's own labelIds is NOT guaranteed to be populated in
+    // history records — module doc's "Folding in labelsAdded" section.
+    labelsAdded?: Array<{ message?: { id?: string }; labelIds?: string[] }>
+  }>
   nextPageToken?: string
   historyId?: string
 }
@@ -181,7 +259,12 @@ export function createGmailHistoryClient(options: GmailHistoryClientOptions): Gm
 
   return {
     async listAddedMessageIds(startHistoryId) {
-      const messageIds = new Set<string>()
+      // Keyed on id so a repeated id (module doc) is de-duplicated; a later
+      // messagesAdded record's labelIds overwrites an earlier one's for the
+      // same id (module doc's "last record wins" rule), while labelsAdded
+      // records MERGE their added-label delta in (module doc's "Folding in
+      // labelsAdded" section).
+      const messagesById = new Map<string, string[]>()
       let newHistoryId: string | undefined
       let pageToken: string | undefined
 
@@ -189,6 +272,11 @@ export function createGmailHistoryClient(options: GmailHistoryClientOptions): Gm
         const url = new URL(`${usersBase}/history`)
         url.searchParams.set('startHistoryId', startHistoryId)
         url.searchParams.set('historyTypes', 'messageAdded')
+        // Also requested (repeated query param — Gmail's API accepts
+        // historyTypes multiple times) so a message's INBOX label applied
+        // via a SEPARATE, later history event is still visible to this
+        // client — module doc's "Folding in labelsAdded" section.
+        url.searchParams.append('historyTypes', 'labelAdded')
         if (pageToken !== undefined) {
           url.searchParams.set('pageToken', pageToken)
         }
@@ -211,7 +299,37 @@ export function createGmailHistoryClient(options: GmailHistoryClientOptions): Gm
           for (const added of record.messagesAdded ?? []) {
             const id = added.message?.id
             if (typeof id === 'string' && id.length > 0) {
-              messageIds.add(id)
+              // Defaults to [] when Gmail's response omits labelIds — fails
+              // open toward "not recognisably SENT-only" rather than
+              // inferring anything (module doc).
+              messagesById.set(id, added.message?.labelIds ?? [])
+            }
+          }
+          for (const labeled of record.labelsAdded ?? []) {
+            const id = labeled.message?.id
+            if (typeof id !== 'string' || id.length === 0) {
+              continue
+            }
+            // Only merges into an id THIS window already tracked via
+            // messagesAdded — a labelsAdded record for an id that was never
+            // newly added describes an existing message being re-labeled,
+            // which is out of scope here and must not manufacture a new
+            // tracked id (module doc's "Folding in labelsAdded" section).
+            const tracked = messagesById.get(id)
+            if (tracked === undefined) {
+              continue
+            }
+            // Merge the record's TOP-LEVEL labelIds — the added-label delta
+            // Gmail's HistoryLabelAdded schema guarantees — into the tracked
+            // entry. Never overwrite, and never read the embedded
+            // message.labelIds (not guaranteed to be populated in history
+            // records): merging can only ADD labels, so a later INBOX
+            // becomes visible without ever losing the earlier SENT (module
+            // doc's "Folding in labelsAdded" section).
+            for (const labelId of labeled.labelIds ?? []) {
+              if (!tracked.includes(labelId)) {
+                tracked.push(labelId)
+              }
             }
           }
         }
@@ -238,7 +356,11 @@ export function createGmailHistoryClient(options: GmailHistoryClientOptions): Gm
         )
       }
 
-      return { kind: 'ok', messageIds: [...messageIds], newHistoryId }
+      return {
+        kind: 'ok',
+        messages: [...messagesById.entries()].map(([id, labelIds]) => ({ id, labelIds })),
+        newHistoryId,
+      }
     },
 
     async getRawMessage(messageId) {
