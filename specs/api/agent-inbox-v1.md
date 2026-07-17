@@ -398,13 +398,17 @@ above.
 ## 7. Changelog
 
 - **v1.1 (2026-07-17, HT-49 review fix).** `InboxApiDeps.selfEchoGuard` (optional, absent
-  by default): when present, a successful reply's own sent-message echo is pre-suppressed
-  in the inbound delivery ledger before it can be re-ingested as a phantom inbound message
-  by a transport that reflects sent mail back into its own mailbox (Gmail, confirmed live)
-  — a consequence of the `References` change below now carrying a verifiable token into
-  that self-echo too. See `src/mail/send.ts`'s "The reply token's own self-echo" section
-  and `inbound-ingestion.md` §5's HT-49 amendment for the full mechanism. No other §4a
-  behavior changed; a deployment that leaves this absent behaves exactly as before.
+  by default): when present — and when the sender reports a provider message id for a
+  resolvable outbound mailbox — the send path best-effort pre-seeds a successful reply's
+  own sent-message echo as suppressed in the inbound delivery ledger, so a transport that
+  reflects sent mail back into its own mailbox (Gmail, confirmed live) normally does not
+  re-ingest it as a phantom inbound message — a consequence of the `References` change
+  below now carrying a verifiable token into that self-echo too. Best-effort, not a
+  guarantee: reconcile can win the documented pre-seeding race and ingest that one echo
+  first (`inbound-ingestion.md` §5's HT-49 amendment, "Known residual"). See
+  `src/mail/send.ts`'s "The reply token's own self-echo" section for the full mechanism.
+  No other §4a behavior changed; a deployment that leaves this absent behaves exactly as
+  before.
 - **v1.1 (2026-07-17, HT-49).** §4a's `References` derivation now appends the reply's own
   freshly-minted `messageId` as the final entry, after the derived ancestor chain — fixing
   live-observed thread splits where a provider (Gmail, confirmed) rewrites the outbound

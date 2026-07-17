@@ -154,9 +154,16 @@ export interface InboxApiDeps {
    * self-reflecting transport configured (no Gmail mailbox connected) simply
    * never sets this, and reply-sending behaves exactly as before this guard
    * existed. When present, a successful reply's own sent-message echo is
-   * pre-suppressed in the inbound delivery ledger so a transport that
-   * delivers sent mail back into its own mailbox (Gmail, confirmed live)
-   * never has that echo re-ingested as a phantom inbound message.
+   * best-effort pre-suppressed in the inbound delivery ledger so a transport
+   * that delivers sent mail back into its own mailbox (Gmail, confirmed
+   * live) normally does not re-ingest it as a phantom inbound message.
+   * Best-effort, not a guarantee: the pre-seed runs only AFTER the provider
+   * send succeeds, so an unusually fast reconcile can claim `(mailboxId,
+   * providerMessageId)` first and ingest that one echo before the pre-seed
+   * lands — reproducing the pre-guard failure mode (a visible phantom
+   * inbound message in that conversation) for that single send, never a new
+   * one. See `inbound-ingestion.md` §5's HT-49 amendment ("Known residual")
+   * for the conceded race.
    */
   selfEchoGuard?: SelfEchoGuardDeps
 }

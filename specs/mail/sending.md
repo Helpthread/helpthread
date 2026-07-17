@@ -185,10 +185,20 @@ does with it afterward). See threading.md §2a for the full story and the fix:
 `sendReply` (`src/mail/send.ts`) now ALSO places its own minted `messageId` as
 the final entry of that same reply's `References` header — a channel Gmail
 does not rewrite — so the token survives even when `Message-ID` itself does
-not. `References`, like `Message-ID`, must still be transmitted verbatim and
-in order by every adapter (unchanged by HT-49); the fix is in what the engine
-puts into `References` before handing it to the adapter, not in the adapter
-contract itself.
+not. The adapter contract for `References` is: every atom transmitted is
+transmitted verbatim and in its given order — never rewritten, reordered, or
+substituted. Unlike `Message-ID`, though, the ancestor portion of `References`
+carries attacker-influenced inbound msg-ids, so an adapter MAY sanitize by
+DROPPING an individual unsafe atom (header-injection / oversize defense — the
+Gmail adapter's `isSafeMsgId` filter, `src/providers/adapters/gmail/mime.ts`,
+does exactly this rather than letting one crafted stored ancestor id block
+every future reply to its conversation). The engine-minted final entry passes
+any such filter by construction (`reply-token.ts`'s bounded `[A-Za-z0-9_-]` /
+`.` / `@` charset contains no control characters and stays far under the
+octet bound) and MUST reach the wire intact — an adapter that drops or alters
+IT is as unusable as one that rewrites `Message-ID`. The HT-49 fix is in what
+the engine puts into `References` before handing it to the adapter, not a
+change to this adapter contract.
 
 **Review-fix amendment: a self-reflecting transport requires ALSO suppressing the sent
 message's own echo (`src/mail/send.ts`'s "The reply token's own self-echo" section).**
