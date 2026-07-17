@@ -76,12 +76,23 @@
  *
  * To close that gap without depending on the unconfirmed one-record
  * assumption, `listAddedMessageIds` also requests the `labelAdded` history
- * type and reads each page's `labelsAdded` records the same way it reads
- * `messagesAdded`. For any message id that already has a `messagesAdded`
- * entry in this same listed window, a LATER `labelsAdded` record for that
- * id overwrites its `labelIds` with that record's (newer, fuller) label
- * snapshot — mirroring the existing "last record wins" de-duplication rule
- * above, just extended to cover both record types. `labelsAdded` records for
+ * type and reads each page's `labelsAdded` records. A `labelsAdded` record
+ * carries the labels applied by that event in its TOP-LEVEL `labelIds`
+ * field, beside `message` (the discovery schema's `HistoryLabelAdded`:
+ * "Label IDs added to the message.") — the embedded `message` object's own
+ * `labelIds` is NOT guaranteed to be populated in history records, so this
+ * client never reads it there. For any message id that already has a
+ * `messagesAdded` entry in this same listed window, each `labelsAdded`
+ * record's top-level `labelIds` is MERGED (set union) into the tracked
+ * entry's labels — never overwritten: an overwrite keyed off the embedded
+ * snapshot would, when Gmail omits it, clobber a real `['SENT']` down to
+ * `[]` and lose the one label the caller's self-echo filter keys on,
+ * whereas merging the schema-guaranteed delta can only ever ADD labels — it
+ * reveals the later `INBOX` without ever losing the earlier `SENT`. Label
+ * REMOVALS (`labelsRemoved`) are deliberately not folded in: the only
+ * removal that could change the caller's decision is `INBOX` (e.g. the
+ * message archived mid-window), and keeping a stale `INBOX` biases the
+ * filter toward ingesting — the safe direction. `labelsAdded` records for
  * ids that never had a `messagesAdded` entry in this window are ignored:
  * they describe a label change on a message that was NOT newly added since
  * the cursor (e.g. an existing message re-labeled), which is out of scope
@@ -188,9 +199,11 @@ const BASE64URL_RE = /^[A-Za-z0-9_-]+={0,2}$/
 interface HistoryListResponseBody {
   history?: Array<{
     messagesAdded?: Array<{ message?: { id?: string; labelIds?: string[] } }>
-    // Read only to fold a LATER label snapshot into an id already tracked
-    // via messagesAdded — module doc's "Folding in labelsAdded" section.
-    labelsAdded?: Array<{ message?: { id?: string; labelIds?: string[] } }>
+    // Only the record's TOP-LEVEL labelIds (the added-label delta Gmail's
+    // HistoryLabelAdded schema guarantees) and the message id are read; the
+    // embedded message's own labelIds is NOT guaranteed to be populated in
+    // history records — module doc's "Folding in labelsAdded" section.
+    labelsAdded?: Array<{ message?: { id?: string }; labelIds?: string[] }>
   }>
   nextPageToken?: string
   historyId?: string
@@ -247,8 +260,10 @@ export function createGmailHistoryClient(options: GmailHistoryClientOptions): Gm
   return {
     async listAddedMessageIds(startHistoryId) {
       // Keyed on id so a repeated id (module doc) is de-duplicated; a later
-      // record's labelIds overwrites an earlier one's for the same id
-      // (module doc's "last record wins" rule).
+      // messagesAdded record's labelIds overwrites an earlier one's for the
+      // same id (module doc's "last record wins" rule), while labelsAdded
+      // records MERGE their added-label delta in (module doc's "Folding in
+      // labelsAdded" section).
       const messagesById = new Map<string, string[]>()
       let newHistoryId: string | undefined
       let pageToken: string | undefined
@@ -292,19 +307,29 @@ export function createGmailHistoryClient(options: GmailHistoryClientOptions): Gm
           }
           for (const labeled of record.labelsAdded ?? []) {
             const id = labeled.message?.id
-            // Only overwrites an id THIS window already tracked via
+            if (typeof id !== 'string' || id.length === 0) {
+              continue
+            }
+            // Only merges into an id THIS window already tracked via
             // messagesAdded — a labelsAdded record for an id that was never
             // newly added describes an existing message being re-labeled,
             // which is out of scope here and must not manufacture a new
             // tracked id (module doc's "Folding in labelsAdded" section).
-            // Processed in the same forward pass as messagesAdded above, so
-            // a later labelsAdded record correctly overwrites an earlier
-            // messagesAdded (or labelsAdded) snapshot for the same id —
-            // this loop's iteration order over `body.history` IS Gmail's
-            // chronological order, both within one page and (since pages
-            // are followed to the end before returning) across pages.
-            if (typeof id === 'string' && id.length > 0 && messagesById.has(id)) {
-              messagesById.set(id, labeled.message?.labelIds ?? [])
+            const tracked = messagesById.get(id)
+            if (tracked === undefined) {
+              continue
+            }
+            // Merge the record's TOP-LEVEL labelIds — the added-label delta
+            // Gmail's HistoryLabelAdded schema guarantees — into the tracked
+            // entry. Never overwrite, and never read the embedded
+            // message.labelIds (not guaranteed to be populated in history
+            // records): merging can only ADD labels, so a later INBOX
+            // becomes visible without ever losing the earlier SENT (module
+            // doc's "Folding in labelsAdded" section).
+            for (const labelId of labeled.labelIds ?? []) {
+              if (!tracked.includes(labelId)) {
+                tracked.push(labelId)
+              }
             }
           }
         }

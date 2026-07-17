@@ -214,7 +214,7 @@
  * forbids. `../providers/adapters/gmail/history.ts`'s `listAddedMessageIds`
  * hardens against exactly that ordering by also reading `labelsAdded`
  * history records for the same message id within the listed window and
- * folding their (later) label snapshot in — see that module's doc for the
+ * merging their added-label deltas in — see that module's doc for the
  * mechanism. This has not been confirmed against a live self-addressed send
  * (flagged in this ticket's report as still open); the hardening below is a
  * defense against the *possible* split-record ordering, not a replacement
