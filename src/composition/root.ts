@@ -273,7 +273,7 @@ export async function buildApp(
 }
 
 /**
- * The per-instance memoized handler the Vercel entry (`api/[...path].ts`)
+ * The per-instance memoized handler the Vercel entry (`api/index.ts`)
  * calls. Reads + validates `process.env` via `loadConfig` and builds the app
  * once; a config error becomes a rejected (cached) promise the entry maps to a
  * generic 500 — a misconfigured instance stays down loudly rather than
