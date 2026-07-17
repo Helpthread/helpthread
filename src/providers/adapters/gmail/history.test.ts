@@ -39,12 +39,19 @@ function sequencedFetch(responses: Array<{ status: number; body?: unknown; text?
 
 describe('createGmailHistoryClient', () => {
   describe('listAddedMessageIds', () => {
-    it('follows nextPageToken pagination to the end, de-duplicates ids, and returns the LAST page historyId', async () => {
+    it("follows nextPageToken pagination to the end, de-duplicates ids, returns the LAST page historyId, and lets a repeated id's labelIds be overwritten by the later record", async () => {
       const { fetchImpl, calls } = sequencedFetch([
         {
           status: 200,
           body: {
-            history: [{ messagesAdded: [{ message: { id: 'm1' } }, { message: { id: 'm2' } }] }],
+            history: [
+              {
+                messagesAdded: [
+                  { message: { id: 'm1', labelIds: ['INBOX'] } },
+                  { message: { id: 'm2', labelIds: ['INBOX'] } },
+                ],
+              },
+            ],
             historyId: 'h-page1', // should be overwritten by the final page's value
             nextPageToken: 'page-2-token',
           },
@@ -53,8 +60,17 @@ describe('createGmailHistoryClient', () => {
           status: 200,
           body: {
             // m2 repeated across pages (Gmail's own history records can
-            // repeat an id) — must be de-duplicated; m3 is genuinely new.
-            history: [{ messagesAdded: [{ message: { id: 'm2' } }, { message: { id: 'm3' } }] }],
+            // repeat an id) — must be de-duplicated, and its LATER labelIds
+            // (here: also labeled SENT) must win over the first page's; m3
+            // is genuinely new.
+            history: [
+              {
+                messagesAdded: [
+                  { message: { id: 'm2', labelIds: ['INBOX', 'SENT'] } },
+                  { message: { id: 'm3', labelIds: ['INBOX'] } },
+                ],
+              },
+            ],
             historyId: 'h-final',
             // no nextPageToken — last page.
           },
@@ -69,7 +85,11 @@ describe('createGmailHistoryClient', () => {
 
       expect(result).toEqual({
         kind: 'ok',
-        messageIds: ['m1', 'm2', 'm3'],
+        messages: [
+          { id: 'm1', labelIds: ['INBOX'] },
+          { id: 'm2', labelIds: ['INBOX', 'SENT'] },
+          { id: 'm3', labelIds: ['INBOX'] },
+        ],
         newHistoryId: 'h-final',
       })
       expect(calls).toHaveLength(2)
@@ -103,7 +123,28 @@ describe('createGmailHistoryClient', () => {
 
       const result = await client.listAddedMessageIds('500')
 
-      expect(result).toEqual({ kind: 'ok', messageIds: [], newHistoryId: 'h-unchanged' })
+      expect(result).toEqual({ kind: 'ok', messages: [], newHistoryId: 'h-unchanged' })
+    })
+
+    it('defaults labelIds to [] when Gmail omits the field on a messagesAdded record', async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [{ messagesAdded: [{ message: { id: 'm1' } }] }],
+            historyId: 'h1',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'm1', labelIds: [] }],
+        newHistoryId: 'h1',
+      })
     })
 
     it('returns { kind: "expired" } on a 404, without throwing', async () => {

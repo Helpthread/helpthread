@@ -201,6 +201,22 @@ function textBytes(s: string): Uint8Array {
   return new TextEncoder().encode(s)
 }
 
+/**
+ * Builds `AddedGmailMessage[]` for a `listResult` fixture — defaults every
+ * id to a normal `['INBOX']`-only message (an ordinary customer message,
+ * never mistaken for a self-echo) so existing tests don't have to spell out
+ * labelIds for the happy path; the self-echo tests below override
+ * `labelIds` explicitly per id via {@link taggedMsgs}.
+ */
+function msgs(ids: string[]): Array<{ id: string; labelIds: string[] }> {
+  return ids.map((id) => ({ id, labelIds: ['INBOX'] }))
+}
+
+/** Like {@link msgs}, but each id carries its own explicit labelIds — for the self-echo filter tests. */
+function taggedMsgs(entries: Array<[string, string[]]>): Array<{ id: string; labelIds: string[] }> {
+  return entries.map(([id, labelIds]) => ({ id, labelIds }))
+}
+
 function storedOutcome(
   raw: RawInboundMessage,
   overrides: Partial<IngestOutcome> = {},
@@ -236,7 +252,7 @@ function baseDeps(
     // `createHistoryClient` on its own; every test that exercises fetching
     // overrides it with a `fakeHistoryClient(...)`.
     createHistoryClient: () => ({
-      listAddedMessageIds: async () => ({ kind: 'ok', messageIds: [], newHistoryId: 'cursor-1' }),
+      listAddedMessageIds: async () => ({ kind: 'ok', messages: [], newHistoryId: 'cursor-1' }),
       getRawMessage: async () => null,
     }),
     ...overrides,
@@ -249,7 +265,7 @@ describe('createGmailReconcileHandler', () => {
     const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
     const { store: blobStore, puts } = fakeBlobStore()
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['m1', 'm2'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['m1', 'm2']), newHistoryId: 'cursor-2' },
       rawMessages: {
         m1: { rawBytes: textBytes('raw-1'), receivedAt: new Date('2026-01-01T00:00:00Z') },
         m2: { rawBytes: textBytes('raw-2'), receivedAt: new Date('2026-01-02T00:00:00Z') },
@@ -288,7 +304,7 @@ describe('createGmailReconcileHandler', () => {
   it('an empty batch (no new messages) still advances the cursor to the new watermark', async () => {
     const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: [], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: [], newHistoryId: 'cursor-2' },
     })
     const ingest = vi.fn()
 
@@ -306,7 +322,7 @@ describe('createGmailReconcileHandler', () => {
   it('a duplicate push whose messages replay as already-stored still advances the cursor', async () => {
     const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['m1', 'm2'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['m1', 'm2']), newHistoryId: 'cursor-2' },
       rawMessages: {
         m1: { rawBytes: textBytes('raw-1'), receivedAt: new Date() },
         m2: { rawBytes: textBytes('raw-2'), receivedAt: new Date() },
@@ -335,7 +351,7 @@ describe('createGmailReconcileHandler', () => {
       [MAILBOX_ID]: 'cursor-1',
     })
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['m1', 'm2'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['m1', 'm2']), newHistoryId: 'cursor-2' },
       rawMessages: {
         m1: { rawBytes: textBytes('raw-1'), receivedAt: new Date() },
         m2: { rawBytes: textBytes('raw-2'), receivedAt: new Date() },
@@ -369,7 +385,7 @@ describe('createGmailReconcileHandler', () => {
   it('an "in-progress" outcome also blocks the cursor advance and returns retry', async () => {
     const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['m1'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['m1']), newHistoryId: 'cursor-2' },
       rawMessages: { m1: { rawBytes: textBytes('raw-1'), receivedAt: new Date() } },
     })
     const ingest = vi.fn(
@@ -394,7 +410,7 @@ describe('createGmailReconcileHandler', () => {
   it('a "dead-letter" outcome is terminal and STILL advances the cursor (documented extension beyond spec §4 prose)', async () => {
     const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['m1', 'm2'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['m1', 'm2']), newHistoryId: 'cursor-2' },
       rawMessages: {
         m1: { rawBytes: textBytes('raw-1'), receivedAt: new Date() },
         m2: { rawBytes: textBytes('raw-2'), receivedAt: new Date() },
@@ -425,7 +441,7 @@ describe('createGmailReconcileHandler', () => {
   it('a message deleted between list and get (messages.get 404 -> null) is skipped, not retried', async () => {
     const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['gone', 'here'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['gone', 'here']), newHistoryId: 'cursor-2' },
       rawMessages: { here: { rawBytes: textBytes('raw'), receivedAt: new Date() } },
     })
     const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
@@ -440,6 +456,147 @@ describe('createGmailReconcileHandler', () => {
     expect(ingest).toHaveBeenCalledTimes(1)
     expect((ingest.mock.calls[0][0] as RawInboundMessage).providerMessageId).toBe('here')
     expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+  })
+
+  // --- The self-echo filter (HT-50) — the live-proven failure this ticket
+  // fixes: the mailbox's own outbound reply, surfaced by history.list like
+  // any other added message, must not spawn a ghost conversation. ---------
+
+  describe('self-echo filter', () => {
+    it('a SENT-only self-message (the exact live round-trip that failed) is skipped: no ingest call, no delivery row, cursor still advances', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const getRawMessage = vi.fn(async () => null)
+      const historyClient: GmailHistoryClient = {
+        listAddedMessageIds: async () => ({
+          kind: 'ok',
+          // Exactly the production failure: help@resonantiq.app's own
+          // just-sent reply, reflected back through history.list with
+          // SENT but no INBOX label.
+          messages: taggedMsgs([['echo-1', ['SENT']]]),
+          newHistoryId: 'cursor-2',
+        }),
+        getRawMessage,
+      }
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      // No inbound_deliveries ledger row is ever attempted for the echo —
+      // ingest (the thing that writes that row) is never called for it.
+      expect(ingest).not.toHaveBeenCalled()
+      // Filtered before the raw fetch, too — no wasted messages.get call.
+      expect(getRawMessage).not.toHaveBeenCalled()
+      // The skip must not disturb cursor advancement (module doc).
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    it('a SENT+INBOX self-addressed message (the desk emailing itself) is still ingested normally', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['self-addressed-1', ['SENT', 'INBOX']]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: {
+          'self-addressed-1': { rawBytes: textBytes('raw'), receivedAt: new Date() },
+        },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(ingest).toHaveBeenCalledTimes(1)
+      expect((ingest.mock.calls[0][0] as RawInboundMessage).providerMessageId).toBe(
+        'self-addressed-1',
+      )
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    it('a mixed batch — a genuine customer message plus a self-echo — ingests the customer message, skips the echo, and lands the cursor correctly', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([
+            ['customer-1', ['INBOX']],
+            ['echo-1', ['SENT']],
+          ]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: {
+          'customer-1': { rawBytes: textBytes('raw-customer'), receivedAt: new Date() },
+        },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(ingest).toHaveBeenCalledTimes(1)
+      expect((ingest.mock.calls[0][0] as RawInboundMessage).providerMessageId).toBe('customer-1')
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    it('an INBOX-only message (no SENT at all — the ordinary case) is never treated as a self-echo', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['customer-2', ['INBOX']]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'customer-2': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(ingest).toHaveBeenCalledTimes(1)
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    it('a message with no labelIds at all (Gmail omitted the field) fails open and is ingested, never silently dropped', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['no-labels-1', []]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'no-labels-1': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(ingest).toHaveBeenCalledTimes(1)
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
   })
 
   it('a 404-expired cursor pauses the mailbox, does not advance the cursor, and acks', async () => {
@@ -534,7 +691,7 @@ describe('createGmailReconcileHandler', () => {
     const { store: blobStore, puts } = fakeBlobStore()
     const bigBytes = textBytes('this raw message is bigger than the tiny threshold below')
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['big1'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['big1']), newHistoryId: 'cursor-2' },
       rawMessages: { big1: { rawBytes: bigBytes, receivedAt: new Date() } },
     })
     let capturedContent: RawInboundMessage['content'] | undefined
@@ -570,7 +727,7 @@ describe('createGmailReconcileHandler', () => {
     const { store: blobStore, puts } = fakeBlobStore()
     const smallBytes = textBytes('tiny')
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['m1'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['m1']), newHistoryId: 'cursor-2' },
       rawMessages: { m1: { rawBytes: smallBytes, receivedAt: new Date() } },
     })
     const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
@@ -691,7 +848,7 @@ describe('createGmailReconcileHandler', () => {
   it('an unexpected error thrown by ingest() itself is retried without advancing the cursor', async () => {
     const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
     const historyClient = fakeHistoryClient({
-      listResult: { kind: 'ok', messageIds: ['m1'], newHistoryId: 'cursor-2' },
+      listResult: { kind: 'ok', messages: msgs(['m1']), newHistoryId: 'cursor-2' },
       rawMessages: { m1: { rawBytes: textBytes('raw'), receivedAt: new Date() } },
     })
     const ingest = vi.fn(async () => {
@@ -717,7 +874,7 @@ describe('createGmailReconcileHandler', () => {
       const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
       const listAddedMessageIds = vi.fn(async () => ({
         kind: 'ok' as const,
-        messageIds: [],
+        messages: [],
         newHistoryId: 'cursor-2',
       }))
       const historyClient: GmailHistoryClient = {
@@ -798,7 +955,7 @@ describe('createGmailReconcileHandler', () => {
       })
       const listAddedMessageIds = vi.fn(async (cursor: string) => ({
         kind: 'ok' as const,
-        messageIds: [],
+        messages: [],
         newHistoryId: cursor === 'cursor-a-1' ? 'cursor-a-2' : 'cursor-b-2',
       }))
       const historyClient: GmailHistoryClient = {
@@ -851,7 +1008,7 @@ describe('createGmailReconcileHandler', () => {
       leases.set(MAILBOX_ID, { until: Date.now() - 1000, token: 'stale-crashed-holder-token' })
       const listAddedMessageIds = vi.fn(async () => ({
         kind: 'ok' as const,
-        messageIds: [],
+        messages: [],
         newHistoryId: 'cursor-2',
       }))
       const historyClient: GmailHistoryClient = {
@@ -947,7 +1104,7 @@ describe('createGmailReconcileHandler', () => {
       const historyClient: GmailHistoryClient = {
         listAddedMessageIds: vi.fn(async (cursor: string) => ({
           kind: 'ok' as const,
-          messageIds: cursor === 'cursor-after-a' ? ['m-arrived-after-a'] : [],
+          messages: cursor === 'cursor-after-a' ? msgs(['m-arrived-after-a']) : [],
           newHistoryId: 'cursor-after-b',
         })),
         getRawMessage: vi.fn(async () => ({

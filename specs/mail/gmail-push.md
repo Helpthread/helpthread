@@ -98,15 +98,50 @@ Then, from the resolved mailbox and its stored cursor:
 - `users.history.list?startHistoryId=<stored cursor>` — enumerate `messagesAdded` since
   **our stored cursor**, not the notification's `historyId` (which is the *new* watermark:
   starting from it returns nothing, because there are no changes newer than the current
-  state — the stored cursor is the source of truth). Page through all results.
-- For each new message id: `users.messages.get?format=raw` → the raw RFC822 bytes. `raw` is
-  mandatory; a parsed/`full` fetch would reintroduce the second-parser problem
-  (inbound-ingestion.md §1).
+  state — the stored cursor is the source of truth). Page through all results. Each
+  `messagesAdded` entry carries the message's `labelIds` alongside its id — see "The
+  self-echo filter" below for what that is for.
+- **Skip the mailbox's own outbound sends before fetching them (HT-50; "the self-echo
+  filter", below).**
+- For each remaining new message id: `users.messages.get?format=raw` → the raw RFC822
+  bytes. `raw` is mandatory; a parsed/`full` fetch would reintroduce the second-parser
+  problem (inbound-ingestion.md §1).
 - Hand each message to the ingest pipeline as `{ raw, mailboxId, providerMessageId =
   <Gmail message id>, receivedAt }` (inbound-ingestion.md §2–3). **The transport never
   parses — and therefore never extracts attachments.** Parsing the MIME and writing
   attachments to the `BlobStore` is the pipeline's job (inbound-ingestion.md §2–3),
   downstream of the single `parseInboundEmail` call; the transport only moves raw bytes.
+
+### The self-echo filter (HT-50)
+
+**Live-proven failure (2026-07-17, first HT-44 live run):** `history.list` does not
+distinguish "a message that arrived" from "a message this mailbox just sent" — Gmail
+surfaces the mailbox's own outbound sends as `messagesAdded` entries exactly like a
+genuine inbound message. Reconcile ingested the desk's own just-sent reply as a brand-new
+`from help@resonantiq.app` conversation; every Agent reply was spawning a ghost
+conversation. This is a transport-level gap, not a mail-semantics one — it belongs here,
+not in inbound-ingestion.md's own (separate) loop-suppression rule (§5 there), which
+guards a different case (a verifiable Message-ID/reply-token correlation showing OUR mail
+bounced or was auto-answered) and runs downstream, inside the pipeline.
+
+**Fix:** before `messages.get`/ingest, skip a `messagesAdded` entry whose `labelIds`
+contain `SENT` and do **not** contain `INBOX`. A message with both labels — the
+self-addressed edge case, an Agent emailing the shared mailbox itself — is **not**
+skipped: Gmail gives no other signal to tell that case apart from a genuine customer
+message at the transport layer, and getting this wrong in the drop direction would
+silently lose a real message forever (invariant #1). The skip happens **before** any
+`inbound_deliveries` ledger row is created, and does **not** disturb the cursor: a skipped
+message is treated exactly like the existing "deleted between list and get" 404 case (a
+message that contributes no outcome to the batch), so §4's cursor-advance rule proceeds
+unaffected and nothing is ever leased or left `in-progress` on a skipped message's behalf.
+
+**Alternative considered and rejected:** track the Gmail message id `users.messages.send`
+returns and skip exactly those ids on reconcile. More precise for sends issued through
+Helpthread's own send path, but it misses an Agent replying **directly from the Gmail web
+UI** — that reply carries no id this engine ever minted, so an id-tracking filter would
+let it through and produce the identical ghost conversation. `SENT`-without-`INBOX`
+catches both origins, because Gmail applies the `SENT` label identically regardless of
+which client sent the mail.
 
 ## 4. The cursor: monotonic, transactional with persistence
 
@@ -255,6 +290,11 @@ Against a **faked** Gmail API + Pub/Sub push (no cloud):
 - A duplicate push (same `historyId`) → no duplicate ingestion (dedup, inbound-ingestion.md §4).
 - A mid-batch failure → the cursor does not advance past the unstored message.
 - A 404 on `history.list` → the mailbox is paused and flagged, no resync attempted.
+- A `messagesAdded` entry labeled `SENT` without `INBOX` (the mailbox's own outbound send,
+  or an Agent's direct Gmail-UI reply) → skipped before `messages.get`/ingest, no
+  `inbound_deliveries` row created, cursor still advances past it (HT-50, "the self-echo
+  filter" above). A self-addressed entry labeled both `SENT` and `INBOX` → still ingested
+  normally.
 - The daily reconciliation sweep re-lists from the stored cursor and ingests a message a
   *dropped* push never delivered — with no duplication of messages push already delivered.
 

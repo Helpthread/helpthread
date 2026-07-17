@@ -30,10 +30,12 @@
  * 4. `history.list` from that cursor. A 404 means the cursor expired
  *    (gmail-push.md §5) — pause the mailbox, do NOT advance the cursor,
  *    ack (a human must rebaseline; retrying a 404 forever helps nobody).
- * 5. `messages.get?format=raw` each added id, in order. A 404 here means
- *    the message was deleted between list and get — skip it, nothing to
- *    ingest or retry. Raw bytes at or under `maxInlineRawBytes` are handed
- *    to `ingest` inline; larger ones are written to `blobStore` first and
+ * 5. For each added message: first the self-echo filter (below) — a
+ *    SENT-not-INBOX message is skipped with no `messages.get`/`ingest` call
+ *    at all. Otherwise `messages.get?format=raw`. A 404 here means the
+ *    message was deleted between list and get — skip it, nothing to ingest
+ *    or retry. Raw bytes at or under `maxInlineRawBytes` are handed to
+ *    `ingest` inline; larger ones are written to `blobStore` first and
  *    handed over as a `blobRef` — the OOM guard on the RAW MESSAGE itself
  *    (`RawMessageContent`'s own module doc, `src/providers/inbound-
  *    email.ts`, names exactly this "one large message inside a Gmail
@@ -135,6 +137,57 @@
  * store module's doc comment for the stale-holder scenario (an overrunning
  * run's release clobbering a legitimate successor's live lease) this
  * closes.
+ *
+ * ## The self-echo filter (HT-50)
+ *
+ * **Live-proven failure (2026-07-17, first HT-44 live run):** `history.list`
+ * surfaces the mailbox's OWN outbound sends — an Agent's reply, sent through
+ * Gmail — as `messagesAdded` entries exactly like a genuine inbound message.
+ * Ingesting one spawns a ghost `new` conversation "from" the desk's own
+ * address, because nothing upstream of `ingest` had ever distinguished "a
+ * message that arrived" from "a message we just sent that Gmail is
+ * reflecting back through history."
+ *
+ * The fix: before `messages.get`/`ingest` for a given added message, check
+ * the `labelIds` {@link GmailHistoryClient.listAddedMessageIds} already
+ * carried for it (`../providers/adapters/gmail/history.ts`'s module doc) —
+ * skip when `SENT` is present and `INBOX` is not (see {@link
+ * isSelfEchoMessage}). This is a pure Gmail-label check, not a mail-
+ * semantics decision: it runs entirely on transport metadata, before the raw
+ * bytes are even fetched, so it never touches `parseInboundEmail` or
+ * `decideThreading` (charter invariant #5) and is unrelated to
+ * inbound-ingestion.md §5's own (different) loop-suppression rule, which
+ * runs INSIDE the pipeline on a verifiable Message-ID/reply-token
+ * correlation — that rule exists for the "our mail bounced or was
+ * auto-answered" case; this one exists for "Gmail's own history conflates
+ * sent and received."
+ *
+ * A self-ADDRESSED message (an Agent emailing the shared mailbox itself)
+ * carries BOTH labels — `SENT` (we sent it) and `INBOX` (it also landed in
+ * the inbox) — and is deliberately NOT skipped: it is exactly the shape of a
+ * customer message and Gmail gives us no other signal to tell the two apart
+ * at the transport layer. Getting this case wrong in the other direction —
+ * skipping anything with `SENT` at all — would silently drop that message
+ * forever, which invariant #1 forbids.
+ *
+ * **Alternative considered and rejected:** track the Gmail message id
+ * `users.messages.send` returns (`../providers/adapters/gmail/sender.ts`)
+ * and skip exactly those ids on reconcile. This is more precise for sends
+ * this engine itself issued, but it has a hole the label filter doesn't: an
+ * Agent replying directly from the Gmail web UI (not through Helpthread's
+ * own send path) produces a message this engine never minted an id for, so
+ * it would sail through un-filtered and become the exact same ghost
+ * conversation. `SENT`-not-`INBOX` catches BOTH origins — our own API sends
+ * and an Agent's direct Gmail-UI replies — because Gmail applies `SENT`
+ * identically regardless of which client sent the mail.
+ *
+ * A skipped message is treated exactly like the existing "deleted between
+ * list and get" case (step 5): no `ingest` call, so no `inbound_deliveries`
+ * ledger row is ever created for it, and it contributes no outcome to the
+ * batch that step 6's cursor-advance check inspects — the cursor still
+ * advances past it normally, and it can never itself block or reclaim
+ * anything (nothing was ever leased or left `in-progress` on its behalf, so
+ * HT-45's stuck-received reclaim has nothing to reclaim here).
  *
  * ## Never drop a message (charter §2; gmail-push.md §4)
  *
@@ -462,9 +515,24 @@ async function reconcileOneMailbox(
       return { kind: 'ack' }
     }
 
-    // --- Step 5: fetch + ingest each added message, in order. ---
+    // --- Step 5: filter, then fetch + ingest each added message, in order. ---
     const outcomes: IngestOutcome[] = []
-    for (const messageId of listed.messageIds) {
+    for (const { id: messageId, labelIds } of listed.messages) {
+      if (isSelfEchoMessage(labelIds)) {
+        // The mailbox's own outbound send, reflected back through history —
+        // skip before ever calling messages.get/ingest (module doc's "The
+        // self-echo filter (HT-50)"). No ledger row, no outcome, no effect
+        // on the cursor advance below.
+        logReconcileEvent('info', {
+          mailboxId,
+          outcome: 'skip',
+          reason: 'self-echo',
+          providerMessageId: messageId,
+          labelIds,
+        })
+        continue
+      }
+
       const fetched = await client.getRawMessage(messageId)
       if (fetched === null) {
         // Deleted between list and get — nothing to ingest, nothing to
@@ -497,7 +565,7 @@ async function reconcileOneMailbox(
         reason: 'non-terminal-ingest-outcome',
         blockingOutcomeKind: blocking.kind,
         blockingProviderMessageId: blocking.providerMessageId,
-        batchSize: listed.messageIds.length,
+        batchSize: listed.messages.length,
       })
       return { kind: 'retry' }
     }
@@ -507,7 +575,7 @@ async function reconcileOneMailbox(
       mailboxId,
       outcome: 'ack',
       reason: 'reconciled',
-      messageCount: listed.messageIds.length,
+      messageCount: listed.messages.length,
       previousCursor: cursor,
       newHistoryId: listed.newHistoryId,
     })
@@ -539,6 +607,18 @@ async function reconcileOneMailbox(
       })
     }
   }
+}
+
+/**
+ * True when `labelIds` (from `history.list`'s per-message data,
+ * `../providers/adapters/gmail/history.ts`) mark this as the mailbox's own
+ * outbound send reflected back through history, rather than a genuinely
+ * received message — see the module doc's "The self-echo filter (HT-50)"
+ * section for the full reasoning, including why a self-addressed message
+ * (both `SENT` and `INBOX`) is deliberately NOT matched here.
+ */
+function isSelfEchoMessage(labelIds: string[]): boolean {
+  return labelIds.includes('SENT') && !labelIds.includes('INBOX')
 }
 
 /**
