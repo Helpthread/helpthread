@@ -125,15 +125,21 @@ guards a different case (a verifiable Message-ID/reply-token correlation showing
 bounced or was auto-answered) and runs downstream, inside the pipeline.
 
 **Fix:** before `messages.get`/ingest, skip a `messagesAdded` entry whose `labelIds`
-contain `SENT` and do **not** contain `INBOX`. A message with both labels — the
-self-addressed edge case, an Agent emailing the shared mailbox itself — is **not**
-skipped: Gmail gives no other signal to tell that case apart from a genuine customer
-message at the transport layer, and getting this wrong in the drop direction would
-silently lose a real message forever (invariant #1). The skip happens **before** any
-`inbound_deliveries` ledger row is created, and does **not** disturb the cursor: a skipped
-message is treated exactly like the existing "deleted between list and get" 404 case (a
-message that contributes no outcome to the batch), so §4's cursor-advance rule proceeds
-unaffected and nothing is ever leased or left `in-progress` on a skipped message's behalf.
+contain `SENT` and do **not** contain `INBOX`, **or** whose `labelIds` contain `DRAFT`.
+A message with both `SENT` and `INBOX` — the self-addressed edge case, an Agent emailing
+the shared mailbox itself — is **not** skipped: Gmail gives no other signal to tell that
+case apart from a genuine customer message at the transport layer, and getting this wrong
+in the drop direction would silently lose a real message forever (invariant #1). The
+`DRAFT` check is safe in that same drop direction with no such ambiguity: genuine inbound
+mail can never carry the system `DRAFT` label, so it exists purely to stop an Agent's
+in-progress Gmail-UI compose or reply — which Gmail autosaves as a new `DRAFT`-labeled
+message id on every keystroke pause, each one surfacing in `history.list` before the
+Agent ever sends anything — from being ingested as a half-written "customer" message or
+spawning a ghost conversation. The skip happens **before** any `inbound_deliveries` ledger
+row is created, and does **not** disturb the cursor: a skipped message is treated exactly
+like the existing "deleted between list and get" 404 case (a message that contributes no
+outcome to the batch), so §4's cursor-advance rule proceeds unaffected and nothing is ever
+leased or left `in-progress` on a skipped message's behalf.
 
 **Alternative considered and rejected:** track the Gmail message id `users.messages.send`
 returns and skip exactly those ids on reconcile. More precise for sends issued through
@@ -146,12 +152,20 @@ which client sent the mail.
 ## 4. The cursor: monotonic, transactional with persistence
 
 Each mailbox stores a `historyId` cursor (HT-36). Its one rule: **it advances only after
-the ingest pipeline confirms every message in the batch is `stored` or `suppressed`**
-(inbound-ingestion.md §4). A crash mid-batch leaves the cursor where it was; the next
-notification (or the §6 reconciliation sweep) re-lists from there, re-fetches, and the
-pipeline dedups on `(mailboxId, providerMessageId)`. Advancing the cursor *before*
-persistence would silently drop any message that failed to store — the one outcome
-invariant #1 forbids — so we always bias to re-fetch, never to skip.
+the ingest pipeline confirms every message HANDED TO IT is `stored` or `suppressed`**
+(inbound-ingestion.md §4) — "the batch" here is scoped to messages the pipeline actually
+received, not every `messagesAdded` entry `history.list` returned. Two kinds of entry are
+filtered out before ever reaching the pipeline and so contribute no outcome for this rule
+to inspect: a message deleted between `history.list` and the raw fetch (§3, "deleted
+between list and get"), and a self-echo/draft skipped by §3's self-echo filter. Neither is
+a gap in this rule — both are terminal, ledger-free non-events decided entirely on
+transport metadata before `ingest` is ever called, so there is nothing for them to be
+`stored`/`suppressed` INTO. A crash mid-batch (of messages that WERE handed to the
+pipeline) leaves the cursor where it was; the next notification (or the §6 reconciliation
+sweep) re-lists from there, re-fetches, and the pipeline dedups on `(mailboxId,
+providerMessageId)`. Advancing the cursor *before* persistence would silently drop any
+message that failed to store — the one outcome invariant #1 forbids — so we always bias
+to re-fetch, never to skip.
 
 ## 5. Expired history cursor — the dangerous case, and a dogfood decision
 

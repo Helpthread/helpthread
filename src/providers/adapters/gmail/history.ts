@@ -52,12 +52,44 @@
  * GmailHistoryClient.listAddedMessageIds} surfaces this per message (see
  * {@link AddedGmailMessage}) purely so the reconcile handler
  * (`src/mail/gmail-reconcile.ts`) can filter the mailbox's own outbound
- * sends out of the batch BEFORE ever calling `messages.get`/`ingest` for
- * them (gmail-push.md's reconcile section, HT-50) — this client itself does
- * not interpret `labelIds`, it only carries the field through. Missing or
- * absent `labelIds` on a record defaults to `[]` (never inferred as
- * "definitely not sent") so a caller's filter fails open toward ingesting
- * rather than toward silently dropping a message it can't confirm.
+ * sends (and in-progress drafts) out of the batch BEFORE ever calling
+ * `messages.get`/`ingest` for them (gmail-push.md's reconcile section,
+ * HT-50) — this client itself does not interpret `labelIds`, it only
+ * carries the field through. Missing or absent `labelIds` on a record
+ * defaults to `[]` (never inferred as "definitely not sent") so a caller's
+ * filter fails open toward ingesting rather than toward silently dropping a
+ * message it can't confirm.
+ *
+ * ## Folding in `labelsAdded` — hardening against a split SENT/INBOX
+ * snapshot (review round 2, HT-50)
+ *
+ * The reconcile handler's self-echo filter assumes a self-addressed send's
+ * `messagesAdded` record already carries BOTH `SENT` and `INBOX` in one
+ * `labelIds` snapshot (`gmail-reconcile.ts`'s module doc). This has not been
+ * confirmed against a live self-addressed send — Gmail's docs do not rule
+ * out recording the message as `SENT`-only at insert time and applying
+ * `INBOX` via a LATER, separate history event once delivery completes. If
+ * that happens and this client only ever read `messagesAdded` records, the
+ * `INBOX` label would never reach the caller: the message would misread as
+ * a pure self-echo and be silently, permanently dropped — invariant #1
+ * forbids exactly that.
+ *
+ * To close that gap without depending on the unconfirmed one-record
+ * assumption, `listAddedMessageIds` also requests the `labelAdded` history
+ * type and reads each page's `labelsAdded` records the same way it reads
+ * `messagesAdded`. For any message id that already has a `messagesAdded`
+ * entry in this same listed window, a LATER `labelsAdded` record for that
+ * id overwrites its `labelIds` with that record's (newer, fuller) label
+ * snapshot — mirroring the existing "last record wins" de-duplication rule
+ * above, just extended to cover both record types. `labelsAdded` records for
+ * ids that never had a `messagesAdded` entry in this window are ignored:
+ * they describe a label change on a message that was NOT newly added since
+ * the cursor (e.g. an existing message re-labeled), which is out of scope
+ * for "messages added since the cursor" and must not manufacture a new
+ * tracked id. This closes the split-record ordering gap whichever way
+ * Gmail's history actually orders the two labels; it does not by itself
+ * confirm the assumption is even real — see gmail-reconcile.ts's module doc
+ * for the still-open live-verification item this ticket's report flagged.
  */
 
 /** Options for {@link createGmailHistoryClient}. Mirrors `GmailEmailSenderOptions` (`./sender.ts`). */
@@ -154,7 +186,12 @@ const BASE64URL_RE = /^[A-Za-z0-9_-]+={0,2}$/
 
 /** Shape of a `users.history.list` response body, narrowed to the fields this client reads. */
 interface HistoryListResponseBody {
-  history?: Array<{ messagesAdded?: Array<{ message?: { id?: string; labelIds?: string[] } }> }>
+  history?: Array<{
+    messagesAdded?: Array<{ message?: { id?: string; labelIds?: string[] } }>
+    // Read only to fold a LATER label snapshot into an id already tracked
+    // via messagesAdded — module doc's "Folding in labelsAdded" section.
+    labelsAdded?: Array<{ message?: { id?: string; labelIds?: string[] } }>
+  }>
   nextPageToken?: string
   historyId?: string
 }
@@ -220,6 +257,11 @@ export function createGmailHistoryClient(options: GmailHistoryClientOptions): Gm
         const url = new URL(`${usersBase}/history`)
         url.searchParams.set('startHistoryId', startHistoryId)
         url.searchParams.set('historyTypes', 'messageAdded')
+        // Also requested (repeated query param — Gmail's API accepts
+        // historyTypes multiple times) so a message's INBOX label applied
+        // via a SEPARATE, later history event is still visible to this
+        // client — module doc's "Folding in labelsAdded" section.
+        url.searchParams.append('historyTypes', 'labelAdded')
         if (pageToken !== undefined) {
           url.searchParams.set('pageToken', pageToken)
         }
@@ -246,6 +288,23 @@ export function createGmailHistoryClient(options: GmailHistoryClientOptions): Gm
               // open toward "not recognisably SENT-only" rather than
               // inferring anything (module doc).
               messagesById.set(id, added.message?.labelIds ?? [])
+            }
+          }
+          for (const labeled of record.labelsAdded ?? []) {
+            const id = labeled.message?.id
+            // Only overwrites an id THIS window already tracked via
+            // messagesAdded — a labelsAdded record for an id that was never
+            // newly added describes an existing message being re-labeled,
+            // which is out of scope here and must not manufacture a new
+            // tracked id (module doc's "Folding in labelsAdded" section).
+            // Processed in the same forward pass as messagesAdded above, so
+            // a later labelsAdded record correctly overwrites an earlier
+            // messagesAdded (or labelsAdded) snapshot for the same id —
+            // this loop's iteration order over `body.history` IS Gmail's
+            // chronological order, both within one page and (since pages
+            // are followed to the end before returning) across pages.
+            if (typeof id === 'string' && id.length > 0 && messagesById.has(id)) {
+              messagesById.set(id, labeled.message?.labelIds ?? [])
             }
           }
         }

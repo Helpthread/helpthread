@@ -575,6 +575,61 @@ describe('createGmailReconcileHandler', () => {
       expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
     })
 
+    it("a DRAFT-labeled message (an Agent's autosaved in-progress Gmail-UI compose) is skipped: no ingest call, cursor still advances", async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const getRawMessage = vi.fn(async () => null)
+      const historyClient: GmailHistoryClient = {
+        listAddedMessageIds: async () => ({
+          kind: 'ok',
+          // A Gmail autosave: no SENT, no INBOX — just DRAFT.
+          messages: taggedMsgs([['draft-1', ['DRAFT']]]),
+          newHistoryId: 'cursor-2',
+        }),
+        getRawMessage,
+      }
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(ingest).not.toHaveBeenCalled()
+      expect(getRawMessage).not.toHaveBeenCalled()
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    it('several DRAFT autosave ids from the same in-progress reply are all skipped, and the final SENT-only copy is also skipped', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([
+            ['autosave-1', ['DRAFT']],
+            ['autosave-2', ['DRAFT']],
+            ['sent-copy', ['SENT']],
+            ['customer-1', ['INBOX']],
+          ]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'customer-1': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(ingest).toHaveBeenCalledTimes(1)
+      expect((ingest.mock.calls[0][0] as RawInboundMessage).providerMessageId).toBe('customer-1')
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
     it('a message with no labelIds at all (Gmail omitted the field) fails open and is ingested, never silently dropped', async () => {
       const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
       const historyClient = fakeHistoryClient({

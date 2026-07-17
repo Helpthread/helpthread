@@ -97,7 +97,11 @@ describe('createGmailHistoryClient', () => {
       const firstUrl = new URL(calls[0].url)
       expect(firstUrl.pathname).toBe('/gmail/v1/users/me/history')
       expect(firstUrl.searchParams.get('startHistoryId')).toBe('1000')
-      expect(firstUrl.searchParams.get('historyTypes')).toBe('messageAdded')
+      // Both historyTypes requested (repeated query param) — messageAdded
+      // for the primary listing, labelAdded so a message's INBOX label
+      // applied via a separate, later history event is still visible
+      // (history.ts's "Folding in labelsAdded" module-doc section, HT-50).
+      expect(firstUrl.searchParams.getAll('historyTypes')).toEqual(['messageAdded', 'labelAdded'])
       expect(firstUrl.searchParams.has('pageToken')).toBe(false)
 
       const secondUrl = new URL(calls[1].url)
@@ -124,6 +128,97 @@ describe('createGmailHistoryClient', () => {
       const result = await client.listAddedMessageIds('500')
 
       expect(result).toEqual({ kind: 'ok', messages: [], newHistoryId: 'h-unchanged' })
+    })
+
+    // --- Folding in labelsAdded (review round 2, HT-50) — hardening
+    // against Gmail possibly recording a self-addressed send's SENT and
+    // INBOX labels as TWO separate history records instead of one
+    // messagesAdded snapshot carrying both. See history.ts's "Folding in
+    // labelsAdded" module-doc section. -------------------------------------
+
+    it("folds a LATER labelsAdded record for the same id into that id's labelIds, catching a split SENT-then-INBOX history ordering", async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [
+              // The message is first added as SENT-only...
+              { messagesAdded: [{ message: { id: 'self-1', labelIds: ['SENT'] } }] },
+              // ...then a LATER history record applies INBOX once delivery
+              // completes. Without folding this in, self-1 would misread as
+              // a pure self-echo and be silently dropped forever.
+              { labelsAdded: [{ message: { id: 'self-1', labelIds: ['SENT', 'INBOX'] } }] },
+            ],
+            historyId: 'h1',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'self-1', labelIds: ['SENT', 'INBOX'] }],
+        newHistoryId: 'h1',
+      })
+    })
+
+    it('ignores a labelsAdded record for an id with no messagesAdded entry in this window (an existing message being re-labeled, not newly added)', async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [
+              { messagesAdded: [{ message: { id: 'm1', labelIds: ['INBOX'] } }] },
+              // 'unrelated-1' was never added in this window — a stray
+              // labelsAdded record for it must not manufacture a tracked id.
+              { labelsAdded: [{ message: { id: 'unrelated-1', labelIds: ['INBOX'] } }] },
+            ],
+            historyId: 'h1',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'm1', labelIds: ['INBOX'] }],
+        newHistoryId: 'h1',
+      })
+    })
+
+    it('folds a labelsAdded record that arrives on a LATER page into an id first seen via messagesAdded on an earlier page', async () => {
+      const { fetchImpl } = sequencedFetch([
+        {
+          status: 200,
+          body: {
+            history: [{ messagesAdded: [{ message: { id: 'self-1', labelIds: ['SENT'] } }] }],
+            historyId: 'h-page1',
+            nextPageToken: 'p2',
+          },
+        },
+        {
+          status: 200,
+          body: {
+            history: [
+              { labelsAdded: [{ message: { id: 'self-1', labelIds: ['SENT', 'INBOX'] } }] },
+            ],
+            historyId: 'h-final',
+          },
+        },
+      ])
+      const client = createGmailHistoryClient({ getAccessToken: async () => 'token', fetchImpl })
+
+      const result = await client.listAddedMessageIds('1')
+
+      expect(result).toEqual({
+        kind: 'ok',
+        messages: [{ id: 'self-1', labelIds: ['SENT', 'INBOX'] }],
+        newHistoryId: 'h-final',
+      })
     })
 
     it('defaults labelIds to [] when Gmail omits the field on a messagesAdded record', async () => {
