@@ -37,7 +37,7 @@ import {
 } from '../lib/actions'
 import type { ConversationDetail, ConversationStatus, ThreadView } from '../lib/api-types'
 import { clearDraft, getDraft, writeDraft } from '../lib/drafts'
-import { messageTime, nameFromEmail, relativeTime, shortDate } from '../lib/format'
+import { humanFileSize, messageTime, nameFromEmail, relativeTime, shortDate } from '../lib/format'
 import { useStarred } from '../lib/starred'
 import { Avatar } from './ds/core/Avatar'
 import { Button } from './ds/core/Button'
@@ -266,6 +266,26 @@ function StarIcon({ filled }: { filled: boolean }) {
       aria-hidden="true"
     >
       <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+    </svg>
+  )
+}
+
+/** HT-46 inbound-attachment marker — the same stroke weight/size family as
+ *  the other inline message-band icons on this screen. */
+function PaperclipIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21.44 11.05 12.25 20.24a5.5 5.5 0 0 1-7.78-7.78l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.48" />
     </svg>
   )
 }
@@ -932,20 +952,21 @@ export function ConversationScreen({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
-  function changeStatus(next: ConversationStatus): void {
+  // Optimistic like tags/assignee below: flip the pill immediately, close the
+  // menu, and only crawl back to the previous value if the server rejects
+  // it — never leave the Agent staring at a status that silently reverted
+  // seconds later with no explanation.
+  async function changeStatus(next: ConversationStatus): Promise<void> {
+    const previous = status
     setStatusMenuOpen(false)
-    startTransition(async () => {
-      const result = await setStatusAction(conversation.id, next)
-      if (result.ok) {
-        setLocalStatus(next)
-        showToast({ title: `Marked ${next}` })
-        router.refresh()
-      } else {
-        // Surface the failure like tags/assignee do — never leave a status
-        // change silently dropped.
-        showToast({ title: "Couldn't update the conversation", detail: 'Please try again.' })
-      }
-    })
+    setLocalStatus(next)
+    const result = await setStatusAction(conversation.id, next)
+    if (!result.ok) {
+      setLocalStatus(previous)
+      showToast({ title: "Couldn't update the conversation", detail: 'Please try again.' })
+      return
+    }
+    showToast({ title: `Marked ${next}` })
   }
 
   async function updateTags(nextTags: string[]): Promise<void> {
@@ -1223,19 +1244,22 @@ export function ConversationScreen({
               onClose={() => setStatusMenuOpen(false)}
               align="right"
             >
-              <MenuItem selected={status === 'active'} onClick={() => changeStatus('active')}>
+              <MenuItem selected={status === 'active'} onClick={() => void changeStatus('active')}>
                 Active
               </MenuItem>
-              <MenuItem selected={status === 'pending'} onClick={() => changeStatus('pending')}>
+              <MenuItem
+                selected={status === 'pending'}
+                onClick={() => void changeStatus('pending')}
+              >
                 Pending
               </MenuItem>
-              <MenuItem selected={status === 'closed'} onClick={() => changeStatus('closed')}>
+              <MenuItem selected={status === 'closed'} onClick={() => void changeStatus('closed')}>
                 Closed
               </MenuItem>
               <MenuItem
                 selected={status === 'spam'}
                 destructive
-                onClick={() => changeStatus('spam')}
+                onClick={() => void changeStatus('spam')}
               >
                 Spam
               </MenuItem>
@@ -1548,6 +1572,53 @@ export function ConversationScreen({
                   ) : (
                     (thread.bodyText ?? '')
                   )}
+                  {/* HT-46 read path, TJ-approved addition beyond the design
+                      prototype (flagged for his sign-off). A missing field
+                      (pre-HT-46 API) or an empty list renders nothing — zero
+                      layout shift either way. Signed URLs expire, so this is
+                      always the URL exactly as the API gave it, opened fresh
+                      in a new tab rather than cached or re-derived. */}
+                  {kind === 'inbound' &&
+                    thread.attachments !== undefined &&
+                    thread.attachments.length > 0 && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          gap: 6,
+                        }}
+                      >
+                        {thread.attachments.map((attachment) => (
+                          <a
+                            key={attachment.id}
+                            href={attachment.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={`Download ${attachment.filename ?? 'attachment'}`}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 6,
+                              fontSize: 12.5,
+                              color: 'var(--ht-ink-muted)',
+                              textDecoration: 'none',
+                              background: 'var(--ht-surface-2)',
+                              borderRadius: 999,
+                              padding: '4px 10px 4px 8px',
+                            }}
+                          >
+                            <PaperclipIcon />
+                            <span style={{ fontWeight: 600, color: 'var(--ht-ink)' }}>
+                              {attachment.filename ?? 'Attachment'}
+                            </span>
+                            <span style={{ color: 'var(--ht-ink-dim)' }}>
+                              {humanFileSize(attachment.size)}
+                            </span>
+                          </a>
+                        ))}
+                      </div>
+                    )}
                 </MessageBand>
                 <MessageMenu
                   open={openMessageMenuId === thread.id}

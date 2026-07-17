@@ -61,3 +61,18 @@ export function messageTime(iso: string, now: Date = new Date()): string {
   }
   return shortDate(iso, now)
 }
+
+/** "412 B" / "3.4 KB" / "1.2 MB" — one decimal below 10 of a unit, none at
+ *  or above (matches the tabular-numeral brevity the design system's
+ *  other formatters use). Used for HT-46 inbound attachment sizes. */
+export function humanFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unitIndex]}`
+}
