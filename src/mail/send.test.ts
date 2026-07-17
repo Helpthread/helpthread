@@ -3,6 +3,8 @@ import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import { type ConversationStore, createConversationStore } from '../store/conversations.js'
+import { createInboundDeliveryStore } from '../store/inbound-deliveries.js'
+import { createMailboxStore } from '../store/mailboxes.js'
 import { verifyViewToken } from './open-tracking.js'
 import type { ParsedEmail } from './parse.js'
 import type { Keyring, SigningKey } from './reply-token.js'
@@ -160,6 +162,123 @@ describe('sendReply', () => {
     })
   })
 
+  // HT-49: live production evidence (2026-07-17) showed Gmail's
+  // `users.messages.send` REPLACING the engine-minted Message-ID with a
+  // Gmail-generated one on the wire — so a customer's reply threading purely
+  // on `In-Reply-To`/the trailing `References` entry finds no verified token
+  // and (correctly, per invariant #5) starts a NEW conversation instead of
+  // appending. The fix: `sendReply` appends its own minted messageId as the
+  // FINAL References entry (module doc), which survives because Gmail does
+  // NOT rewrite References — so it rides along into the customer's reply
+  // one position before whatever foreign id the provider substituted.
+  it("HT-49: derived envelope — sendEnvelope.references ends with this reply's OWN minted messageId, after any ancestor ids", async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+        inReplyTo: '<inbound-1@customer.example.test>',
+        references: ['<inbound-1@customer.example.test>'],
+      },
+      deps,
+    )
+    if (!result.ok) throw new Error('unreachable')
+
+    // Sent on the wire (via the provider seam) — ends with our own token.
+    expect(sender.sent).toHaveLength(1)
+    expect(sender.sent[0].references).toEqual([
+      '<inbound-1@customer.example.test>',
+      result.messageId,
+    ])
+    // In-Reply-To is UNCHANGED — it still names the ancestor being answered,
+    // never this reply's own id.
+    expect(sender.sent[0].inReplyTo).toBe('<inbound-1@customer.example.test>')
+
+    // Persisted verbatim in the outbound thread's send_envelope snapshot —
+    // what any later retry (a keyed replay, or the delivery worker) resends.
+    const conversation = await store.getConversation(conversationId)
+    const outbound = conversation?.threads.find((t) => t.id === result.threadId)
+    expect(outbound?.sendEnvelope?.references).toEqual([
+      '<inbound-1@customer.example.test>',
+      result.messageId,
+    ])
+  })
+
+  it('HT-49: a first reply with NO ancestor references still gets a one-element References: [ownMessageId]', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+    if (!result.ok) throw new Error('unreachable')
+
+    expect(sender.sent[0].references).toEqual([result.messageId])
+  })
+
+  it('HT-49: the exact live-production failure — a customer reply whose In-Reply-To is a FOREIGN (Gmail-rewritten) id and whose References carries our token one position before it still threads into the original conversation', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    const sent = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+        inReplyTo: '<inbound-1@customer.example.test>',
+        references: ['<inbound-1@customer.example.test>'],
+      },
+      deps,
+    )
+    if (!sent.ok) throw new Error('unreachable')
+
+    // What the engine actually sent (mime.ts/gmail sender wire contract):
+    // References = [...ancestors, ourMintedToken].
+    expect(sender.sent[0].references).toEqual(['<inbound-1@customer.example.test>', sent.messageId])
+
+    // Gmail REPLACES the wire Message-ID with its own id (live-confirmed
+    // 2026-07-17) — so the customer's mail client builds ITS OWN reply as
+    // In-Reply-To: {gmail's id}, References: {our outbound References} +
+    // {gmail's id}. Our token ends up MID-CHAIN, one position before the
+    // trailing foreign id — never last, never in In-Reply-To at all.
+    const gmailRewrittenId = '<CAKWkAL3-gmail-generated-id@mail.gmail.com>'
+    const customerReply = inboundReplyTo(gmailRewrittenId)
+    customerReply.references = [
+      '<inbound-1@customer.example.test>',
+      sent.messageId,
+      gmailRewrittenId,
+    ]
+
+    const decision = decideThreading(customerReply, keyring)
+
+    expect(decision).toEqual({
+      kind: 'append',
+      conversationId,
+      threadId: sent.threadId,
+      forgedTokenCount: 0,
+    })
+  })
+
   it('send failure: returns { send-failed, persistedStatus: failed } and leaves the thread failed', async () => {
     const { store } = await freshStore()
     const { conversationId } = await seedConversation(store)
@@ -298,6 +417,167 @@ describe('sendReply', () => {
 
     expect(result).toEqual({ ok: false, reason: 'conversation-not-found' })
     expect(sendSpy).not.toHaveBeenCalled()
+  })
+})
+
+// --- self-echo guard (HT-49 review fix) -------------------------------------
+//
+// Gmail delivers a sent reply's own copy back into the SAME mailbox it was
+// sent from; without this guard, the reply token this fix (HT-49) puts in
+// EVERY outbound References would make that self-echo `append` into the very
+// conversation it belongs to (module doc's "The reply token's own self-echo"
+// section). These tests exercise `selfEchoGuard` directly against a real
+// `InboundDeliveryStore`/`MailboxStore`, rather than a fake, so the
+// suppressed row's shape (and `claim()`'s later behavior against it) is
+// verified, not assumed.
+
+describe('sendReply self-echo guard (HT-49 review fix)', () => {
+  let db: Db | undefined
+
+  afterEach(async () => {
+    await db?.close()
+    db = undefined
+  })
+
+  async function freshDeps() {
+    db = await createPgliteDb()
+    await migrate(db)
+    const store = createConversationStore(db)
+    const mailboxStore = createMailboxStore(db)
+    const inboundDeliveryStore = createInboundDeliveryStore(db)
+    await db.query("INSERT INTO mailboxes (address, provider) VALUES ($1, 'gmail')", [
+      'support@example.test',
+    ])
+    const { conversationId } = await store.createConversation({
+      subject: 'Help with my order',
+      customerEmail: 'customer@example.test',
+      firstMessage: {
+        direction: 'inbound',
+        messageId: '<inbound-1@customer.example.test>',
+        fromAddress: 'customer@example.test',
+        bodyText: 'Where is my order?',
+      },
+    })
+    return { db, store, mailboxStore, inboundDeliveryStore, conversationId }
+  }
+
+  it("a successful send whose sender returns a providerMessageId pre-suppresses that id in the FROM mailbox's inbound delivery ledger", async () => {
+    const { store, mailboxStore, inboundDeliveryStore, conversationId } = await freshDeps()
+    const sender = fakeSender() // returns { providerMessageId: 'provider-1' }
+    const deps: SendReplyDeps = {
+      store,
+      sender,
+      keyring,
+      mailDomain,
+      selfEchoGuard: { mailboxStore, inboundDeliveryStore },
+    }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+    if (!result.ok) throw new Error('unreachable')
+
+    // The exact self-echo Gmail would later report via history.list for
+    // THIS send is already suppressed — claim() reports it as terminal,
+    // never as a fresh 'received' row ingest would append.
+    const mailbox = await mailboxStore.getMailboxByAddress('support@example.test')
+    const claim = await inboundDeliveryStore.claim(mailbox?.id ?? '', 'provider-1', 30_000)
+    expect(claim).toMatchObject({
+      claimed: false,
+      delivery: { status: 'suppressed', lastError: 'own-outbound-self-echo' },
+    })
+  })
+
+  it('no selfEchoGuard configured: send succeeds exactly as before, no ledger row is created', async () => {
+    const { db, store, conversationId } = await freshDeps()
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+
+    expect(result.ok).toBe(true)
+    // No mailbox lookup or ledger write ever happens without a configured guard.
+    const rows = await db.query('SELECT id FROM inbound_deliveries')
+    expect(rows).toHaveLength(0)
+  })
+
+  it('sender returns no providerMessageId: guard is configured but a no-op (nothing to correlate against)', async () => {
+    const { store, mailboxStore, inboundDeliveryStore, conversationId } = await freshDeps()
+    const sender: EmailSender = {
+      maxSendMs: 30_000,
+      async send() {
+        return {} // no providerMessageId
+      },
+    }
+    const deps: SendReplyDeps = {
+      store,
+      sender,
+      keyring,
+      mailDomain,
+      selfEchoGuard: { mailboxStore, inboundDeliveryStore },
+    }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+
+    expect(result.ok).toBe(true)
+    const mailbox = await mailboxStore.getMailboxByAddress('support@example.test')
+    expect(mailbox).not.toBeNull()
+    // Nothing to correlate against without a providerMessageId — no row was seeded.
+    const claim = await inboundDeliveryStore.claim(mailbox?.id ?? '', 'whatever', 30_000)
+    expect(claim.claimed).toBe(true) // fresh — proves nothing was pre-seeded.
+  })
+
+  it('a failed send never pre-suppresses anything (nothing was delivered, so there is no self-echo to guard against)', async () => {
+    const { store, mailboxStore, inboundDeliveryStore, conversationId } = await freshDeps()
+    const sender = failingSender()
+    const deps: SendReplyDeps = {
+      store,
+      sender,
+      keyring,
+      mailDomain,
+      selfEchoGuard: { mailboxStore, inboundDeliveryStore },
+    }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      deps,
+    )
+
+    expect(result.ok).toBe(false)
+    const mailbox = await mailboxStore.getMailboxByAddress('support@example.test')
+    const claim = await inboundDeliveryStore.claim(mailbox?.id ?? '', 'provider-1', 30_000)
+    expect(claim.claimed).toBe(true) // fresh — nothing was pre-seeded for a rejected send.
   })
 })
 
@@ -451,7 +731,11 @@ describe('sendReply idempotency (HT-16)', () => {
       messageId: first.messageId,
       to: ['customer@example.test'],
       subject: 'Re: Help with my order',
-      references: ['<inbound-1@customer.example.test>'],
+      // HT-49: References carries the reply's OWN minted messageId as its
+      // FINAL entry (after the persisted ancestor chain) — see send.ts's
+      // module doc. This is the ORIGINAL attempt's messageId/references,
+      // unaffected by the retry's different (ignored) references input.
+      references: ['<inbound-1@customer.example.test>', first.messageId],
     })
 
     const conversation = await store.getConversation(conversationId)

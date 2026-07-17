@@ -391,4 +391,48 @@ describe('createInboundDeliveryStore', () => {
       db.transaction(async (tx) => markStoredInTx(tx, RANDOM_UUID, RANDOM_UUID, 0)),
     ).rejects.toThrow(/no delivery with id/)
   })
+
+  // --- HT-49 review fix: preSuppressOwnSend --------------------------------
+
+  it('preSuppressOwnSend on a fresh key creates an already-suppressed row that claim() then reports as terminal, never re-ingesting it', async () => {
+    const { store, mailboxId } = await freshStore()
+
+    await store.preSuppressOwnSend(mailboxId, 'gmail-self-echo-1', 'own-outbound-self-echo')
+
+    const result = await store.claim(mailboxId, 'gmail-self-echo-1', LEASE_MS)
+
+    expect(result.claimed).toBe(false)
+    expect(result.delivery).toMatchObject({
+      mailboxId,
+      providerMessageId: 'gmail-self-echo-1',
+      status: 'suppressed',
+      lastError: 'own-outbound-self-echo',
+    })
+  })
+
+  it('preSuppressOwnSend never overwrites a row a genuine claim() already won (the race is conceded, not corrected)', async () => {
+    const { store, mailboxId } = await freshStore()
+
+    // A genuine concurrent ingest claims this key FIRST...
+    const claimed = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    expect(claimed.claimed).toBe(true)
+
+    // ...then the self-echo guard loses the race and tries to pre-seed the
+    // SAME key as suppressed.
+    await store.preSuppressOwnSend(mailboxId, 'provider-msg-1', 'own-outbound-self-echo')
+
+    // The already-`received` row is untouched — never silently flipped.
+    const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    expect(replay).toMatchObject({ claimed: false, delivery: { status: 'received' } })
+  })
+
+  it('preSuppressOwnSend is a silent no-op when the key is already suppressed', async () => {
+    const { store, mailboxId } = await freshStore()
+
+    await store.preSuppressOwnSend(mailboxId, 'provider-msg-1', 'own-outbound-self-echo')
+    await store.preSuppressOwnSend(mailboxId, 'provider-msg-1', 'own-outbound-self-echo')
+
+    const result = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
+    expect(result).toMatchObject({ claimed: false, delivery: { status: 'suppressed' } })
+  })
 })

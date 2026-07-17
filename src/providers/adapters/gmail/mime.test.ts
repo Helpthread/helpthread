@@ -67,6 +67,28 @@ describe('buildRawMessage', () => {
     expect(unfold(raw)).toContain(`References: ${references.join(' ')}`)
   })
 
+  // HT-49: send.ts appends the reply's OWN minted messageId as the FINAL
+  // References entry (after ancestor ids) — the durable channel for the
+  // reply token once a provider (Gmail, confirmed live) rewrites Message-ID
+  // on send. This wire-level test locks that ordering is preserved verbatim
+  // by buildRawMessage, and that In-Reply-To (which still names the
+  // ANCESTOR being answered, never this reply's own id) is untouched.
+  it('HT-49: the reply token, appended as the final References entry, survives as the LAST entry on the wire; In-Reply-To is unchanged', () => {
+    const inReplyTo = '<inbound-1@customer.example.test>'
+    const references = ['<inbound-1@customer.example.test>', messageId]
+
+    const raw = buildRawMessage({ ...base, text: 'body', inReplyTo, references })
+
+    expect(raw).toContain(`In-Reply-To: ${inReplyTo}`)
+    expect(raw.match(/In-Reply-To:/g)).toHaveLength(1)
+    // Unfolded References ends with our token, exactly the given order.
+    const referencesLine = unfold(raw)
+      .split('\r\n')
+      .find((l) => l.startsWith('References:'))
+    expect(referencesLine).toBe(`References: ${references.join(' ')}`)
+    expect(referencesLine?.endsWith(messageId)).toBe(true)
+  })
+
   it('omits In-Reply-To and References entirely when not supplied', () => {
     const raw = buildRawMessage({ ...base, text: 'body' })
 

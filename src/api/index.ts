@@ -31,6 +31,7 @@
 
 import { TRANSPARENT_GIF, verifyViewToken } from '../mail/open-tracking.js'
 import type { Keyring } from '../mail/reply-token.js'
+import type { SelfEchoGuardDeps } from '../mail/send.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
 import type { ThreadAttachmentStore } from '../store/attachments.js'
 import type { ConversationStore } from '../store/conversations.js'
@@ -147,6 +148,24 @@ export interface InboxApiDeps {
    * posture above.
    */
   attachments?: { store: ThreadAttachmentStore; blobStore: BlobStore }
+  /**
+   * The self-echo guard `sendReply` accepts (HT-49 review fix; `src/mail/
+   * send.ts`'s `SelfEchoGuardDeps`): ABSENT BY DEFAULT — a deployment with no
+   * self-reflecting transport configured (no Gmail mailbox connected) simply
+   * never sets this, and reply-sending behaves exactly as before this guard
+   * existed. When present, a successful reply's own sent-message echo is
+   * best-effort pre-suppressed in the inbound delivery ledger so a transport
+   * that delivers sent mail back into its own mailbox (Gmail, confirmed
+   * live) normally does not re-ingest it as a phantom inbound message.
+   * Best-effort, not a guarantee: the pre-seed runs only AFTER the provider
+   * send succeeds, so an unusually fast reconcile can claim `(mailboxId,
+   * providerMessageId)` first and ingest that one echo before the pre-seed
+   * lands — reproducing the pre-guard failure mode (a visible phantom
+   * inbound message in that conversation) for that single send, never a new
+   * one. See `inbound-ingestion.md` §5's HT-49 amendment ("Known residual")
+   * for the conceded race.
+   */
+  selfEchoGuard?: SelfEchoGuardDeps
 }
 
 /**
@@ -310,6 +329,7 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             mailDomain: deps.mailDomain,
             supportAddress: deps.supportAddress,
             ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
+            ...(deps.selfEchoGuard !== undefined ? { selfEchoGuard: deps.selfEchoGuard } : {}),
           })
 
         case 'gmail-connect':

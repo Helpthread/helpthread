@@ -44,6 +44,7 @@ import {
   assertLeaseExceedsSenderBound,
   attemptDeliveryOfClaimedThread,
   DEFAULT_LEASE_MS,
+  type SelfEchoGuardDeps,
 } from './send.js'
 
 /** Default age a `'pending'` row must reach before this worker considers it stuck rather than merely in flight. */
@@ -56,6 +57,14 @@ const DEFAULT_BATCH_SIZE = 50
 export interface DeliveryWorkerDeps {
   store: ConversationStore
   sender: EmailSender
+  /**
+   * The same self-echo guard `sendReply` accepts (`./send.js`'s
+   * `SelfEchoGuardDeps`, HT-49 review fix) — a retried send through THIS
+   * worker's `attemptDeliveryOfClaimedThread` call is just as capable of
+   * producing a self-echo as `sendReply`'s own retry path, so it needs the
+   * same pre-suppression. ABSENT BY DEFAULT, a no-op when unset.
+   */
+  selfEchoGuard?: SelfEchoGuardDeps
 }
 
 /** Tuning knobs for one sweep; every field defaults, so `runDeliveryWorker(deps)` alone is a complete, reasonable call. */
@@ -121,6 +130,7 @@ export async function runDeliveryWorker(
     const result = await attemptDeliveryOfClaimedThread(claimed, {
       store: deps.store,
       sender: deps.sender,
+      selfEchoGuard: deps.selfEchoGuard,
     })
     if (result.ok) {
       sent++

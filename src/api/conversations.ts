@@ -16,7 +16,7 @@
  */
 
 import type { Keyring } from '../mail/reply-token.js'
-import { sendReply } from '../mail/send.js'
+import { type SelfEchoGuardDeps, sendReply } from '../mail/send.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
 import type { StoredThreadAttachment, ThreadAttachmentStore } from '../store/attachments.js'
 import {
@@ -371,6 +371,7 @@ export async function handleReply(
     mailDomain: string
     supportAddress: string
     openTracking?: { publicBaseUrl: string }
+    selfEchoGuard?: SelfEchoGuardDeps
   },
 ): Promise<Response> {
   if (!isUuid(id)) {
@@ -440,6 +441,7 @@ export async function handleReply(
       keyring: deps.keyring,
       mailDomain: deps.mailDomain,
       ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
+      ...(deps.selfEchoGuard !== undefined ? { selfEchoGuard: deps.selfEchoGuard } : {}),
     },
   )
 

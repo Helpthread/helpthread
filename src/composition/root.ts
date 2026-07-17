@@ -232,6 +232,12 @@ export async function buildApp(
     gmailConnect,
     gmailDisconnect,
     attachments: { store: attachmentStore, blobStore },
+    // HT-49 review fix: Gmail delivers a sent reply's own copy back into the
+    // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
+    // it as a phantom inbound message (src/mail/send.ts's "The reply token's
+    // own self-echo" section). Wired unconditionally here — every deployment
+    // this root builds is Gmail-backed.
+    selfEchoGuard: { mailboxStore, inboundDeliveryStore },
   })
 
   // --- The reconcile handler the queue drain dispatches to. ---
