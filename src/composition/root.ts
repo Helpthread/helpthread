@@ -47,6 +47,8 @@ import {
   type GmailReconcileJob,
 } from '../api/gmail-webhook.js'
 import { createInboxApi } from '../api/index.js'
+import { createPasswordAuthProvider } from '../auth/password-provider.js'
+import type { AuthProvider } from '../auth/provider.js'
 import type { Db } from '../db/client.js'
 import { createPostgresDb } from '../db/postgres.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
@@ -70,6 +72,7 @@ import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.
 import { createSupabaseStorageBlobStore } from '../providers/adapters/supabase-storage/index.js'
 import type { BlobStore } from '../providers/blob.js'
 import type { QueueMessage, QueueMessageHandler } from '../providers/queue.js'
+import { createAgentStore } from '../store/agents.js'
 import {
   createConversationStore,
   createGmailWatchStateStore,
@@ -142,6 +145,13 @@ export async function buildApp(
   const watchStateStore = createGmailWatchStateStore(db)
   const inboundDeliveryStore = createInboundDeliveryStore(db)
   const attachmentStore = createThreadAttachmentStore(db)
+  const agentStore = createAgentStore(db)
+
+  // --- Agents & Authentication (HT-54): the core provider registry is just
+  // `[password]` — an ordered list, no discovery mechanism (spec §4's
+  // honest-scope note). A marketplace module adds a provider HERE, in a
+  // future ticket, not via any plugin loader this build ships. ---
+  const authProviders: AuthProvider[] = [createPasswordAuthProvider({ agentStore })]
 
   // --- The HMAC keyring backing reply/state/view tokens (single current key). ---
   const keyring: Keyring = { current: { keyId: SIGNING_KEY_ID, secret: config.signingSecret } }
@@ -232,6 +242,15 @@ export async function buildApp(
     gmailConnect,
     gmailDisconnect,
     attachments: { store: attachmentStore, blobStore },
+    // Agents & Authentication (HT-54) — CORE, required (unlike the
+    // absent-by-default fields above). uiBaseUrl is spread in only when
+    // configured (config.ts's own optional-field convention) so the invite
+    // path stays genuinely absent, not present-with-undefined.
+    agents: {
+      store: agentStore,
+      providers: authProviders,
+      ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),
+    },
     // HT-49 review fix: Gmail delivers a sent reply's own copy back into the
     // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
     // it as a phantom inbound message (src/mail/send.ts's "The reply token's

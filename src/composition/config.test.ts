@@ -127,6 +127,35 @@ describe('loadConfig — missing / malformed values', () => {
   })
 })
 
+describe('loadConfig — HELPTHREAD_UI_BASE_URL (HT-54, optional)', () => {
+  it('is absent from AppConfig when unset — no error, invite deps simply absent', () => {
+    const config = loadConfig(validEnv())
+    expect(config.uiBaseUrl).toBeUndefined()
+  })
+
+  it('is absent when set to whitespace only — treated the same as unset', () => {
+    const config = loadConfig({ ...validEnv(), HELPTHREAD_UI_BASE_URL: '   ' })
+    expect(config.uiBaseUrl).toBeUndefined()
+  })
+
+  it('is read and normalized to a bare origin when set', () => {
+    const config = loadConfig({
+      ...validEnv(),
+      HELPTHREAD_UI_BASE_URL: 'https://app.resonantiq.app/',
+    })
+    expect(config.uiBaseUrl).toBe('https://app.resonantiq.app')
+  })
+
+  it('rejects a malformed value at boot rather than silently ignoring it', () => {
+    expect(() => loadConfig({ ...validEnv(), HELPTHREAD_UI_BASE_URL: 'not a url' })).toThrow(
+      /HELPTHREAD_UI_BASE_URL/,
+    )
+    expect(() =>
+      loadConfig({ ...validEnv(), HELPTHREAD_UI_BASE_URL: 'https://app.example.com/some/path' }),
+    ).toThrow(/HELPTHREAD_UI_BASE_URL/)
+  })
+})
+
 describe('loadConfig — never leaks a secret value', () => {
   it('reports a too-short token by LENGTH, never echoing the secret value', () => {
     const secretValue = 'sekret'

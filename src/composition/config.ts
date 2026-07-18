@@ -86,6 +86,16 @@ export interface AppConfig {
   mailDomain: string
   /** The connected support mailbox's address — the `from` on every Agent reply, and the mailbox outbound sends resolve their token from. */
   supportAddress: string
+  /**
+   * The web UI's base origin (HT-54; specs/auth/agents-and-auth.md §8) —
+   * invite links are `${uiBaseUrl}/invite/${token}`. OPTIONAL, unlike every
+   * other field above: when `HELPTHREAD_UI_BASE_URL` is unset, invite email
+   * deps are simply absent — the Agents API still works, `sendInvite`
+   * creates `invited` Agents with `inviteSent: false`, and `POST
+   * /agents/{id}/invite` refuses with `409 conflict` (the admin-set-password
+   * fallback remains the only path that works before a UI origin is known).
+   */
+  uiBaseUrl?: string
 }
 
 /** Accumulates human-readable, secret-free validation problems for a single combined throw. */
@@ -158,6 +168,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   const tokenEncryptionKey = resolveEncryptionKey(env, errors)
   const publicBaseUrl = resolvePublicBaseUrl(env, errors)
+  const uiBaseUrl = resolveUiBaseUrl(env, errors)
 
   errors.throwIfAny()
 
@@ -181,6 +192,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicBaseUrl: publicBaseUrl as string,
     mailDomain: mailDomain as string,
     supportAddress: supportAddress as string,
+    ...(uiBaseUrl !== undefined ? { uiBaseUrl } : {}),
   }
 }
 
@@ -248,6 +260,50 @@ function resolvePublicBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): str
       'PUBLIC_BASE_URL must be a bare origin with no path, query, fragment, or credentials (e.g. https://desk.example.com)',
     )
     return null
+  }
+  return parsed.origin
+}
+
+/**
+ * `HELPTHREAD_UI_BASE_URL` is OPTIONAL (HT-54; unlike every `require*` field
+ * above) — absent means "no invite email deps configured" (`AppConfig.uiBaseUrl`'s
+ * doc). `undefined` here means "not set, and that's fine, no error." When
+ * SET, it must still be a well-formed http(s) origin (same shape as
+ * `PUBLIC_BASE_URL`, but a distinct origin — the UI is a separate Vercel
+ * project from the engine, `HELPTHREAD_UI_SESSION_SECRET`'s deployment) —
+ * a malformed value IS a boot-time error, since a garbage invite link is
+ * worse than no invite feature at all.
+ */
+function resolveUiBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | undefined {
+  const raw = env.HELPTHREAD_UI_BASE_URL
+  if (raw === undefined || raw.trim().length === 0) return undefined
+
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    errors.add(
+      `HELPTHREAD_UI_BASE_URL must be an absolute URL (e.g. https://desk.example.com), got ${JSON.stringify(raw)}`,
+    )
+    return undefined
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    errors.add(
+      `HELPTHREAD_UI_BASE_URL must be an http(s) URL, got protocol ${JSON.stringify(parsed.protocol)}`,
+    )
+    return undefined
+  }
+  if (
+    (parsed.pathname !== '/' && parsed.pathname !== '') ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    parsed.username !== '' ||
+    parsed.password !== ''
+  ) {
+    errors.add(
+      'HELPTHREAD_UI_BASE_URL must be a bare origin with no path, query, fragment, or credentials (e.g. https://desk.example.com)',
+    )
+    return undefined
   }
   return parsed.origin
 }
