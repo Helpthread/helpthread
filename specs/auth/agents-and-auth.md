@@ -276,7 +276,16 @@ Auth / bootstrap:
   to me", gates admin controls) and treats `401` as "log in again."
 
 Agents (management):
-- **`GET /api/v1/agents`** (admin) → `Agent[]`.
+Response envelopes (as built): a single Agent rides as `{ agent }` (`/setup`,
+`/auth/verify`, `/auth/invite/accept`, `GET`/`PATCH /agents/{id}`), the roster as
+`{ agents }`, and provider discovery as `{ providers, needsSetup }` — object envelopes
+throughout, extensible without breaking clients, matching the wrapped shapes below.
+
+- **`GET /api/v1/agents`** (any active Agent) → `{ agents: Agent[] }`. *(Amended at build time, HT-54:
+  was admin-only in the draft, but the assignee UI — any Agent may assign any Agent, §5 —
+  needs the roster to render names and offer choices; an admin-only list would make a
+  non-admin's assignee menu impossible. The roster carries no secrets (no identities, no
+  hashes). Every mutation below remains admin-gated.)*
 - **`POST /api/v1/agents`** (admin) `{ name, email, role, sendInvite, password? }` → creates
   an Agent (§8 provisioning): with `sendInvite`, `status='invited'` and no password; with
   `password` (the admin-set fallback), a `password` identity and `status='active'` outright.
@@ -495,6 +504,8 @@ is retired (§8).
 
 ## Changelog
 
+- **draft.4 (2026-07-18, HT-54 build):** `GET /agents` opened to any active Agent (was
+  admin-only) — the assignee UI needs the roster; mutations stay admin-gated (§6).
 - **draft.3 (2026-07-18):** status is a closed lifecycle (CodeRabbit round 2): PATCH may
   only toggle `active`↔`disabled`; `invited` exits solely via invite acceptance (or
   delete/re-create); password writes on an `invited` Agent are refused (§6) — closing the

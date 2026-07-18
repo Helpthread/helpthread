@@ -249,11 +249,12 @@ export interface StoredConversation {
   /** Short lowercase labels, replace-set via {@link ConversationStore.setConversationTags} (v1.1, HT-29). `[]` default. */
   tags: string[]
   /**
-   * Single-Agent claim flag (v1.1, HT-31): `'me'` = the deployment's one
-   * operator, `null` = Anyone. Deliberately NOT identity — the multi-Agent
-   * increment replaces `'me'` with real Agent ids (spec §4f).
+   * The assigned Agent's id, or `null` for Anyone (v1.1, HT-31; HT-54:
+   * graduated from the single-operator `'me'` flag to a real Agent identity
+   * — specs/auth/agents-and-auth.md §3.3, a coordinated breaking change with
+   * `PUT /api/v1/conversations/{id}/assignee`'s new body shape).
    */
-  assignee: 'me' | null
+  assigneeAgentId: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -485,15 +486,24 @@ export interface ConversationStore {
   setConversationTags(conversationId: string, tags: string[]): Promise<ConversationSummary | null>
 
   /**
-   * Claim (`'me'`) or release (`null`) a conversation — the write path
-   * behind `PUT /api/v1/conversations/{id}/assignee` (spec §4f, v1.1). Does
-   * NOT bump `updated_at` (spec §4f). Returns the updated summary, or
-   * `null` for a missing/deleted conversation.
+   * Assign a conversation to `assigneeAgentId`, or release it (`null`) —
+   * the write path behind `PUT /api/v1/conversations/{id}/assignee`
+   * (spec §4f, v1.1; graduated to a real Agent id by HT-54,
+   * specs/auth/agents-and-auth.md §3.3/§10 — the new body shape is
+   * `{ assigneeAgentId: uuid | null }`, breaking). The caller
+   * (`src/api/conversations.ts`) is what validates `assigneeAgentId`
+   * names an existing Agent before calling this — but that check-then-act
+   * pair is not atomic (the Agent can be hard-deleted between the two), so
+   * the `assignee_agent_id` FK (migration 018) is the real guard and its
+   * violation is translated here to `'invalid_agent'` rather than escaping
+   * as an uncontrolled error. Does NOT bump `updated_at` (spec §4f).
+   * Returns the updated summary, `null` for a missing/deleted conversation,
+   * or `'invalid_agent'` when the id no longer names an Agent.
    */
   setConversationAssignee(
     conversationId: string,
-    assignee: 'me' | null,
-  ): Promise<ConversationSummary | null>
+    assigneeAgentId: string | null,
+  ): Promise<ConversationSummary | null | 'invalid_agent'>
 
   /**
    * Record that the customer viewed an outbound thread (open tracking, spec
@@ -545,9 +555,23 @@ const PREVIEW_MAX_LENGTH = 120
  * caller data.
  */
 function summaryReturningSql(idParam: string): string {
-  return `RETURNING id, number, subject, customer_email, status, tags, assignee, created_at, updated_at,
+  return `RETURNING id, number, subject, customer_email, status, tags, assignee_agent_id, created_at, updated_at,
            (SELECT count(*)::int FROM threads WHERE conversation_id = ${idParam}) AS thread_count,
            (SELECT t.body_text FROM threads t WHERE t.conversation_id = ${idParam} AND t.body_text IS NOT NULL ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text`
+}
+
+/**
+ * Is `err` the `conversations.assignee_agent_id` FK rejecting a
+ * just-deleted Agent? Matched by SQLSTATE 23503 (foreign_key_violation)
+ * when the driver surfaces it (`pg` and PGlite both set `code`), with the
+ * constraint/message text as a fallback so a driver that doesn't is still
+ * recognized. Total: any non-object input is simply "no".
+ */
+function isAssigneeFkViolation(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const { code, message } = err as { code?: unknown; message?: unknown }
+  if (code === '23503') return true
+  return typeof message === 'string' && message.includes('assignee_agent_id')
 }
 
 /**
@@ -584,8 +608,8 @@ export interface ConversationSummary {
   preview: string
   /** Short lowercase labels — see {@link StoredConversation.tags}. */
   tags: string[]
-  /** Single-Agent claim flag — see {@link StoredConversation.assignee}. */
-  assignee: 'me' | null
+  /** The assigned Agent's id, or `null` for Anyone — see {@link StoredConversation.assigneeAgentId}. */
+  assigneeAgentId: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -629,7 +653,7 @@ interface ConversationRow {
   status: string
   /** jsonb — arrives already-decoded (same driver behavior as `send_envelope`); this codebase only ever writes string arrays. */
   tags: unknown
-  assignee: string | null
+  assignee_agent_id: string | null
   created_at: Date | string
   updated_at: Date | string
 }
@@ -772,8 +796,8 @@ export function createConversationStore(db: Db): ConversationStore {
       // work is done proportional to a deleted conversation's size.
       const conversationRows = await db.query<ConversationRow>(
         includeDeleted
-          ? 'SELECT id, number, subject, customer_email, status, tags, assignee, created_at, updated_at FROM conversations WHERE id = $1'
-          : "SELECT id, number, subject, customer_email, status, tags, assignee, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
+          ? 'SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, created_at, updated_at FROM conversations WHERE id = $1'
+          : "SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
         [conversationId],
       )
       const conversationRow = conversationRows[0]
@@ -913,7 +937,7 @@ export function createConversationStore(db: Db): ConversationStore {
       const limitParam = params.length
 
       const rows = await db.query<ConversationSummaryRow>(
-        `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}, ${LATEST_BODY_TEXT_SUBQUERY}
+        `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}, ${LATEST_BODY_TEXT_SUBQUERY}
          FROM conversations c
          WHERE ${conditions.join(' AND ')}
          ORDER BY c.updated_at DESC, c.id DESC
@@ -952,15 +976,24 @@ export function createConversationStore(db: Db): ConversationStore {
       return row === undefined ? null : toConversationSummary(row)
     },
 
-    async setConversationAssignee(conversationId, assignee) {
+    async setConversationAssignee(conversationId, assigneeAgentId) {
       // No updated_at bump: claiming is metadata, not activity (spec §4f).
-      const rows = await db.query<ConversationSummaryRow>(
-        `UPDATE conversations
-         SET assignee = $1
-         WHERE id = $2 AND status <> 'deleted'
-         ${summaryReturningSql('$2')}`,
-        [assignee, conversationId],
-      )
+      let rows: ConversationSummaryRow[]
+      try {
+        rows = await db.query<ConversationSummaryRow>(
+          `UPDATE conversations
+           SET assignee_agent_id = $1
+           WHERE id = $2 AND status <> 'deleted'
+           ${summaryReturningSql('$2')}`,
+          [assigneeAgentId, conversationId],
+        )
+      } catch (err) {
+        // The Agent was deleted between the caller's existence check and this
+        // UPDATE — the FK is the authoritative guard for that race (interface
+        // doc above), and its violation is a caller-facing outcome, not a 500.
+        if (isAssigneeFkViolation(err)) return 'invalid_agent'
+        throw err
+      }
       const row = rows[0]
       return row === undefined ? null : toConversationSummary(row)
     },
@@ -1120,10 +1153,9 @@ function toStoredConversation(row: ConversationRow): StoredConversation {
     status: row.status as StoredConversation['status'],
     // Cast, not parsed — same reasoning as send_envelope in toStoredThread:
     // this codebase is the only writer (always a JSON string array), and the
-    // jsonb arrives already decoded. The assignee CHECK (migration 006)
-    // makes 'me'/NULL the only representable values.
+    // jsonb arrives already decoded.
     tags: row.tags as string[],
-    assignee: row.assignee as StoredConversation['assignee'],
+    assigneeAgentId: row.assignee_agent_id,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
   }
@@ -1147,7 +1179,7 @@ function toConversationSummary(row: ConversationSummaryRow): ConversationSummary
     threadCount: row.thread_count,
     preview: derivePreview(row.latest_body_text),
     tags: row.tags as string[],
-    assignee: row.assignee as ConversationSummary['assignee'],
+    assigneeAgentId: row.assignee_agent_id,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
   }

@@ -35,12 +35,15 @@
 
 import { createServer } from 'node:http'
 import { createInboxApi } from '../src/api/index.js'
+import { createPasswordAuthProvider } from '../src/auth/password-provider.js'
+import type { AuthProvider } from '../src/auth/provider.js'
 import { createPgliteDb } from '../src/db/client.js'
 import { migrate } from '../src/db/migrate.js'
 import { createDevEmailSender } from '../src/dev/dev-sender.js'
 import { createHttpBridge } from '../src/dev/http-adapter.js'
 import { seedDevData } from '../src/dev/seed.js'
 import type { Keyring } from '../src/mail/reply-token.js'
+import { createAgentStore } from '../src/store/agents.js'
 import { createConversationStore } from '../src/store/conversations.js'
 
 const PORT = Number(process.env.HT_DEV_PORT ?? 8787)
@@ -62,6 +65,13 @@ async function main(): Promise<void> {
   const store = createConversationStore(db)
   const sender = createDevEmailSender()
 
+  // Agents & Authentication (HT-54) — core, required by createInboxApi.
+  // No HELPTHREAD_UI_BASE_URL in this harness (there is no web dev server
+  // wired up here), so uiBaseUrl stays absent: sendInvite still creates the
+  // Agent but inviteSent is always false, matching a fresh, UI-less deploy.
+  const agentStore = createAgentStore(db)
+  const authProviders: AuthProvider[] = [createPasswordAuthProvider({ agentStore })]
+
   let seededCount: number | undefined
   if (DB_PATH === undefined) {
     const seeded = await seedDevData({
@@ -82,6 +92,7 @@ async function main(): Promise<void> {
     keyring: KEYRING,
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,
+    agents: { store: agentStore, providers: authProviders },
   })
 
   const baseUrl = `http://127.0.0.1:${PORT}`

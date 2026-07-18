@@ -995,18 +995,27 @@ describe('createConversationStore', () => {
     })
   })
 
-  describe('tags & assignee (HT-29/HT-31, spec §4e/§4f v1.1)', () => {
-    it('defaults: a new conversation has [] tags and null assignee, on summaries and detail alike', async () => {
+  describe('tags & assignee (HT-29/HT-31, spec §4e/§4f v1.1; HT-54 graduates assignee to a real Agent id, spec §3.3)', () => {
+    /** Insert a minimal `agents` row directly (raw SQL, not via `AgentStore`, matching this file's fixture-setup convention) — just enough to satisfy `assignee_agent_id`'s FK. */
+    async function insertAgent(db: Db, email: string): Promise<string> {
+      const [row] = await db.query<{ id: string }>(
+        'INSERT INTO agents (email, name) VALUES ($1, $2) RETURNING id',
+        [email, 'Test Agent'],
+      )
+      return row.id
+    }
+
+    it('defaults: a new conversation has [] tags and null assigneeAgentId, on summaries and detail alike', async () => {
       const { store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())
 
       const [summary] = await store.listConversations({ limit: 50 })
       expect(summary.tags).toEqual([])
-      expect(summary.assignee).toBeNull()
+      expect(summary.assigneeAgentId).toBeNull()
 
       const detail = await store.getConversation(conversationId)
       expect(detail?.tags).toEqual([])
-      expect(detail?.assignee).toBeNull()
+      expect(detail?.assigneeAgentId).toBeNull()
     })
 
     it('setConversationTags replace-set round-trip: set, re-set, clear — persisted verbatim, no updated_at bump', async () => {
@@ -1026,32 +1035,48 @@ describe('createConversationStore', () => {
       expect(cleared?.tags).toEqual([])
     })
 
-    it('setConversationAssignee claims and releases, no updated_at bump', async () => {
+    it('setConversationAssignee assigns and releases, no updated_at bump', async () => {
       const { db, store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())
       await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+      const agentId = await insertAgent(db, 'agent@example.test')
 
-      const claimed = await store.setConversationAssignee(conversationId, 'me')
-      expect(claimed?.assignee).toBe('me')
-      expect(claimed?.updatedAt.getTime()).toBe(new Date('2020-01-01T00:00:00.000Z').getTime())
+      const claimed = await store.setConversationAssignee(conversationId, agentId)
+      if (claimed === null || claimed === 'invalid_agent') throw new Error('expected a summary')
+      expect(claimed.assigneeAgentId).toBe(agentId)
+      expect(claimed.updatedAt.getTime()).toBe(new Date('2020-01-01T00:00:00.000Z').getTime())
 
       const released = await store.setConversationAssignee(conversationId, null)
-      expect(released?.assignee).toBeNull()
+      if (released === null || released === 'invalid_agent') throw new Error('expected a summary')
+      expect(released.assigneeAgentId).toBeNull()
+    })
+
+    it("setConversationAssignee returns 'invalid_agent' when the id no longer names an Agent (the FK race, translated)", async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      // Calling the store DIRECTLY with an id no Agent has — the same state
+      // the API's check-then-act race lands in when the Agent is deleted
+      // between the handler's existence check and this UPDATE.
+      const outcome = await store.setConversationAssignee(conversationId, RANDOM_UUID)
+      expect(outcome).toBe('invalid_agent')
+      const raw = await store.getConversation(conversationId)
+      expect(raw?.assigneeAgentId).toBeNull()
     })
 
     it('both return null for a missing or deleted conversation — nothing is written', async () => {
       const { db, store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'deleted')
+      const agentId = await insertAgent(db, 'agent2@example.test')
 
       expect(await store.setConversationTags(RANDOM_UUID, ['x'])).toBeNull()
       expect(await store.setConversationTags(conversationId, ['x'])).toBeNull()
-      expect(await store.setConversationAssignee(RANDOM_UUID, 'me')).toBeNull()
-      expect(await store.setConversationAssignee(conversationId, 'me')).toBeNull()
+      expect(await store.setConversationAssignee(RANDOM_UUID, agentId)).toBeNull()
+      expect(await store.setConversationAssignee(conversationId, agentId)).toBeNull()
 
       const raw = await store.getConversation(conversationId)
       expect(raw?.tags).toEqual([])
-      expect(raw?.assignee).toBeNull()
+      expect(raw?.assigneeAgentId).toBeNull()
     })
   })
 

@@ -89,6 +89,67 @@ const GMAIL_DISCONNECT: RouteDef = {
   methods: ['POST'],
 }
 
+// --- Agents & Authentication (HT-54; specs/auth/agents-and-auth.md §6) -----
+//
+// All still Bearer-gated ordinary routes (spec §6: "All under the existing
+// service-bearer channel") — the acting-Agent header is a SEPARATE,
+// per-endpoint check the handlers perform themselves
+// (`src/api/acting-agent.ts`), not something this matcher is aware of.
+
+/** `/api/v1/auth/providers` — GET only, no acting-Agent header (spec §6, §8). */
+const AUTH_PROVIDERS: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/providers$/,
+  methods: ['GET'],
+}
+
+/** `/api/v1/setup` — the zero-Agents-gated first-admin bootstrap (spec §6), POST only, no acting-Agent header (spec §8's pre-session carve-out). */
+const SETUP: RouteDef = {
+  pattern: /^\/api\/v1\/setup$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/auth/verify` — dispatch to a registered `AuthProvider` (spec §6), POST only, no acting-Agent header (pre-session). */
+const AUTH_VERIFY: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/verify$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/auth/me` — the acting Agent (spec §6), GET only, acting-Agent header REQUIRED. */
+const AUTH_ME: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/me$/,
+  methods: ['GET'],
+}
+
+/** `/api/v1/auth/invite/accept` — validate an invite token and activate (spec §6), POST only, no acting-Agent header (pre-session — no session exists yet). Anchored so it never collides with `AGENT_INVITE`'s `/agents/{id}/invite`. */
+const AUTH_INVITE_ACCEPT: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/invite\/accept$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/agents` — list (any active Agent, per the coordinator's roster-visibility amendment) and create (admin), acting-Agent header REQUIRED on both. */
+const AGENTS_LIST: RouteDef = {
+  pattern: /^\/api\/v1\/agents$/,
+  methods: ['GET', 'POST'],
+}
+
+/** `/api/v1/agents/{id}` — get (admin or self), patch (admin for anyone, self for own name/timezone), hard delete (admin) — spec §6. Anchored `[^/]+$` so it never matches a `.../password` or `.../invite` suffix, mirroring `CONVERSATION_ITEM`'s own anchoring. */
+const AGENT_ITEM: RouteDef = {
+  pattern: /^\/api\/v1\/agents\/(?<id>[^/]+)$/,
+  methods: ['GET', 'PATCH', 'DELETE'],
+}
+
+/** `/api/v1/agents/{id}/password` — set/replace a password (self, or admin reset) — spec §6, POST only. */
+const AGENT_PASSWORD: RouteDef = {
+  pattern: /^\/api\/v1\/agents\/(?<id>[^/]+)\/password$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/agents/{id}/invite` — (re)send an invite (admin) — spec §6, POST only. */
+const AGENT_INVITE: RouteDef = {
+  pattern: /^\/api\/v1\/agents\/(?<id>[^/]+)\/invite$/,
+  methods: ['POST'],
+}
+
 /** Every route this API recognizes, checked in order. */
 const ROUTES: readonly RouteDef[] = [
   CONVERSATIONS_LIST,
@@ -99,6 +160,15 @@ const ROUTES: readonly RouteDef[] = [
   CONVERSATION_ASSIGNEE,
   GMAIL_CONNECT,
   GMAIL_DISCONNECT,
+  AUTH_PROVIDERS,
+  SETUP,
+  AUTH_VERIFY,
+  AUTH_ME,
+  AUTH_INVITE_ACCEPT,
+  AGENTS_LIST,
+  AGENT_PASSWORD,
+  AGENT_INVITE,
+  AGENT_ITEM,
 ]
 
 /** The outcome of matching a `(method, pathname)` pair against {@link ROUTES}. */
@@ -113,6 +183,18 @@ export type RouteMatch =
   | { kind: 'conversation-assignee'; id: string }
   | { kind: 'gmail-connect' }
   | { kind: 'gmail-disconnect' }
+  | { kind: 'auth-providers' }
+  | { kind: 'setup' }
+  | { kind: 'auth-verify' }
+  | { kind: 'auth-me' }
+  | { kind: 'auth-invite-accept' }
+  | { kind: 'agents-list' }
+  | { kind: 'agents-create' }
+  | { kind: 'agent-item'; id: string }
+  | { kind: 'agent-patch'; id: string }
+  | { kind: 'agent-delete'; id: string }
+  | { kind: 'agent-password'; id: string }
+  | { kind: 'agent-invite'; id: string }
   | { kind: 'method-not-allowed'; allow: string[] }
   | { kind: 'not-found' }
 
@@ -217,9 +299,27 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     if (route === GMAIL_DISCONNECT) {
       return { kind: 'gmail-disconnect' }
     }
+    if (route === AUTH_PROVIDERS) {
+      return { kind: 'auth-providers' }
+    }
+    if (route === SETUP) {
+      return { kind: 'setup' }
+    }
+    if (route === AUTH_VERIFY) {
+      return { kind: 'auth-verify' }
+    }
+    if (route === AUTH_ME) {
+      return { kind: 'auth-me' }
+    }
+    if (route === AUTH_INVITE_ACCEPT) {
+      return { kind: 'auth-invite-accept' }
+    }
+    if (route === AGENTS_LIST) {
+      return method === 'GET' ? { kind: 'agents-list' } : { kind: 'agents-create' }
+    }
 
-    // Both CONVERSATION_ITEM and CONVERSATION_REPLIES guarantee a present,
-    // non-empty `id` group (per their `[^/]+` pattern) whenever they matched.
+    // Every remaining route guarantees a present, non-empty `id` group (per
+    // its `[^/]+` pattern) whenever it matched.
     const id = match.groups?.id as string
 
     if (route === CONVERSATION_REPLIES) {
@@ -233,6 +333,17 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     }
     if (route === CONVERSATION_ASSIGNEE) {
       return { kind: 'conversation-assignee', id }
+    }
+    if (route === AGENT_PASSWORD) {
+      return { kind: 'agent-password', id }
+    }
+    if (route === AGENT_INVITE) {
+      return { kind: 'agent-invite', id }
+    }
+    if (route === AGENT_ITEM) {
+      if (method === 'GET') return { kind: 'agent-item', id }
+      if (method === 'DELETE') return { kind: 'agent-delete', id }
+      return { kind: 'agent-patch', id }
     }
     // route === CONVERSATION_ITEM: GET reads, PATCH updates status, DELETE
     // soft-deletes (spec §4d, v1.1).

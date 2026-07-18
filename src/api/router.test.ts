@@ -101,6 +101,85 @@ describe('matchRoute', () => {
     expect(matchRoute('POST', '/api/v1/inbound/gmail/connect')).toEqual({ kind: 'gmail-connect' })
     expect(matchRoute('POST', '/api/v1/inbound/gmail')).toEqual({ kind: 'not-found' })
   })
+
+  // --- Agents & Authentication (HT-54) ----------------------------------------
+
+  it('matches GET /api/v1/auth/providers', () => {
+    expect(matchRoute('GET', '/api/v1/auth/providers')).toEqual({ kind: 'auth-providers' })
+    expect(matchRoute('POST', '/api/v1/auth/providers')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET'],
+    })
+  })
+
+  it('matches POST /api/v1/setup', () => {
+    expect(matchRoute('POST', '/api/v1/setup')).toEqual({ kind: 'setup' })
+  })
+
+  it('matches POST /api/v1/auth/verify', () => {
+    expect(matchRoute('POST', '/api/v1/auth/verify')).toEqual({ kind: 'auth-verify' })
+  })
+
+  it('matches GET /api/v1/auth/me', () => {
+    expect(matchRoute('GET', '/api/v1/auth/me')).toEqual({ kind: 'auth-me' })
+  })
+
+  it('matches POST /api/v1/auth/invite/accept — a distinct prefix (/auth/) from /agents/{id}/invite, never confused', () => {
+    expect(matchRoute('POST', '/api/v1/auth/invite/accept')).toEqual({ kind: 'auth-invite-accept' })
+  })
+
+  it('matches GET/POST /api/v1/agents as list/create', () => {
+    expect(matchRoute('GET', '/api/v1/agents')).toEqual({ kind: 'agents-list' })
+    expect(matchRoute('POST', '/api/v1/agents')).toEqual({ kind: 'agents-create' })
+    expect(matchRoute('DELETE', '/api/v1/agents')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET', 'POST'],
+    })
+  })
+
+  it('matches GET/PATCH/DELETE /api/v1/agents/{id}, extracting the id', () => {
+    expect(matchRoute('GET', '/api/v1/agents/abc-123')).toEqual({
+      kind: 'agent-item',
+      id: 'abc-123',
+    })
+    expect(matchRoute('PATCH', '/api/v1/agents/abc-123')).toEqual({
+      kind: 'agent-patch',
+      id: 'abc-123',
+    })
+    expect(matchRoute('DELETE', '/api/v1/agents/abc-123')).toEqual({
+      kind: 'agent-delete',
+      id: 'abc-123',
+    })
+    expect(matchRoute('PUT', '/api/v1/agents/abc-123')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET', 'PATCH', 'DELETE'],
+    })
+  })
+
+  it('matches POST /api/v1/agents/{id}/password, distinct from the item route', () => {
+    expect(matchRoute('POST', '/api/v1/agents/abc-123/password')).toEqual({
+      kind: 'agent-password',
+      id: 'abc-123',
+    })
+    expect(matchRoute('GET', '/api/v1/agents/abc-123/password')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+  })
+
+  it('matches POST /api/v1/agents/{id}/invite, distinct from the item route and /password', () => {
+    expect(matchRoute('POST', '/api/v1/agents/abc-123/invite')).toEqual({
+      kind: 'agent-invite',
+      id: 'abc-123',
+    })
+  })
+
+  it("agent item route never matches a /password or /invite suffix (anchored, mirrors CONVERSATION_ITEM's own anchoring)", () => {
+    expect(matchRoute('GET', '/api/v1/agents/abc-123/password')).not.toEqual({
+      kind: 'agent-item',
+      id: 'abc-123/password',
+    })
+  })
 })
 
 describe('matchGmailPushWebhook', () => {
