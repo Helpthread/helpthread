@@ -47,7 +47,8 @@ records are Agents. (The FreeScout screens we model call them "Users"; our copy 
 
 ## 3. Data model
 
-Two new tables (`agents`, `agent_auth_identities`) plus one `ALTER` (assignee, §3.3) in the
+Three new tables (`agents`, `agent_auth_identities`, `agent_mailbox_access` §3.4) plus one
+`ALTER` (assignee, §3.3) in the
 engine's Postgres (`src/db/migrate.ts`, next migration ids). Web has no DB access
 (`agent-inbox-v1.md` API-first rule) — all of this is reachable only through the engine API
 (§6).
@@ -137,14 +138,25 @@ existing surface (§10), coordinated backend+UI in a single deploy — exactly a
 `agent-inbox-v1.md` §4f anticipated ("the multi-Agent increment replaces `'me'` with real
 Agent ids") and how HT-26 was handled.
 
-### 3.4 Per-Agent mailbox scoping — **deferred, not built** (§7 decision)
+### 3.4 Per-Agent mailbox scoping — **schema now, behavior deferred** (§12.4, decided)
 
 FreeScout scopes each user to specific mailboxes, and Helpthread already carries `mailbox_id`
-throughout. The honest v1 call (charter "every line pays rent"; avoid dead schema): **do not
-create a scoping table now.** v1 grants every Agent access to all mailboxes. The identity
-model above accommodates the future extension cleanly — a later `agent_mailbox_access
-(agent_id, mailbox_id)` join, consulted only when present — without disrupting anything here.
-Flagged as a decision point; if you want it modelled now, it is one migration.
+throughout. **Decided (TJ, 2026-07-18): model the join table in this migration; build no
+scoping behavior or UI.** v1 grants every Agent access to all mailboxes — nothing reads or
+writes this table yet; it exists so the future scoping increment is data-model-compatible
+from day one rather than a later migration against live rows.
+
+```sql
+CREATE TABLE agent_mailbox_access (
+  agent_id    uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  mailbox_id  uuid NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (agent_id, mailbox_id)
+);
+```
+
+An absent row set means "unrestricted" in v1 by definition (the table is empty and
+unconsulted); the semantics of a populated table are pinned when scoping actually ships.
 
 ## 4. The auth-provider seam
 
@@ -337,11 +349,21 @@ session cookie (getting `sub`) and asserts it to the engine as
 `X-Helpthread-Agent-Id: <agentId>`. Today `web/src/lib/api.ts`'s `request()` reads only server
 env and has no access to the request's session, so this is a **real refactor, specified here,
 not a free carry-over**: `request()` (server-only already) reads and verifies the session
-cookie via `next/headers` and attaches the header on calls that need it. Per-endpoint rule:
-  - **Header required** on all authenticated engine endpoints (every `/agents/*` op, `/auth/me`,
-    and every existing inbox mutation/read that now records or authorizes by Agent).
+cookie via `next/headers` and attaches the header on calls that need it. Per-endpoint rule
+(pinned precisely, so neither side guesses):
+  - **Header required** on every `/agents/*` op, `/auth/me`, and `PUT
+    /conversations/{id}/assignee` — the one existing inbox op that now records an Agent.
+  - **Other existing inbox endpoints stay service-bearer-only in this increment** — requiring
+    the header there would be a third breaking change §10 doesn't make, and they neither
+    record nor authorize by Agent yet. Each future increment that adds Agent authorship to an
+    inbox op moves that op into the header-required set. (Consequence, stated honestly: until
+    then, a `disabled` Agent holding a still-valid cookie can read/act on *conversations* for
+    up to the cookie lifetime; the bound on them is `/auth/me` — which the UI consults and
+    which 401s a disabled Agent — plus session expiry. The admin surface and assignee are
+    bounded immediately.)
   - **Header forbidden/ignored** on the three pre-session bootstrap endpoints — `/setup`,
-    `/auth/verify`, `/auth/invite/accept` — which run before a session exists.
+    `/auth/verify`, `/auth/invite/accept` — which run before a session exists, and on
+    `GET /auth/providers` (same pre-session reality).
   - **Absent where required → engine returns `401`** (the web should have supplied it; treat as
     unauthenticated).
 The engine, on every header-required call, **loads the asserted Agent and rejects with `401`
@@ -454,8 +476,8 @@ is retired (§8).
 2. **First admin:** `/setup` first-run screen, zero-Agents-guarded. *(Confirmed.)*
 3. **Provisioning:** both — invite-primary (via the core `EmailSender`) + admin-set-password
    fallback. *(Recommended; FreeScout confirms.)*
-4. **Per-Agent mailbox scoping (§3.4):** recommend **defer / don't build** now (avoid dead
-   schema), vs. model-the-table-now. *(Open — my default is defer.)*
+4. **Per-Agent mailbox scoping (§3.4):** model the `agent_mailbox_access` table in this
+   migration; no scoping behavior or UI. *(Confirmed — TJ, 2026-07-18.)*
 5. **Profile fields (§3.1):** lean v1 — name, email, password, role, disable, **timezone**;
    avatar, job title, phone, alternate-emails, language, time-format **deferred**. *(Open.)*
 6. **Acting-Agent trust model (§8):** the web asserts the Agent id under the service token,
@@ -463,6 +485,11 @@ is retired (§8).
 
 ## Changelog
 
+- **draft.2 (2026-07-18):** decisions resolved for the build (TJ's HT-54 go-ahead):
+  `agent_mailbox_access` is modelled now, schema-only, no behavior (§3.4, §12.4 confirmed);
+  the acting-Agent header rule pinned per-endpoint — required on `/agents/*`, `/auth/me`,
+  and `PUT .../assignee`; other inbox endpoints stay bearer-only this increment, with the
+  disabled-Agent consequence stated (§8).
 - **draft.1 (2026-07-18):** review fixes from PR #69 (CodeRabbit): the admin-set-password
   path creates Agents directly `active` (resolving the `invited`-status contradiction — an
   Agent whose login is uniformly 401'd at `invited` could never "activate on first login"),
