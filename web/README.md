@@ -23,20 +23,22 @@ The app's dev defaults match the harness (`http://localhost:8787`,
   API client (`src/lib/api.ts`) imports `server-only`, so the token can never
   reach a client bundle; every API call runs in a server component or server
   action.
-- `HELPTHREAD_UI_PASSWORD` — the operator login password (HT-51), required to
-  be at least 12 characters in production. Compared constant-time
-  (`src/lib/auth-actions.ts`) against what's submitted on `/login`; there is
-  no per-Agent account, just this one shared password (v1 is single-Agent —
-  see `specs/api/agent-inbox-v1.md` §1).
 - `HELPTHREAD_UI_SESSION_SECRET` — the HMAC secret signing the login session
   cookie (`src/lib/session.ts`), required to be at least 32 characters in
   production. Checked on every route by `src/middleware.ts`, which runs on
   Next's Edge runtime — hence Web Crypto (`crypto.subtle`) rather than
-  `node:crypto` for the cookie's HMAC, unlike the password comparison above.
+  `node:crypto` for the cookie's HMAC.
 
-Both `HELPTHREAD_UI_*` vars have obviously-dev-only fallbacks in local
+`HELPTHREAD_UI_PASSWORD` (HT-51's single shared operator password) is
+**retired** (HT-54; `specs/auth/agents-and-auth.md` §8) — replaced by real
+per-Agent accounts. There is no env-var password anymore: on a fresh
+deployment (zero Agents), the app routes to `/setup` to create the first
+Admin; from then on, each Agent signs in with their own email/password at
+`/login`, verified by the engine (`POST /auth/verify`), never the web layer.
+
+`HELPTHREAD_UI_SESSION_SECRET` has an obviously-dev-only fallback in local
 development (matching the `HELPTHREAD_API_TOKEN` dev-default pattern above)
-and are REQUIRED — with no fallback — once `NODE_ENV=production`.
+and is REQUIRED — with no fallback — once `NODE_ENV=production`.
 
 ## Where things live
 
@@ -53,10 +55,14 @@ and are REQUIRED — with no fallback — once `NODE_ENV=production`.
   rendered: DOMPurify always (spec §5's stored-XSS contract), remote images
   stripped.
 - `src/middleware.ts` / `src/lib/session.ts` / `src/lib/auth-actions.ts` /
-  `src/lib/next-path.ts` — the operator login gate (HT-51): every route
-  requires a signed session cookie except `/login` itself. See
-  `specs/api/agent-inbox-v1.md` §5 for why this is a web-layer addition, not
-  a change to the API's own auth model.
+  `src/lib/next-path.ts` — the per-Agent login gate (HT-51, real identity
+  since HT-54): every route requires a signed session cookie (carrying the
+  signed-in Agent's id) except `/login`, `/setup`, and `/invite/{token}`. See
+  `specs/auth/agents-and-auth.md` §8 for the session/trust model.
+- `src/lib/agent-actions.ts` — the Agents & Authentication write path
+  (HT-54): create/edit/disable/delete an Agent, resend an invite, change a
+  password — all through the engine's acting-Agent header
+  (`src/lib/api.ts`'s `actingAgent` option), never a raw client call.
 
 ## The fidelity mandate (TJ, 2026-07-12)
 
@@ -85,8 +91,15 @@ after a validation failure; honest send-failure copy with retry) · keyboard
 shortcuts throughout (inbox j/k/Enter/x; conversation j/k/r/n/⌘+↵/cascading
 Escape; global `?` overlay).
 
-Still not wired: Forward, Merge, composing a NEW conversation from scratch
-("New message"), and the Agent's own profile settings — all spec'd for v1
-but not yet implemented. See the fidelity checklist on
-[HT-23](https://resonantiq.atlassian.net/browse/HT-23) for the authoritative
-list of remaining gaps.
+Agents & Authentication (HT-54; `specs/auth/agents-and-auth.md`): real
+per-Agent accounts — `/setup` (first admin), `/login` (email+password),
+`/settings/team` (roster, admin-only UI), `/settings/team/new` (invite or
+admin-set password), `/settings/team/{id}` (profile: name/timezone/role,
+disable, change/reset password, delete), `/invite/{token}` (accept), and the
+real-Agent assignee control (`ConversationScreen`'s roster picker, the
+Unassigned/Mine/Assigned folders split by `assigneeAgentId`).
+
+Still not wired: Forward, Merge, and composing a NEW conversation from
+scratch ("New message") — all spec'd for v1 but not yet implemented. See the
+fidelity checklist on [HT-23](https://resonantiq.atlassian.net/browse/HT-23)
+for the authoritative list of remaining gaps.
