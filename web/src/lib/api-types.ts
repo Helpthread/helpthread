@@ -17,9 +17,50 @@ export interface ConversationSummary {
   threadCount: number
   preview: string
   tags: string[]
-  assignee: 'me' | null
+  /** HT-54 breaking change (spec §3.3, §10): a real Agent id, or `null` (unassigned) — was `'me' | null`. */
+  assigneeAgentId: string | null
   createdAt: string
   updatedAt: string
+}
+
+// --- Agents & Authentication (HT-54; specs/auth/agents-and-auth.md §6) -----
+// Typed 1:1 against the engine branch's `src/api/agents.ts` handlers.
+
+export type AgentRole = 'admin' | 'agent'
+export type AgentStatus = 'invited' | 'active' | 'disabled'
+
+/** The wire shape of one Agent (`toAgentJson`, `src/api/agents.ts`) — never carries a secret. */
+export interface Agent {
+  id: string
+  email: string
+  name: string
+  role: AgentRole
+  status: AgentStatus
+  timezone: string
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * `GET /api/v1/auth/me`'s response shape (`handleAuthMe`) — deliberately
+ * NARROWER than {@link Agent}: no `status` (an inactive Agent 401s instead of
+ * being reported here) and no timestamps. Kept as its own type rather than
+ * `Pick<Agent, ...>` aliasing so a future `/auth/me` field addition doesn't
+ * silently widen this one.
+ */
+export interface SelfAgent {
+  id: string
+  email: string
+  name: string
+  role: AgentRole
+  timezone: string
+}
+
+/** What the login UI needs to render one login method (`GET /auth/providers`, spec §6). */
+export interface AuthProviderDescriptor {
+  key: string
+  label: string
+  kind: 'credentials'
 }
 
 /** v1.1 (HT-46) — one inbound attachment's metadata plus a time-limited
