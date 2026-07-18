@@ -285,12 +285,22 @@ Agents (management):
 - **`PATCH /api/v1/agents/{id}`** (admin for anyone; self for own name/timezone) `{ name?,
   role?, status?, timezone? }` → updated Agent. **No `email`** — email is immutable in v1
   (§3.2); re-create the Agent to change it. `role`/`status` changes are admin-only and bound by
-  §5's last-admin invariant.
+  §5's last-admin invariant. **`status` is a lifecycle, not a free field:** PATCH may only
+  toggle `active` ↔ `disabled`. `invited` is neither a settable target nor a PATCH-able
+  source — an `invited` Agent leaves that status only through invite acceptance (the atomic
+  transition below), or by being deleted and re-created; any PATCH naming an `invited` Agent's
+  `status` (either direction) is `409`. This is what keeps the §8 provisioning stories the
+  only lifecycle paths: no admin edit can mint an `active` Agent with no credential, or
+  strand an invite token against a status it can no longer transition.
 - **`DELETE /api/v1/agents/{id}`** (admin) → **hard delete** (cascades identities;
   `ON DELETE SET NULL` un-assigns their conversations). Distinct from disable
   (`PATCH status='disabled'`, the reversible soft-off). Blocked for the last admin.
 - **`POST /api/v1/agents/{id}/password`** (self, or admin reset) `{ password }` → sets/replaces
-  the `password` identity's hash.
+  the `password` identity's hash. **Refused (`409`) for an `invited` Agent** — a password on a
+  record whose status still gates login off would be a credential that cannot be used and an
+  invite token still armed against it; the invite path sets the first password atomically with
+  activation, and the admin-set path creates `active` outright (§8). Allowed for `disabled`
+  (an admin may rotate a disabled Agent's password; login stays off until re-enabled).
 - **`POST /api/v1/agents/{id}/invite`** (admin) → (re)send the invite email (§8), when a mail
   sender is configured.
 - **`POST /api/v1/auth/invite/accept`** `{ token, password }` → validate the signed invite
@@ -485,6 +495,11 @@ is retired (§8).
 
 ## Changelog
 
+- **draft.3 (2026-07-18):** status is a closed lifecycle (CodeRabbit round 2): PATCH may
+  only toggle `active`↔`disabled`; `invited` exits solely via invite acceptance (or
+  delete/re-create); password writes on an `invited` Agent are refused (§6) — closing the
+  incoherent states (credential-less `active`, permanently-stranded invite, unusable
+  password) an unconstrained `status` field permitted.
 - **draft.2 (2026-07-18):** decisions resolved for the build (TJ's HT-54 go-ahead):
   `agent_mailbox_access` is modelled now, schema-only, no behavior (§3.4, §12.4 confirmed);
   the acting-Agent header rule pinned per-endpoint — required on `/agents/*`, `/auth/me`,
