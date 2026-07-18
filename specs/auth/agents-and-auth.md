@@ -39,7 +39,7 @@ change** (§3.2 is why).
 
 ## 2. Vocabulary (charter §, fixed)
 
-**Agent** = a human member of the support staff — a user of the inbox. **Assistant** = an AI
+**Agent** = a human member of the support staff who operates the inbox. **Assistant** = an AI
 actor. Never conflated. The identity records this spec introduces are **Agents**. We never
 call them "users" loosely in schema, API, or UI copy; the API resource is `/agents`, the
 records are Agents. (The FreeScout screens we model call them "Users"; our copy says
@@ -70,13 +70,14 @@ CREATE TABLE agents (
 CREATE UNIQUE INDEX agents_email_key ON agents (lower(email));
 ```
 
-`status`: `invited` = created, no usable password yet (awaiting invite acceptance);
-`active` = can sign in; `disabled` = soft-off, cannot sign in, records and history retained
-(FreeScout's "Prevent user from logging in"). **Both provisioning paths converge on `active`**
-— invite acceptance flips it (§6), and a temp-password Agent activates on first login (§8) — so
-a working Agent is never left at `invited`. Login (`/auth/verify`) treats `invited` and
-`disabled` identically to a wrong password: a generic `401`, no status leak (§6, §9). Deletion
-is separate and hard (§6).
+`status`: `invited` = created via the invite path, no usable password yet (awaiting invite
+acceptance) — **only** the invite path ever produces this status; `active` = can sign in;
+`disabled` = soft-off, cannot sign in, records and history retained (FreeScout's "Prevent
+user from logging in"). **Both provisioning paths converge on `active`** — invite acceptance
+flips `invited`→`active` (§6), and an admin-set-password Agent is created `active` outright
+(§8) — so a working Agent is never left at `invited`. Login (`/auth/verify`) treats `invited`
+and `disabled` identically to a wrong password: a generic `401`, no status leak (§6, §9).
+Deletion is separate and hard (§6).
 
 ### 3.2 `agent_auth_identities` — *how* an Agent proves who they are
 
@@ -94,10 +95,17 @@ CREATE TABLE agent_auth_identities (
   UNIQUE (provider, subject)
 );
 CREATE INDEX agent_auth_identities_agent ON agent_auth_identities (agent_id);
+-- "One password identity per Agent" is a schema invariant, not a convention:
+-- UNIQUE(provider, subject) alone would still admit two 'password' rows for one
+-- Agent under different subjects, making password lookup/reset ambiguous.
+CREATE UNIQUE INDEX agent_auth_identities_one_password_per_agent
+  ON agent_auth_identities (agent_id) WHERE provider = 'password';
 ```
 
 - For `provider='password'`: `subject` = the Agent's normalised email; `secret_hash` = the
-  scrypt hash (§9). One password identity per Agent. **Email is immutable in v1** (§7.5): a
+  scrypt hash (§9). One password identity per Agent — enforced by the partial unique index
+  above *and* by the core identity service (§4), which refuses to link a second `password`
+  identity rather than surfacing the constraint violation raw. **Email is immutable in v1** (§7.5): a
   password identity's `subject` is the login key and the `UNIQUE(provider, subject)` invariant,
   so changing an Agent's email would require rewriting the identity `subject` in lockstep and
   guarding a freed old email against later collision — deferred rather than half-built. An
@@ -209,12 +217,17 @@ not the service channel. The guardrail that keeps this honest: **the web derives
 header *only* from the verified session `sub`, never from any client-supplied value** (§8).
 
 **Last-admin invariant.** A deployment must always have at least one *active* admin. Deleting,
-disabling, or demoting the last active admin is refused. Enforce it **atomically** — a
-conditional UPDATE/DELETE guarded by `... WHERE (SELECT count(*) FROM agents WHERE role='admin'
-AND status='active') > 1` (or an advisory lock, as `migrate.ts` already uses) — not a
-check-then-act count, so two concurrent admins demoting each other cannot both pass and drop
-the active-admin count to zero. The invariant is defined over **active** admins (a `disabled`
-admin does not satisfy "a deployment has an admin").
+disabling, or demoting the last active admin is refused. **A guard predicate alone is not
+enough:** under Postgres's default READ COMMITTED isolation, two concurrent demotions each
+running `UPDATE ... WHERE (SELECT count(*) FROM agents WHERE role='admin' AND status='active')
+> 1` both see a count of 2 in their own snapshots (they touch different rows, so neither
+blocks the other) — both pass, and the active-admin count drops to zero. So every mutation
+that can reduce the active-admin set (demote, disable, delete an admin) runs inside a
+transaction that first takes a **`pg_advisory_xact_lock`** on a single well-known key (the
+same serialization tool `migrate.ts` already uses), then checks the count, then mutates —
+the lock serializes the check-and-act, and the predicate stays as a belt-and-suspenders
+guard inside it. The invariant is defined over **active** admins (a `disabled` admin does
+not satisfy "a deployment has an admin").
 
 ## 6. Engine API (new)
 
@@ -228,11 +241,15 @@ Auth / bootstrap:
   `needsSetup` = zero Agents exist. The web reads this to decide login vs. `/setup`, and to
   render the right controls.
 - **`POST /api/v1/setup`** `{ name, email, password }` → creates the **first admin**
-  (role=admin, status=active, a `password` identity). **Guarded atomically:** the insert is
-  `INSERT ... WHERE NOT EXISTS (SELECT 1 FROM agents)` (not a check-then-act count), so two
-  concurrent `/setup` calls with different emails cannot both create a "first admin" — exactly
-  one wins, the other gets `409`. Zero-Agents-gated (the RIQ superadmin pattern); the one
-  endpoint that creates an Agent without an acting admin. Returns the Agent.
+  (role=admin, status=active, a `password` identity). **Guarded atomically — and a predicate
+  alone is not enough:** under READ COMMITTED, two concurrent
+  `INSERT ... WHERE NOT EXISTS (SELECT 1 FROM agents)` calls each see an empty table in their
+  own snapshots and both insert (different emails, so no unique index saves it). The setup
+  transaction therefore takes the same **`pg_advisory_xact_lock`** the last-admin guard (§5)
+  uses before the zero-Agents check + insert; the `WHERE NOT EXISTS` predicate stays as a
+  guard inside it. Exactly one concurrent call wins; the other gets `409`. Zero-Agents-gated
+  (the RIQ superadmin pattern); the one endpoint that creates an Agent without an acting
+  admin. Returns the Agent.
 - **`POST /api/v1/auth/verify`** `{ providerKey, ... }` → dispatches to the named provider's
   `authenticate`; returns `{ agent }` or a **generic `401`**. For `password`:
   `{ providerKey:'password', email, password }`. **All failure modes return the same generic
@@ -248,8 +265,10 @@ Auth / bootstrap:
 
 Agents (management):
 - **`GET /api/v1/agents`** (admin) → `Agent[]`.
-- **`POST /api/v1/agents`** (admin) `{ name, email, role, sendInvite, tempPassword? }` →
-  creates an Agent (§8 provisioning). Returns the Agent.
+- **`POST /api/v1/agents`** (admin) `{ name, email, role, sendInvite, password? }` → creates
+  an Agent (§8 provisioning): with `sendInvite`, `status='invited'` and no password; with
+  `password` (the admin-set fallback), a `password` identity and `status='active'` outright.
+  Exactly one of the two paths per call. Returns the Agent.
 - **`GET /api/v1/agents/{id}`** (admin, or self) → the Agent.
 - **`PATCH /api/v1/agents/{id}`** (admin for anyone; self for own name/timezone) `{ name?,
   role?, status?, timezone? }` → updated Agent. **No `email`** — email is immutable in v1
@@ -286,8 +305,8 @@ new. Copy uses Agent/Team vocabulary (§2), never "user".
    cards (avatar-or-initial, name, email, a role chip), a "New Agent" action, search.
 4. **New Agent** (admin-only). FreeScout-modelled wizard: **Role** (Agent/Admin), First/Last
    name, Email, and provisioning — **"Send an invite email"** (default on, when a sender is
-   configured) with the *"an invite can be sent later"* fallback, **or** an admin-set
-   **temporary password** when invite is off. No password field when inviting.
+   configured) with the *"an invite can be sent later"* fallback, **or** an **admin-set
+   password** when invite is off. No password field when inviting.
 5. **Agent profile / edit** (`/settings/team/{id}`; admin for anyone, self for own).
    FreeScout-modelled: Role, **Disabled** ("prevent sign-in") toggle, name, **Change password**
    (self, or admin reset), timezone; **Save** and, for admins on others, **Delete**
@@ -352,15 +371,16 @@ trust boundary is stated so it is a decision, not an accident.
   `send_envelope`, and holds a delivery lease — an invite has no conversation, so routing it
   there would create bogus thread rows). No new dependency: the sender is already core. The
   link → `/invite/{token}` → set password → `active` (the atomic transition, §6).
-- **Temp password (fallback + first-run reality):** when invite is off (or no sender is
-  connected yet — a fresh deploy can't email before it can), the admin sets a temporary
-  password inline; the Agent signs in and may change it. Always available; the only path that
-  works before a mailbox is connected. (FreeScout's "an invite can be sent later" is the same
-  admission.) **This path also transitions `invited`→`active`** — on the Agent's first
-  successful `/auth/verify` (or first password change), so a temp-password Agent does not sit at
-  `invited` forever and no dangling invite token stays armed against them. (An Agent created
-  with a temp password may be created directly as `active`; if created `invited`, first login
-  activates.)
+- **Admin-set password (fallback + first-run reality):** when invite is off (or no sender is
+  connected yet — a fresh deploy can't email before it can), the admin sets the Agent's
+  initial password inline; the Agent signs in with it and may change it. Always available; the
+  only path that works before a mailbox is connected. (FreeScout's "an invite can be sent
+  later" is the same admission.) **This path creates the Agent directly as `active`** — it has
+  a usable password from the moment it exists, `invited` would be a lie the login path (§6)
+  would then have to special-case, and no invite token is ever minted for it. This is honestly
+  an *admin-set* password, not a temporary one: v1 has no forced-change-on-first-login
+  machinery or credential expiry (deferred, §11), so nothing forces the Agent to rotate it —
+  the admin handing over the password out-of-band is the trust step, same as FreeScout.
 
 **Retiring HT-51's shared password.** `HELPTHREAD_UI_PASSWORD` is *replaced*, not extended
 (per HT-51's own note). On deploy: if zero Agents exist, the web routes to `/setup`; the old
@@ -420,6 +440,9 @@ is retired (§8).
   out of scope for a two-role v1).
 - **No per-Agent API tokens / public multi-Agent API** — the acting-Agent assertion (§8) is
   the first-party trust model; direct Agent-authenticated API is later.
+- **No forced password change / credential expiry** — the admin-set-password fallback (§8)
+  hands over a real password, not a temporary one; must-change-on-first-login state is a
+  later addition if wanted.
 - **No SCIM provisioning, audit log, or password-reset-by-email** for the forgotten case
   (admin reset covers v1; self-service email reset can follow, but needs its own one-time
   mechanism — it acts on an already-`active` Agent, so it cannot reuse the invite token's
@@ -429,7 +452,7 @@ is retired (§8).
 
 1. **Roles:** Admin + Agent. *(Confirmed.)*
 2. **First admin:** `/setup` first-run screen, zero-Agents-guarded. *(Confirmed.)*
-3. **Provisioning:** both — invite-primary (via the core `EmailSender`) + admin-temp-password
+3. **Provisioning:** both — invite-primary (via the core `EmailSender`) + admin-set-password
    fallback. *(Recommended; FreeScout confirms.)*
 4. **Per-Agent mailbox scoping (§3.4):** recommend **defer / don't build** now (avoid dead
    schema), vs. model-the-table-now. *(Open — my default is defer.)*
@@ -440,6 +463,14 @@ is retired (§8).
 
 ## Changelog
 
+- **draft.1 (2026-07-18):** review fixes from PR #69 (CodeRabbit): the admin-set-password
+  path creates Agents directly `active` (resolving the `invited`-status contradiction — an
+  Agent whose login is uniformly 401'd at `invited` could never "activate on first login"),
+  and is named honestly (admin-set, not temporary; forced-change deferred, §11);
+  one-password-identity-per-Agent becomes a partial unique index plus an identity-service
+  check (§3.2); `/setup` and the last-admin guard are serialized with `pg_advisory_xact_lock`
+  (guard predicates alone race under READ COMMITTED — both concurrent callers see the same
+  snapshot); vocabulary nit in §2.
 - **draft (2026-07-18):** initial contract — data model (§3), auth-provider seam (§4), roles
   (§5), engine API (§6), UI screens (§7), session/trust/provisioning (§8), security (§9),
   rollout (§10). Replaces the HT-51 single-operator password per that ticket's own mandate.
