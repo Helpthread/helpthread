@@ -25,6 +25,7 @@ export function InviteAcceptScreen({ token }: { token: string }) {
   const [isPending, startTransition] = useTransition()
 
   const mismatch = confirm.length > 0 && password !== confirm
+  const tooShort = password.length > 0 && password.length < MIN_PASSWORD_LENGTH
   const canSubmit = password.length >= MIN_PASSWORD_LENGTH && password === confirm
 
   function submit(): void {
@@ -184,6 +185,11 @@ export function InviteAcceptScreen({ token }: { token: string }) {
             }}
           />
 
+          {tooShort && (
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ht-ink-dim)' }}>
+              Password must be at least {MIN_PASSWORD_LENGTH} characters.
+            </div>
+          )}
           {mismatch && (
             <div
               role="alert"

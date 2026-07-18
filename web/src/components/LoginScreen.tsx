@@ -31,6 +31,13 @@
  *   `<form>` via JS instead of relying on native submit-button semantics.
  *   Pressing Enter in either field still submits the form natively, no JS
  *   trick needed for that path.
+ *
+ * A third, milder instance of the same HT-52 gap: the EMAIL field does use
+ * `ds/core/TextInput`, which means it cannot carry `type="email"`,
+ * `name="email"`, or `autoComplete="username"` — weakening password managers'
+ * username↔password pairing on this form. Same expiry path (HT-52's `type`
+ * prop, plus pass-through `name`/`autoComplete`), noted so the limitation is
+ * a tracked trade-off, not an oversight.
  */
 
 import { useRef, useState, useTransition } from 'react'

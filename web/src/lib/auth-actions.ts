@@ -94,7 +94,14 @@ export async function setupAction(
     agentId = agent.id
   } catch (error) {
     if (error instanceof ApiError) {
-      return { ok: false, message: error.message }
+      // Only the 409 (someone else completed setup first / a concurrent
+      // submit) carries engine copy that is meaningful to show; any other
+      // ApiError (a bearer-token 401's internal prefix, a 500) surfaces as
+      // generic copy — raw internal messages never reach this screen.
+      if (error.status === 409) {
+        return { ok: false, message: 'Setup has already been completed. Sign in instead.' }
+      }
+      return { ok: false, message: 'Could not create the account. Please try again.' }
     }
     return { ok: false, message: 'Could not reach the server. Please try again.' }
   }

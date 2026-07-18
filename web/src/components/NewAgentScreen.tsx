@@ -29,15 +29,21 @@ function SegmentedControl<T extends string>({
   options,
   value,
   onChange,
+  label,
 }: {
   options: Array<{ value: T; label: string }>
   value: T
   onChange: (value: T) => void
+  /** Accessible name for the group — a button group can't be named by a `<label htmlFor>` (no form control to reference), so it carries `role="group"` + `aria-label` instead. */
+  label: string
 }) {
   return (
-    <div
+    <fieldset
+      aria-label={label}
       style={{
         display: 'inline-flex',
+        margin: 0,
+        padding: 0,
         border: '1px solid var(--ht-border)',
         borderRadius: 'var(--ht-radius-md)',
         overflow: 'hidden',
@@ -65,11 +71,11 @@ function SegmentedControl<T extends string>({
           </button>
         )
       })}
-    </div>
+    </fieldset>
   )
 }
 
-function FieldLabel({ children, htmlFor }: { children: string; htmlFor: string }) {
+function FieldLabel({ children, htmlFor }: { children: string; htmlFor?: string }) {
   return (
     <label
       htmlFor={htmlFor}
@@ -154,8 +160,9 @@ export function NewAgentScreen() {
         <h1 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>New Agent</h1>
 
         <div>
-          <FieldLabel htmlFor="ht-new-agent-role">Role</FieldLabel>
+          <FieldLabel>Role</FieldLabel>
           <SegmentedControl
+            label="Role"
             options={[
               { value: 'agent', label: 'Agent' },
               { value: 'admin', label: 'Admin' },

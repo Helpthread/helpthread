@@ -32,8 +32,15 @@ import { useToast } from './Toaster'
 const DELETE_DISARM_MS = 3500
 const MIN_PASSWORD_LENGTH = 8
 
-const TIMEZONES: readonly string[] =
-  typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : ['UTC']
+// 'UTC' is prepended because Intl.supportedValuesOf('timeZone') does NOT
+// include it (verified live: 418 IANA zones, none of them plain UTC) — yet
+// it is the engine's schema default, so without it the <select> would fall
+// back to its first option (Africa/Abidjan) and a Save would silently
+// rewrite a UTC Agent's timezone.
+const TIMEZONES: readonly string[] = [
+  'UTC',
+  ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : []),
+]
 
 function FieldLabel({ children, htmlFor }: { children: string; htmlFor?: string }) {
   return (
@@ -103,8 +110,16 @@ export function AgentProfileScreen({
     if (isPending || !canEdit) return
     setError(null)
     startTransition(async () => {
+      // Never name `status` on an `invited` Agent: the engine's closed
+      // lifecycle 409s ANY status mention there (spec §6), which would turn
+      // every admin Save on a pending invite — even a name fix — into a
+      // dead-end conflict. `invited` exits only via invite acceptance.
       const status: 'active' | 'disabled' = disabled ? 'disabled' : 'active'
-      const patch = isAdmin ? { name, timezone, role, status } : { name, timezone }
+      const patch = isAdmin
+        ? agent.status === 'invited'
+          ? { name, timezone, role }
+          : { name, timezone, role, status }
+        : { name, timezone }
       const result = await patchAgentAction(agent.id, patch)
       if (!result.ok) {
         if (result.code === 'conflict') {
@@ -242,10 +257,13 @@ export function AgentProfileScreen({
 
         {isAdmin && (
           <div>
-            <FieldLabel htmlFor="ht-agent-role">Role</FieldLabel>
-            <div
+            <FieldLabel>Role</FieldLabel>
+            <fieldset
+              aria-label="Role"
               style={{
                 display: 'inline-flex',
+                margin: 0,
+                padding: 0,
                 border: '1px solid var(--ht-border)',
                 borderRadius: 'var(--ht-radius-md)',
                 overflow: 'hidden',
@@ -273,7 +291,7 @@ export function AgentProfileScreen({
                   </button>
                 )
               })}
-            </div>
+            </fieldset>
           </div>
         )}
 
