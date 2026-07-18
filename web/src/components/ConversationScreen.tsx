@@ -704,6 +704,7 @@ export function ConversationScreen({
   // conversations (j/k, prev/next chevrons navigate without remounting), so
   // this can't be a one-time mount effect. Loads that conversation's saved
   // draft and auto-opens the composer when one exists.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: conversation.id is the ONLY trigger — re-seeding assignee (and wiping composer state) must happen on a conversation SWITCH, never when the same conversation's server-refreshed fields change under an open composer
   useEffect(() => {
     const existingDraft = getDraft(conversation.id) ?? ''
     replyDraftTextRef.current = existingDraft
@@ -712,6 +713,7 @@ export function ConversationScreen({
     setNoteDraft('')
     setComposerError(null)
     setSendFailed(false)
+    setAssigneeAgentId(conversation.assigneeAgentId)
     idempotencyKey.current = crypto.randomUUID()
     setComposerGeneration((generation) => generation + 1)
     if (existingDraft.length > 0) {
@@ -1023,11 +1025,15 @@ export function ConversationScreen({
     const previous = assigneeAgentId
     setAssigneeMenuOpen(false)
     setAssigneeAgentId(next)
-    const result = await putAssigneeAction(conversation.id, next)
-    if (!result.ok) {
-      setAssigneeAgentId(previous)
-      showToast({ title: "Couldn't update the assignee", detail: 'Please try again.' })
+    try {
+      const result = await putAssigneeAction(conversation.id, next)
+      if (result.ok) return
+    } catch {
+      // The action invocation itself rejected (network) — same rollback as a
+      // failed result; the catch exists so the optimistic flip can't stick.
     }
+    setAssigneeAgentId(previous)
+    showToast({ title: "Couldn't update the assignee", detail: 'Please try again.' })
   }
 
   function onDeleteClick(): void {

@@ -21,6 +21,10 @@ export function InviteAcceptScreen({ token }: { token: string }) {
   const formRef = useRef<HTMLFormElement>(null)
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  // `invalidInvite` (the token is dead — terminal) replaces the form with
+  // the ask-your-admin panel; `error` (transient — network, server) renders
+  // ABOVE the form, which stays interactive so the Agent can simply retry.
+  const [invalidInvite, setInvalidInvite] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
 
@@ -32,10 +36,20 @@ export function InviteAcceptScreen({ token }: { token: string }) {
     if (isPending || !canSubmit) return
     setError(null)
     startTransition(async () => {
-      const result = await acceptInviteAction(token, password)
+      let result: Awaited<ReturnType<typeof acceptInviteAction>>
+      try {
+        result = await acceptInviteAction(token, password)
+      } catch {
+        setError('Could not reach the server. Please try again.')
+        return
+      }
       // A successful accept redirects server-side and never returns here.
       if (!result.ok) {
-        setError(result.message ?? "That invite link isn't valid or has expired.")
+        if (result.invalidInvite) {
+          setInvalidInvite(true)
+        } else {
+          setError(result.message ?? 'Could not reach the server. Please try again.')
+        }
       }
     })
   }
@@ -45,6 +59,7 @@ export function InviteAcceptScreen({ token }: { token: string }) {
       style={{
         position: 'fixed',
         inset: 0,
+        overflowY: 'auto',
         zIndex: 90,
         background: 'var(--ht-bg)',
         color: 'var(--ht-ink)',
@@ -90,14 +105,14 @@ export function InviteAcceptScreen({ token }: { token: string }) {
         Finish joining your team by choosing a password.
       </p>
 
-      {error !== null ? (
+      {invalidInvite ? (
         <div style={{ marginTop: 24, maxWidth: 320 }}>
           <div
             role="alert"
             aria-live="assertive"
             style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ht-critical)' }}
           >
-            {error}
+            That invite link isn't valid or has expired.
           </div>
           <p style={{ marginTop: 8, fontSize: 12.5, color: 'var(--ht-ink-dim)' }}>
             Ask your admin to send a new invite.
@@ -197,6 +212,21 @@ export function InviteAcceptScreen({ token }: { token: string }) {
               style={{ marginTop: 8, fontSize: 12.5, fontWeight: 600, color: 'var(--ht-critical)' }}
             >
               Passwords don't match.
+            </div>
+          )}
+
+          {error !== null && (
+            <div
+              role="alert"
+              aria-live="assertive"
+              style={{
+                marginTop: 14,
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: 'var(--ht-critical)',
+              }}
+            >
+              {error}
             </div>
           )}
 

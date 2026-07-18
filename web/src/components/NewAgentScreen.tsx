@@ -115,13 +115,21 @@ export function NewAgentScreen() {
     if (isPending || !canSubmit) return
     setError(null)
     startTransition(async () => {
-      const result = await createAgentAction({
-        name,
-        email: email.trim(),
-        role,
-        sendInvite,
-        ...(sendInvite ? {} : { password }),
-      })
+      let result: Awaited<ReturnType<typeof createAgentAction>>
+      try {
+        result = await createAgentAction({
+          name,
+          email: email.trim(),
+          role,
+          sendInvite,
+          ...(sendInvite ? {} : { password }),
+        })
+      } catch {
+        // The action invocation itself rejected (network) — surface the same
+        // recoverable form error a failed result gets, never an unhandled throw.
+        setError('Could not reach the server. Please try again.')
+        return
+      }
       if (!result.ok) {
         setError(result.message ?? 'Could not create the Agent. Please try again.')
         return

@@ -16,7 +16,10 @@ export default async function AgentProfilePage({ params }: { params: Promise<{ i
 
   try {
     const agent = await getAgent(id)
-    return <AgentProfileScreen agent={agent} viewer={me} />
+    // Keyed by the Agent id: the client component seeds its form state from
+    // `agent` on mount only, so a same-route navigation (Agent A → Agent B)
+    // must remount rather than reuse A's state against B's id.
+    return <AgentProfileScreen key={agent.id} agent={agent} viewer={me} />
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) notFound()
     throw error

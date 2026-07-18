@@ -17,6 +17,7 @@ import { useRouter } from 'next/navigation'
 import type { CSSProperties } from 'react'
 import { useRef, useState, useTransition } from 'react'
 import {
+  type AgentActionResult,
   deleteAgentAction,
   patchAgentAction,
   resendInviteAction,
@@ -31,6 +32,21 @@ import { useToast } from './Toaster'
 
 const DELETE_DISARM_MS = 3500
 const MIN_PASSWORD_LENGTH = 8
+
+/**
+ * Await a server-action invocation, normalizing a REJECTED invocation (the
+ * client→server request itself failing — network, aborted navigation) into
+ * the same `{ ok: false }` shape a failed result carries, so every flow
+ * below has exactly one failure path and none can escape as an unhandled
+ * rejection inside `startTransition`.
+ */
+async function invokeAction(invocation: Promise<AgentActionResult>): Promise<AgentActionResult> {
+  try {
+    return await invocation
+  } catch {
+    return { ok: false, message: 'Could not reach the server. Please try again.' }
+  }
+}
 
 // 'UTC' is prepended because Intl.supportedValuesOf('timeZone') does NOT
 // include it (verified live: 418 IANA zones, none of them plain UTC) — yet
@@ -120,7 +136,7 @@ export function AgentProfileScreen({
           ? { name, timezone, role }
           : { name, timezone, role, status }
         : { name, timezone }
-      const result = await patchAgentAction(agent.id, patch)
+      const result = await invokeAction(patchAgentAction(agent.id, patch))
       if (!result.ok) {
         if (result.code === 'conflict') {
           showToast({ title: "Couldn't save", detail: result.message })
@@ -138,7 +154,7 @@ export function AgentProfileScreen({
     if (isPending || !canSetPassword) return
     setPasswordError(null)
     startTransition(async () => {
-      const result = await setAgentPasswordAction(agent.id, password)
+      const result = await invokeAction(setAgentPasswordAction(agent.id, password))
       if (!result.ok) {
         setPasswordError(result.message ?? 'Could not change the password. Please try again.')
         return
@@ -151,7 +167,7 @@ export function AgentProfileScreen({
 
   function resendInvite(): void {
     startTransition(async () => {
-      const result = await resendInviteAction(agent.id)
+      const result = await invokeAction(resendInviteAction(agent.id))
       if (!result.ok) {
         showToast({ title: "Couldn't resend the invite", detail: result.message })
         return
@@ -169,7 +185,7 @@ export function AgentProfileScreen({
     if (deleteDisarmTimer.current !== null) clearTimeout(deleteDisarmTimer.current)
     setDeleteArmed(false)
     startTransition(async () => {
-      const result = await deleteAgentAction(agent.id)
+      const result = await invokeAction(deleteAgentAction(agent.id))
       if (!result.ok) {
         showToast({ title: "Couldn't delete this Agent", detail: result.message })
         return

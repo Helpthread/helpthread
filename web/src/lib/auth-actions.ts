@@ -114,6 +114,8 @@ export async function setupAction(
 export interface AcceptInviteActionResult {
   ok: boolean
   message?: string
+  /** True when the TOKEN itself was rejected (expired/consumed/forged) — a terminal state the screen replaces the form for; a transient failure (network, 500) keeps the form so the Agent can simply retry. */
+  invalidInvite?: boolean
 }
 
 /** `/invite/{token}` (spec §6): validates the token, sets the password, activates, signs in. */
@@ -127,7 +129,11 @@ export async function acceptInviteAction(
     agentId = agent.id
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
-      return { ok: false, message: "That invite link isn't valid or has expired." }
+      return {
+        ok: false,
+        invalidInvite: true,
+        message: "That invite link isn't valid or has expired.",
+      }
     }
     return { ok: false, message: 'Could not reach the server. Please try again.' }
   }
