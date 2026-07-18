@@ -57,6 +57,7 @@ describe('migrate', () => {
       { id: 15, name: 'thread_attachments' },
       { id: 16, name: 'gmail_reconcile_lease' },
       { id: 17, name: 'mailboxes_disconnected_status' },
+      { id: 18, name: 'agents_and_auth' },
     ])
   })
 
@@ -84,6 +85,7 @@ describe('migrate', () => {
       { id: 15 },
       { id: 16 },
       { id: 17 },
+      { id: 18 },
     ])
   })
 
@@ -450,7 +452,12 @@ describe('migrate', () => {
       ['customer@example.test'],
     )
 
-    await expect(migrate(database)).resolves.toBeUndefined()
+    // Bounded to throughId: 17 — this test is about migration 006's OWN
+    // upgrade behavior, which migration 018 later supersedes (it drops
+    // `assignee` entirely; see that migration's own test). Running the
+    // unbounded migrate() here would apply 018 too and this SELECT would
+    // fail with "column assignee does not exist".
+    await expect(migrate(database, { throughId: 17 })).resolves.toBeUndefined()
 
     const [row] = await database.query<{ tags: unknown; assignee: string | null }>(
       'SELECT tags, assignee FROM conversations WHERE id = $1',
@@ -847,5 +854,184 @@ describe('migrate', () => {
     )
     expect(afterDelete.id).toBe(delivery.id)
     expect(afterDelete.thread_id).toBeNull()
+  })
+
+  it('migration 018 creates agents with default role/status/timezone, enforces the email UNIQUE (case-insensitive) and the role/status CHECKs', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [agent] = await db.query<{
+      id: string
+      role: string
+      status: string
+      timezone: string
+    }>(
+      `INSERT INTO agents (email, name) VALUES ($1, $2)
+       RETURNING id, role, status, timezone`,
+      ['agent@example.test', 'Agent One'],
+    )
+    expect(agent.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    expect(agent.role).toBe('agent')
+    expect(agent.status).toBe('invited')
+    expect(agent.timezone).toBe('UTC')
+
+    // Case-insensitive email uniqueness.
+    await expect(
+      db.query('INSERT INTO agents (email, name) VALUES ($1, $2)', [
+        'Agent@Example.test',
+        'Duplicate',
+      ]),
+    ).rejects.toThrow()
+
+    // Out-of-domain role/status are rejected.
+    await expect(
+      db.query('INSERT INTO agents (email, name, role) VALUES ($1, $2, $3)', [
+        'other@example.test',
+        'Other',
+        'superadmin',
+      ]),
+    ).rejects.toThrow()
+    await expect(
+      db.query('INSERT INTO agents (email, name, status) VALUES ($1, $2, $3)', [
+        'other@example.test',
+        'Other',
+        'bogus',
+      ]),
+    ).rejects.toThrow()
+  })
+
+  it('migration 018 enforces one password identity per Agent via the partial unique index, but allows multiple providers', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [agent] = await db.query<{ id: string }>(
+      'INSERT INTO agents (email, name) VALUES ($1, $2) RETURNING id',
+      ['agent@example.test', 'Agent One'],
+    )
+
+    await db.query(
+      `INSERT INTO agent_auth_identities (agent_id, provider, subject, secret_hash)
+       VALUES ($1, 'password', $2, $3)`,
+      [agent.id, 'agent@example.test', 'scrypt$hash'],
+    )
+
+    // A second 'password' identity for the SAME agent collides with the
+    // partial unique index, even though (provider, subject) itself differs.
+    await expect(
+      db.query(
+        `INSERT INTO agent_auth_identities (agent_id, provider, subject, secret_hash)
+         VALUES ($1, 'password', $2, $3)`,
+        [agent.id, 'agent-alias@example.test', 'scrypt$hash2'],
+      ),
+    ).rejects.toThrow()
+
+    // A different provider for the SAME agent is fine — one Agent, many login methods.
+    await expect(
+      db.query(
+        `INSERT INTO agent_auth_identities (agent_id, provider, subject) VALUES ($1, 'google', $2)`,
+        [agent.id, 'google-sub-123'],
+      ),
+    ).resolves.toBeDefined()
+
+    // (provider, subject) UNIQUE holds independent of the partial index.
+    await expect(
+      db.query(
+        `INSERT INTO agent_auth_identities (agent_id, provider, subject) VALUES ($1, 'google', $2)`,
+        [agent.id, 'google-sub-123'],
+      ),
+    ).rejects.toThrow()
+
+    // Deleting the agent cascades its identities.
+    await db.query('DELETE FROM agents WHERE id = $1', [agent.id])
+    const remaining = await db.query('SELECT id FROM agent_auth_identities WHERE agent_id = $1', [
+      agent.id,
+    ])
+    expect(remaining).toEqual([])
+  })
+
+  it('migration 018 models agent_mailbox_access as a pure join with a composite PK, cascading on either side', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [agent] = await db.query<{ id: string }>(
+      'INSERT INTO agents (email, name) VALUES ($1, $2) RETURNING id',
+      ['agent@example.test', 'Agent One'],
+    )
+    const [mailbox] = await db.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      ['support@example.test', 'gmail'],
+    )
+
+    await db.query('INSERT INTO agent_mailbox_access (agent_id, mailbox_id) VALUES ($1, $2)', [
+      agent.id,
+      mailbox.id,
+    ])
+
+    // Duplicate pair collides on the composite PK.
+    await expect(
+      db.query('INSERT INTO agent_mailbox_access (agent_id, mailbox_id) VALUES ($1, $2)', [
+        agent.id,
+        mailbox.id,
+      ]),
+    ).rejects.toThrow()
+
+    await db.query('DELETE FROM agents WHERE id = $1', [agent.id])
+    const remaining = await db.query(
+      'SELECT agent_id FROM agent_mailbox_access WHERE mailbox_id = $1',
+      [mailbox.id],
+    )
+    expect(remaining).toEqual([])
+  })
+
+  it("migration 018 replaces conversations.assignee with assignee_agent_id: existing 'me' rows become NULL, the new column FKs to agents with ON DELETE SET NULL", async () => {
+    const database = await createPgliteDb()
+    db = database
+
+    // Apply only through migration 17, then write a conversation the way a
+    // pre-018 deployment would have — the single-operator 'me' flag.
+    await migrate(database, { throughId: 17 })
+    const [existing] = await database.query<{ id: string }>(
+      `INSERT INTO conversations (customer_email, assignee) VALUES ($1, 'me') RETURNING id`,
+      ['customer@example.test'],
+    )
+
+    await expect(migrate(database)).resolves.toBeUndefined()
+
+    // The old column is gone; the new one defaults every pre-existing row to
+    // NULL (no migrated value — spec §3.3: Agents don't exist until this
+    // migration runs, so there is nothing 'me' could map to).
+    const [row] = await database.query<{ assignee_agent_id: string | null }>(
+      'SELECT assignee_agent_id FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(row.assignee_agent_id).toBeNull()
+    await expect(
+      database.query('SELECT assignee FROM conversations WHERE id = $1', [existing.id]),
+    ).rejects.toThrow()
+
+    // Assigning to a real Agent works; deleting that Agent un-assigns (SET
+    // NULL) rather than deleting the conversation.
+    const [agent] = await database.query<{ id: string }>(
+      'INSERT INTO agents (email, name) VALUES ($1, $2) RETURNING id',
+      ['agent@example.test', 'Agent One'],
+    )
+    await database.query('UPDATE conversations SET assignee_agent_id = $1 WHERE id = $2', [
+      agent.id,
+      existing.id,
+    ])
+    await database.query('DELETE FROM agents WHERE id = $1', [agent.id])
+    const [afterDelete] = await database.query<{ assignee_agent_id: string | null }>(
+      'SELECT assignee_agent_id FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(afterDelete.assignee_agent_id).toBeNull()
+
+    // A nonexistent agent id violates the FK.
+    await expect(
+      database.query('UPDATE conversations SET assignee_agent_id = $1 WHERE id = $2', [
+        '00000000-0000-0000-0000-000000000000',
+        existing.id,
+      ]),
+    ).rejects.toThrow()
   })
 })

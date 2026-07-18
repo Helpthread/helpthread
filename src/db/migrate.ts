@@ -817,6 +817,101 @@ ALTER TABLE mailboxes ADD CONSTRAINT mailboxes_status_check CHECK (status IN ('a
 `
 
 /**
+ * Migration 018 — `agents`, `agent_auth_identities`, `agent_mailbox_access`,
+ * and the `conversations.assignee` → `assignee_agent_id` swap (HT-54;
+ * specs/auth/agents-and-auth.md §3).
+ *
+ * ## `agents` — the identity (spec §3.1)
+ *
+ * One row per human support-staff member (never an Assistant — CLAUDE.md's
+ * vocabulary rule). `role`/`status` are both CHECK-constrained closed sets,
+ * matching this file's standing convention for closed-set lifecycle columns
+ * (`conversations.status`, `mailboxes.status`, ...). `email` is written
+ * already-lowercased by every application writer (`src/store/agents.ts`
+ * normalizes before every INSERT); `agents_email_key` on `lower(email)` is
+ * schema-level defense-in-depth, not the only place normalization happens.
+ * `status = 'invited'` is produced ONLY by the invite-provisioning path
+ * (spec §8) — every other creation path (`/setup`, the admin-set-password
+ * fallback) inserts `'active'` directly, so a credential-less `active` row
+ * is unrepresentable by construction, not just by application discipline.
+ *
+ * ## `agent_auth_identities` — how an Agent proves who they are (spec §3.2)
+ *
+ * The marketplace seam: one row per (Agent, auth method). `secret_hash` is
+ * NULL for every non-`'password'` provider (an OAuth module never writes a
+ * hash) — nullable rather than a second table, since every row already
+ * carries `provider` to discriminate. `UNIQUE (provider, subject)` is the
+ * ordinary "no two Agents can claim the same external identity" invariant;
+ * `agent_auth_identities_one_password_per_agent` is a SEPARATE, additional
+ * invariant that constraint alone cannot express — see the inline SQL
+ * comment (kept in the SQL, not just here, because the "why not just the
+ * UNIQUE above" reasoning is exactly the kind of non-obvious constraint
+ * rationale that belongs beside the DDL it explains, matching how migration
+ * 002's NULL-semantics comment lives next to its CHECK).
+ *
+ * ## `agent_mailbox_access` — schema now, behavior deferred (spec §3.4)
+ *
+ * Modeled so a future per-Agent mailbox-scoping increment is a store/API
+ * change, not a migration against live rows (TJ, 2026-07-18, spec §12.4).
+ * Nothing in this build reads or writes this table — an EMPTY table means
+ * "every Agent may access every mailbox" by definition, not by a runtime
+ * check anywhere. `PRIMARY KEY (agent_id, mailbox_id)` needs no separate
+ * surrogate `id`: this is a pure many-to-many join with no attributes of
+ * its own beyond `created_at`.
+ *
+ * ## `conversations.assignee` → `assignee_agent_id` — breaking (spec §3.3)
+ *
+ * `assignee` (migration 006) was deliberately NOT identity — a `text CHECK
+ * (assignee IS NULL OR assignee = 'me')` flag for the single-operator era.
+ * Multi-Agent replaces it with a real FK. **No UPDATE/backfill step**: every
+ * existing `'me'` row has no Agent to map to (Agents are created only
+ * starting with THIS migration, at first-run) — spec §3.3 is explicit that
+ * those rows become unassigned (`NULL`) by construction, simply by the new
+ * column defaulting `NULL` and the old column being dropped, not by any
+ * migrated value. `ON DELETE SET NULL` (not `CASCADE`): deleting an Agent
+ * un-assigns their conversations, it does not delete them — the same
+ * "the record outlives the pointer" policy migration 012's
+ * `inbound_deliveries.thread_id` already uses. Dropping `assignee` also
+ * drops `conversations_assignee_check` (migration 006's CHECK, which
+ * references only that column) automatically — Postgres removes a
+ * single-column constraint along with the column it's built on, no
+ * explicit `DROP CONSTRAINT`/`CASCADE` needed.
+ */
+const MIGRATION_018_AGENTS_AND_AUTH = `
+CREATE TABLE agents (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email       text NOT NULL,
+  name        text NOT NULL,
+  role        text NOT NULL DEFAULT 'agent' CHECK (role IN ('admin', 'agent')),
+  status      text NOT NULL DEFAULT 'invited' CHECK (status IN ('invited', 'active', 'disabled')),
+  timezone    text NOT NULL DEFAULT 'UTC',
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX agents_email_key ON agents (lower(email));
+CREATE TABLE agent_auth_identities (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id     uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  provider     text NOT NULL,
+  subject      text NOT NULL,
+  secret_hash  text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (provider, subject)
+);
+CREATE INDEX agent_auth_identities_agent ON agent_auth_identities (agent_id);
+CREATE UNIQUE INDEX agent_auth_identities_one_password_per_agent ON agent_auth_identities (agent_id) WHERE provider = 'password';
+CREATE TABLE agent_mailbox_access (
+  agent_id    uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  mailbox_id  uuid NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (agent_id, mailbox_id)
+);
+ALTER TABLE conversations ADD COLUMN assignee_agent_id uuid REFERENCES agents(id) ON DELETE SET NULL;
+ALTER TABLE conversations DROP COLUMN assignee;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -902,6 +997,11 @@ const MIGRATIONS: Migration[] = [
     id: 17,
     name: 'mailboxes_disconnected_status',
     sql: MIGRATION_017_MAILBOXES_DISCONNECTED_STATUS,
+  },
+  {
+    id: 18,
+    name: 'agents_and_auth',
+    sql: MIGRATION_018_AGENTS_AND_AUTH,
   },
 ]
 
