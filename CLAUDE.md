@@ -2,6 +2,12 @@
 
 Helpthread is an open-source serverless helpdesk (AGPL-3.0 core; a Resonant IQ, Inc. product). **CHARTER.md is the constitution** — read it before substantive work.
 
+## Delegation ladder
+
+Shared rule (mirrored from the resonantiq canonical doc) — imported so it loads in every session that reads this repo.
+
+@.claude/rules/delegation-ladder.md
+
 ## References & provenance
 
 - Helpthread is an independent implementation. No code copied or derived from copyleft-licensed projects, ever.
