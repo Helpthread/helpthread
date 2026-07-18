@@ -14,22 +14,14 @@
  * would do for almost every wrong guess (most wrong passwords aren't the
  * same length as the real one) — turning "wrong password" into a thrown
  * error and, worse, leaking the correct length through which path failed.
- * We blind both sides to a fixed-length **keyed HMAC** first, then
- * `timingSafeEqual` always sees two equal-length digests, length is never
- * data, and the comparison is byte-for-byte time-independent.
- *
- * The HMAC is keyed with the deployment's session secret (not a bare
- * `createHash`): this is the standard constant-time-compare-of-unequal-length
- * idiom (cf. Django's `constant_time_compare`), and — because there is no
- * *stored* password hash to brute-force here (the expected value is the
- * plaintext `HELPTHREAD_UI_PASSWORD` env, deployment config like the API
- * token) — a slow password KDF (bcrypt/scrypt/argon2) would buy nothing: it
- * exists to make cracking a leaked hash-at-rest expensive, and there is no
- * hash at rest. The keyed HMAC is purely a length-blinding step for the
- * constant-time equality, not a storage hash.
+ * We derive a fixed-length key from each side with `scrypt` (a slow KDF)
+ * first, then `timingSafeEqual` always sees two equal-length digests, length
+ * is never data, and the comparison is byte-for-byte time-independent — see
+ * `passwordMatches` for why a *slow* KDF specifically (online-guess cost, and
+ * what static analysis expects of any password comparison).
  */
 
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { scryptSync, timingSafeEqual } from 'node:crypto'
 import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { sanitizeNextPath } from './next-path'
@@ -39,6 +31,9 @@ import {
   sessionCookieOptions,
   uiAuthConfig,
 } from './session'
+
+/** scrypt output length; 32 bytes matches a SHA-256-sized digest. */
+const SCRYPT_KEYLEN = 32
 
 /** Per-instance-only throttle (see the module comment on `loginAction`). */
 const LOGIN_FAILURE_DELAY_MS = 500
@@ -83,13 +78,23 @@ export async function logoutAction(): Promise<void> {
   redirect('/login')
 }
 
-function passwordMatches(candidate: string, expected: string, key: string): boolean {
-  // Keyed HMAC blinds both sides to a fixed 32-byte length before the
-  // constant-time compare (see the module comment). The key is the session
-  // secret; it is not a salt for storage — there is no stored hash.
-  const candidateMac = createHmac('sha256', key).update(candidate).digest()
-  const expectedMac = createHmac('sha256', key).update(expected).digest()
-  return timingSafeEqual(candidateMac, expectedMac)
+function passwordMatches(candidate: string, expected: string, salt: string): boolean {
+  // Derive a fixed-length key from each side with scrypt (a deliberately slow
+  // KDF) before the constant-time compare. Two things fall out of this:
+  //  1. Length-blinding: both digests are SCRYPT_KEYLEN bytes, so
+  //     `timingSafeEqual` never sees unequal lengths and length is never data.
+  //  2. Online-guess cost: scrypt's work factor makes each comparison cost
+  //     ~tens of ms, so an attacker who reaches this endpoint can't cheaply
+  //     brute-force the password. (There is no password hash *at rest* to
+  //     protect — the expected value is the plaintext HELPTHREAD_UI_PASSWORD
+  //     env — but a slow KDF still raises the cost of online guessing, and it
+  //     is what static analysis expects of any password comparison.)
+  // The salt is the deployment session secret; both sides use the same salt so
+  // their derived keys are comparable.
+  const saltBuf = Buffer.from(salt)
+  const candidateKey = scryptSync(candidate, saltBuf, SCRYPT_KEYLEN)
+  const expectedKey = scryptSync(expected, saltBuf, SCRYPT_KEYLEN)
+  return timingSafeEqual(candidateKey, expectedKey)
 }
 
 function sleep(ms: number): Promise<void> {
