@@ -1042,11 +1042,25 @@ describe('createConversationStore', () => {
       const agentId = await insertAgent(db, 'agent@example.test')
 
       const claimed = await store.setConversationAssignee(conversationId, agentId)
-      expect(claimed?.assigneeAgentId).toBe(agentId)
-      expect(claimed?.updatedAt.getTime()).toBe(new Date('2020-01-01T00:00:00.000Z').getTime())
+      if (claimed === null || claimed === 'invalid_agent') throw new Error('expected a summary')
+      expect(claimed.assigneeAgentId).toBe(agentId)
+      expect(claimed.updatedAt.getTime()).toBe(new Date('2020-01-01T00:00:00.000Z').getTime())
 
       const released = await store.setConversationAssignee(conversationId, null)
-      expect(released?.assigneeAgentId).toBeNull()
+      if (released === null || released === 'invalid_agent') throw new Error('expected a summary')
+      expect(released.assigneeAgentId).toBeNull()
+    })
+
+    it("setConversationAssignee returns 'invalid_agent' when the id no longer names an Agent (the FK race, translated)", async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      // Calling the store DIRECTLY with an id no Agent has — the same state
+      // the API's check-then-act race lands in when the Agent is deleted
+      // between the handler's existence check and this UPDATE.
+      const outcome = await store.setConversationAssignee(conversationId, RANDOM_UUID)
+      expect(outcome).toBe('invalid_agent')
+      const raw = await store.getConversation(conversationId)
+      expect(raw?.assigneeAgentId).toBeNull()
     })
 
     it('both return null for a missing or deleted conversation — nothing is written', async () => {

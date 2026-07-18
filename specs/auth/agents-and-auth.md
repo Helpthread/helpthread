@@ -276,7 +276,12 @@ Auth / bootstrap:
   to me", gates admin controls) and treats `401` as "log in again."
 
 Agents (management):
-- **`GET /api/v1/agents`** (any active Agent) → `Agent[]`. *(Amended at build time, HT-54:
+Response envelopes (as built): a single Agent rides as `{ agent }` (`/setup`,
+`/auth/verify`, `/auth/invite/accept`, `GET`/`PATCH /agents/{id}`), the roster as
+`{ agents }`, and provider discovery as `{ providers, needsSetup }` — object envelopes
+throughout, extensible without breaking clients, matching the wrapped shapes below.
+
+- **`GET /api/v1/agents`** (any active Agent) → `{ agents: Agent[] }`. *(Amended at build time, HT-54:
   was admin-only in the draft, but the assignee UI — any Agent may assign any Agent, §5 —
   needs the roster to render names and offer choices; an admin-only list would make a
   non-admin's assignee menu impossible. The roster carries no secrets (no identities, no

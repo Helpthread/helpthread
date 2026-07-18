@@ -701,6 +701,11 @@ export async function handlePutAssignee(
   }
 
   const updated = await deps.store.setConversationAssignee(id, assigneeAgentId)
+  if (updated === 'invalid_agent') {
+    // The Agent existed at the check above but was deleted before the write
+    // landed — same caller-facing outcome as never having existed.
+    return apiError(400, 'validation_failed', 'assigneeAgentId does not name an existing Agent.')
+  }
   if (updated === null) {
     return apiError(404, 'not_found', 'No conversation with that id.')
   }

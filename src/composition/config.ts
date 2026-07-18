@@ -274,6 +274,16 @@ function resolvePublicBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): str
  * a malformed value IS a boot-time error, since a garbage invite link is
  * worse than no invite feature at all.
  */
+/** Hosts whose traffic never leaves the machine — the one place plain http is acceptable for invite links. */
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '[::1]' ||
+    hostname === '::1'
+  )
+}
+
 function resolveUiBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | undefined {
   const raw = env.HELPTHREAD_UI_BASE_URL
   if (raw === undefined || raw.trim().length === 0) return undefined
@@ -290,6 +300,16 @@ function resolveUiBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): string 
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     errors.add(
       `HELPTHREAD_UI_BASE_URL must be an http(s) URL, got protocol ${JSON.stringify(parsed.protocol)}`,
+    )
+    return undefined
+  }
+  // Invite links carry a credential (the signed invite token), so plaintext
+  // transport is refused outright — except explicit loopback hosts, where
+  // local development genuinely runs over http and the traffic never leaves
+  // the machine.
+  if (parsed.protocol === 'http:' && !isLoopbackHost(parsed.hostname)) {
+    errors.add(
+      `HELPTHREAD_UI_BASE_URL must use https (invite links carry a signed credential); http is allowed only for loopback hosts, got ${JSON.stringify(raw)}`,
     )
     return undefined
   }

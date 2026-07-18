@@ -492,16 +492,18 @@ export interface ConversationStore {
    * specs/auth/agents-and-auth.md §3.3/§10 — the new body shape is
    * `{ assigneeAgentId: uuid | null }`, breaking). The caller
    * (`src/api/conversations.ts`) is what validates `assigneeAgentId`
-   * names an existing Agent before calling this — this method trusts its
-   * input and relies on the `assignee_agent_id` FK (migration 018) to
-   * reject a genuinely nonexistent id. Does NOT bump `updated_at` (spec
-   * §4f). Returns the updated summary, or `null` for a missing/deleted
-   * conversation.
+   * names an existing Agent before calling this — but that check-then-act
+   * pair is not atomic (the Agent can be hard-deleted between the two), so
+   * the `assignee_agent_id` FK (migration 018) is the real guard and its
+   * violation is translated here to `'invalid_agent'` rather than escaping
+   * as an uncontrolled error. Does NOT bump `updated_at` (spec §4f).
+   * Returns the updated summary, `null` for a missing/deleted conversation,
+   * or `'invalid_agent'` when the id no longer names an Agent.
    */
   setConversationAssignee(
     conversationId: string,
     assigneeAgentId: string | null,
-  ): Promise<ConversationSummary | null>
+  ): Promise<ConversationSummary | null | 'invalid_agent'>
 
   /**
    * Record that the customer viewed an outbound thread (open tracking, spec
@@ -556,6 +558,20 @@ function summaryReturningSql(idParam: string): string {
   return `RETURNING id, number, subject, customer_email, status, tags, assignee_agent_id, created_at, updated_at,
            (SELECT count(*)::int FROM threads WHERE conversation_id = ${idParam}) AS thread_count,
            (SELECT t.body_text FROM threads t WHERE t.conversation_id = ${idParam} AND t.body_text IS NOT NULL ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text`
+}
+
+/**
+ * Is `err` the `conversations.assignee_agent_id` FK rejecting a
+ * just-deleted Agent? Matched by SQLSTATE 23503 (foreign_key_violation)
+ * when the driver surfaces it (`pg` and PGlite both set `code`), with the
+ * constraint/message text as a fallback so a driver that doesn't is still
+ * recognized. Total: any non-object input is simply "no".
+ */
+function isAssigneeFkViolation(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const { code, message } = err as { code?: unknown; message?: unknown }
+  if (code === '23503') return true
+  return typeof message === 'string' && message.includes('assignee_agent_id')
 }
 
 /**
@@ -962,13 +978,22 @@ export function createConversationStore(db: Db): ConversationStore {
 
     async setConversationAssignee(conversationId, assigneeAgentId) {
       // No updated_at bump: claiming is metadata, not activity (spec §4f).
-      const rows = await db.query<ConversationSummaryRow>(
-        `UPDATE conversations
-         SET assignee_agent_id = $1
-         WHERE id = $2 AND status <> 'deleted'
-         ${summaryReturningSql('$2')}`,
-        [assigneeAgentId, conversationId],
-      )
+      let rows: ConversationSummaryRow[]
+      try {
+        rows = await db.query<ConversationSummaryRow>(
+          `UPDATE conversations
+           SET assignee_agent_id = $1
+           WHERE id = $2 AND status <> 'deleted'
+           ${summaryReturningSql('$2')}`,
+          [assigneeAgentId, conversationId],
+        )
+      } catch (err) {
+        // The Agent was deleted between the caller's existence check and this
+        // UPDATE — the FK is the authoritative guard for that race (interface
+        // doc above), and its violation is a caller-facing outcome, not a 500.
+        if (isAssigneeFkViolation(err)) return 'invalid_agent'
+        throw err
+      }
       const row = rows[0]
       return row === undefined ? null : toConversationSummary(row)
     },

@@ -57,6 +57,13 @@ const ENCODED_PREFIX = 'scrypt'
 /** The exact shape {@link encode} produces and {@link decode} parses: `scrypt$N=..,r=..,p=..$<salt>$<hash>` — four `$`-separated segments. */
 const PARAMS_PATTERN = /^N=(\d+),r=(\d+),p=(\d+)$/
 
+/** Decode-time ceilings on the embedded cost parameters and digest sizes — see the bounds note inside {@link decode}. */
+const MAX_DECODED_N = 1 << 20
+const MAX_DECODED_R = 32
+const MAX_DECODED_P = 16
+const MAX_DECODED_SALT_BYTES = 64
+const MAX_DECODED_HASH_BYTES = 128
+
 interface DecodedHash {
   n: number
   r: number
@@ -89,13 +96,22 @@ function decode(encoded: string): DecodedHash | null {
   const n = Number(match[1])
   const r = Number(match[2])
   const p = Number(match[3])
+  // Upper bounds as well as lower: the embedded parameters DRIVE the scrypt
+  // work `verifyPassword` performs, so a syntactically valid tuple with a
+  // huge N/r/p (a corrupted or hostile stored value) must not be allowed to
+  // buy unbounded CPU/memory before failing. The caps leave generous
+  // headroom over the current constants for future cost bumps while keeping
+  // the worst case bounded.
   if (
     !Number.isFinite(n) ||
     !Number.isFinite(p) ||
     !Number.isFinite(r) ||
     n <= 0 ||
     r <= 0 ||
-    p <= 0
+    p <= 0 ||
+    n > MAX_DECODED_N ||
+    r > MAX_DECODED_R ||
+    p > MAX_DECODED_P
   ) {
     return null
   }
@@ -107,6 +123,7 @@ function decode(encoded: string): DecodedHash | null {
   const salt = Buffer.from(saltB64, 'base64url')
   const hash = Buffer.from(hashB64, 'base64url')
   if (salt.length === 0 || hash.length === 0) return null
+  if (salt.length > MAX_DECODED_SALT_BYTES || hash.length > MAX_DECODED_HASH_BYTES) return null
 
   return { n, r, p, salt, hash }
 }

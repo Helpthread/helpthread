@@ -897,7 +897,9 @@ CREATE TABLE agent_auth_identities (
   secret_hash  text,
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (provider, subject)
+  UNIQUE (provider, subject),
+  CONSTRAINT agent_auth_identities_password_secret_check
+    CHECK (provider <> 'password' OR secret_hash IS NOT NULL)
 );
 CREATE INDEX agent_auth_identities_agent ON agent_auth_identities (agent_id);
 CREATE UNIQUE INDEX agent_auth_identities_one_password_per_agent ON agent_auth_identities (agent_id) WHERE provider = 'password';
@@ -908,6 +910,7 @@ CREATE TABLE agent_mailbox_access (
   PRIMARY KEY (agent_id, mailbox_id)
 );
 ALTER TABLE conversations ADD COLUMN assignee_agent_id uuid REFERENCES agents(id) ON DELETE SET NULL;
+CREATE INDEX conversations_assignee_agent ON conversations (assignee_agent_id);
 ALTER TABLE conversations DROP COLUMN assignee;
 `
 

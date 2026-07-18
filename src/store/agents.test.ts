@@ -80,6 +80,47 @@ describe('AgentStore', () => {
         db.query('SELECT pg_advisory_xact_lock($1::bigint)', [7_331_009_881]),
       ).resolves.toBeDefined()
     })
+
+    it('acquires the advisory lock BEFORE the zero-Agents check, inside one transaction (instrumented Db)', async () => {
+      // True two-backend concurrency isn't reproducible on single-connection
+      // PGlite (test above), but the ordering that MAKES the guard sound is
+      // unit-testable: wrap the Db, record every statement the transaction
+      // issues, and assert the lock precedes any read of `agents`. A refactor
+      // that drops the lock or moves the check ahead of it fails here.
+      const { db } = await freshStore()
+      const statements: string[] = []
+      const instrumented: typeof db = {
+        query: (sql, params) => {
+          statements.push(sql)
+          return db.query(sql, params)
+        },
+        transaction: (fn) =>
+          db.transaction((tx) =>
+            fn({
+              query: (sql, params) => {
+                statements.push(sql)
+                return tx.query(sql, params)
+              },
+            }),
+          ),
+        close: () => db.close(),
+      }
+      const instrumentedStore = createAgentStore(instrumented)
+      const created = await instrumentedStore.createFirstAdmin({
+        name: 'Ada Admin',
+        email: 'ada@example.test',
+        passwordHash: 'scrypt$hash1',
+      })
+      expect(created).not.toBeNull()
+
+      const lockIndex = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'))
+      const agentsReadIndex = statements.findIndex(
+        (sql) => sql !== statements[lockIndex] && /FROM agents|INSERT INTO agents/i.test(sql),
+      )
+      expect(lockIndex).toBeGreaterThanOrEqual(0)
+      expect(agentsReadIndex).toBeGreaterThanOrEqual(0)
+      expect(lockIndex).toBeLessThan(agentsReadIndex)
+    })
   })
 
   // --- createAgent -------------------------------------------------------------

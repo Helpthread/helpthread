@@ -41,6 +41,14 @@ describe('hashPassword / verifyPassword', () => {
       'scrypt$bogus-params$c2FsdA$aGFzaA',
       'scrypt$N=0,r=8,p=1$c2FsdA$aGFzaA', // N must be positive
       'scrypt$N=16384,r=8,p=1$not!!valid!!base64url$aGFzaA',
+      // Decode-time cost ceilings: a syntactically valid tuple must not be
+      // able to buy unbounded scrypt work (attacker/corruption-controlled
+      // stored value) — capped params or oversized digests fail fast.
+      'scrypt$N=2097152,r=8,p=1$c2FsdA$aGFzaA', // N over the 2^20 ceiling
+      'scrypt$N=16384,r=64,p=1$c2FsdA$aGFzaA', // r over ceiling
+      'scrypt$N=16384,r=8,p=32$c2FsdA$aGFzaA', // p over ceiling
+      `scrypt$N=16384,r=8,p=1$c2FsdA$${Buffer.alloc(256).toString('base64url')}`, // hash over 128 bytes
+      `scrypt$N=16384,r=8,p=1$${Buffer.alloc(96).toString('base64url')}$aGFzaA`, // salt over 64 bytes
     ]
     for (const value of malformed) {
       expect(() => verifyPassword('anything', value)).not.toThrow()

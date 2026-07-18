@@ -154,6 +154,18 @@ describe('loadConfig — HELPTHREAD_UI_BASE_URL (HT-54, optional)', () => {
       loadConfig({ ...validEnv(), HELPTHREAD_UI_BASE_URL: 'https://app.example.com/some/path' }),
     ).toThrow(/HELPTHREAD_UI_BASE_URL/)
   })
+
+  it('refuses plain http except for loopback hosts — invite links carry a signed credential', () => {
+    expect(() =>
+      loadConfig({ ...validEnv(), HELPTHREAD_UI_BASE_URL: 'http://app.example.com' }),
+    ).toThrow(/https/)
+    expect(
+      loadConfig({ ...validEnv(), HELPTHREAD_UI_BASE_URL: 'http://localhost:3000' }).uiBaseUrl,
+    ).toBe('http://localhost:3000')
+    expect(
+      loadConfig({ ...validEnv(), HELPTHREAD_UI_BASE_URL: 'http://127.0.0.1:3000' }).uiBaseUrl,
+    ).toBe('http://127.0.0.1:3000')
+  })
 })
 
 describe('loadConfig — never leaks a secret value', () => {
