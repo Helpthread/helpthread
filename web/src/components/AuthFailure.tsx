@@ -58,7 +58,8 @@ export function AuthFailure() {
         }}
       >
         Every request is signed with this deployment&rsquo;s service token, and the API just
-        rejected it. There&rsquo;s nothing to sign into — this is configuration, not a login.
+        rejected it. Your sign-in is fine — this is the deployment&rsquo;s service token, not your
+        login.
       </p>
       <code
         style={{

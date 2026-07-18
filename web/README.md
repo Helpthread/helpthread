@@ -23,6 +23,20 @@ The app's dev defaults match the harness (`http://localhost:8787`,
   API client (`src/lib/api.ts`) imports `server-only`, so the token can never
   reach a client bundle; every API call runs in a server component or server
   action.
+- `HELPTHREAD_UI_PASSWORD` — the operator login password (HT-51), required to
+  be at least 12 characters in production. Compared constant-time
+  (`src/lib/auth-actions.ts`) against what's submitted on `/login`; there is
+  no per-Agent account, just this one shared password (v1 is single-Agent —
+  see `specs/api/agent-inbox-v1.md` §1).
+- `HELPTHREAD_UI_SESSION_SECRET` — the HMAC secret signing the login session
+  cookie (`src/lib/session.ts`), required to be at least 32 characters in
+  production. Checked on every route by `src/middleware.ts`, which runs on
+  Next's Edge runtime — hence Web Crypto (`crypto.subtle`) rather than
+  `node:crypto` for the cookie's HMAC, unlike the password comparison above.
+
+Both `HELPTHREAD_UI_*` vars have obviously-dev-only fallbacks in local
+development (matching the `HELPTHREAD_API_TOKEN` dev-default pattern above)
+and are REQUIRED — with no fallback — once `NODE_ENV=production`.
 
 ## Where things live
 
@@ -38,6 +52,11 @@ The app's dev defaults match the harness (`http://localhost:8787`,
 - `src/components/SanitizedHtml.tsx` — the ONE place inbound email HTML is
   rendered: DOMPurify always (spec §5's stored-XSS contract), remote images
   stripped.
+- `src/middleware.ts` / `src/lib/session.ts` / `src/lib/auth-actions.ts` /
+  `src/lib/next-path.ts` — the operator login gate (HT-51): every route
+  requires a signed session cookie except `/login` itself. See
+  `specs/api/agent-inbox-v1.md` §5 for why this is a web-layer addition, not
+  a change to the API's own auth model.
 
 ## The fidelity mandate (TJ, 2026-07-12)
 

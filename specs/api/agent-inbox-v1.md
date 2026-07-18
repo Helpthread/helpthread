@@ -127,6 +127,10 @@ added when a real need appears, not preemptively.
   wrong token is `401 unauthorized` with a generic message — the response never reveals
   which of those it was. (The open-tracking pixel, §4g, is the one deliberate exception
   to Bearer auth — it is fetched by customer mail clients and carries its own rules.)
+  **This is still the API's only auth model (HT-51, §5).** The Agent Inbox web app now
+  requires an operator to sign in before it will render any page, but that is a web-layer
+  door in front of this same Bearer token, not a second API auth mechanism — see §5 for
+  the full justification.
 - **Never cache:** every response carries `Cache-Control: no-store`. This is authenticated
   support data; no edge or CDN copy, ever.
 - **Error envelope:**
@@ -381,6 +385,29 @@ above.
   rule to its unauthenticated surface: `200` + gif regardless of token validity.
 - **The Bearer token is a service credential.** It grants the whole inbox. It is compared
   in constant time and read only from server configuration, never logged.
+- **UI session auth (HT-51) is a web-layer door in front of this same token, not a second
+  auth model.** Before HT-51, the Agent Inbox web app had no login at all — every request
+  it made carried the deployment's `HELPTHREAD_API_TOKEN` and nothing distinguished one
+  browser tab from another. HT-51 adds an operator password (`HELPTHREAD_UI_PASSWORD`)
+  and a signed session cookie (`web/src/lib/session.ts`, checked by `web/src/middleware.ts`
+  on every route) that the browser must hold before the UI will render anything. This
+  changes nothing about the API described in this document:
+  - The API still authenticates every request by `HELPTHREAD_API_TOKEN` alone (constant-time
+    Bearer comparison, above) and has no knowledge of UI sessions, passwords, or cookies —
+    `web/src/lib/api.ts` still reads the token from server env and sends it exactly as
+    before. Anything holding the token can still call the API directly, session or no
+    session; that was already true (the token is a service credential, not tied to a
+    browser) and HT-51 doesn't change it.
+  - The session cookie carries no identity beyond "an operator signed in" (`{v, iat}`,
+    nothing else) — v1 is still single-Agent (§1, §6), so there is nothing for it to be an
+    identity FOR yet. It answers "is anyone allowed to look at this browser tab's inbox",
+    which is a strictly web-layer question the API was never positioned to answer (a
+    server-to-server Bearer token can't gate "is a human currently present").
+  - Multi-Agent identity (§6, "No multi-Agent identity, teams, or per-user authorization")
+    remains out of scope and unaffected. When it lands, it is expected to REPLACE this
+    single shared password with real per-Agent accounts, not extend it — HT-51 is
+    deliberately the smallest thing that closes the "anyone with the URL sees the inbox"
+    gap for a single operator, not a first draft of multi-user auth.
 
 ## 6. What v1 is NOT
 
@@ -397,6 +424,12 @@ above.
 
 ## 7. Changelog
 
+- **v1.1 (2026-07-17, HT-51).** Documented the Agent Inbox web app's new operator login
+  (§3, §5) — a session cookie the UI now requires before rendering any page. No API
+  behavior changed: this is a web-layer addition in front of the unchanged
+  `HELPTHREAD_API_TOKEN` Bearer auth, recorded here only because §5's prior security notes
+  implied the UI itself had no auth story of its own. See §5's HT-51 bullet for the full
+  justification.
 - **v1.1 (2026-07-17, HT-49 review fix).** `InboxApiDeps.selfEchoGuard` (optional, absent
   by default): when present — and when the sender reports a provider message id for a
   resolvable outbound mailbox — the send path best-effort pre-seeds a successful reply's
