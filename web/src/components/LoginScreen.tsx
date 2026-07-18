@@ -154,6 +154,8 @@ export function LoginScreen({ next }: { next: string }) {
 
         {error !== null && (
           <div
+            role="alert"
+            aria-live="assertive"
             style={{
               marginTop: 8,
               fontSize: 12.5,
