@@ -35,6 +35,23 @@ import type { SelfEchoGuardDeps } from '../mail/send.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
 import type { ThreadAttachmentStore } from '../store/attachments.js'
 import type { ConversationStore } from '../store/conversations.js'
+import { resolveActingAgent } from './acting-agent.js'
+import {
+  type AgentsApiDeps,
+  type AgentsHandlerDeps,
+  handleAuthMe,
+  handleAuthProviders,
+  handleAuthVerify,
+  handleCreateAgent,
+  handleDeleteAgent,
+  handleGetAgent,
+  handleInviteAccept,
+  handleListAgents,
+  handlePatchAgent,
+  handleResendInvite,
+  handleSetAgentPassword,
+  handleSetup,
+} from './agents.js'
 import { authenticateRequest } from './auth.js'
 import {
   handleDeleteConversation,
@@ -91,6 +108,15 @@ export interface InboxApiDeps {
   mailDomain: string
   /** The deployment's configured support address — the `from` on every Agent reply (spec §4a). */
   supportAddress: string
+  /**
+   * Agents & Authentication (HT-54; specs/auth/agents-and-auth.md) — REQUIRED,
+   * unlike every `?`-suffixed field below: this is core product surface, not
+   * an absent-by-default feature. See `src/api/agents.ts`'s `AgentsApiDeps`
+   * doc for why this is deliberately narrow (the invite path reuses this
+   * interface's own `keyring`/`sender`/`mailDomain`/`supportAddress` rather
+   * than duplicating them here).
+   */
+  agents: AgentsApiDeps
   /**
    * Open tracking (spec §4g, v1.1 — HT-32): ABSENT BY DEFAULT — a deliberate
    * privacy stance, not an unset knob. When present, outbound replies get a
@@ -166,6 +192,26 @@ export interface InboxApiDeps {
    * for the conceded race.
    */
   selfEchoGuard?: SelfEchoGuardDeps
+}
+
+/**
+ * Merge `deps.agents` with the top-level `keyring`/`sender`/`mailDomain`/
+ * `supportAddress` fields every `InboxApiDeps` already carries, into the
+ * combined shape `src/api/agents.ts`'s handlers accept — see
+ * `AgentsHandlerDeps`'s doc for why `deps.agents` itself doesn't duplicate
+ * those fields. Called once per request, only by the two dispatch cases
+ * (`auth-invite-accept`'s success path needs `store`+`keyring`;
+ * `agents-create`/`agent-invite` need the full set for the invite-email
+ * path) that need more than `deps.agents` alone provides.
+ */
+function agentsHandlerDeps(deps: InboxApiDeps): AgentsHandlerDeps {
+  return {
+    ...deps.agents,
+    keyring: deps.keyring,
+    sender: deps.sender,
+    mailDomain: deps.mailDomain,
+    supportAddress: deps.supportAddress,
+  }
 }
 
 /**
@@ -319,7 +365,16 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
           return await handlePutTags(route.id, request, { store: deps.store })
 
         case 'conversation-assignee':
-          return await handlePutAssignee(route.id, request, { store: deps.store })
+          // The one existing inbox endpoint that now requires the
+          // acting-Agent header (spec §8) — any ACTIVE Agent may assign any
+          // Agent (spec §5), so resolveActingAgent's null → 401 is the whole
+          // authz check here; no role gate.
+          return await handlePutAssignee(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            { store: deps.store, agentStore: deps.agents.store },
+          )
 
         case 'conversation-reply':
           return await handleReply(route.id, request, {
@@ -341,6 +396,78 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
           return deps.gmailDisconnect !== undefined
             ? await handleGmailDisconnect(request, deps.gmailDisconnect)
             : apiError(404, 'not_found', 'No such route.')
+
+        // --- Agents & Authentication (HT-54) --------------------------------
+        //
+        // agentsDeps merges InboxApiDeps.agents (store/providers/uiBaseUrl)
+        // with the top-level keyring/sender/mailDomain/supportAddress every
+        // request already carries — see AgentsHandlerDeps's doc for why
+        // those aren't duplicated onto `deps.agents` itself.
+
+        case 'auth-providers':
+          return await handleAuthProviders(deps.agents)
+
+        case 'setup':
+          return await handleSetup(request, deps.agents)
+
+        case 'auth-verify':
+          return await handleAuthVerify(request, deps.agents)
+
+        case 'auth-me':
+          return handleAuthMe(await resolveActingAgent(request, deps.agents.store))
+
+        case 'auth-invite-accept':
+          return await handleInviteAccept(request, agentsHandlerDeps(deps))
+
+        case 'agents-list':
+          return await handleListAgents(
+            await resolveActingAgent(request, deps.agents.store),
+            deps.agents,
+          )
+
+        case 'agents-create':
+          return await handleCreateAgent(
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            agentsHandlerDeps(deps),
+          )
+
+        case 'agent-item':
+          return await handleGetAgent(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            deps.agents,
+          )
+
+        case 'agent-patch':
+          return await handlePatchAgent(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.agents,
+          )
+
+        case 'agent-delete':
+          return await handleDeleteAgent(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            deps.agents,
+          )
+
+        case 'agent-password':
+          return await handleSetAgentPassword(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.agents,
+          )
+
+        case 'agent-invite':
+          return await handleResendInvite(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            agentsHandlerDeps(deps),
+          )
       }
     } catch (err) {
       console.error('[inbox-api] unhandled error handling request', err)

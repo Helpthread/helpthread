@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createPasswordAuthProvider } from '../auth/password-provider.js'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
@@ -14,6 +15,7 @@ import type {
   OutboundEmail,
   QueueProvider,
 } from '../providers/index.js'
+import { type AgentRecord, type AgentStore, createAgentStore } from '../store/agents.js'
 import { createThreadAttachmentStore, insertThreadAttachmentsInTx } from '../store/attachments.js'
 import {
   type ConversationStore,
@@ -24,6 +26,7 @@ import { createGmailWatchStateStore } from '../store/gmail-watch-state.js'
 import { createMailboxTokenStore } from '../store/mailbox-tokens.js'
 import { createMailboxStore } from '../store/mailboxes.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
+import type { AgentsApiDeps } from './agents.js'
 import type { GmailReconcileJob } from './gmail-webhook.js'
 import { createInboxApi, type InboxApiDeps } from './index.js'
 
@@ -34,6 +37,20 @@ const RANDOM_UUID = '00000000-0000-4000-8000-000000000000'
 const SUPPORT_ADDRESS = 'support@example.test'
 const MAIL_DOMAIN = 'mail.example.test'
 const KEYRING: Keyring = { current: { keyId: 'k1', secret: 'a'.repeat(32) } }
+
+/**
+ * Build the REQUIRED `agents` deps (HT-54) for a `createInboxApi` call
+ * wired to `db` — a real PGlite-backed `AgentStore` plus the core
+ * `password` provider, matching how `src/composition/root.ts` wires them.
+ * None of these tests exercise `/agents/*`/`/auth/*` routes directly (that
+ * surface has its own describe block below), so this is just enough for
+ * `createInboxApi` to construct and for existing conversation routes to
+ * behave unchanged.
+ */
+function testAgentsDeps(db: Db): AgentsApiDeps {
+  const store = createAgentStore(db)
+  return { store, providers: [createPasswordAuthProvider({ agentStore: store })] }
+}
 
 /** A fake `EmailSender` that records every `OutboundEmail` it's asked to send, never fails. */
 function createFakeSender(): { sender: EmailSender; sent: OutboundEmail[] } {
@@ -214,6 +231,7 @@ describe('createInboxApi', () => {
   ): Promise<{
     db: Db
     store: ConversationStore
+    agentStore: AgentStore
     api: (request: Request) => Promise<Response>
     /** Emails recorded by the default fake sender (empty if `overrides.sender` was supplied instead). */
     sent: OutboundEmail[]
@@ -221,6 +239,7 @@ describe('createInboxApi', () => {
     db = await createPgliteDb()
     await migrate(db)
     const store = createConversationStore(db)
+    const agentsDeps = testAgentsDeps(db)
     const { sender: defaultSender, sent } = createFakeSender()
     const api = createInboxApi({
       store,
@@ -229,6 +248,7 @@ describe('createInboxApi', () => {
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
+      agents: agentsDeps,
       ...(overrides.openTracking !== undefined ? { openTracking: overrides.openTracking } : {}),
       ...(overrides.gmailPush !== undefined ? { gmailPush: overrides.gmailPush } : {}),
       ...(overrides.gmailConnect !== undefined ? { gmailConnect: overrides.gmailConnect } : {}),
@@ -241,7 +261,7 @@ describe('createInboxApi', () => {
           }
         : {}),
     })
-    return { db, store, api, sent }
+    return { db, store, agentStore: agentsDeps.store, api, sent }
   }
 
   // --- auth ------------------------------------------------------------------
@@ -677,6 +697,7 @@ describe('createInboxApi', () => {
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
       })
 
       const res = await api(
@@ -783,6 +804,7 @@ describe('createInboxApi', () => {
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
       })
 
       const res = await api(
@@ -987,6 +1009,7 @@ describe('createInboxApi', () => {
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
       })
 
       const res = await api(
@@ -1526,6 +1549,31 @@ describe('createInboxApi', () => {
       return withJsonBody('PUT', path, JSON.stringify(body), tokenArg)
     }
 
+    /** Like {@link put}, additionally setting `X-Helpthread-Agent-Id` — the assignee route requires it (HT-54, spec §8). */
+    function putWithAgent(path: string, body: unknown, agentId: string): Request {
+      const request = put(path, body)
+      const headers = new Headers(request.headers)
+      headers.set('X-Helpthread-Agent-Id', agentId)
+      return new Request(request.url, {
+        method: request.method,
+        headers,
+        body: JSON.stringify(body),
+      })
+    }
+
+    /** Create a real, active Agent directly via the store — the assignee tests need one both as the acting Agent and as a valid assignment target. */
+    async function activeAgent(agentStore: AgentStore, email: string): Promise<AgentRecord> {
+      const result = await agentStore.createAgent({
+        name: 'Test Agent',
+        email,
+        role: 'agent',
+        status: 'active',
+        passwordHash: 'scrypt$unused',
+      })
+      if (!result.ok) throw new Error('expected ok')
+      return result.agent
+    }
+
     it('PUT tags replaces the set, normalizing: trim, lowercase, dedupe preserving first occurrence', async () => {
       const { store, api } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
@@ -1560,63 +1608,125 @@ describe('createInboxApi', () => {
       }
     })
 
-    it('PUT assignee claims with me, releases with null; 400s otherwise (including a missing property)', async () => {
-      const { store, api } = await freshApi()
+    it('PUT assignee (HT-54 body shape) assigns to a real Agent id, releases with null; 400s otherwise', async () => {
+      const { store, agentStore, api } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
+      const acting = await activeAgent(agentStore, 'acting@example.test')
+      const assignee = await activeAgent(agentStore, 'assignee@example.test')
 
       const claimed = await api(
-        put(`/api/v1/conversations/${conversationId}/assignee`, { assignee: 'me' }),
+        putWithAgent(
+          `/api/v1/conversations/${conversationId}/assignee`,
+          { assigneeAgentId: assignee.id },
+          acting.id,
+        ),
       )
       expect(claimed.status).toBe(200)
-      expect(((await claimed.json()) as { assignee: string | null }).assignee).toBe('me')
+      expect(((await claimed.json()) as { assigneeAgentId: string | null }).assigneeAgentId).toBe(
+        assignee.id,
+      )
 
       const released = await api(
-        put(`/api/v1/conversations/${conversationId}/assignee`, { assignee: null }),
+        putWithAgent(
+          `/api/v1/conversations/${conversationId}/assignee`,
+          { assigneeAgentId: null },
+          acting.id,
+        ),
       )
       expect(released.status).toBe(200)
-      expect(((await released.json()) as { assignee: string | null }).assignee).toBeNull()
+      expect(
+        ((await released.json()) as { assigneeAgentId: string | null }).assigneeAgentId,
+      ).toBeNull()
 
-      for (const bad of [{ assignee: 'someone' }, { assignee: 42 }, {}]) {
-        const res = await api(put(`/api/v1/conversations/${conversationId}/assignee`, bad))
+      // Malformed shapes, and the OLD `{ assignee: 'me' }` body — all 400.
+      for (const bad of [
+        { assigneeAgentId: 42 },
+        {},
+        { assignee: 'me' }, // the pre-HT-54 shape — no `assigneeAgentId` key at all
+      ]) {
+        const res = await api(
+          putWithAgent(`/api/v1/conversations/${conversationId}/assignee`, bad, acting.id),
+        )
         expect(res.status).toBe(400)
       }
+
+      // A syntactically-uuid-shaped id that names no real Agent is also 400
+      // (validation_failed, no existence oracle beyond what any Agent can
+      // already see via GET /agents).
+      const nonexistent = await api(
+        putWithAgent(
+          `/api/v1/conversations/${conversationId}/assignee`,
+          { assigneeAgentId: RANDOM_UUID },
+          acting.id,
+        ),
+      )
+      expect(nonexistent.status).toBe(400)
+    })
+
+    it('PUT assignee requires the acting-Agent header — 401 without it, 401 for a disabled acting Agent', async () => {
+      const { store, agentStore, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      const disabled = await activeAgent(agentStore, 'disabled@example.test')
+      await agentStore.updateAgent(disabled.id, { status: 'disabled' })
+
+      const noHeader = await api(
+        put(`/api/v1/conversations/${conversationId}/assignee`, { assigneeAgentId: null }),
+      )
+      expect(noHeader.status).toBe(401)
+
+      const disabledActing = await api(
+        putWithAgent(
+          `/api/v1/conversations/${conversationId}/assignee`,
+          { assigneeAgentId: null },
+          disabled.id,
+        ),
+      )
+      expect(disabledActing.status).toBe(401)
     })
 
     it('both PUT routes 404 for missing, deleted, and non-UUID ids', async () => {
-      const { db, store, api } = await freshApi()
+      const { db, store, agentStore, api } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'deleted')
+      const acting = await activeAgent(agentStore, 'acting2@example.test')
 
       for (const suffix of ['tags', 'assignee'] as const) {
-        const body = suffix === 'tags' ? { tags: ['x'] } : { assignee: 'me' }
-        expect(
-          (await api(put(`/api/v1/conversations/${RANDOM_UUID}/${suffix}`, body))).status,
-        ).toBe(404)
-        expect(
-          (await api(put(`/api/v1/conversations/${conversationId}/${suffix}`, body))).status,
-        ).toBe(404)
-        expect((await api(put(`/api/v1/conversations/not-a-uuid/${suffix}`, body))).status).toBe(
+        const body = suffix === 'tags' ? { tags: ['x'] } : { assigneeAgentId: null }
+        const request = (path: string) =>
+          suffix === 'tags' ? put(path, body) : putWithAgent(path, body, acting.id)
+        expect((await api(request(`/api/v1/conversations/${RANDOM_UUID}/${suffix}`))).status).toBe(
           404,
         )
+        expect(
+          (await api(request(`/api/v1/conversations/${conversationId}/${suffix}`))).status,
+        ).toBe(404)
+        expect((await api(request(`/api/v1/conversations/not-a-uuid/${suffix}`))).status).toBe(404)
       }
     })
 
-    it('list summaries and the detail response carry tags and assignee', async () => {
-      const { store, api } = await freshApi()
+    it('list summaries and the detail response carry tags and assigneeAgentId', async () => {
+      const { store, agentStore, api } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
+      const assignee = await activeAgent(agentStore, 'assignee2@example.test')
       await store.setConversationTags(conversationId, ['bug'])
-      await store.setConversationAssignee(conversationId, 'me')
+      await store.setConversationAssignee(conversationId, assignee.id)
 
       const list = await api(get('/api/v1/conversations'))
       const listBody = (await list.json()) as {
-        conversations: Array<{ tags: string[]; assignee: string | null }>
+        conversations: Array<{ tags: string[]; assigneeAgentId: string | null }>
       }
-      expect(listBody.conversations[0]).toMatchObject({ tags: ['bug'], assignee: 'me' })
+      expect(listBody.conversations[0]).toMatchObject({
+        tags: ['bug'],
+        assigneeAgentId: assignee.id,
+      })
 
       const detail = await api(get(`/api/v1/conversations/${conversationId}`))
-      const detailBody = (await detail.json()) as { tags: string[]; assignee: string | null }
+      const detailBody = (await detail.json()) as {
+        tags: string[]
+        assigneeAgentId: string | null
+      }
       expect(detailBody.tags).toEqual(['bug'])
-      expect(detailBody.assignee).toBe('me')
+      expect(detailBody.assigneeAgentId).toBe(assignee.id)
     })
 
     it('GET on the tags route is 405 with Allow: PUT; 401 without a token', async () => {
@@ -1808,6 +1918,7 @@ describe('createInboxApi', () => {
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
         gmailPush: {
           verifySignature: async () => true,
           subscription: SUBSCRIPTION,
@@ -1838,6 +1949,7 @@ describe('createInboxApi', () => {
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
         gmailPush: {
           verifySignature: async () => true,
           subscription: SUBSCRIPTION,
@@ -1972,6 +2084,7 @@ describe('createInboxApi', () => {
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
         ...(gmailConnect !== undefined ? { gmailConnect } : {}),
       })
     }
@@ -2204,6 +2317,7 @@ describe('createInboxApi', () => {
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
         ...(gmailDisconnect !== undefined ? { gmailDisconnect } : {}),
       })
     }
@@ -2291,11 +2405,15 @@ describe('createInboxApi', () => {
 describe('createInboxApi — hardening (Codex review)', () => {
   const dummyStore = {} as unknown as ConversationStore
   const dummySender = createThrowingSender()
+  // None of these tests ever exercise an /agents/*|/auth/* route, so a
+  // never-invoked dummy AgentStore is fine — this block is purely about
+  // construction-time validation and the conversations-route error paths.
   const dummyDeps = {
     sender: dummySender,
     keyring: KEYRING,
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,
+    agents: { store: {} as unknown as AgentStore, providers: [] } satisfies AgentsApiDeps,
   }
 
   it('throws at construction on an empty apiToken (fail closed — an empty token would authenticate every request)', () => {

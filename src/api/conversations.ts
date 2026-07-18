@@ -18,6 +18,7 @@
 import type { Keyring } from '../mail/reply-token.js'
 import { type SelfEchoGuardDeps, sendReply } from '../mail/send.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
+import type { AgentRecord, AgentStore } from '../store/agents.js'
 import type { StoredThreadAttachment, ThreadAttachmentStore } from '../store/attachments.js'
 import {
   type ConversationFolder,
@@ -89,7 +90,7 @@ interface ConversationSummaryJson {
   threadCount: number
   preview: string
   tags: string[]
-  assignee: 'me' | null
+  assigneeAgentId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -245,7 +246,7 @@ export async function handleGetConversation(
     threadCount: conversation.threads.length,
     preview: previewFromThreads(conversation.threads),
     tags: conversation.tags,
-    assignee: conversation.assignee,
+    assigneeAgentId: conversation.assigneeAgentId,
     createdAt: conversation.createdAt.toISOString(),
     updatedAt: conversation.updatedAt.toISOString(),
     threads: conversation.threads.map((thread) =>
@@ -652,17 +653,30 @@ export async function handlePutTags(
 }
 
 /**
- * Handle `PUT /api/v1/conversations/{id}/assignee` — claim or release (spec
- * §4f, v1.1). Body: `{ assignee: 'me' | null }` — the property must be
- * present and exactly one of those two values (`'me'` = the deployment's
- * one operator; `null` = Anyone); anything else is `400 validation_failed`.
+ * Handle `PUT /api/v1/conversations/{id}/assignee` — assign or release
+ * (spec §4f, v1.1; graduated to a real Agent identity by HT-54,
+ * specs/auth/agents-and-auth.md §3.3/§10 — **breaking**: the body was
+ * `{ assignee: 'me' | null }`, now `{ assigneeAgentId: uuid | null }`; the
+ * old shape is simply a `400` now, since `assignee` is not a recognized
+ * property). This is now the one existing inbox endpoint that requires the
+ * acting-Agent header (spec §8) — any ACTIVE Agent may assign any Agent
+ * (spec §5's role model; no admin gate here).
+ *
+ * A non-null `assigneeAgentId` that isn't uuid-shaped, or doesn't name an
+ * existing Agent, is `400 validation_failed` (a generic message — no
+ * existence oracle beyond what any Agent can already see via `GET
+ * /api/v1/agents`, per the brief's acceptance of that as fine here).
  * `200` with the updated summary; missing or deleted conversation → `404`.
  */
 export async function handlePutAssignee(
   id: string,
+  actingAgent: AgentRecord | null,
   request: Request,
-  deps: { store: ConversationStore },
+  deps: { store: ConversationStore; agentStore: AgentStore },
 ): Promise<Response> {
+  if (actingAgent === null) {
+    return apiError(401, 'unauthorized', 'Missing or invalid Agent identity.')
+  }
   if (!isUuid(id)) {
     return apiError(404, 'not_found', 'No conversation with that id.')
   }
@@ -672,12 +686,21 @@ export async function handlePutAssignee(
     return apiError(400, 'validation_failed', 'Request body must be valid JSON.')
   }
 
-  const assignee = parseAssigneeBody(parsedBody.value)
-  if (assignee === undefined) {
-    return apiError(400, 'validation_failed', "assignee must be 'me' or null.")
+  const assigneeAgentId = parseAssigneeBody(parsedBody.value)
+  if (assigneeAgentId === undefined) {
+    return apiError(400, 'validation_failed', 'assigneeAgentId must be a uuid string or null.')
+  }
+  if (assigneeAgentId !== null) {
+    if (!isUuid(assigneeAgentId)) {
+      return apiError(400, 'validation_failed', 'assigneeAgentId must be a valid uuid.')
+    }
+    const assigneeExists = await deps.agentStore.getAgent(assigneeAgentId)
+    if (assigneeExists === null) {
+      return apiError(400, 'validation_failed', 'assigneeAgentId does not name an existing Agent.')
+    }
   }
 
-  const updated = await deps.store.setConversationAssignee(id, assignee)
+  const updated = await deps.store.setConversationAssignee(id, assigneeAgentId)
   if (updated === null) {
     return apiError(404, 'not_found', 'No conversation with that id.')
   }
@@ -785,16 +808,20 @@ function parseTagsBody(raw: unknown): string[] | null {
 }
 
 /**
- * Validate a PUT-assignee body against spec §4f: the `assignee` property
- * must be PRESENT and exactly `'me'` or `null`. Returns the value, or
- * `undefined` on any violation (which is unambiguous precisely because
- * `undefined` — a missing property — is itself a violation) — never throws.
+ * Validate a PUT-assignee body against spec §4f/§10 (HT-54's breaking body
+ * shape): the `assigneeAgentId` property must be PRESENT and either a
+ * string (uuid-shape checked by the caller, which also confirms the Agent
+ * exists) or `null`. Returns the value, or `undefined` on any violation
+ * (unambiguous precisely because `undefined` — a missing property, or the
+ * OLD `{ assignee: 'me' }` shape, which has no `assigneeAgentId` key at
+ * all — is itself a violation) — never throws.
  */
-function parseAssigneeBody(raw: unknown): 'me' | null | undefined {
+function parseAssigneeBody(raw: unknown): string | null | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined
-  if (!('assignee' in raw)) return undefined
-  const { assignee } = raw as Record<string, unknown>
-  return assignee === 'me' || assignee === null ? assignee : undefined
+  if (!('assigneeAgentId' in raw)) return undefined
+  const { assigneeAgentId } = raw as Record<string, unknown>
+  if (assigneeAgentId === null) return null
+  return typeof assigneeAgentId === 'string' ? assigneeAgentId : undefined
 }
 
 /**
@@ -847,7 +874,7 @@ function toConversationSummaryJson(row: {
   threadCount: number
   preview: string
   tags: string[]
-  assignee: 'me' | null
+  assigneeAgentId: string | null
   createdAt: Date
   updatedAt: Date
 }): ConversationSummaryJson {
@@ -860,7 +887,7 @@ function toConversationSummaryJson(row: {
     threadCount: row.threadCount,
     preview: row.preview,
     tags: row.tags,
-    assignee: row.assignee,
+    assigneeAgentId: row.assigneeAgentId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }
