@@ -14,9 +14,9 @@
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useState, useTransition } from 'react'
-import type { ConversationSummary } from '../lib/api-types'
+import type { ConversationSummary, SelfAgent } from '../lib/api-types'
 import { logoutAction } from '../lib/auth-actions'
-import { nameFromEmail, relativeTime } from '../lib/format'
+import { initialsFromName, nameFromEmail, relativeTime } from '../lib/format'
 import { Avatar } from './ds/core/Avatar'
 import { DropdownMenu } from './ds/core/DropdownMenu'
 import { EmptyState } from './ds/core/EmptyState'
@@ -110,7 +110,14 @@ function NotificationRow({
   )
 }
 
-export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
+export function TopBar({
+  recentOpen,
+  me,
+}: {
+  recentOpen: ConversationSummary[]
+  /** The signed-in Agent (`getMe()`, HT-54), or `null` on public routes / a momentary session hiccup — see `app/layout.tsx`. */
+  me: SelfAgent | null
+}) {
   const pathname = usePathname()
   const router = useRouter()
   const showToast = useToast()
@@ -297,13 +304,39 @@ export function TopBar({ recentOpen }: { recentOpen: ConversationSummary[] }) {
             cursor: 'pointer',
           }}
         >
-          <Avatar agent size={28} />
+          {me !== null ? (
+            <Avatar email={me.email} initials={initialsFromName(me.name)} size={28} />
+          ) : (
+            <Avatar agent size={28} />
+          )}
         </button>
         <DropdownMenu open={openMenu === 'avatar'} onClose={() => setOpenMenu(null)} align="right">
+          {me !== null && (
+            <div style={{ padding: '4px 8px 8px' }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--ht-ink)' }}>
+                {me.name}
+              </div>
+              <div
+                style={{
+                  marginTop: 1,
+                  fontSize: 11.5,
+                  color: 'var(--ht-ink-dim)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {me.email}
+              </div>
+            </div>
+          )}
           <MenuItem
             onClick={() => {
               setOpenMenu(null)
-              stubToast('Your profile')
+              if (me !== null) {
+                router.push(`/settings/team/${me.id}`)
+              } else {
+                stubToast('Your profile')
+              }
             }}
           >
             Your profile

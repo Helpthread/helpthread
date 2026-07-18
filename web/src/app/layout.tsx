@@ -5,8 +5,8 @@ import { ShortcutsProvider } from '../components/ShortcutsProvider'
 import { ThemeProvider } from '../components/ThemeProvider'
 import { ToasterProvider } from '../components/Toaster'
 import { TopBar } from '../components/TopBar'
-import { listConversations } from '../lib/api'
-import type { ConversationSummary } from '../lib/api-types'
+import { getMe, listConversations } from '../lib/api'
+import type { ConversationSummary, SelfAgent } from '../lib/api-types'
 import { THEME_INIT_SCRIPT } from '../lib/theme'
 
 export const metadata: Metadata = {
@@ -35,6 +35,19 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
     recentOpen = (await listConversations({ folder: 'open', limit: 6 })).conversations
   } catch {
     // Empty bell; the real error surfaces (and is handled) at the page level.
+  }
+
+  // Same defensive posture as the notifications fetch above, same reason:
+  // this layout has no boundary above it, so a thrown 401 here (there's no
+  // session at all on `/login`/`/setup`/`/invite/{token}`, or a stale one
+  // elsewhere) would hard-crash the whole app instead of letting the PAGE's
+  // own boundary handle it. `null` just means the avatar menu shows no name
+  // — harmless on the public routes, and momentary elsewhere.
+  let me: SelfAgent | null = null
+  try {
+    me = await getMe()
+  } catch {
+    // Anonymous avatar; the real 401 surfaces (and is handled) at the page level.
   }
 
   return (
@@ -66,7 +79,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
         <ThemeProvider>
           <ToasterProvider>
             <ShortcutsProvider>
-              <TopBar recentOpen={recentOpen} />
+              <TopBar recentOpen={recentOpen} me={me} />
               {children}
             </ShortcutsProvider>
           </ToasterProvider>

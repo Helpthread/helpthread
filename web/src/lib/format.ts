@@ -35,6 +35,17 @@ export function nameFromEmail(email: string): string {
     .join(' ')
 }
 
+/** "Jordan Blake" → "JB"; a single word falls back to its first two letters (HT-54, Agent avatars/team cards). */
+export function initialsFromName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) {
+    const first = parts[0]?.[0] ?? ''
+    const last = parts[parts.length - 1]?.[0] ?? ''
+    return (first + last).toUpperCase()
+  }
+  return (parts[0] ?? '').slice(0, 2).toUpperCase()
+}
+
 /** "Jun 19" / "Jun 19, 2025" (year only when not the current year) — used
  *  for the context panel's Previous conversations rows. */
 export function shortDate(iso: string, now: Date = new Date()): string {
