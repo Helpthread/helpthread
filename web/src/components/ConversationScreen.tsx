@@ -35,7 +35,7 @@ import {
   sendReplyAction,
   setStatusAction,
 } from '../lib/actions'
-import type { ConversationDetail, ConversationStatus, ThreadView } from '../lib/api-types'
+import type { Agent, ConversationDetail, ConversationStatus, ThreadView } from '../lib/api-types'
 import { clearDraft, getDraft, writeDraft } from '../lib/drafts'
 import { humanFileSize, messageTime, nameFromEmail, relativeTime, shortDate } from '../lib/format'
 import { useStarred } from '../lib/starred'
@@ -624,10 +624,16 @@ export function ConversationScreen({
   conversation,
   position,
   previousConversations,
+  agents,
+  selfId,
 }: {
   conversation: ConversationDetail
   position: ConversationNeighborPosition | null
   previousConversations: PreviousConversationSummary[]
+  /** The Agent roster (`listAgents()`, HT-54) — every ACTIVE Agent may appear in the assignee menu. */
+  agents: Agent[]
+  /** The viewing Agent's own id (`getMe()`) — resolves "Assign to me". */
+  selfId: string
 }) {
   const router = useRouter()
   const showToast = useToast()
@@ -664,7 +670,9 @@ export function ConversationScreen({
 
   const [status, setLocalStatus] = useState<ConversationStatus>(conversation.status)
   const [tags, setTags] = useState<string[]>(conversation.tags)
-  const [assignee, setAssignee] = useState<'me' | null>(conversation.assignee)
+  const [assigneeAgentId, setAssigneeAgentId] = useState<string | null>(
+    conversation.assigneeAgentId,
+  )
 
   const [tagInput, setTagInput] = useState('')
   const [tagsMenuOpen, setTagsMenuOpen] = useState(false)
@@ -1011,13 +1019,13 @@ export function ConversationScreen({
     addTagFromInput()
   }
 
-  async function updateAssignee(next: 'me' | null): Promise<void> {
-    const previous = assignee
+  async function updateAssignee(next: string | null): Promise<void> {
+    const previous = assigneeAgentId
     setAssigneeMenuOpen(false)
-    setAssignee(next)
+    setAssigneeAgentId(next)
     const result = await putAssigneeAction(conversation.id, next)
     if (!result.ok) {
-      setAssignee(previous)
+      setAssigneeAgentId(previous)
       showToast({ title: "Couldn't update the assignee", detail: 'Please try again.' })
     }
   }
@@ -1048,6 +1056,20 @@ export function ConversationScreen({
 
   const customerName = nameFromEmail(conversation.customerEmail)
   const starred = isStarred(conversation.id)
+
+  // Assignee display/menu (HT-54): "Me" wins the label when the assignee IS
+  // the viewing Agent (parity with the old single-operator UX); otherwise
+  // the roster supplies the name. `otherActiveAgents` backs the rest of the
+  // menu — ACTIVE only (an invited/disabled Agent can't act, spec §8, and
+  // offering them here would be a false choice), self excluded (the
+  // "Assign to me" item above already covers self).
+  const assigneeLabel =
+    assigneeAgentId === null
+      ? 'Anyone'
+      : assigneeAgentId === selfId
+        ? 'Me'
+        : (agents.find((a) => a.id === assigneeAgentId)?.name ?? 'Someone')
+  const otherActiveAgents = agents.filter((a) => a.id !== selfId && a.status === 'active')
 
   // sameSpeakerAsPrev compares CHRONOLOGICALLY adjacent messages — computed
   // here, before the list is reversed for newest-first presentation. The
@@ -1219,7 +1241,7 @@ export function ConversationScreen({
           <div style={{ position: 'relative' }}>
             <Button variant="outline" onClick={() => setAssigneeMenuOpen((open) => !open)}>
               <PersonIcon />
-              {assignee === 'me' ? 'Me' : 'Anyone'}
+              {assigneeLabel}
               <ChevronDownIcon />
             </Button>
             <DropdownMenu
@@ -1227,12 +1249,30 @@ export function ConversationScreen({
               onClose={() => setAssigneeMenuOpen(false)}
               align="right"
             >
-              <MenuItem selected={assignee === null} onClick={() => void updateAssignee(null)}>
+              <MenuItem
+                selected={assigneeAgentId === null}
+                onClick={() => void updateAssignee(null)}
+              >
                 Anyone
               </MenuItem>
-              <MenuItem selected={assignee === 'me'} onClick={() => void updateAssignee('me')}>
-                Me
+              <MenuItem
+                selected={assigneeAgentId === selfId}
+                onClick={() => void updateAssignee(selfId)}
+              >
+                Assign to me
               </MenuItem>
+              {otherActiveAgents.length > 0 && (
+                <div style={{ height: 1, background: 'var(--ht-divider)', margin: '4px 2px' }} />
+              )}
+              {otherActiveAgents.map((agent) => (
+                <MenuItem
+                  key={agent.id}
+                  selected={assigneeAgentId === agent.id}
+                  onClick={() => void updateAssignee(agent.id)}
+                >
+                  {agent.name}
+                </MenuItem>
+              ))}
             </DropdownMenu>
           </div>
 

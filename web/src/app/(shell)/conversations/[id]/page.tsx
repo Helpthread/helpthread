@@ -1,6 +1,12 @@
 import { notFound } from 'next/navigation'
 import { ConversationScreen } from '../../../../components/ConversationScreen'
-import { ApiError, getConversation, listConversations } from '../../../../lib/api'
+import {
+  ApiError,
+  getConversation,
+  getMe,
+  listAgents,
+  listConversations,
+} from '../../../../lib/api'
 
 /**
  * One conversation — server-fetched, client-rendered. A 404 from the API
@@ -21,9 +27,11 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
 
   try {
     const conversation = await getConversation(id)
-    const [openPage, closedPage] = await Promise.all([
+    const [openPage, closedPage, me, agents] = await Promise.all([
       listConversations({ folder: 'open', limit: 50 }),
       listConversations({ folder: 'closed', limit: 50 }),
+      getMe(),
+      listAgents(),
     ])
     const ids = openPage.conversations.map((c) => c.id)
     const index = ids.indexOf(id)
@@ -45,6 +53,8 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
         conversation={conversation}
         position={position}
         previousConversations={previousConversations}
+        agents={agents}
+        selfId={me.id}
       />
     )
   } catch (error) {
