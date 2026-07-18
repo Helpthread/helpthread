@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import { type AgentStore, createAgentStore } from '../store/agents.js'
-import { hashPassword } from './password-hash.js'
+import { hashPassword, MAX_PASSWORD_LENGTH } from './password-hash.js'
 import { createPasswordAuthProvider } from './password-provider.js'
 import type { AuthProvider } from './provider.js'
 
@@ -148,5 +148,15 @@ describe('PasswordAuthProvider', () => {
     for (const attempt of attempts) {
       await expect(provider.authenticate(attempt)).resolves.toBeNull()
     }
+  })
+
+  it('rejects an over-length password before any KDF work (the pre-session scrypt-cost cap)', async () => {
+    const { provider } = await freshProvider()
+    const attempt = {
+      providerKey: 'password',
+      email: 'agent@example.test',
+      password: 'x'.repeat(MAX_PASSWORD_LENGTH + 1),
+    }
+    await expect(provider.authenticate(attempt)).resolves.toBeNull()
   })
 })

@@ -31,6 +31,15 @@
 
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 
+/**
+ * The longest password any entry point will feed to the KDF, shared by the
+ * API's validation (`src/api/agents.ts`) and the login path
+ * (`src/auth/password-provider.ts`) so no caller can push unbounded input
+ * into scrypt. Defined here — next to the KDF it bounds — because the two
+ * enforcement sites must never drift apart.
+ */
+export const MAX_PASSWORD_LENGTH = 256
+
 /** scrypt cost parameter — CPU/memory cost, a power of two. Fixed and explicit (spec §9), not derived from any env. */
 const SCRYPT_N = 16384
 /** scrypt block size. */

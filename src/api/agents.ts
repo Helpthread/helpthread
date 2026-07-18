@@ -47,7 +47,7 @@
 
 import { buildInviteEmail } from '../auth/invite-email.js'
 import { mintInviteToken, verifyInviteToken } from '../auth/invite-token.js'
-import { hashPassword } from '../auth/password-hash.js'
+import { hashPassword, MAX_PASSWORD_LENGTH } from '../auth/password-hash.js'
 import type { AuthAttempt, AuthProvider } from '../auth/provider.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { OutboundEmail } from '../providers/email-sender.js'
@@ -86,7 +86,6 @@ const MAX_EMAIL_LENGTH = 254
 const MIN_NAME_LENGTH = 1
 const MAX_NAME_LENGTH = 200
 const MIN_PASSWORD_LENGTH = 8
-const MAX_PASSWORD_LENGTH = 256
 const MAX_TIMEZONE_LENGTH = 64
 
 /** Trim + lowercase; require exactly one `@` with a nonempty local part and domain, ≤254 chars — no heroic regex (brief's pinned rule). `null` on any violation. */
@@ -171,6 +170,8 @@ function toAgentJson(agent: AgentRecord): AgentJson {
 }
 
 const UNAUTHORIZED = () => apiError(401, 'unauthorized', 'Missing or invalid Agent identity.')
+/** The login endpoint's own uniform failure — every `/auth/verify` miss is this exact response (spec §9's no-oracle rule), phrased for a sign-in, not for the acting-Agent header. */
+const INVALID_CREDENTIALS = () => apiError(401, 'unauthorized', 'Invalid email or password.')
 const NOT_FOUND = () => apiError(404, 'not_found', 'No Agent with that id.')
 
 // --- GET /api/v1/auth/providers ---------------------------------------------
@@ -235,22 +236,22 @@ export async function handleAuthVerify(
   deps: Pick<AgentsHandlerDeps, 'store' | 'providers'>,
 ): Promise<Response> {
   const parsed = await parseJsonBody(request)
-  if (!parsed.ok) return UNAUTHORIZED()
+  if (!parsed.ok) return INVALID_CREDENTIALS()
   const body = asRecord(parsed.value)
-  if (body === null) return UNAUTHORIZED()
+  if (body === null) return INVALID_CREDENTIALS()
 
   const providerKey = body.providerKey
-  if (typeof providerKey !== 'string') return UNAUTHORIZED()
+  if (typeof providerKey !== 'string') return INVALID_CREDENTIALS()
 
   const provider = deps.providers.find((candidate) => candidate.key === providerKey)
-  if (provider === undefined) return UNAUTHORIZED()
+  if (provider === undefined) return INVALID_CREDENTIALS()
 
   const attempt: AuthAttempt = { ...body, providerKey }
   const verified = await provider.authenticate(attempt)
-  if (verified === null) return UNAUTHORIZED()
+  if (verified === null) return INVALID_CREDENTIALS()
 
   const agent = await deps.store.getAgent(verified.agentId)
-  if (agent === null) return UNAUTHORIZED()
+  if (agent === null) return INVALID_CREDENTIALS()
 
   return json(200, { agent: toAgentJson(agent) })
 }

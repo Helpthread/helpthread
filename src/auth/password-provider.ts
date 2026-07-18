@@ -20,7 +20,7 @@
  */
 
 import type { AgentStore } from '../store/agents.js'
-import { DUMMY_HASH, verifyPassword } from './password-hash.js'
+import { DUMMY_HASH, MAX_PASSWORD_LENGTH, verifyPassword } from './password-hash.js'
 import type {
   AuthAttempt,
   AuthProvider,
@@ -59,6 +59,15 @@ export function createPasswordAuthProvider(deps: PasswordAuthProviderDeps): Auth
     async authenticate(attempt: AuthAttempt): Promise<VerifiedIdentity | null> {
       const { email, password } = attempt
       if (typeof email !== 'string' || typeof password !== 'string') {
+        return null
+      }
+      // Cap BEFORE any KDF work: this is the one pre-session, rate-limit-free
+      // entry point (HT-53), so an unbounded candidate would buy an attacker
+      // arbitrarily large scrypt input for free. A fast reject here carries no
+      // per-Agent timing signal — it is conditioned only on the caller's own
+      // input, same as the malformed-attempt rejection above. No real password
+      // can exceed this: every set-password path enforces the same cap.
+      if (password.length > MAX_PASSWORD_LENGTH) {
         return null
       }
 
