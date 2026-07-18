@@ -105,7 +105,15 @@ export function uiAuthConfig(): UiAuthConfig {
   // because the production guard above refuses to start without real ones.
   return {
     sessionSecret: sessionSecret ?? 'helpthread-dev-session-secret-do-not-use-in-production-00',
-    password: password ?? 'helpthread-dev-password',
+    // Trim the STORED password only. Dashboard/CLI env editors routinely append
+    // a trailing newline (or a copy-paste leaves surrounding whitespace), and the
+    // operator typing the password at the login form never includes it — so an
+    // untrimmed exact-match comparison rejects the correct password with no
+    // recoverable signal. We never trim the *candidate* the operator types
+    // (leading/trailing spaces there are a deliberate part of their secret).
+    // The length guard above runs on the raw value, so whitespace can't be used
+    // to sneak under the 12-char minimum.
+    password: (password ?? 'helpthread-dev-password').trim(),
   }
 }
 
