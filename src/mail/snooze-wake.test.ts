@@ -71,7 +71,7 @@ describe('runSnoozeWake', () => {
     expect(conversation?.status).toBe('pending')
   })
 
-  it('emits conversation.status_changed transactionally for the wake', async () => {
+  it('emits EXACTLY ONE conversation.status_changed for the timer wake, transactionally — unlike the inbound wake, which fires conversation.message_received(reopened:true) instead (see ingest.test.ts)', async () => {
     const { db, store } = await freshStore()
     const past = new Date(Date.now() - 60_000)
     const id = await insertConversation(db, { status: 'pending', snoozedUntil: past })
@@ -82,6 +82,10 @@ describe('runSnoozeWake', () => {
       'SELECT type, conversation_id, data FROM event_outbox WHERE conversation_id = $1',
       [id],
     )
+    // The array-equality (not a `.filter(...)` count) is what proves BOTH
+    // halves at once: exactly one event total, AND it is status_changed —
+    // never status_changed alongside some other stray event, and never
+    // message_received (that field belongs to the inbound-wake path only).
     expect(events).toEqual([
       {
         type: 'conversation.status_changed',

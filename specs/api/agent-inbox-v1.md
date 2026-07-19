@@ -282,11 +282,25 @@ threading headers, and the wire message sent is byte-identical whether or not
 `thenSetStatus` is present. Applies ONLY on a genuinely new send — never on an
 idempotency-key replay (§4a's own replay rule, immediately below, applies unchanged: a
 replay touches the conversation not at all). Fires `conversation.status_changed`
-transactionally, through the exact same store code path §4b's `PATCH` uses — so a
-send-and-close is indistinguishable, from the event log's perspective, from a reply
-immediately followed by a separate `PATCH .../status` call, except atomic. Any
-`snoozed_until` the conversation had is cleared (this endpoint never accepts a
-`snoozedUntil` of its own — only §4b's `PATCH` does).
+transactionally, through the exact same store code path §4b's `PATCH` uses, `from` set to
+the conversation's status FROM BEFORE THIS WHOLE OPERATION (captured prior to any reply
+reopening it — see below). Any `snoozed_until` the conversation had is cleared (this
+endpoint never accepts a `snoozedUntil` of its own — only §4b's `PATCH` does).
+
+**Not identical to a two-step reply-then-`PATCH`, and deliberately so.** A reply to a
+`closed`/`spam` conversation reopens it (§4a's own reopen rule, above) — silently, no
+event of its own, exactly as an ordinary reply already does. `thenSetStatus`'s `from` is
+the conversation's status captured BEFORE that reopen, not the transient `active` it
+passes through — this is MORE correct than a two-step sequence (reply, then a separate
+`PATCH`) would report, since a separate `PATCH` call can only see the ALREADY-reopened
+`active` state and would report `from: 'active'` regardless of what the conversation
+actually was. Two concrete consequences: replying to a `closed` conversation with
+`thenSetStatus: 'closed'` fires **no** `status_changed` at all (the net status never
+changed — `closed` in, `closed` out — even though it silently passed through `active`
+internally); replying to a `closed` conversation with `thenSetStatus: 'pending'` fires
+`status_changed` with `from: 'closed'`, never `from: 'active'`. A caller reading the event
+log therefore sees the conversation's REAL prior state, not an artifact of the reopen
+implementation.
 
 **Replay semantics: same key + same conversation = same logical send, never re-diffed
 against the body.** If a call reuses a key already recorded against this conversation, the
@@ -352,16 +366,23 @@ the response (`ConversationSummary.snoozedUntil`) for every status other than a 
 `pending`.
 
 A snoozed conversation wakes itself two ways, both ending in `status: 'active'` and
-`snoozedUntil: null`, both firing `conversation.status_changed` (`from: 'pending', to:
-'active'`) exactly like an Agent's own `PATCH`:
+`snoozedUntil: null` — but the two are NOT event-identical, and deliberately so: each
+reports through the SAME event a structurally-equivalent non-timed transition already
+uses, rather than both being forced through one shape.
 
 - **Timer wake.** A periodic engine-internal pass flips it once `now() >= snoozedUntil`, no
-  Agent action.
+  Agent action, via `setConversationStatus` — the exact same write path (and therefore the
+  exact same event) an Agent's own `PATCH` to `active` uses. Fires
+  `conversation.status_changed` (`from: 'pending', to: 'active'`).
 - **Inbound wake.** Inbound customer mail on a snoozed conversation wakes it immediately —
   the same "the customer came back" reasoning §4a's closed/spam reopen already uses,
-  applied to a snoozed `pending` conversation instead. Scoped to genuinely inbound mail
-  only: an Agent's own outbound reply or an internal note to a snoozed conversation never
-  wakes it early.
+  applied to a snoozed `pending` conversation instead, and reported the SAME way that
+  reopen already is: through `conversation.message_received`'s existing `reopened: true`
+  field (spec §4's vocabulary table), NOT `conversation.status_changed` — an inbound reopen
+  has never fired `status_changed` (§2's original framing: only an Agent's `PATCH` does),
+  and a snoozed conversation's inbound wake is the same kind of reopen, not a new one.
+  Scoped to genuinely inbound mail only: an Agent's own outbound reply or an internal note
+  to a snoozed conversation never wakes it early.
 
 ### 4c. `POST /api/v1/conversations/{id}/notes` — internal note (v1.1, HT-28)
 
@@ -574,8 +595,11 @@ Agent so the picker works regardless of who authored the library.
     .../status` gains the optional `snoozedUntil` field, legal only alongside
     `status: 'pending'`. A snooze wakes itself on a timer OR on inbound customer mail
     (§2's "snoozed exception to `pending` is never cleared automatically" amendment) —
-    both routes end in `active`/`null` and fire `conversation.status_changed`
-    identically to an Agent's own `PATCH`.
+    both routes end in `active`/`null`, but report through DIFFERENT events: the timer
+    wake fires `conversation.status_changed` (the same `setConversationStatus` path an
+    Agent's own `PATCH` uses); the inbound wake reports through `conversation.
+    message_received`'s existing `reopened: true` field, exactly like every other
+    inbound reopen (§4a) — never `status_changed`.
   - **HT-78, send & close (§4a).** `POST .../replies` gains the optional
     `thenSetStatus: 'closed' | 'pending'` field — applied transactionally alongside the
     reply's persist, never touching mail content/envelope/threading. Fires

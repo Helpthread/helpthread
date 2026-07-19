@@ -257,7 +257,7 @@ describe('createConversationStore', () => {
   })
 
   describe('snooze wake on inbound append (HT-77)', () => {
-    it('an INBOUND message on a SNOOZED pending conversation wakes it: reopens to active, clears snoozed_until, reopened: true', async () => {
+    it('an INBOUND message on a SNOOZED pending conversation wakes it: reopens to active, clears snoozed_until, reopened: true, and fires NO event of its own (message_received is emitted by src/mail/ingest.ts, layered on `reopened` — see ingest.test.ts)', async () => {
       const { db, store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())
       await setStatus(db, conversationId, 'pending')
@@ -272,6 +272,15 @@ describe('createConversationStore', () => {
       const conversation = await store.getConversation(conversationId)
       expect(conversation?.status).toBe('active')
       expect(conversation?.snoozedUntil).toBeNull()
+
+      // The reopen branch itself (appendThreadInTx) never touches the event
+      // outbox — same as the pre-existing closed/spam reopen branch it sits
+      // beside. In particular, this is NOT conversation.status_changed: the
+      // inbound wake surfaces exclusively via conversation.message_received's
+      // reopened:true field, emitted by src/mail/ingest.ts's writeParsedEmail
+      // from AppendResult.reopened — see that describe block for the
+      // end-to-end assertion.
+      expect(await outboxEventsFor(db, conversationId)).toEqual([])
     })
 
     it('an OUTBOUND reply to a SNOOZED pending conversation does NOT wake it — only inbound mail wakes (HT-77)', async () => {

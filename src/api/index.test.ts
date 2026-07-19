@@ -1156,6 +1156,64 @@ describe('createInboxApi', () => {
         ])
       })
 
+      // --- closed/spam-reopen interaction (F2 review fix) -----------------
+      //
+      // A reply to a closed/spam conversation reopens it SILENTLY (§4a's own
+      // reopen rule — no event of its own), so thenSetStatus's `from` is
+      // captured BEFORE that reopen, not the transient `active` it passes
+      // through. This is deliberately NOT identical to a two-step
+      // reply-then-PATCH: a separate PATCH call can only observe the
+      // ALREADY-reopened `active` row and would report `from: 'active'`
+      // regardless of what the conversation actually was.
+
+      it('replying to a CLOSED conversation with thenSetStatus:"closed" fires NO status_changed — the net status never changed, even though it silently passed through active internally', async () => {
+        const { db, store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+        await setStatus(db, conversationId, 'closed')
+
+        const res = await api(
+          replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+            text: 'Still resolved.',
+            thenSetStatus: 'closed',
+          }),
+        )
+        expect(res.status).toBe(201)
+
+        const updated = await store.getConversation(conversationId, { includeDeleted: false })
+        expect(updated?.status).toBe('closed')
+
+        const events = await db.query<{ type: string }>(
+          'SELECT type FROM event_outbox WHERE conversation_id = $1 AND type = $2',
+          [conversationId, 'conversation.status_changed'],
+        )
+        expect(events).toEqual([])
+      })
+
+      it('replying to a CLOSED conversation with thenSetStatus:"pending" fires status_changed with from:"closed" — never from:"active" (the transient reopen state)', async () => {
+        const { db, store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+        await setStatus(db, conversationId, 'closed')
+
+        const res = await api(
+          replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+            text: 'Following up separately.',
+            thenSetStatus: 'pending',
+          }),
+        )
+        expect(res.status).toBe(201)
+
+        const updated = await store.getConversation(conversationId, { includeDeleted: false })
+        expect(updated?.status).toBe('pending')
+
+        const events = await db.query<{ type: string; data: unknown }>(
+          'SELECT type, data FROM event_outbox WHERE conversation_id = $1 AND type = $2',
+          [conversationId, 'conversation.status_changed'],
+        )
+        expect(events).toEqual([
+          { type: 'conversation.status_changed', data: { from: 'closed', to: 'pending' } },
+        ])
+      })
+
       it('sends byte-identical mail with and without thenSetStatus', async () => {
         const { store: storeA, api: apiA, sent: sentA } = await freshApi()
         const { conversationId: idA } = await storeA.createConversation(newConversation())

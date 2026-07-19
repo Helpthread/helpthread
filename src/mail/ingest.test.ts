@@ -852,6 +852,60 @@ describe('ingestInboundMessage', () => {
       expect(reopenEvent?.data).toEqual({ threadId: second.threadId, reopened: true })
     })
 
+    it('a valid-token reply to a SNOOZED (pending + snoozed_until) conversation wakes it: fires conversation.message_received(reopened:true) ONLY — never conversation.status_changed (HT-77; agent-inbox-v1.md §4b: inbound wake reports the same way every other inbound reopen does)', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const first = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+        deps,
+      )
+      if (first.kind !== 'stored') throw new Error('unreachable')
+      await db.query(
+        "UPDATE conversations SET status = 'pending', snoozed_until = now() + interval '1 day' WHERE id = $1",
+        [first.conversationId],
+      )
+
+      const replyToken = mintReplyMessageId(
+        { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+        keyring,
+      )
+      const second = await ingestInboundMessage(
+        inboundDelivery(
+          mailboxId,
+          'provider-msg-2',
+          rawMessage(
+            {
+              From: 'customer@example.test',
+              To: 'support@example.test',
+              Subject: 'Re: Help with my order',
+              'Message-ID': '<cust-2@customer.example.test>',
+              'In-Reply-To': replyToken,
+            },
+            'Still broken.',
+          ),
+        ),
+        deps,
+      )
+      if (second.kind !== 'stored') throw new Error('unreachable')
+
+      const conversation = await db.query<{ status: string; snoozed_until: unknown }>(
+        'SELECT status, snoozed_until FROM conversations WHERE id = $1',
+        [first.conversationId],
+      )
+      expect(conversation[0]).toEqual({ status: 'active', snoozed_until: null })
+
+      const events = await outboxEventsFor(db, first.conversationId)
+      // Exactly one message_received carries the reopen (the original
+      // message's own reopened:false plus this reply's reopened:true), and
+      // — the point of this test — ZERO status_changed anywhere: the wake
+      // is reported exclusively through message_received's existing
+      // reopened field, the same channel every other inbound reopen uses.
+      expect(events.filter((e) => e.type === 'conversation.status_changed')).toEqual([])
+      const reopenEvent = events.find(
+        (e) => e.type === 'conversation.message_received' && e.data.threadId === second.threadId,
+      )
+      expect(reopenEvent?.data).toEqual({ threadId: second.threadId, reopened: true })
+    })
+
     it('the deleted/not-found append fallback fires conversation.created + conversation.message_received(reopened:false) on the FRESH conversation, not the orphaned one', async () => {
       const { db, deps, mailboxId } = await freshDeps()
       const first = await ingestInboundMessage(
