@@ -38,9 +38,10 @@ What this classification means for Helpthread (charter §3 governs):
   These are honest positioning differentiators: FreeScout charges for them, we don't.
 - **Their paid list is market signal for OUR marketplace candidates** — Custom Folders,
   Saved Replies, Send & Close, Satisfaction Ratings are proven willingness-to-pay
-  features. Core-vs-module for each is decided at ticket grooming; the charter's floor
-  ("nothing free today gets paywalled retroactively; monetization adds, never subtracts")
-  applies, and AI-powered modules remain the leading paid candidates.
+  features. Core-vs-module is now decided: `specs/plugins/catalog.md` (HT-66) is the
+  canonical line — all four land core-free there; the charter's floor ("nothing free
+  today gets paywalled retroactively; monetization adds, never subtracts") applies, and
+  AI-powered modules lead the paid catalog.
 
 - **Dashboard (home)** — multi-mailbox card grid: one card per mailbox with folder counts
   (Unassigned/Mine/Starred/Drafts/Assigned + last-activity dates) and quick actions
@@ -91,3 +92,5 @@ What this classification means for Helpthread (charter §3 governs):
 
 - **2026-07-18**: initial version from TJ's HT-54 fidelity review (screenshot index +
   three-scope rule + module caveat). Roadmap tickets for deferred surfaces filed under HT.
+- **2026-07-18** (HT-66): §2's open core-vs-module calls resolved by
+  `specs/plugins/catalog.md`; this doc keeps the observations, that one keeps the line.
