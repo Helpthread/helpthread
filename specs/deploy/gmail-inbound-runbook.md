@@ -270,7 +270,7 @@ alerting stack.
 
 ### G1. The health endpoint
 
-```
+```text
 GET https://<domain>/api/v1/internal/health
 Authorization: Bearer $CRON_SECRET
 ```
