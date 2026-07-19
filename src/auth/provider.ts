@@ -18,15 +18,22 @@
 
 /**
  * What the login UI needs to render one login method, serialized verbatim
- * by `GET /api/v1/auth/providers` (spec §6). `kind: 'credentials'` is the
- * only kind the core seam defines today (a password form) — deliberately
- * not widened to anticipate an OAuth `kind` before a module that needs one
- * actually ships (module doc's "do not speculate" note).
+ * by `GET /api/v1/auth/providers` (spec §6). `kind: 'credentials'` was the
+ * only kind the core seam defined at HT-54 (a password form) — deliberately
+ * not widened to anticipate a kind before a module that needs one actually
+ * shipped (module doc's "do not speculate" note). HT-75 (specs/auth/
+ * passkeys.md §4.1) is that module: `kind` widens to `'credentials' |
+ * 'webauthn'`, the exact type-level change that spec section names as the
+ * seam's only required edit — no other field is added, since a webauthn
+ * login needs nothing beyond `{ key: 'webauthn', label, kind: 'webauthn' }`
+ * to know to render a passkey control; every ceremony detail is fetched
+ * fresh per-attempt from the options endpoints (passkeys.md §9), never
+ * baked into this static descriptor.
  */
 export interface AuthProviderDescriptor {
   key: string
   label: string
-  kind: 'credentials'
+  kind: 'credentials' | 'webauthn'
 }
 
 /**

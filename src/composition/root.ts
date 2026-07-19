@@ -47,8 +47,11 @@ import {
   type GmailReconcileJob,
 } from '../api/gmail-webhook.js'
 import { createInboxApi } from '../api/index.js'
+import type { WebAuthnApiDeps } from '../api/webauthn.js'
 import { createPasswordAuthProvider } from '../auth/password-provider.js'
 import type { AuthProvider } from '../auth/provider.js'
+import { createWebAuthnAuthProvider } from '../auth/webauthn-provider.js'
+import { resolveWebAuthnRp } from '../auth/webauthn-rp.js'
 import type { Db } from '../db/client.js'
 import { createPostgresDb } from '../db/postgres.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
@@ -86,6 +89,7 @@ import {
   createThreadAttachmentStore,
   createWebhookEndpointStore,
 } from '../store/index.js'
+import { createWebAuthnStore } from '../store/webauthn.js'
 import {
   createWebhookDeliveryHandler,
   WEBHOOK_DELIVERY_TOPIC,
@@ -117,6 +121,9 @@ const GMAIL_SCOPES = [
  * work, and is deliberately not built for the single-mailbox dogfood).
  */
 const SIGNING_KEY_ID = 'ht1'
+
+/** Deployment display name shown in the OS passkey UI (HT-75; specs/auth/passkeys.md §6.1's `rpName` — "config or a fixed string"; no `AppConfig` field exists for this yet, so a fixed string is used). */
+const WEBAUTHN_RP_NAME = 'Helpthread'
 
 /** Overrides for {@link buildApp}, injected only by tests so the wiring is exercised without real Postgres/Supabase or any network. */
 export interface BuildAppOverrides {
@@ -160,6 +167,7 @@ export async function buildApp(
   const agentStore = createAgentStore(db)
   const assistantStore = createAssistantStore(db)
   const savedReplyStore = createSavedReplyStore(db)
+  const webAuthnStore = createWebAuthnStore(db)
 
   // --- Module substrate (HT-69; specs/modules/substrate-v1.md §4/§5): the
   // event outbox and webhook endpoint stores. `webhookEndpointStore` reuses
@@ -170,14 +178,15 @@ export async function buildApp(
   const eventOutboxStore = createEventOutboxStore(db)
   const webhookEndpointStore = createWebhookEndpointStore(db, config.tokenEncryptionKey)
 
+  // --- The HMAC keyring backing reply/state/view/webauthn tokens (single current key). ---
+  const keyring: Keyring = { current: { keyId: SIGNING_KEY_ID, secret: config.signingSecret } }
+
   // --- Agents & Authentication (HT-54): the core provider registry is just
   // `[password]` — an ordered list, no discovery mechanism (spec §4's
-  // honest-scope note). A marketplace module adds a provider HERE, in a
-  // future ticket, not via any plugin loader this build ships. ---
+  // honest-scope note). HT-75 (specs/auth/passkeys.md §3) pushes a SECOND
+  // provider onto this SAME array below, once `sender` exists — see that
+  // block's own comment for why it's conditional on `config.uiBaseUrl`. ---
   const authProviders: AuthProvider[] = [createPasswordAuthProvider({ agentStore })]
-
-  // --- The HMAC keyring backing reply/state/view tokens (single current key). ---
-  const keyring: Keyring = { current: { keyId: SIGNING_KEY_ID, secret: config.signingSecret } }
 
   // --- Durable job queue — ONE instance shared by the webhook enqueue, the
   // maintenance sweep enqueue, and the drain, so they share tunables. ---
@@ -206,6 +215,57 @@ export async function buildApp(
       return tokenService.getAccessToken(mailbox.id)
     },
   })
+
+  // --- Passkeys (HT-75; specs/auth/passkeys.md §3) — ONLY when
+  // `config.uiBaseUrl` is set AND resolves to a domain-form hostname: there
+  // is no safe fallback origin to bind WebAuthn ceremonies to, so a
+  // deployment with no known (or WebAuthn-unusable) UI origin simply never
+  // gets the passkey login option (`GET /auth/providers` omits the
+  // descriptor, and `webauthn` stays `undefined` — every route in
+  // `src/api/webauthn.ts` 404s) — the same degrade-by-omission shape
+  // `agents.uiBaseUrl` already uses for invites.
+  //
+  // The `uiBaseUrl`-set-but-IP-literal case is a deliberate judgment call,
+  // not directly pinned by the spec: `resolveWebAuthnRp` THROWS for that
+  // case (module doc), and letting that throw propagate would crash
+  // `buildApp()` entirely — taking down the WHOLE engine (mail ingestion,
+  // conversations, everything) over a passkeys-only misconfiguration that
+  // spec §3 itself frames as "every other HT-54 feature working, passkeys
+  // silently failing at the first ceremony," not "the deployment doesn't
+  // boot." Caught here and treated identically to `uiBaseUrl` being unset —
+  // the SAME degrade-by-omission this block already applies, just reached
+  // by a different path — rather than an unbounded-blast-radius boot crash.
+  // authProviders.push below mutates the SAME array reference already
+  // passed to `createPasswordAuthProvider`'s sibling above and threaded
+  // into both `webauthn.providers` (step-up/password reuses the registered
+  // `password` provider) and `agents.providers` below. ---
+  let webauthn: WebAuthnApiDeps | undefined
+  if (config.uiBaseUrl !== undefined) {
+    let rp: ReturnType<typeof resolveWebAuthnRp> | undefined
+    try {
+      rp = resolveWebAuthnRp(config.uiBaseUrl)
+    } catch (err) {
+      console.error(
+        '[composition] HELPTHREAD_UI_BASE_URL is set but not WebAuthn-usable (an IP literal, not a domain) — passkeys are disabled for this deployment; every other feature is unaffected',
+        err,
+      )
+    }
+    if (rp !== undefined) {
+      webauthn = {
+        db,
+        store: webAuthnStore,
+        agentStore,
+        providers: authProviders,
+        keyring,
+        rp,
+        rpName: WEBAUTHN_RP_NAME,
+        sender,
+        mailDomain: config.mailDomain,
+        supportAddress: config.supportAddress,
+      }
+      authProviders.push(createWebAuthnAuthProvider({ db, store: webAuthnStore, keyring, rp }))
+    }
+  }
 
   // --- Gmail push webhook deps. The JWKS key source is built ONCE here and
   // reused across every request (its fetch cache only caches if reused — see
@@ -289,6 +349,9 @@ export async function buildApp(
     // MailboxStore instance every other mailbox-scoped feature in this root
     // shares — no second store needed.
     savedReplies: { store: savedReplyStore, mailboxStore },
+    // Passkeys (HT-75) — spread in only when configured (uiBaseUrl set),
+    // matching agents.uiBaseUrl's own optional-field convention above.
+    ...(webauthn !== undefined ? { webauthn } : {}),
     // HT-49 review fix: Gmail delivers a sent reply's own copy back into the
     // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
     // it as a phantom inbound message (src/mail/send.ts's "The reply token's
