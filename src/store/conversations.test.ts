@@ -1166,4 +1166,450 @@ describe('createConversationStore', () => {
       expect(inbound?.customerViewedAt).toBeNull()
     })
   })
+
+  describe('drafts (HT-68, spec §6)', () => {
+    /** Insert a real `assistants` row directly — appendDraft's author_assistant_id FKs to it. */
+    async function createTestAssistant(db: Db, name = 'Draft Bot'): Promise<string> {
+      const [row] = await db.query<{ id: string }>(
+        `INSERT INTO assistants (name, module, token_hash) VALUES ($1, 'draft-reply', 'hash') RETURNING id`,
+        [name],
+      )
+      return row.id
+    }
+
+    /** Insert a real `agents` row directly — resolveDraft's approved_by_agent_id FKs to it. */
+    async function createTestAgent(db: Db, email = 'agent@example.test'): Promise<string> {
+      const [row] = await db.query<{ id: string }>(
+        `INSERT INTO agents (email, name, role, status) VALUES ($1, 'Agent', 'agent', 'active') RETURNING id`,
+        [email],
+      )
+      return row.id
+    }
+
+    const testEnvelope: SendEnvelope = {
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      references: ['<ht.k1.c1.t2.sig@mail.example.test>'],
+    }
+
+    it('appendDraft inserts an outbound, awaiting_review, assistant-authored thread with NULL delivery_status, message_id, and send_envelope', async () => {
+      const { store, db } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const assistantId = await createTestAssistant(db)
+
+      const result = await store.appendDraft(conversationId, {
+        assistantId,
+        bodyText: 'Here is a suggested reply.',
+        idempotencyKey: 'draft-key-1',
+      })
+
+      expect(result).toMatchObject({ ok: true, created: true })
+      if (!result.ok) throw new Error('unreachable')
+      expect(result.thread).toMatchObject({
+        direction: 'outbound',
+        authorKind: 'assistant',
+        authorAssistantId: assistantId,
+        authorAgentId: null,
+        draftStatus: 'awaiting_review',
+        deliveryStatus: null,
+        messageId: null,
+        sendEnvelope: null,
+        bodyText: 'Here is a suggested reply.',
+        approvedByAgentId: null,
+        draftResolvedAt: null,
+        draftEdited: false,
+      })
+    })
+
+    it('appendDraft causes NO reopen and NO updated_at bump on a closed conversation — stronger than a note, which still bumps', async () => {
+      const { store, db } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const assistantId = await createTestAssistant(db)
+      await setStatus(db, conversationId, 'closed')
+      await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+
+      const draftResult = await store.appendDraft(conversationId, {
+        assistantId,
+        bodyText: 'Draft on a closed conversation.',
+        idempotencyKey: 'draft-key-closed',
+      })
+      expect(draftResult).toMatchObject({ ok: true, created: true })
+
+      const afterDraft = await store.getConversation(conversationId)
+      // Still closed — a draft is not activity (spec §6, stronger than a note).
+      expect(afterDraft?.status).toBe('closed')
+      expect(afterDraft?.updatedAt.getTime()).toBe(new Date('2020-01-01T00:00:00.000Z').getTime())
+
+      // A NOTE on the SAME fixture still reopens-exempt but DOES bump —
+      // regression-guard that the draft carve-out didn't accidentally widen
+      // to notes too (existing behavior, byte-identical).
+      const noteResult = await store.appendThread(conversationId, {
+        direction: 'note',
+        messageId: null,
+        fromAddress: 'support@example.test',
+        bodyText: 'A regular note.',
+      })
+      expect(noteResult).toMatchObject({ ok: true, created: true })
+      const afterNote = await store.getConversation(conversationId)
+      expect(afterNote?.status).toBe('closed')
+      expect(afterNote?.updatedAt.getTime()).toBeGreaterThan(
+        new Date('2020-01-01T00:00:00.000Z').getTime(),
+      )
+    })
+
+    it('appendDraft causes NO reopen on a SPAM conversation (an ordinary outbound send, by contrast, DOES reopen)', async () => {
+      const { store, db } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const assistantId = await createTestAssistant(db)
+      await setStatus(db, conversationId, 'spam')
+
+      await store.appendDraft(conversationId, {
+        assistantId,
+        bodyText: 'Draft on a spam conversation.',
+        idempotencyKey: 'draft-key-spam',
+      })
+      expect((await store.getConversation(conversationId))?.status).toBe('spam')
+
+      // Regression-guard: an ordinary outbound append to the SAME
+      // still-spam conversation still reopens it, exactly as before HT-68.
+      await store.appendThread(
+        conversationId,
+        newThread({ messageId: '<reopen@mail.example.test>' }),
+      )
+      expect((await store.getConversation(conversationId))?.status).toBe('active')
+    })
+
+    it('appendDraft prefixes the idempotency key with draft: so it never collides with a reply idempotency key on the same conversation', async () => {
+      const { store, db } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const assistantId = await createTestAssistant(db)
+
+      const draftResult = await store.appendDraft(conversationId, {
+        assistantId,
+        bodyText: 'A draft.',
+        idempotencyKey: 'shared-key',
+      })
+      const replyResult = await store.appendThread(
+        conversationId,
+        newThread({ messageId: '<reply@mail.example.test>', idempotencyKey: 'shared-key' }),
+      )
+
+      expect(draftResult).toMatchObject({ ok: true, created: true })
+      expect(replyResult).toMatchObject({ ok: true, created: true })
+      if (!draftResult.ok || !replyResult.ok) throw new Error('unreachable')
+      // Two DISTINCT rows, not a get-or-insert collision.
+      expect(draftResult.threadId).not.toBe(replyResult.threadId)
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.threads.map((t) => t.idempotencyKey)).toEqual(
+        expect.arrayContaining(['draft:shared-key', 'shared-key']),
+      )
+    })
+
+    describe('listAwaitingDrafts', () => {
+      it('returns awaiting_review drafts newest first, and excludes a draft on a soft-deleted conversation', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+
+        const { conversationId: c1 } = await store.createConversation(newConversation())
+        const { conversationId: c2 } = await store.createConversation(
+          newConversation({ customerEmail: 'other@example.test' }),
+        )
+        const { conversationId: c3 } = await store.createConversation(
+          newConversation({ customerEmail: 'deleted@example.test' }),
+        )
+
+        const d1 = await store.appendDraft(c1, {
+          assistantId,
+          bodyText: 'first',
+          idempotencyKey: 'd1',
+        })
+        const d2 = await store.appendDraft(c2, {
+          assistantId,
+          bodyText: 'second',
+          idempotencyKey: 'd2',
+        })
+        const d3 = await store.appendDraft(c3, {
+          assistantId,
+          bodyText: 'on a soon-to-be-deleted conversation',
+          idempotencyKey: 'd3',
+        })
+        if (!d1.ok || !d2.ok || !d3.ok) throw new Error('unreachable')
+
+        // Distinct created_at so newest-first ordering is unambiguous.
+        await db.query('UPDATE threads SET created_at = $1 WHERE id = $2', [
+          new Date('2024-01-01T00:00:00.000Z'),
+          d1.threadId,
+        ])
+        await db.query('UPDATE threads SET created_at = $1 WHERE id = $2', [
+          new Date('2024-01-02T00:00:00.000Z'),
+          d2.threadId,
+        ])
+        await db.query('UPDATE threads SET created_at = $1 WHERE id = $2', [
+          new Date('2024-01-03T00:00:00.000Z'),
+          d3.threadId,
+        ])
+        await store.deleteConversation(c3)
+
+        const drafts = await store.listAwaitingDrafts({ limit: 10 })
+        expect(drafts.map((t) => t.id)).toEqual([d2.threadId, d1.threadId])
+      })
+
+      it('keyset-paginates with cursor (createdAt, id)', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const ids: string[] = []
+        for (let i = 0; i < 3; i++) {
+          const result = await store.appendDraft(conversationId, {
+            assistantId,
+            bodyText: `draft ${i}`,
+            idempotencyKey: `d${i}`,
+          })
+          if (!result.ok) throw new Error('unreachable')
+          await db.query('UPDATE threads SET created_at = $1 WHERE id = $2', [
+            new Date(2024, 0, i + 1),
+            result.threadId,
+          ])
+          ids.push(result.threadId)
+        }
+
+        const firstPage = await store.listAwaitingDrafts({ limit: 2 })
+        expect(firstPage.map((t) => t.id)).toEqual([ids[2], ids[1]])
+
+        const secondPage = await store.listAwaitingDrafts({
+          limit: 2,
+          cursor: { createdAt: firstPage[1].createdAt, id: firstPage[1].id },
+        })
+        expect(secondPage.map((t) => t.id)).toEqual([ids[0]])
+      })
+    })
+
+    describe('resolveDraft', () => {
+      it('approve: writes message_id, send_envelope, draft_status=approved, delivery_status=pending, and audit fields in one write', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Original draft body.',
+          idempotencyKey: 'approve-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        const resolved = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+        })
+
+        expect(resolved).toMatchObject({
+          id: draft.threadId,
+          direction: 'outbound',
+          draftStatus: 'approved',
+          deliveryStatus: 'pending',
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          approvedByAgentId: agentId,
+          draftEdited: false,
+          bodyText: 'Original draft body.',
+        })
+        expect(resolved?.draftResolvedAt).toBeInstanceOf(Date)
+      })
+
+      it('approve with edits: replaces the body and records draft_edited = true', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Original draft body.',
+          idempotencyKey: 'approve-edit-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        const resolved = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          edit: { bodyText: 'Edited by the Agent before sending.' },
+        })
+
+        expect(resolved).toMatchObject({
+          draftEdited: true,
+          bodyText: 'Edited by the Agent before sending.',
+        })
+      })
+
+      it('discard: sets draft_status=discarded and audit fields, and delivery_status stays NULL', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Draft to discard.',
+          idempotencyKey: 'discard-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        const resolved = await store.resolveDraft({
+          action: 'discard',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+        })
+
+        expect(resolved).toMatchObject({
+          draftStatus: 'discarded',
+          deliveryStatus: null,
+          approvedByAgentId: agentId,
+        })
+        expect(resolved?.draftResolvedAt).toBeInstanceOf(Date)
+      })
+
+      it('returns null for an unknown threadId, a non-draft thread, or a draft already resolved', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId, threadId: inboundId } = await store.createConversation(
+          newConversation(),
+        )
+
+        expect(
+          await store.resolveDraft({
+            action: 'discard',
+            threadId: RANDOM_UUID,
+            resolvedByAgentId: agentId,
+          }),
+        ).toBeNull()
+
+        // A non-draft (inbound) thread.
+        expect(
+          await store.resolveDraft({
+            action: 'discard',
+            threadId: inboundId,
+            resolvedByAgentId: agentId,
+          }),
+        ).toBeNull()
+
+        // A draft resolved TWICE — the second call finds no awaiting_review row.
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Only resolvable once.',
+          idempotencyKey: 'once-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+        await store.resolveDraft({
+          action: 'discard',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+        })
+        expect(
+          await store.resolveDraft({
+            action: 'discard',
+            threadId: draft.threadId,
+            resolvedByAgentId: agentId,
+          }),
+        ).toBeNull()
+      })
+
+      it('a draft already APPROVED cannot be discarded, or approved again — both find no awaiting_review row', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Approved, then someone tries to resolve it again.',
+          idempotencyKey: 'double-resolve-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        const approved = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+        })
+        expect(approved?.draftStatus).toBe('approved')
+
+        // approve-then-discard: the row is no longer awaiting_review, so
+        // discard is a no-op — it must NOT flip an already-approved,
+        // already-delivery-pending row to 'discarded' out from under the
+        // delivery worker.
+        const discardAfterApprove = await store.resolveDraft({
+          action: 'discard',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+        })
+        expect(discardAfterApprove).toBeNull()
+
+        // approve-twice: a second approve must NOT re-mint a message_id/
+        // envelope over the already-approved row.
+        const approveAgain = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.SECOND-ATTEMPT@mail.example.test>',
+          sendEnvelope: { ...testEnvelope, subject: 'A different subject' },
+        })
+        expect(approveAgain).toBeNull()
+
+        // The row is untouched by either failed resolution attempt — still
+        // approved, still carrying the ORIGINAL message_id/envelope/subject.
+        const unchanged = (await store.getConversation(conversationId))?.threads.find(
+          (t) => t.id === draft.threadId,
+        )
+        expect(unchanged).toMatchObject({
+          draftStatus: 'approved',
+          deliveryStatus: 'pending',
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+        })
+      })
+
+      it('an APPROVED draft flows through listDeliverableThreads/claimThreadForDelivery exactly like an ordinary reply — the delivery worker sees it only after approval', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Will be approved.',
+          idempotencyKey: 'flows-through-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        // While awaiting_review, invisible to the delivery worker (delivery_status is NULL).
+        expect(await store.listDeliverableThreads({ staleAfterMs: 0, batchSize: 50 })).toEqual([])
+
+        await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+        })
+        // Age it so it's past the staleness threshold for a 'pending' row.
+        await db.query('UPDATE threads SET created_at = $1 WHERE id = $2', [
+          new Date('2020-01-01T00:00:00.000Z'),
+          draft.threadId,
+        ])
+
+        const eligible = await store.listDeliverableThreads({ staleAfterMs: 0, batchSize: 50 })
+        expect(eligible.map((t) => t.id)).toEqual([draft.threadId])
+
+        const claimed = await store.claimThreadForDelivery(draft.threadId, 60_000)
+        expect(claimed?.id).toBe(draft.threadId)
+      })
+    })
+  })
 })

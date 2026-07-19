@@ -949,6 +949,312 @@ ALTER TABLE inbound_deliveries ADD COLUMN forged_token_count integer NOT NULL DE
 `
 
 /**
+ * Migration 020 — `assistants`, the AI-actor principal table (HT-68;
+ * specs/plugins/substrate-v1.md §3 — the module substrate's assistant
+ * principals; "module" here means an out-of-process Helpthread extension,
+ * never the legal "plugin exception" phrase CHARTER.md §7 uses).
+ *
+ * One row per Assistant — an AI actor (never a human; CLAUDE.md's
+ * Agents-vs-Assistants vocabulary rule) that authenticates with a
+ * `ht_asst_<id>_<secret>` bearer token (spec §3) and may read conversations
+ * and post drafts/notes (wave 2/3; this migration is schema only). Created
+ * MUST precede migration 021's `threads.author_assistant_id` FK — that
+ * ordering, not the spec's own section numbering, is why this table is
+ * migration 020 rather than folded into the "actor model" migration that
+ * follows it.
+ *
+ * - `module` (spec §1's additive-forward rule): the slug of the module
+ *   operating this Assistant, attributing every row to its owner from day
+ *   one so a future `module_installs` bundle references existing rows
+ *   instead of backfilling identity. Free text today — no registry exists
+ *   yet to validate it against.
+ * - `token_hash` — the SHA-256 digest of the token's secret part, compared
+ *   constant-time at verification (spec §3). This migration only reserves
+ *   the column; hashing and verification are wave 3's concern (this
+ *   ticket's boundary excludes auth wiring), matching migration 010's
+ *   "reserve the column, a later ticket owns the crypto" precedent.
+ * - `status` — `active`/`disabled`, the same two-state closed set
+ *   `agent_auth_identities` has no equivalent for for Agents (Agents use
+ *   `invited`/`active`/`disabled`, migration 018) — an Assistant has no
+ *   invite flow, so `active` is simply the creation default.
+ * - `created_by_agent_id` is nullable with `ON DELETE SET NULL`, not `NOT
+ *   NULL`/`CASCADE`: matching `conversations.assignee_agent_id`'s "the
+ *   record outlives the pointer" policy (migration 018) — deleting the
+ *   admin who created an Assistant must not delete or orphan the Assistant
+ *   itself, since it may still be actively authenticating.
+ */
+const MIGRATION_020_ASSISTANTS = `
+CREATE TABLE assistants (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  module text NOT NULL,
+  token_hash text NOT NULL,
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
+  created_by_agent_id uuid REFERENCES agents(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+`
+
+/**
+ * Migration 021 — the `threads` actor model + draft lifecycle (HT-68;
+ * specs/plugins/substrate-v1.md §2). Closes the gap that spec names
+ * explicitly: CHARTER.md §4 promises an authoring-actor-kind + draft-before-
+ * send schema shape "day one," but the shipped schema (migrations 001/007)
+ * only ever had `direction IN ('inbound','outbound','note')`. This migration
+ * is that promise, kept late but in full — the contradiction and its
+ * resolution are recorded here deliberately (CLAUDE.md's coding-discipline
+ * commandment: name the contradiction, don't code through it).
+ *
+ * ## `author_kind` + identity (spec §2, backfill-before-constraint order)
+ *
+ * Same discipline as migration 004/005's own backfill-before-constraint
+ * ordering: `author_kind` is added nullable, backfilled (`inbound` →
+ * `customer`; `outbound`/`note` → `agent` — every pre-substrate row was
+ * authored by a human, since Assistants didn't exist before this
+ * migration), THEN set `NOT NULL` and CHECK-constrained. NO column
+ * `DEFAULT` is added: every application insert
+ * (`src/store/conversations.ts`'s `insertThread`) ALWAYS computes and
+ * supplies `author_kind` explicitly (spec §2: "every insert path supplies
+ * it in the same change"), so a default would only ever mask a hand-written
+ * INSERT that forgot the column — exactly the kind of silent wrong-value
+ * risk this schema's CHECK-heavy convention exists to avoid, not paper
+ * over. (An earlier revision of this migration added `DEFAULT 'agent'` for
+ * test-fixture convenience; reviewed and reverted — a masking default is
+ * strictly worse than fixing the ~handful of raw-SQL fixtures that needed
+ * an explicit value, see `src/db/migrate.test.ts`'s `threads` inserts.)
+ *
+ * `threads_author_kind_direction_check` is the real invariant a default
+ * would have masked: `(direction = 'inbound') = (author_kind = 'customer')`
+ * — a biconditional, both sides always boolean (never NULL: `direction` is
+ * `NOT NULL` since migration 001, `author_kind` is `NOT NULL` as of the
+ * statement just above). Inbound mail is ALWAYS customer-authored, and only
+ * inbound mail is — outbound/note rows are free to be `'agent'` or
+ * `'assistant'`, but never `'customer'`. This is stronger than the backfill
+ * CASE alone: the backfill sets the right value once; this CHECK keeps it
+ * right forever, rejecting e.g. an inbound row mislabeled `'agent'` or an
+ * outbound row mislabeled `'customer'` at insert/update time, not just at
+ * migration time.
+ *
+ * `author_agent_id`/`author_assistant_id` need no backfill: `NULL` is the
+ * correct, honest value for every backfilled row and every future
+ * service-token caller with no acting-agent header (spec §3: "a
+ * service-token caller without the header still writes author_kind='agent'
+ * with NULL identity — the pre-HT-54 posture, preserved rather than
+ * broken"). `threads_author_identity_check` makes the spec's three-way
+ * consistency rule unrepresentable-otherwise: a `customer` row carries
+ * neither id; an `assistant` row carries `author_assistant_id` and never
+ * `author_agent_id`; an `agent` row may carry `author_agent_id` (or not)
+ * and never `author_assistant_id`.
+ *
+ * ## Draft lifecycle (spec §2)
+ *
+ * `draft_status` is nullable — legal only on `direction = 'outbound'`
+ * (`threads_draft_status_outbound_only`, matching the shape of every other
+ * outbound-only column in this schema, e.g. migration 003's `idempotency_
+ * key`) and only from the closed set `awaiting_review`/`approved`/
+ * `discarded` (`threads_draft_status_check`). The audit columns
+ * (`approved_by_agent_id`, `draft_resolved_at`, `draft_edited`) need no
+ * CHECK of their own — they are meaningful only alongside a non-null
+ * `draft_status`, which the store layer (not the schema) is responsible for
+ * only ever setting together; no illegal state results from setting them on
+ * a non-draft row, so no constraint is needed to forbid it.
+ *
+ * ## The delivery/draft CHECK replacement — spec §2's exact predicate
+ *
+ * This DROPS migration 007's `threads_delivery_status_by_direction` (which
+ * still carries the `note` arm — reproduced verbatim below, not narrowed)
+ * and replaces it with the spec's two-CHECK predicate, copied here exactly
+ * as spec §2 shows it, not paraphrased:
+ *
+ * 1. `threads_draft_status_outbound_only` — already listed above, but doing
+ *    real work here too: without it, the second CHECK's outbound branches
+ *    say nothing about a `note` row carrying a stray `draft_status`, since
+ *    the first arm of the second CHECK (`direction IN ('inbound','note')
+ *    AND delivery_status IS NULL`) never inspects `draft_status` at all.
+ * 2. `threads_delivery_draft_status_check` — the illegal-state-proof rule
+ *    spec §2 requires: an unapproved draft (`awaiting_review`/`discarded`)
+ *    MUST have `delivery_status IS NULL` (invisible to the delivery worker,
+ *    which scopes every query to `delivery_status IN (...)`), and only
+ *    `draft_status IS NULL` (an ordinary send/note — the pre-substrate
+ *    shape) or `'approved'` may carry a real delivery status.
+ *
+ *    **Deviation from spec §2's literal SQL, found by this migration's own
+ *    tests**: the spec's predicate text omits explicit `IS NOT NULL` guards
+ *    on both `IN (...)` membership tests over nullable columns — the
+ *    second arm's `draft_status IN ('awaiting_review','discarded')` and the
+ *    third arm's `delivery_status IN ('pending','sent','failed')`. Copied
+ *    verbatim, an ORDINARY outbound row (`draft_status IS NULL`,
+ *    `delivery_status IS NULL` — never a legal state; a plain send always
+ *    carries a delivery status) slipped through: `NULL IN (...)` evaluates
+ *    to SQL NULL, not FALSE, so both the second and third arm evaluated to
+ *    NULL rather than FALSE, and a CHECK treats NULL as a PASS. This is the
+ *    EXACT trap migration 002's own doc comment names ("a CHECK constraint
+ *    passes on TRUE *or* NULL... the guard forces that case to FALSE so it
+ *    is rejected") — applied here, with both guards restored, rather than
+ *    reproducing the bug spec §2's prose missed.
+ *
+ * `listDeliverableThreads`/`claimThreadForDelivery` (`src/store/
+ * conversations.ts`) additionally gain an explicit `draft_status IS
+ * DISTINCT FROM 'awaiting_review'` guard in the same change — belt on top
+ * of this CHECK's braces, per spec §2's closing paragraph.
+ *
+ * ## The partial index
+ *
+ * `threads_awaiting_review_idx` serves `ConversationStore.listAwaitingDrafts`
+ * (`GET /api/v1/drafts?status=awaiting_review`, spec §6) — a real,
+ * shipped-in-this-change query, not speculative head-room, so it is added
+ * alongside the column it scans rather than deferred (matching migration
+ * 013's `queue_jobs_ready_idx` precedent: an index ships with the query
+ * that needs it, not before).
+ */
+const MIGRATION_021_THREADS_ACTOR_MODEL = `
+ALTER TABLE threads ADD COLUMN author_kind text;
+UPDATE threads SET author_kind = CASE WHEN direction = 'inbound' THEN 'customer' ELSE 'agent' END;
+ALTER TABLE threads ALTER COLUMN author_kind SET NOT NULL;
+ALTER TABLE threads ADD CONSTRAINT threads_author_kind_check CHECK (author_kind IN ('customer','agent','assistant'));
+ALTER TABLE threads ADD CONSTRAINT threads_author_kind_direction_check CHECK ((direction = 'inbound') = (author_kind = 'customer'));
+ALTER TABLE threads ADD COLUMN author_agent_id uuid REFERENCES agents(id);
+ALTER TABLE threads ADD COLUMN author_assistant_id uuid REFERENCES assistants(id);
+ALTER TABLE threads ADD CONSTRAINT threads_author_identity_check CHECK (
+  (author_kind = 'customer' AND author_agent_id IS NULL AND author_assistant_id IS NULL)
+  OR (author_kind = 'assistant' AND author_assistant_id IS NOT NULL AND author_agent_id IS NULL)
+  OR (author_kind = 'agent' AND author_assistant_id IS NULL)
+);
+ALTER TABLE threads ADD COLUMN draft_status text;
+ALTER TABLE threads ADD CONSTRAINT threads_draft_status_check CHECK (draft_status IS NULL OR draft_status IN ('awaiting_review','approved','discarded'));
+ALTER TABLE threads ADD CONSTRAINT threads_draft_status_outbound_only CHECK (draft_status IS NULL OR direction = 'outbound');
+ALTER TABLE threads ADD COLUMN approved_by_agent_id uuid REFERENCES agents(id);
+ALTER TABLE threads ADD COLUMN draft_resolved_at timestamptz;
+ALTER TABLE threads ADD COLUMN draft_edited boolean NOT NULL DEFAULT false;
+ALTER TABLE threads DROP CONSTRAINT threads_delivery_status_by_direction;
+ALTER TABLE threads ADD CONSTRAINT threads_delivery_draft_status_check CHECK (
+  (direction IN ('inbound','note') AND delivery_status IS NULL)
+  OR (direction = 'outbound'
+      AND draft_status IS NOT NULL AND draft_status IN ('awaiting_review','discarded')
+      AND delivery_status IS NULL)
+  OR (direction = 'outbound'
+      AND (draft_status IS NULL OR draft_status = 'approved')
+      AND delivery_status IS NOT NULL AND delivery_status IN ('pending','sent','failed'))
+);
+CREATE INDEX threads_awaiting_review_idx ON threads (created_at DESC, id DESC) WHERE draft_status = 'awaiting_review';
+`
+
+/**
+ * Migration 022 — `webhook_endpoints` (HT-68; specs/plugins/substrate-v1.md
+ * §5). Schema only — registration/admin API, delivery, and SSRF-pinning are
+ * wave 2/3.
+ *
+ * - `url` carries a cheap defense-in-depth CHECK (`LIKE 'https://%'`)
+ *   mirroring spec §5's "https only" posture at the one layer where it costs
+ *   nothing to enforce; it is NOT a substitute for the delivery handler's
+ *   resolve-then-connect SSRF pinning (spec §5's closing bullet), which
+ *   needs a live DNS resolution this migration cannot perform.
+ * - `secret_ciphertext` is `bytea`, the same shape `mailbox_oauth_tokens`
+ *   (migration 010) reserves for its own secrets — this migration reserves
+ *   the column; `src/store/token-crypto.ts`'s existing AES-256-GCM envelope
+ *   (iv || authTag || ciphertext, one flat `Uint8Array`) is what the store
+ *   layer (`src/store/webhook-endpoints.ts`) writes into it, the same
+ *   module `mailbox-tokens.ts` already depends on — no new crypto code, a
+ *   second caller of the existing one.
+ * - `events` is `jsonb NOT NULL DEFAULT '[]'`, the same "caller-serialized
+ *   JSON, persisted verbatim" convention `conversations.tags` (migration
+ *   006) uses — a subset of spec §4's event-type list. Whether an empty
+ *   array means "no events" or "all events" is an API-layer interpretation
+ *   (spec §5: "or all") this migration takes no position on; the column
+ *   only stores whatever the caller serializes.
+ * - `module text NULL` (spec §1's additive-forward rule, spec §5): the
+ *   attribution slug mirroring `assistants.module` above — nullable because
+ *   an operator-registered endpoint (not tied to any installed module) is a
+ *   legal, unattributed row.
+ * - `status` starts `'active'`; `'auto_disabled'` is written only by the
+ *   delivery handler's failure path (wave 3) at the consecutive-failure
+ *   threshold (spec §5, spec §9 decision 2: 20, admin re-enable);
+ *   `'disabled'` is an operator's own deliberate choice, kept as a distinct
+ *   value so an auto-disable can never masquerade as (or be silently
+ *   overwritten by) a manual one.
+ * - `consecutive_failures` is the counter the store layer's
+ *   `recordDeliveryFailure`/`recordDeliverySuccess` (`src/store/
+ *   webhook-endpoints.ts`) increments/resets — no CHECK on it beyond the
+ *   `integer` type; the auto-disable threshold is application logic (the
+ *   same "policy lives in the consuming code, not a schema CHECK"
+ *   convention migration 013's doc comment uses for `queue_jobs.max_
+ *   attempts`).
+ */
+const MIGRATION_022_WEBHOOK_ENDPOINTS = `
+CREATE TABLE webhook_endpoints (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  url text NOT NULL CHECK (url LIKE 'https://%'),
+  secret_ciphertext bytea NOT NULL,
+  events jsonb NOT NULL DEFAULT '[]'::jsonb,
+  module text,
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled','auto_disabled')),
+  consecutive_failures integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+`
+
+/**
+ * Migration 023 — `event_outbox` (HT-68; specs/plugins/substrate-v1.md §4).
+ * Schema only — emission call sites (every state change §4's vocabulary
+ * table lists) and the drain-to-queue step are wave 2/3; this migration
+ * only reserves where a transactionally-written event row lives.
+ *
+ * One row per domain event, written in the SAME transaction as the state
+ * change it describes (spec §4: "an event never fires for a change that
+ * rolled back, and no committed change silently drops its event") — the
+ * transactional-outbox pattern, the only reliable shape serverless allows.
+ * `event_id` IS the envelope's `eventId` (spec §4's JSON shape) — the
+ * dedupe key carried all the way to the webhook consumer, so the PK doubles
+ * as that stable identity rather than a separate surrogate id existing
+ * alongside it.
+ *
+ * `conversation_id` is `NOT NULL REFERENCES conversations(id) ON DELETE
+ * CASCADE`: every event type in spec §4's vocabulary table carries a
+ * `conversationId` in its envelope — there is no event shape this schema
+ * needs to represent without one. `ON DELETE CASCADE` matches migration
+ * 001's `threads.conversation_id` precedent, though in practice conversations
+ * are only ever soft-deleted (`status = 'deleted'`), never hard-deleted, so
+ * this cascade is dormant defense-in-depth rather than a live path.
+ *
+ * ## Claim/drain bookkeeping — deliberately thinner than `queue_jobs`
+ *
+ * Unlike migration 013's `queue_jobs` (which IS the retry queue), this
+ * table is only the DURABLE STAGING AREA between "the state change
+ * committed" and "the drain step handed this off to the real queue" (spec
+ * §4: "a drain step... turns outbox rows into QueueProvider deliveries").
+ * Once a row is handed to `queue_jobs` (keyed by `dedupe_key = event_id`,
+ * so a double-enqueue from a crashed drain is harmless per migration 013's
+ * own dedupe precedent), ALL retry/backoff/dead-letter bookkeeping for
+ * actually delivering the event lives there, not here — this table needs no
+ * `attempts`/`last_error`/`dead_lettered_at` columns of its own.
+ *
+ * What it DOES need, mirroring `queue_jobs`'s lease shape narrowly: `locked_
+ * until`, so two overlapping drain invocations (an overlapping cron tick, a
+ * retry racing a slow run — the same scenario migration 013's doc comment
+ * names) don't both read and enqueue the same undispatched batch; and
+ * `dispatched_at`, the terminal marker (`NULL` = still pending drain,
+ * non-`NULL` = already hand-off-to-queue, never revisited). `event_outbox_
+ * ready_idx` is `(occurred_at) WHERE dispatched_at IS NULL`, the same
+ * "exclude terminal rows from the hot-path index" shape as `queue_jobs_
+ * ready_idx`.
+ */
+const MIGRATION_023_EVENT_OUTBOX = `
+CREATE TABLE event_outbox (
+  event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  type text NOT NULL,
+  occurred_at timestamptz NOT NULL DEFAULT now(),
+  conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  data jsonb NOT NULL DEFAULT '{}'::jsonb,
+  dispatched_at timestamptz,
+  locked_until timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX event_outbox_ready_idx ON event_outbox (occurred_at) WHERE dispatched_at IS NULL;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1044,6 +1350,26 @@ const MIGRATIONS: Migration[] = [
     id: 19,
     name: 'inbound_delivery_forged_tokens',
     sql: MIGRATION_019_INBOUND_DELIVERY_FORGED_TOKENS,
+  },
+  {
+    id: 20,
+    name: 'assistants',
+    sql: MIGRATION_020_ASSISTANTS,
+  },
+  {
+    id: 21,
+    name: 'threads_actor_model',
+    sql: MIGRATION_021_THREADS_ACTOR_MODEL,
+  },
+  {
+    id: 22,
+    name: 'webhook_endpoints',
+    sql: MIGRATION_022_WEBHOOK_ENDPOINTS,
+  },
+  {
+    id: 23,
+    name: 'event_outbox',
+    sql: MIGRATION_023_EVENT_OUTBOX,
   },
 ]
 
