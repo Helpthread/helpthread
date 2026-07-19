@@ -565,6 +565,27 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
       expect(res.status).toBe(409)
     })
 
+    it('approving a draft on a CLOSED conversation reopens it to active, end to end (Opus review fix)', async () => {
+      const { api, agentStore, store, assistantStore } = await freshApi()
+      const agent = await createActiveAgent(agentStore)
+      const { token } = await createActiveAssistant(assistantStore)
+      const { conversationId, threadId } = await seedDraft(api, store, token)
+      await api(
+        req('PATCH', `/api/v1/conversations/${conversationId}`, {
+          agentId: agent.id,
+          body: { status: 'closed' },
+        }),
+      )
+
+      const res = await api(
+        req('POST', `/api/v1/drafts/${threadId}/approve`, { agentId: agent.id }),
+      )
+      expect(res.status).toBe(200)
+
+      const conversation = await store.getConversation(conversationId, { includeDeleted: false })
+      expect(conversation?.status).toBe('active')
+    })
+
     it('502s when the provider rejects the send; the draft stays approved but delivery fails', async () => {
       const { api, agentStore, store, assistantStore } = await freshApi({
         sender: createThrowingSender(),

@@ -949,6 +949,24 @@ describe('createInboxApi', () => {
       expect(sent).toHaveLength(0)
     })
 
+    it('an Idempotency-Key starting with the reserved draft: prefix is 400 validation_failed (HT-70 review fix — a raw reply key could otherwise collide with an engine-owned draft key of the same name)', async () => {
+      const { store, api, sent } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        replyPost(
+          `/api/v1/conversations/${conversationId}/replies`,
+          { text: 'Hi' },
+          { idempotencyKey: 'draft:abc' },
+        ),
+      )
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+      expect(sent).toHaveLength(0)
+    })
+
     it('leading/trailing whitespace in Idempotency-Key is trimmed before comparison — a whitespace-padded key and its trimmed twin replay the SAME send (one send only)', async () => {
       const { store, api, sent } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())

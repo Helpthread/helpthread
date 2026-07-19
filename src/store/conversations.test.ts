@@ -1466,6 +1466,86 @@ describe('createConversationStore', () => {
         expect(resolved?.draftResolvedAt).toBeInstanceOf(Date)
       })
 
+      it('approve on a CLOSED conversation reopens it to active (HT-70 review fix — the normal reply-reopen rule applies at approval time)', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Reply to a closed conversation.',
+          idempotencyKey: 'approve-reopen-closed',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+        await setStatus(db, conversationId, 'closed')
+
+        const resolved = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
+        })
+        expect(resolved?.draftStatus).toBe('approved')
+
+        const conversation = await store.getConversation(conversationId)
+        expect(conversation?.status).toBe('active')
+      })
+
+      it('approve on an ACTIVE conversation leaves its status alone', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Reply to an active conversation.',
+          idempotencyKey: 'approve-active-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+        expect((await store.getConversation(conversationId))?.status).toBe('active')
+
+        await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
+        })
+
+        expect((await store.getConversation(conversationId))?.status).toBe('active')
+      })
+
+      it('approve on a PENDING conversation leaves it pending — never auto-set, matching the normal-reply rule', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Reply to a pending conversation.',
+          idempotencyKey: 'approve-pending-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+        await setStatus(db, conversationId, 'pending')
+
+        await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
+        })
+
+        expect((await store.getConversation(conversationId))?.status).toBe('pending')
+      })
+
       it('approve (HT-70) also persists in_reply_to, derived by the caller at approval time — StoredThread.inReplyTo is what attemptDeliveryOfClaimedThread reads, never sendEnvelope', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)

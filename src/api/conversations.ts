@@ -419,6 +419,24 @@ export async function handleReply(
       `Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters.`,
     )
   }
+  // HT-70 review fix (Opus): a reply's idempotency key is stored RAW — unlike
+  // a draft's, which the engine itself prefixes (`ConversationStore.appendDraft`
+  // stores it as `` `draft:${key}` ``, src/store/conversations.ts). Without
+  // this check, a caller-supplied reply key literally spelled e.g. `draft:abc`
+  // would land in the SAME `(conversation_id, idempotency_key)` row a draft's
+  // engine-owned `draft:abc` key would use — the two sub-namespaces are
+  // disjoint only because BOTH halves hold: the engine never lets a draft key
+  // escape its `draft:` prefix, AND a reply key is refused if it tries to
+  // enter that prefix itself. Retro-prefixing reply keys instead was rejected
+  // (a stored-raw key in production would lose idempotency continuity for
+  // every reply already in flight).
+  if (idempotencyKey.startsWith('draft:')) {
+    return apiError(
+      400,
+      'validation_failed',
+      "Idempotency-Key must not start with the reserved prefix 'draft:'.",
+    )
+  }
 
   const parsedBody = await parseJsonBody(request)
   if (!parsedBody.ok) {

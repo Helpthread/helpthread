@@ -91,9 +91,15 @@ function parseDraftBody(raw: unknown): DraftRequestBody | null {
  * resolves this via `authenticateAssistantRequest` before dispatch, and
  * refuses any other credential at the capability gate). `Idempotency-Key`
  * is REQUIRED, stored prefixed `` `draft:${key}` `` by
- * `ConversationStore.appendDraft` (spec §6: shares the
- * `(conversation_id, idempotency_key)` namespace with replies, but can
- * never collide with one). `201` with the created `ThreadView` on success;
+ * `ConversationStore.appendDraft` — sharing the `(conversation_id,
+ * idempotency_key)` namespace with replies. That prefix alone is NOT what
+ * keeps the two sub-namespaces disjoint (a reply key is stored raw, so a
+ * caller-supplied reply key literally spelled `draft:abc` would otherwise
+ * collide with an engine-owned draft key of the same name) — the actual
+ * guarantee is the PAIR: this engine-owned `draft:` prefix, plus
+ * `handleReply` (`src/api/conversations.ts`) rejecting any caller-supplied
+ * reply `Idempotency-Key` that itself starts with `draft:`. `201` with the
+ * created `ThreadView` on success;
  * `404 not_found` for a missing or soft-deleted conversation
  * (indistinguishable, per §4d); `400 validation_failed` on a missing/
  * over-length `Idempotency-Key` or an invalid body.

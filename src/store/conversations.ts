@@ -386,10 +386,18 @@ export interface NewDraft {
   /**
    * Caller-supplied dedup key, UNPREFIXED — {@link
    * createConversationStore}'s `appendDraft` stores it as `` `draft:${key}` ``
-   * (spec §6: "the engine stores it prefixed... so the shared
-   * `(conversation_id, idempotency_key)` uniqueness namespace can never
-   * replay a reply as a draft or vice versa"). Required — spec §6 states
-   * `Idempotency-Key` is required on this endpoint.
+   * (spec §6), sharing the `(conversation_id, idempotency_key)` uniqueness
+   * namespace with replies. The prefix alone does not make the two
+   * sub-namespaces disjoint — a reply's key is stored RAW, so a
+   * caller-supplied reply key literally spelled `draft:abc` could otherwise
+   * collide with an engine-minted draft key of the same name. The actual
+   * guarantee is this prefix PLUS `handleReply`
+   * (`src/api/conversations.ts`) rejecting any caller-supplied reply
+   * `Idempotency-Key` that itself starts with `draft:` — see that
+   * rejection's own comment for why reply keys are refused rather than
+   * retro-prefixed (a stored-raw key in production would lose idempotency
+   * continuity). Required — spec §6 states `Idempotency-Key` is required on
+   * this endpoint.
    */
   idempotencyKey: string
 }
@@ -711,7 +719,9 @@ export interface ConversationStore {
    * 'awaiting_review'`, `delivery_status NULL`. Reuses {@link
    * appendThreadInTx}'s not-found/deleted policy and idempotency-key
    * get-or-insert (the caller's key is stored `` `draft:${key}` `` — see
-   * {@link NewDraft.idempotencyKey}), but causes NO reopen and NO
+   * {@link NewDraft.idempotencyKey} for the full disjointness guarantee,
+   * which requires the reply-side rejection too, not this prefix alone),
+   * but causes NO reopen and NO
    * `updated_at` bump on the conversation, even if it is closed or spam
    * (see the module doc's "actor model + draft lifecycle" section) —
    * approval, not draft creation, is what later follows the normal
@@ -1528,6 +1538,21 @@ export function createConversationStore(db: Db): ConversationStore {
         )
         const row = rows[0]
         if (row === undefined) return null
+        // Review fix (Opus, HT-70): "approval on a closed conversation
+        // follows the normal reply-reopen rule at send time" (spec §6's
+        // invariants) — the same closed→active reopen appendThreadInTx
+        // applies to an ordinary reply. Scoped to 'closed' only: 'spam' is
+        // already refused with 409 at the API layer before resolveDraft is
+        // ever called for approve (src/api/drafts.ts's handleApproveDraft),
+        // so it is not a reachable case here; 'pending' deliberately stays
+        // pending either way (never auto-set — see the module doc). Without
+        // this, approving a draft on a closed conversation would send mail
+        // while the conversation stayed closed, diverging from what a
+        // normal reply does.
+        await tx.query(
+          "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1 AND status = 'closed'",
+          [row.conversation_id],
+        )
         await appendOutboxEventInTx(tx, {
           type: 'draft.resolved',
           conversationId: row.conversation_id,
