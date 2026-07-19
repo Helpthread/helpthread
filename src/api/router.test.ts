@@ -328,6 +328,66 @@ describe('matchRoute', () => {
       allow: ['POST'],
     })
   })
+
+  // --- Passkeys (WebAuthn) (HT-75) --------------------------------------------
+
+  it('matches the two pre-session webauthn/step-up minting routes', () => {
+    expect(matchRoute('POST', '/api/v1/auth/webauthn/authentication/options')).toEqual({
+      kind: 'webauthn-authentication-options',
+    })
+    expect(matchRoute('POST', '/api/v1/auth/step-up/password')).toEqual({
+      kind: 'step-up-password',
+    })
+    expect(matchRoute('POST', '/api/v1/auth/step-up/webauthn/options')).toEqual({
+      kind: 'step-up-webauthn-options',
+    })
+    expect(matchRoute('POST', '/api/v1/auth/step-up/webauthn/verify')).toEqual({
+      kind: 'step-up-webauthn-verify',
+    })
+    expect(matchRoute('POST', '/api/v1/auth/webauthn/registration/options')).toEqual({
+      kind: 'webauthn-registration-options',
+    })
+    expect(matchRoute('POST', '/api/v1/auth/webauthn/registration/verify')).toEqual({
+      kind: 'webauthn-registration-verify',
+    })
+  })
+
+  it('matches GET/PATCH/DELETE .../agents/{id}/webauthn-credentials(/{credentialId})', () => {
+    expect(matchRoute('GET', '/api/v1/agents/abc-123/webauthn-credentials')).toEqual({
+      kind: 'agent-webauthn-credentials-list',
+      id: 'abc-123',
+    })
+    expect(matchRoute('PATCH', '/api/v1/agents/abc-123/webauthn-credentials/cred-1')).toEqual({
+      kind: 'agent-webauthn-credential-patch',
+      id: 'abc-123',
+      credentialId: 'cred-1',
+    })
+    expect(matchRoute('DELETE', '/api/v1/agents/abc-123/webauthn-credentials/cred-1')).toEqual({
+      kind: 'agent-webauthn-credential-delete',
+      id: 'abc-123',
+      credentialId: 'cred-1',
+    })
+  })
+
+  it('webauthn-credentials routes never collide with AGENT_ITEM’s bare {id} pattern', () => {
+    // A bare /agents/{id} still resolves as agent-item, not swallowed by the
+    // webauthn-credentials patterns.
+    expect(matchRoute('GET', '/api/v1/agents/abc-123')).toEqual({
+      kind: 'agent-item',
+      id: 'abc-123',
+    })
+  })
+
+  it('wrong methods on the webauthn routes are method-not-allowed, not not-found', () => {
+    expect(matchRoute('GET', '/api/v1/auth/webauthn/authentication/options')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+    expect(matchRoute('POST', '/api/v1/agents/abc-123/webauthn-credentials')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET'],
+    })
+  })
 })
 
 describe('matchGmailPushWebhook', () => {

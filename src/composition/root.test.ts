@@ -255,3 +255,63 @@ describe('buildApp — end-to-end wiring over PGlite', () => {
     expect(body.error.code).toBe('gmail_push_rejected')
   })
 })
+
+describe('buildApp — passkeys (HT-75; specs/auth/passkeys.md §3)', () => {
+  let db: Db
+
+  afterEach(async () => {
+    await db.close()
+  })
+
+  async function buildWithUiBaseUrl(uiBaseUrl: string | undefined) {
+    db = await createPgliteDb()
+    await migrate(db)
+    return buildApp(
+      { ...testConfig(), ...(uiBaseUrl !== undefined ? { uiBaseUrl } : {}) },
+      { db, blobStore: fakeBlobStore() },
+    )
+  }
+
+  async function providerKinds(
+    handler: (request: Request) => Promise<Response>,
+  ): Promise<string[]> {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/auth/providers`, {
+        headers: { Authorization: `Bearer ${API_TOKEN}` },
+      }),
+    )
+    const body = (await res.json()) as { providers: { kind: string }[] }
+    return body.providers.map((p) => p.kind)
+  }
+
+  it('with no uiBaseUrl configured, webauthn is absent: GET /auth/providers omits it, and every webauthn route 404s', async () => {
+    const handler = await buildWithUiBaseUrl(undefined)
+    expect(await providerKinds(handler)).toEqual(['credentials'])
+
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/auth/webauthn/authentication/options`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${API_TOKEN}` },
+      }),
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('with a valid domain-form uiBaseUrl, webauthn is wired: GET /auth/providers includes it', async () => {
+    const handler = await buildWithUiBaseUrl('https://inbox.example.test')
+    expect(await providerKinds(handler)).toEqual(['credentials', 'webauthn'])
+  })
+
+  it('with an IP-literal uiBaseUrl, buildApp does NOT crash — it degrades to webauthn-absent, exactly like an unset uiBaseUrl (a deliberate choice: a passkeys-only misconfiguration must not take down the whole engine)', async () => {
+    const handler = await buildWithUiBaseUrl('http://127.0.0.1:3000')
+    expect(await providerKinds(handler)).toEqual(['credentials'])
+
+    // Every other feature is unaffected — the inbox API still works.
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/conversations`, {
+        headers: { Authorization: `Bearer ${API_TOKEN}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+  })
+})

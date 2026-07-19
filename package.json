@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
+    "@simplewebauthn/server": "^13.3.2",
     "@supabase/supabase-js": "^2.110.6",
     "jose": "^6.2.3",
     "mimetext": "^3.0.28",

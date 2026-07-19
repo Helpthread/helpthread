@@ -25,6 +25,7 @@ const HEALTHY_REPORT: HealthReport = {
   forgedTokens: { deliveriesLast24h: 0, tokensLast24h: 0, alertThreshold: 5 },
   mailboxes: [],
   webhooks: { autoDisabled: [], deliveryFailuresLast24h: 0 },
+  webauthn: { counterRegressionsLast24h: 0 },
 }
 
 /** Build a handler over spy deps; the inbox API spy returns a recognizable 299 so delegation is observable. */

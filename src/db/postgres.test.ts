@@ -310,6 +310,9 @@ describe('createPostgresDb with a schema option', () => {
       'saved_replies',
       'thread_attachments',
       'threads',
+      'webauthn_challenges',
+      'webauthn_credentials',
+      'webauthn_stepup_tokens',
       'webhook_endpoints',
     ])
 

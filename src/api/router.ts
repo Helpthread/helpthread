@@ -150,6 +150,62 @@ const AGENT_INVITE: RouteDef = {
   methods: ['POST'],
 }
 
+// --- Passkeys (WebAuthn) (HT-75; specs/auth/passkeys.md §9) -----------------
+//
+// The two pre-session rows (`authentication/options`, and `/auth/verify`'s
+// existing generic `providerKey: 'webauthn'` dispatch — no new route needed
+// for that one) join agents-and-auth.md §8's bootstrap set. Every other row
+// below is session-required, joining the "header required" set alongside
+// `/agents/*`.
+
+/** `/api/v1/auth/webauthn/authentication/options` — mint a login challenge (spec §6.2, §9), POST only, no acting-Agent header (pre-session). */
+const WEBAUTHN_AUTHENTICATION_OPTIONS: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/webauthn\/authentication\/options$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/auth/step-up/password` — step-up via the acting Agent's own password (spec §5.1, §9), POST only, acting-Agent header REQUIRED. */
+const STEP_UP_PASSWORD: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/step-up\/password$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/auth/step-up/webauthn/options` — mint a step-up challenge against the acting Agent's own credentials (spec §5.1, §9), POST only, acting-Agent header REQUIRED. */
+const STEP_UP_WEBAUTHN_OPTIONS: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/step-up\/webauthn\/options$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/auth/step-up/webauthn/verify` — verify the step-up assertion (spec §5.1, §9), POST only, acting-Agent header REQUIRED. Anchored `verify$` so it never collides with `STEP_UP_WEBAUTHN_OPTIONS`'s `options$`. */
+const STEP_UP_WEBAUTHN_VERIFY: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/step-up\/webauthn\/verify$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/auth/webauthn/registration/options` — mint a registration challenge, step-up-gated (spec §5, §6.1, §9), POST only, acting-Agent header REQUIRED. */
+const WEBAUTHN_REGISTRATION_OPTIONS: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/webauthn\/registration\/options$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/auth/webauthn/registration/verify` — verify + insert the new credential, step-up-gated (spec §5, §6.1, §9), POST only, acting-Agent header REQUIRED. */
+const WEBAUTHN_REGISTRATION_VERIFY: RouteDef = {
+  pattern: /^\/api\/v1\/auth\/webauthn\/registration\/verify$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/agents/{id}/webauthn-credentials` — list (self, or admin) — spec §9, GET only. Anchored (`webauthn-credentials$`) so it never collides with `AGENT_ITEM`'s bare `{id}` pattern, mirroring `AGENT_PASSWORD`/`AGENT_INVITE`/`AGENT_MAILBOXES`. */
+const AGENT_WEBAUTHN_CREDENTIALS: RouteDef = {
+  pattern: /^\/api\/v1\/agents\/(?<id>[^/]+)\/webauthn-credentials$/,
+  methods: ['GET'],
+}
+
+/** `/api/v1/agents/{id}/webauthn-credentials/{credentialId}` — rename (PATCH) or revoke (DELETE), self or admin, NOT step-up-gated (spec §5.4, §9). */
+const AGENT_WEBAUTHN_CREDENTIAL_ITEM: RouteDef = {
+  pattern: /^\/api\/v1\/agents\/(?<id>[^/]+)\/webauthn-credentials\/(?<credentialId>[^/]+)$/,
+  methods: ['PATCH', 'DELETE'],
+}
+
 // --- Mailbox access (HT-54 follow-up; spec §3.4/§6) -------------------------
 
 /** `/api/v1/mailboxes` — the full mailbox roster (admin only) — spec §3.4/§6, GET only. */
@@ -274,6 +330,14 @@ const ROUTES: readonly RouteDef[] = [
   AGENT_INVITE,
   MAILBOXES_LIST,
   AGENT_MAILBOXES,
+  WEBAUTHN_AUTHENTICATION_OPTIONS,
+  STEP_UP_PASSWORD,
+  STEP_UP_WEBAUTHN_OPTIONS,
+  STEP_UP_WEBAUTHN_VERIFY,
+  WEBAUTHN_REGISTRATION_OPTIONS,
+  WEBAUTHN_REGISTRATION_VERIFY,
+  AGENT_WEBAUTHN_CREDENTIAL_ITEM,
+  AGENT_WEBAUTHN_CREDENTIALS,
   SAVED_REPLY_ITEM,
   SAVED_REPLIES_LIST,
   AGENT_ITEM,
@@ -315,6 +379,15 @@ export type RouteMatch =
   | { kind: 'mailboxes-list' }
   | { kind: 'agent-mailboxes-get'; id: string }
   | { kind: 'agent-mailboxes-put'; id: string }
+  | { kind: 'webauthn-authentication-options' }
+  | { kind: 'step-up-password' }
+  | { kind: 'step-up-webauthn-options' }
+  | { kind: 'step-up-webauthn-verify' }
+  | { kind: 'webauthn-registration-options' }
+  | { kind: 'webauthn-registration-verify' }
+  | { kind: 'agent-webauthn-credentials-list'; id: string }
+  | { kind: 'agent-webauthn-credential-patch'; id: string; credentialId: string }
+  | { kind: 'agent-webauthn-credential-delete'; id: string; credentialId: string }
   | { kind: 'saved-replies-list'; mailboxId: string }
   | { kind: 'saved-replies-create'; mailboxId: string }
   | { kind: 'saved-reply-patch'; mailboxId: string; replyId: string }
@@ -456,6 +529,35 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     }
     if (route === MAILBOXES_LIST) {
       return { kind: 'mailboxes-list' }
+    }
+    if (route === WEBAUTHN_AUTHENTICATION_OPTIONS) {
+      return { kind: 'webauthn-authentication-options' }
+    }
+    if (route === STEP_UP_PASSWORD) {
+      return { kind: 'step-up-password' }
+    }
+    if (route === STEP_UP_WEBAUTHN_OPTIONS) {
+      return { kind: 'step-up-webauthn-options' }
+    }
+    if (route === STEP_UP_WEBAUTHN_VERIFY) {
+      return { kind: 'step-up-webauthn-verify' }
+    }
+    if (route === WEBAUTHN_REGISTRATION_OPTIONS) {
+      return { kind: 'webauthn-registration-options' }
+    }
+    if (route === WEBAUTHN_REGISTRATION_VERIFY) {
+      return { kind: 'webauthn-registration-verify' }
+    }
+    if (route === AGENT_WEBAUTHN_CREDENTIALS) {
+      const id = match.groups?.id as string
+      return { kind: 'agent-webauthn-credentials-list', id }
+    }
+    if (route === AGENT_WEBAUTHN_CREDENTIAL_ITEM) {
+      const id = match.groups?.id as string
+      const credentialId = match.groups?.credentialId as string
+      return method === 'DELETE'
+        ? { kind: 'agent-webauthn-credential-delete', id, credentialId }
+        : { kind: 'agent-webauthn-credential-patch', id, credentialId }
     }
     if (route === WEBHOOKS_LIST) {
       return method === 'GET' ? { kind: 'webhooks-list' } : { kind: 'webhooks-create' }

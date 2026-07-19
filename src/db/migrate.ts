@@ -1352,6 +1352,101 @@ ALTER TABLE conversations ADD CONSTRAINT conversations_snoozed_until_pending_onl
 `
 
 /**
+ * Migration 026 — passkey (WebAuthn) login (HT-75; specs/auth/passkeys.md
+ * §2). Three new tables; neither `agents` nor `agent_auth_identities`
+ * changes (spec §1: "additive only").
+ *
+ * ## `webauthn_credentials` (spec §2.1)
+ *
+ * A provider-owned credential table, deliberately NOT a row shape inside
+ * `agent_auth_identities` — the spec's own §2.1 argues this at length
+ * (mutable per-use state that would turn a low-write table into a
+ * mixed-traffic one; a public key / counter / transports / backup-flags
+ * shape that doesn't fit `agent_auth_identities`' one `secret_hash` column).
+ * `credential_id` is the WebAuthn authenticator's own id, globally unique
+ * (not scoped to `agent_id`) and NOT NULL — it is the lookup key the
+ * discoverable-credential authentication ceremony resolves an Agent from
+ * BEFORE it knows who is signing in (spec §6.2). `name` is NOT NULL at the
+ * database even though optional on the wire (spec §6.1, §9): the API layer
+ * defaults a blank/omitted name to `"Passkey — {date}"` before the INSERT
+ * ever runs. `sign_count_regression_at` is the HT-44 health-check signal
+ * (spec §8) — a marker column, not an audit trail, overwritten on each new
+ * Tier-2 regression. `ON DELETE CASCADE` mirrors `agent_auth_identities`'
+ * own cascade (migration 018): a deleted Agent's credentials go with them.
+ *
+ * ## `webauthn_challenges` (spec §2.2, §7)
+ *
+ * One row per minted WebAuthn ceremony challenge, keyed by its `nonce`
+ * (the SAME nonce embedded in the signed `htw.` token, `src/auth/
+ * webauthn-token.ts`) — the DB-backed single-use layer a bare signed token
+ * cannot provide on its own (spec §7: "a bare signature+TTL check can be
+ * satisfied twice"). `ceremony` has three values (`registration` /
+ * `authentication` / `step-up`) and is part of BOTH the mint and the
+ * consume statement (`AND ceremony = $2`) — the database-level half of
+ * spec §7's "ceremony discriminator enforced, not just recorded" fix.
+ * `agent_id` is set for registration/step-up (session-bound at mint) and
+ * NULL for authentication (pre-identification, spec §6.2's discoverable
+ * flow) — nullable, `ON DELETE CASCADE` so a deleted Agent's in-flight
+ * challenges go with them same as their credentials.
+ *
+ * ## `webauthn_stepup_tokens` (spec §2.3, §5)
+ *
+ * Backs the enrollment-hardening step-up proof (spec §5): a credential
+ * mints a durable, independent factor, so registering one requires fresh
+ * evidence of an EXISTING factor, not just a live session. Same shape and
+ * discipline as `webauthn_challenges` (nonce PK, `expires_at`,
+ * `consumed_at`) — a separate table because a step-up token proves a
+ * DIFFERENT thing (an existing factor was just demonstrated) than a
+ * WebAuthn ceremony challenge does, even though both reuse the identical
+ * signed-token-plus-DB-row mechanism. `agent_id` is NOT NULL here (unlike
+ * `webauthn_challenges`) — a step-up token always proves step-up for a
+ * SPECIFIC, already-session-identified Agent; there is no anonymous case.
+ *
+ * ## No cron — opportunistic purge on mint (spec §2.2)
+ *
+ * Neither challenge table gets a cleanup job. `WebAuthnStore`'s mint
+ * methods (`src/store/webauthn.ts`) precede every INSERT with `DELETE ...
+ * WHERE expires_at < now()` in the SAME transaction, piggybacking the
+ * cleanup on a write that was happening anyway (spec §2.2's "the cost of
+ * self-cleaning is one indexed DELETE"). The two `_expires` indexes below
+ * are what makes that DELETE cheap.
+ */
+const MIGRATION_026_WEBAUTHN = `
+CREATE TABLE webauthn_credentials (
+  id                        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id                  uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  credential_id             text NOT NULL,
+  public_key                bytea NOT NULL,
+  sign_count                bigint NOT NULL DEFAULT 0,
+  transports                text[] NOT NULL DEFAULT '{}',
+  backup_eligible           boolean NOT NULL,
+  backup_state              boolean NOT NULL,
+  name                      text NOT NULL,
+  sign_count_regression_at  timestamptz,
+  created_at                timestamptz NOT NULL DEFAULT now(),
+  last_used_at              timestamptz,
+  updated_at                timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX webauthn_credentials_credential_id_key ON webauthn_credentials (credential_id);
+CREATE INDEX webauthn_credentials_agent ON webauthn_credentials (agent_id);
+CREATE TABLE webauthn_challenges (
+  nonce        text PRIMARY KEY,
+  ceremony     text NOT NULL CHECK (ceremony IN ('registration', 'authentication', 'step-up')),
+  agent_id     uuid REFERENCES agents(id) ON DELETE CASCADE,
+  expires_at   timestamptz NOT NULL,
+  consumed_at  timestamptz
+);
+CREATE INDEX webauthn_challenges_expires ON webauthn_challenges (expires_at);
+CREATE TABLE webauthn_stepup_tokens (
+  nonce        text PRIMARY KEY,
+  agent_id     uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  expires_at   timestamptz NOT NULL,
+  consumed_at  timestamptz
+);
+CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_at);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1477,6 +1572,11 @@ const MIGRATIONS: Migration[] = [
     id: 25,
     name: 'conversation_snooze',
     sql: MIGRATION_025_CONVERSATION_SNOOZE,
+  },
+  {
+    id: 26,
+    name: 'webauthn',
+    sql: MIGRATION_026_WEBAUTHN,
   },
 ]
 

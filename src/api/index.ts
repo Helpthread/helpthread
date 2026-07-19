@@ -106,6 +106,18 @@ import {
   type SavedRepliesApiDeps,
 } from './saved-replies.js'
 import {
+  handleAuthenticationOptions,
+  handleDeleteCredential,
+  handleListCredentials,
+  handlePatchCredential,
+  handleRegistrationOptions,
+  handleRegistrationVerify,
+  handleStepUpPassword,
+  handleStepUpWebAuthnOptions,
+  handleStepUpWebAuthnVerify,
+  type WebAuthnApiDeps,
+} from './webauthn.js'
+import {
   handleCreateWebhook,
   handleDeleteWebhook,
   handleListWebhooks,
@@ -273,6 +285,16 @@ export interface InboxApiDeps {
    * is required.
    */
   savedReplies: SavedRepliesApiDeps
+  /**
+   * Passkey (WebAuthn) login (HT-75; specs/auth/passkeys.md) — ABSENT BY
+   * DEFAULT, like `openTracking`/`gmailPush`: a deployment with no known UI
+   * origin (`config.uiBaseUrl` unset) has no safe origin to bind WebAuthn
+   * ceremonies to (spec §3), so the composition root simply never
+   * configures this and every route below 404s / `GET /auth/providers`
+   * omits the `webauthn` descriptor — the exact degrade-by-omission shape
+   * `agents.uiBaseUrl` already uses for invites.
+   */
+  webauthn?: WebAuthnApiDeps
 }
 
 /**
@@ -631,6 +653,91 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             request,
             deps.agents,
           )
+
+        // --- Passkeys (WebAuthn) (HT-75; specs/auth/passkeys.md) ------------
+        //
+        // Every route here 404s when deps.webauthn is absent (config.uiBaseUrl
+        // unset) — the same absent-by-default degrade `gmailConnect`/
+        // `gmailDisconnect` above use.
+
+        case 'webauthn-authentication-options':
+          return deps.webauthn !== undefined
+            ? await handleAuthenticationOptions(deps.webauthn)
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'step-up-password':
+          return deps.webauthn !== undefined
+            ? await handleStepUpPassword(
+                await resolveActingAgent(request, deps.agents.store),
+                request,
+                deps.webauthn,
+              )
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'step-up-webauthn-options':
+          return deps.webauthn !== undefined
+            ? await handleStepUpWebAuthnOptions(
+                await resolveActingAgent(request, deps.agents.store),
+                deps.webauthn,
+              )
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'step-up-webauthn-verify':
+          return deps.webauthn !== undefined
+            ? await handleStepUpWebAuthnVerify(
+                await resolveActingAgent(request, deps.agents.store),
+                request,
+                deps.webauthn,
+              )
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'webauthn-registration-options':
+          return deps.webauthn !== undefined
+            ? await handleRegistrationOptions(
+                await resolveActingAgent(request, deps.agents.store),
+                request,
+                deps.webauthn,
+              )
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'webauthn-registration-verify':
+          return deps.webauthn !== undefined
+            ? await handleRegistrationVerify(
+                await resolveActingAgent(request, deps.agents.store),
+                request,
+                deps.webauthn,
+              )
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'agent-webauthn-credentials-list':
+          return deps.webauthn !== undefined
+            ? await handleListCredentials(
+                route.id,
+                await resolveActingAgent(request, deps.agents.store),
+                deps.webauthn,
+              )
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'agent-webauthn-credential-patch':
+          return deps.webauthn !== undefined
+            ? await handlePatchCredential(
+                route.id,
+                route.credentialId,
+                await resolveActingAgent(request, deps.agents.store),
+                request,
+                deps.webauthn,
+              )
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'agent-webauthn-credential-delete':
+          return deps.webauthn !== undefined
+            ? await handleDeleteCredential(
+                route.id,
+                route.credentialId,
+                await resolveActingAgent(request, deps.agents.store),
+                deps.webauthn,
+              )
+            : apiError(404, 'not_found', 'No such route.')
 
         // --- Saved replies & macros (HT-76) ---------------------------------
 

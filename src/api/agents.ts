@@ -54,6 +54,7 @@ import { buildInviteEmail } from '../auth/invite-email.js'
 import { mintInviteToken, verifyInviteToken } from '../auth/invite-token.js'
 import { hashPassword, MAX_PASSWORD_LENGTH } from '../auth/password-hash.js'
 import type { AuthAttempt, AuthProvider } from '../auth/provider.js'
+import { WebAuthnChallengeExpiredError } from '../auth/webauthn-provider.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { OutboundEmail } from '../providers/email-sender.js'
 import type { EmailSender } from '../providers/index.js'
@@ -285,8 +286,14 @@ export async function handleSetup(
  * `POST /api/v1/auth/verify` (spec §6, §9) — dispatch to the named
  * provider. EVERY failure mode is the SAME generic `401` (unknown email,
  * wrong password, an unknown `providerKey`, a malformed body, an
- * `invited`/`disabled` Agent) — spec §9: "no oracle." No acting-Agent
- * header (pre-session).
+ * `invited`/`disabled` Agent) — spec §9: "no oracle." — with ONE deliberate
+ * exception (HT-75; specs/auth/passkeys.md §6.2): a webauthn attempt whose
+ * challenge token expired, was already used, or was minted for a different
+ * ceremony throws {@link WebAuthnChallengeExpiredError}, caught HERE and
+ * mapped to a distinguishable `challenge_expired` code — safe to
+ * distinguish per that section (it signals ceremony freshness, never
+ * account existence). No other provider ever throws through this path. No
+ * acting-Agent header (pre-session).
  */
 export async function handleAuthVerify(
   request: Request,
@@ -304,7 +311,15 @@ export async function handleAuthVerify(
   if (provider === undefined) return INVALID_CREDENTIALS()
 
   const attempt: AuthAttempt = { ...body, providerKey }
-  const verified = await provider.authenticate(attempt)
+  let verified: Awaited<ReturnType<AuthProvider['authenticate']>>
+  try {
+    verified = await provider.authenticate(attempt)
+  } catch (err) {
+    if (err instanceof WebAuthnChallengeExpiredError) {
+      return apiError(401, 'challenge_expired', 'This passkey challenge expired. Please try again.')
+    }
+    throw err
+  }
   if (verified === null) return INVALID_CREDENTIALS()
 
   const agent = await deps.store.getAgent(verified.agentId)

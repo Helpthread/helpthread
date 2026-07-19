@@ -65,6 +65,7 @@ describe('migrate', () => {
       { id: 23, name: 'event_outbox' },
       { id: 24, name: 'saved_replies' },
       { id: 25, name: 'conversation_snooze' },
+      { id: 26, name: 'webauthn' },
     ])
   })
 
@@ -100,6 +101,7 @@ describe('migrate', () => {
       { id: 23 },
       { id: 24 },
       { id: 25 },
+      { id: 26 },
     ])
   })
 
