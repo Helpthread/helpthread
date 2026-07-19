@@ -101,6 +101,43 @@
  * this store committing independently. See that module's doc comment for why
  * this composition is otherwise impossible: a transaction opened by one
  * `db.transaction` call cannot be joined by a second, separate call.
+ *
+ * ## The actor model + draft lifecycle (HT-68; specs/plugins/substrate-v1.md
+ * §2, migration 021 — "module" below means an out-of-process Helpthread
+ * extension, never the legal "plugin exception" phrase CHARTER.md §7 uses)
+ *
+ * Every thread now carries `author_kind` (`'customer'|'agent'|'assistant'`)
+ * plus nullable author identity. {@link insertThread} DERIVES it from
+ * `direction` when the caller doesn't supply one explicitly — `inbound` →
+ * `'customer'`, `outbound`/`note` → `'agent'` — the same "coerce a sensible
+ * default, let an explicit value override it" shape `deliveryStatus` already
+ * used before this change. This is why every EXISTING caller
+ * (`src/mail/ingest.ts`, `src/mail/send.ts`, `src/api/conversations.ts`'s
+ * notes handler) compiles and behaves correctly with zero edits: none of
+ * them author assistant rows, so the default derivation is always right for
+ * them. Only the NEW draft path ({@link ConversationStore.appendDraft})
+ * passes `authorKind: 'assistant'` explicitly.
+ *
+ * A draft is an outbound thread with `draft_status = 'awaiting_review'` — no
+ * `send_envelope`, no `message_id`, and critically `delivery_status = NULL`
+ * (spec §2's CHECK: an unapproved draft must be structurally invisible to
+ * the delivery worker). {@link insertThread}'s existing `deliveryStatus ??
+ * 'pending'` outbound coercion is made draft-aware: an insert carrying
+ * `draftStatus: 'awaiting_review'` (the only draft-status value ever
+ * INSERTed fresh — `'approved'`/`'discarded'` only ever arrive via {@link
+ * ConversationStore.resolveDraft}'s UPDATE, never a fresh row) skips the
+ * `'pending'` coercion and leaves `delivery_status NULL`, exactly as spec §2
+ * requires ("today it would silently arm a draft for delivery").
+ *
+ * {@link ConversationStore.appendDraft} reuses {@link appendThreadInTx} —
+ * same not-found/deleted policy, same `FOR UPDATE` lock, same idempotency-
+ * key get-or-insert — but {@link appendThreadInTx} gains an explicit
+ * carve-out: a draft insert (`thread.draftStatus !== undefined`) causes NO
+ * reopen and NO `updated_at` bump, stronger than even a note (spec §6: "an
+ * assistant call can never directly cause outbound mail," and posting a
+ * draft is not activity the way a note or a real reply is — approval is).
+ * Every OTHER row's reopen/bump behavior is byte-identical to before this
+ * change; only the new carve-out branch is added.
  */
 
 import type { Db, Queryable, SqlValue } from '../db/client.js'
@@ -119,6 +156,12 @@ export interface SendEnvelope {
   subject: string
   references?: string[]
 }
+
+/** The actor kind that authored a thread (HT-68; specs/plugins/substrate-v1.md §2). `'customer'` for inbound mail, `'agent'` for human-authored outbound/notes, `'assistant'` for an AI-authored draft. */
+export type ThreadAuthorKind = 'customer' | 'agent' | 'assistant'
+
+/** A draft's lifecycle state (HT-68; spec §2) — `null` on every non-draft thread. */
+export type DraftStatus = 'awaiting_review' | 'approved' | 'discarded'
 
 /** One message to be persisted as a new thread — inbound customer mail, or outbound agent/assistant mail. */
 export interface NewThread {
@@ -171,6 +214,32 @@ export interface NewThread {
    * not a live derivation). Never set for an inbound thread.
    */
   sendEnvelope?: SendEnvelope
+  /**
+   * The actor kind that authored this thread (HT-68; spec §2). Omitted
+   * (the common case — every pre-substrate caller) is DERIVED from
+   * `direction` by {@link insertThread}: `inbound` → `'customer'`,
+   * `outbound`/`note` → `'agent'`. Pass `'assistant'` explicitly only for
+   * an assistant-authored row (a draft — see {@link
+   * ConversationStore.appendDraft}); nothing in this codebase authors an
+   * assistant note yet (spec §6, wave 2/3).
+   */
+  authorKind?: ThreadAuthorKind
+  /** The acting Agent's id, when known (spec §3's acting-agent header). `null`/omitted is legal for an `'agent'`-authored row (the pre-HT-54 posture) — never set for `'customer'`/`'assistant'` rows, per {@link StoredThread.authorAgentId}'s CHECK. */
+  authorAgentId?: string | null
+  /** The authoring Assistant's id — REQUIRED (non-null) exactly when `authorKind: 'assistant'`, per the schema's `threads_author_identity_check`. */
+  authorAssistantId?: string | null
+  /**
+   * Draft lifecycle (HT-68; spec §2) — legal only on `direction: 'outbound'`.
+   * Omitted means "not a draft" (an ordinary send or note, the pre-substrate
+   * shape). `'awaiting_review'` is the only value {@link insertThread} ever
+   * INSERTs fresh; `'approved'`/`'discarded'` are UPDATE-only transitions
+   * applied by {@link ConversationStore.resolveDraft}, never passed here.
+   * Setting this makes {@link insertThread} leave `delivery_status NULL`
+   * (see the module doc's "actor model + draft lifecycle" section) and
+   * makes {@link appendThreadInTx} skip its reopen/`updated_at`-bump branch
+   * entirely.
+   */
+  draftStatus?: DraftStatus
 }
 
 /** Input to {@link ConversationStore.createConversation}: a new conversation plus its first thread. */
@@ -212,6 +281,20 @@ export interface StoredThread {
    */
   customerViewedAt: Date | null
   createdAt: Date
+  /** The actor kind that authored this thread (HT-68; spec §2) — see {@link ThreadAuthorKind}. */
+  authorKind: ThreadAuthorKind
+  /** The acting Agent's id, or `null` — legal only alongside `authorKind: 'agent'`. See {@link NewThread.authorAgentId}. */
+  authorAgentId: string | null
+  /** The authoring Assistant's id, or `null` — non-null exactly when `authorKind: 'assistant'`. See {@link NewThread.authorAssistantId}. */
+  authorAssistantId: string | null
+  /** Draft lifecycle state, or `null` for a non-draft thread. See {@link NewThread.draftStatus}. */
+  draftStatus: DraftStatus | null
+  /** The Agent who approved or discarded this draft, or `null`. Set only alongside a resolved (`'approved'`/`'discarded'`) `draftStatus`. */
+  approvedByAgentId: string | null
+  /** When this draft was approved or discarded, or `null` while `'awaiting_review'` (or for a non-draft thread). */
+  draftResolvedAt: Date | null
+  /** Did the approving Agent change the body before sending (spec §2)? Always `false` for a non-draft thread. */
+  draftEdited: boolean
 }
 
 /**
@@ -270,6 +353,75 @@ export interface StoredConversation {
 export type AppendResult =
   | { ok: true; threadId: string; created: boolean; thread: StoredThread }
   | { ok: false; reason: 'not-found' | 'deleted' }
+
+/**
+ * Input to {@link ConversationStore.appendDraft} (HT-68; spec §6). Mirrors
+ * `POST /api/v1/conversations/{id}/drafts`'s body — `bodyText`/`bodyHtml` —
+ * plus the identity/idempotency fields the wave-2 API handler supplies.
+ */
+export interface NewDraft {
+  /** The authoring Assistant's id — becomes `author_assistant_id` on the inserted row. */
+  assistantId: string
+  bodyText: string
+  bodyHtml?: string | null
+  /**
+   * `From` address for the eventual outbound mail. Not yet meaningful at
+   * draft time (the real envelope is derived at approval, spec §6 step 2) —
+   * defaults to `''` when omitted; the caller is free to supply the
+   * mailbox's address if known.
+   */
+  fromAddress?: string
+  /**
+   * Caller-supplied dedup key, UNPREFIXED — {@link
+   * createConversationStore}'s `appendDraft` stores it as `` `draft:${key}` ``
+   * (spec §6: "the engine stores it prefixed... so the shared
+   * `(conversation_id, idempotency_key)` uniqueness namespace can never
+   * replay a reply as a draft or vice versa"). Required — spec §6 states
+   * `Idempotency-Key` is required on this endpoint.
+   */
+  idempotencyKey: string
+}
+
+/**
+ * A keyset pagination cursor for {@link ConversationStore.listAwaitingDrafts}
+ * — the `(createdAt, id)` of the last row a previous page returned. Same
+ * shape/reasoning as {@link ConversationListCursor}, scoped to `threads.
+ * created_at` (a draft's own creation moment) instead of a conversation's
+ * `updated_at`.
+ */
+export interface ListAwaitingDraftsCursor {
+  createdAt: Date
+  id: string
+}
+
+/**
+ * Input to {@link ConversationStore.resolveDraft} (HT-68; spec §6): either
+ * branch of `POST /api/v1/drafts/{threadId}/approve` or `.../discard`.
+ * `resolvedByAgentId` is written to `threads.approved_by_agent_id` on both
+ * branches (spec §2: that column is the resolution audit field generally,
+ * not "approval" specifically).
+ *
+ * The `approve` branch takes `messageId`/`sendEnvelope` as OPAQUE inputs —
+ * this store does NOT mint a reply token or derive an envelope (spec §6
+ * steps 1-3 are the caller's job; `sendReply` cannot be reused for an
+ * existing row, see spec §6's "what approval actually does"). `edit`,
+ * when present, is spec §6's "approve with edits": the given fields replace
+ * the draft's stored body and `draft_edited` is recorded `true`.
+ */
+export type ResolveDraftInput =
+  | {
+      action: 'approve'
+      threadId: string
+      resolvedByAgentId: string
+      messageId: string
+      sendEnvelope: SendEnvelope
+      edit?: { bodyText?: string; bodyHtml?: string }
+    }
+  | {
+      action: 'discard'
+      threadId: string
+      resolvedByAgentId: string
+    }
 
 /** Persistence operations for conversations and their threads. See the module doc for the storage-layer policy this implements. */
 export interface ConversationStore {
@@ -515,6 +667,47 @@ export interface ConversationStore {
    * nothing useful for this method to report — and a throw would be worse.
    */
   recordThreadView(threadId: string): Promise<void>
+
+  /**
+   * Append an assistant-authored draft to `conversationId` (HT-68; spec §6):
+   * `direction: 'outbound'`, `author_kind: 'assistant'`, `draft_status:
+   * 'awaiting_review'`, `delivery_status NULL`. Reuses {@link
+   * appendThreadInTx}'s not-found/deleted policy and idempotency-key
+   * get-or-insert (the caller's key is stored `` `draft:${key}` `` — see
+   * {@link NewDraft.idempotencyKey}), but causes NO reopen and NO
+   * `updated_at` bump on the conversation, even if it is closed or spam
+   * (see the module doc's "actor model + draft lifecycle" section) —
+   * approval, not draft creation, is what later follows the normal
+   * reply-reopen rule (spec §6).
+   */
+  appendDraft(conversationId: string, draft: NewDraft): Promise<AppendResult>
+
+  /**
+   * Cross-conversation review queue (HT-68; spec §6): every thread with
+   * `direction = 'outbound' AND draft_status = 'awaiting_review'`, newest
+   * first (`created_at DESC, id DESC`, keyset-paginated — same tiebreak
+   * shape as {@link listConversations}), EXCLUDING any draft whose
+   * conversation is soft-deleted (spec §6: "such drafts are unreachable
+   * everywhere and simply never surface").
+   */
+  listAwaitingDrafts(options: {
+    limit: number
+    cursor?: ListAwaitingDraftsCursor
+  }): Promise<StoredThread[]>
+
+  /**
+   * Resolve an awaiting-review draft — approve or discard (HT-68; spec §6).
+   * See {@link ResolveDraftInput}'s doc comment for the opaque-input
+   * contract on approval. Scoped to `direction = 'outbound' AND draft_status
+   * = 'awaiting_review'`: returns `null` when `threadId` names no thread,
+   * a non-outbound thread, or a draft that was already resolved (or was
+   * never a draft) — the same "no such row in the state this method
+   * requires" shape {@link setConversationStatus} uses for a missing/deleted
+   * conversation. This method does not check conversation status (spam,
+   * soft-deleted) — spec §6 assigns those refusals to the API layer, which
+   * has the conversation already loaded.
+   */
+  resolveDraft(input: ResolveDraftInput): Promise<StoredThread | null>
 }
 
 /**
@@ -696,10 +889,28 @@ interface ThreadRow {
   claimed_until: Date | string | null
   customer_viewed_at: Date | string | null
   created_at: Date | string
+  author_kind: string
+  author_agent_id: string | null
+  author_assistant_id: string | null
+  draft_status: string | null
+  approved_by_agent_id: string | null
+  draft_resolved_at: Date | string | null
+  draft_edited: boolean
 }
 
 const THREAD_COLUMNS =
-  'id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope, claimed_until, customer_viewed_at, created_at'
+  'id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope, claimed_until, customer_viewed_at, created_at, author_kind, author_agent_id, author_assistant_id, draft_status, approved_by_agent_id, draft_resolved_at, draft_edited'
+
+/**
+ * {@link THREAD_COLUMNS}, `t.`-qualified — needed only by {@link
+ * ConversationStore.listAwaitingDrafts}'s query, which JOINs `threads` to
+ * `conversations` (to exclude soft-deleted ones) and would otherwise be
+ * ambiguous on the `id` column both tables share. Same qualification shape
+ * `src/store/attachments.ts`'s `ATTACHMENT_COLUMNS` uses for its own join.
+ */
+const THREAD_COLUMNS_T = THREAD_COLUMNS.split(', ')
+  .map((column) => `t.${column}`)
+  .join(', ')
 
 /**
  * Create a {@link ConversationStore} backed by `db`. Every operation opens
@@ -765,7 +976,14 @@ export async function appendThreadInTx(
   // deliberately stays pending (see the module doc). A NOTE never
   // reopens anything (spec §4c — noting a closed conversation is not
   // the customer coming back), but it IS activity: updated_at bumps.
-  if (created) {
+  //
+  // HT-68 draft carve-out (spec §6): a draft insert (thread.draftStatus is
+  // set — only ever 'awaiting_review' on a fresh insert, see insertThread's
+  // doc comment) causes NEITHER a reopen NOR an updated_at bump, stronger
+  // than even a note. This is checked FIRST, ahead of the direction check
+  // below, so a draft row (direction: 'outbound') never falls into the
+  // reopen/bump branch a plain outbound send would.
+  if (created && thread.draftStatus === undefined) {
     if ((row.status === 'closed' || row.status === 'spam') && thread.direction !== 'note') {
       await tx.query(
         "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1",
@@ -849,12 +1067,18 @@ export function createConversationStore(db: Db): ConversationStore {
       // as pending/failed and this claim call must never be reclaimed —
       // that would resend an already-delivered message. See this method's
       // doc comment on the interface for the full TOCTOU it closes.
+      // draft_status IS DISTINCT FROM 'awaiting_review' (HT-68; spec §2's
+      // closing paragraph): belt on top of migration 021's CHECK, which
+      // already makes an awaiting_review row with a non-null delivery_status
+      // structurally unrepresentable — this guard is defense-in-depth, not
+      // load-bearing on its own.
       const rows = await db.query<ThreadRow>(
         `UPDATE threads
          SET claimed_until = now() + ($2::double precision * interval '1 millisecond')
          WHERE id = $1 AND direction = 'outbound'
            AND (claimed_until IS NULL OR claimed_until < now())
            AND delivery_status IN ('pending', 'failed')
+           AND draft_status IS DISTINCT FROM 'awaiting_review'
          RETURNING ${THREAD_COLUMNS}`,
         [threadId, leaseMs],
       )
@@ -878,6 +1102,9 @@ export function createConversationStore(db: Db): ConversationStore {
     },
 
     async listDeliverableThreads(options) {
+      // draft_status IS DISTINCT FROM 'awaiting_review' — same
+      // belt-on-top-of-the-CHECK guard as claimThreadForDelivery above
+      // (HT-68; spec §2's closing paragraph).
       const rows = await db.query<ThreadRow>(
         `SELECT ${THREAD_COLUMNS} FROM threads
          WHERE direction = 'outbound'
@@ -890,6 +1117,7 @@ export function createConversationStore(db: Db): ConversationStore {
              )
            )
            AND (claimed_until IS NULL OR claimed_until < now())
+           AND draft_status IS DISTINCT FROM 'awaiting_review'
          ORDER BY created_at
          LIMIT $2`,
         [options.staleAfterMs, options.batchSize],
@@ -1006,6 +1234,93 @@ export function createConversationStore(db: Db): ConversationStore {
       )
     },
 
+    async appendDraft(conversationId, draft) {
+      return db.transaction((tx) =>
+        appendThreadInTx(tx, conversationId, {
+          direction: 'outbound',
+          messageId: null,
+          fromAddress: draft.fromAddress ?? '',
+          bodyText: draft.bodyText,
+          bodyHtml: draft.bodyHtml ?? null,
+          authorKind: 'assistant',
+          authorAssistantId: draft.assistantId,
+          draftStatus: 'awaiting_review',
+          idempotencyKey: `draft:${draft.idempotencyKey}`,
+        }),
+      )
+    },
+
+    async listAwaitingDrafts(options) {
+      const conditions = [
+        "t.direction = 'outbound'",
+        "t.draft_status = 'awaiting_review'",
+        "c.status <> 'deleted'",
+      ]
+      const params: SqlValue[] = []
+      if (options.cursor !== undefined) {
+        params.push(options.cursor.createdAt, options.cursor.id)
+        conditions.push(`(t.created_at, t.id) < ($${params.length - 1}, $${params.length})`)
+      }
+      params.push(options.limit)
+
+      const rows = await db.query<ThreadRow>(
+        `SELECT ${THREAD_COLUMNS_T} FROM threads t
+         JOIN conversations c ON c.id = t.conversation_id
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY t.created_at DESC, t.id DESC
+         LIMIT $${params.length}`,
+        params,
+      )
+      return rows.map(toStoredThread)
+    },
+
+    async resolveDraft(input) {
+      if (input.action === 'discard') {
+        const rows = await db.query<ThreadRow>(
+          `UPDATE threads
+           SET draft_status = 'discarded', approved_by_agent_id = $2, draft_resolved_at = now()
+           WHERE id = $1 AND direction = 'outbound' AND draft_status = 'awaiting_review'
+           RETURNING ${THREAD_COLUMNS}`,
+          [input.threadId, input.resolvedByAgentId],
+        )
+        const row = rows[0]
+        return row === undefined ? null : toStoredThread(row)
+      }
+
+      // approve (spec §6 step 4): writes the caller-derived envelope
+      // snapshot + message id, flips draft_status → 'approved' and
+      // delivery_status → 'pending' in the SAME statement (so the row is
+      // NEVER observably in a state where draft_status is 'approved' but
+      // delivery_status is still NULL, or vice versa), and records the
+      // approve-with-edits audit fields.
+      const edited = input.edit !== undefined
+      const rows = await db.query<ThreadRow>(
+        `UPDATE threads
+         SET message_id = $2,
+             send_envelope = $3::jsonb,
+             draft_status = 'approved',
+             delivery_status = 'pending',
+             approved_by_agent_id = $4,
+             draft_resolved_at = now(),
+             draft_edited = $5,
+             body_text = COALESCE($6, body_text),
+             body_html = COALESCE($7, body_html)
+         WHERE id = $1 AND direction = 'outbound' AND draft_status = 'awaiting_review'
+         RETURNING ${THREAD_COLUMNS}`,
+        [
+          input.threadId,
+          input.messageId,
+          JSON.stringify(input.sendEnvelope),
+          input.resolvedByAgentId,
+          edited,
+          input.edit?.bodyText ?? null,
+          input.edit?.bodyHtml ?? null,
+        ],
+      )
+      const row = rows[0]
+      return row === undefined ? null : toStoredThread(row)
+    },
+
     async deleteConversation(conversationId) {
       // No updated_at bump: a deleted conversation is never surfaced again,
       // so its sort key is meaningless — and leaving it untouched keeps the
@@ -1053,13 +1368,37 @@ async function insertThread(
   conversationId: string,
   thread: NewThread,
 ): Promise<{ threadId: string; created: boolean; row: ThreadRow }> {
+  // Derive author_kind from direction when the caller doesn't supply one
+  // explicitly (HT-68; spec §2) — same "sensible default, explicit value
+  // overrides it" shape as deliveryStatus below. inbound → customer,
+  // outbound/note → agent; only the draft path passes 'assistant' itself.
+  const authorKind: ThreadAuthorKind =
+    thread.authorKind ?? (thread.direction === 'inbound' ? 'customer' : 'agent')
+  const authorAgentId = thread.authorAgentId ?? null
+  const authorAssistantId = thread.authorAssistantId ?? null
+  const draftStatus = thread.draftStatus ?? null
+
   // Derive delivery_status from direction so the row always satisfies the
   // schema's direction↔status CHECK (migration 002): an outbound thread
   // defaults to 'pending' (its outbox starting state) unless the caller set a
   // status; an inbound thread is forced to NULL regardless of any status
   // passed, since delivery status is meaningless for received mail.
+  //
+  // HT-68 draft-aware carve-out (spec §2): a fresh draft insert
+  // (draftStatus === 'awaiting_review', the only draft_status value ever
+  // INSERTed rather than reached via resolveDraft's UPDATE) must NOT be
+  // coerced to 'pending' — that would silently arm an unapproved draft for
+  // the delivery worker, exactly the illegal state migration 021's CHECK
+  // forbids. 'discarded' is included in the same guard for symmetry (the
+  // schema forbids a non-null delivery_status alongside it too), even
+  // though nothing in this codebase inserts a fresh 'discarded' row today.
+  const isUnresolvedDraftInsert = draftStatus === 'awaiting_review' || draftStatus === 'discarded'
   const deliveryStatus =
-    thread.direction === 'outbound' ? (thread.deliveryStatus ?? 'pending') : null
+    thread.direction === 'outbound'
+      ? isUnresolvedDraftInsert
+        ? null
+        : (thread.deliveryStatus ?? 'pending')
+      : null
   const idempotencyKey = thread.idempotencyKey ?? null
   // jsonb columns take a caller-serialized string, per src/db/client.ts's
   // module doc — `SqlValue` deliberately has no "plain object" member, so
@@ -1070,8 +1409,8 @@ async function insertThread(
   const rows =
     thread.id !== undefined
       ? await tx.query<ThreadRow>(
-          `INSERT INTO threads (id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          `INSERT INTO threads (id, conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope, author_kind, author_agent_id, author_assistant_id, draft_status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            ON CONFLICT (conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
            RETURNING ${THREAD_COLUMNS}`,
           [
@@ -1086,11 +1425,15 @@ async function insertThread(
             deliveryStatus,
             idempotencyKey,
             sendEnvelopeJson,
+            authorKind,
+            authorAgentId,
+            authorAssistantId,
+            draftStatus,
           ],
         )
       : await tx.query<ThreadRow>(
-          `INSERT INTO threads (conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          `INSERT INTO threads (conversation_id, direction, message_id, in_reply_to, from_address, body_text, body_html, delivery_status, idempotency_key, send_envelope, author_kind, author_agent_id, author_assistant_id, draft_status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
            ON CONFLICT (conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
            RETURNING ${THREAD_COLUMNS}`,
           [
@@ -1104,6 +1447,10 @@ async function insertThread(
             deliveryStatus,
             idempotencyKey,
             sendEnvelopeJson,
+            authorKind,
+            authorAgentId,
+            authorAssistantId,
+            draftStatus,
           ],
         )
 
@@ -1204,5 +1551,12 @@ function toStoredThread(row: ThreadRow): StoredThread {
     claimedUntil: row.claimed_until === null ? null : toDate(row.claimed_until),
     customerViewedAt: row.customer_viewed_at === null ? null : toDate(row.customer_viewed_at),
     createdAt: toDate(row.created_at),
+    authorKind: row.author_kind as ThreadAuthorKind,
+    authorAgentId: row.author_agent_id,
+    authorAssistantId: row.author_assistant_id,
+    draftStatus: row.draft_status as DraftStatus | null,
+    approvedByAgentId: row.approved_by_agent_id,
+    draftResolvedAt: row.draft_resolved_at === null ? null : toDate(row.draft_resolved_at),
+    draftEdited: row.draft_edited,
   }
 }

@@ -299,7 +299,9 @@ describe('createPostgresDb with a schema option', () => {
       'agent_auth_identities',
       'agent_mailbox_access',
       'agents',
+      'assistants',
       'conversations',
+      'event_outbox',
       'gmail_watch_state',
       'inbound_deliveries',
       'mailbox_oauth_tokens',
@@ -307,6 +309,7 @@ describe('createPostgresDb with a schema option', () => {
       'queue_jobs',
       'thread_attachments',
       'threads',
+      'webhook_endpoints',
     ])
 
     const inPublic = await pglite.query(

@@ -59,6 +59,10 @@ describe('migrate', () => {
       { id: 17, name: 'mailboxes_disconnected_status' },
       { id: 18, name: 'agents_and_auth' },
       { id: 19, name: 'inbound_delivery_forged_tokens' },
+      { id: 20, name: 'assistants' },
+      { id: 21, name: 'threads_actor_model' },
+      { id: 22, name: 'webhook_endpoints' },
+      { id: 23, name: 'event_outbox' },
     ])
   })
 
@@ -88,6 +92,10 @@ describe('migrate', () => {
       { id: 17 },
       { id: 18 },
       { id: 19 },
+      { id: 20 },
+      { id: 21 },
+      { id: 22 },
+      { id: 23 },
     ])
   })
 
@@ -1071,5 +1079,308 @@ describe('migrate', () => {
       [preexisting.id],
     )
     expect(updated.forged_token_count).toBe(3)
+  })
+
+  it('migration 020 creates assistants with a default active status, enforces NOT NULL on name/module/token_hash, the status CHECK, and ON DELETE SET NULL on created_by_agent_id', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [agent] = await db.query<{ id: string }>(
+      `INSERT INTO agents (email, name, role, status) VALUES ('admin@example.test', 'Admin', 'admin', 'active') RETURNING id`,
+    )
+
+    const [assistant] = await db.query<{ status: string; created_by_agent_id: string | null }>(
+      `INSERT INTO assistants (name, module, token_hash, created_by_agent_id)
+       VALUES ('Draft Bot', 'draft-reply', 'hash-1', $1) RETURNING status, created_by_agent_id`,
+      [agent.id],
+    )
+    expect(assistant.status).toBe('active')
+    expect(assistant.created_by_agent_id).toBe(agent.id)
+
+    // NOT NULL on the required columns.
+    await expect(
+      db.query(`INSERT INTO assistants (module, token_hash) VALUES ('m', 'h')`),
+    ).rejects.toThrow()
+    await expect(
+      db.query(`INSERT INTO assistants (name, token_hash) VALUES ('n', 'h')`),
+    ).rejects.toThrow()
+    await expect(
+      db.query(`INSERT INTO assistants (name, module) VALUES ('n', 'm')`),
+    ).rejects.toThrow()
+
+    // The status CHECK rejects an out-of-domain value.
+    await expect(
+      db.query(
+        `INSERT INTO assistants (name, module, token_hash, status) VALUES ('n', 'm', 'h', 'bogus')`,
+      ),
+    ).rejects.toThrow()
+
+    // Deleting the creating Agent un-sets the pointer, does not delete the Assistant.
+    await db.query('DELETE FROM agents WHERE id = $1', [agent.id])
+    const [row] = await db.query<{ created_by_agent_id: string | null }>(
+      `SELECT created_by_agent_id FROM assistants WHERE name = 'Draft Bot'`,
+    )
+    expect(row.created_by_agent_id).toBeNull()
+  })
+
+  it('migration 021 upgrades a NON-fresh 020 database: backfills author_kind (inbound → customer, outbound/note → agent)', async () => {
+    db = await createPgliteDb()
+    await migrate(db, { throughId: 20 })
+
+    const [conversation] = await db.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+    const [inbound] = await db.query<{ id: string }>(
+      `INSERT INTO threads (conversation_id, direction, from_address) VALUES ($1, 'inbound', $2) RETURNING id`,
+      [conversation.id, 'customer@example.test'],
+    )
+    const [outbound] = await db.query<{ id: string }>(
+      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status) VALUES ($1, 'outbound', $2, 'sent') RETURNING id`,
+      [conversation.id, 'support@example.test'],
+    )
+    const [note] = await db.query<{ id: string }>(
+      `INSERT INTO threads (conversation_id, direction, from_address) VALUES ($1, 'note', $2) RETURNING id`,
+      [conversation.id, 'support@example.test'],
+    )
+
+    await expect(migrate(db)).resolves.toBeUndefined()
+
+    const rows = await db.query<{ id: string; author_kind: string }>(
+      'SELECT id, author_kind FROM threads ORDER BY created_at',
+    )
+    const byId = new Map(rows.map((row) => [row.id, row.author_kind]))
+    expect(byId.get(inbound.id)).toBe('customer')
+    expect(byId.get(outbound.id)).toBe('agent')
+    expect(byId.get(note.id)).toBe('agent')
+
+    // The NOT NULL + CHECK are live post-migration.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, author_kind) VALUES ($1, 'inbound', $2, 'bogus')`,
+        [conversation.id, 'customer@example.test'],
+      ),
+    ).rejects.toThrow()
+  })
+
+  it('migration 021 enforces the author-identity CHECK: customer carries neither id, assistant carries only author_assistant_id, agent never carries author_assistant_id', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [conversation] = await db.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+    const [agent] = await db.query<{ id: string }>(
+      `INSERT INTO agents (email, name, role, status) VALUES ('a@example.test', 'A', 'agent', 'active') RETURNING id`,
+    )
+    const [assistant] = await db.query<{ id: string }>(
+      `INSERT INTO assistants (name, module, token_hash) VALUES ('Bot', 'm', 'h') RETURNING id`,
+    )
+
+    // Legal: customer with neither id.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, author_kind) VALUES ($1, 'inbound', $2, 'customer')`,
+        [conversation.id, 'customer@example.test'],
+      ),
+    ).resolves.toBeDefined()
+
+    // Legal: agent with a real author_agent_id, and agent with NULL (pre-HT-54 posture).
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind, author_agent_id) VALUES ($1, 'outbound', $2, 'sent', 'agent', $3)`,
+        [conversation.id, 'support@example.test', agent.id],
+      ),
+    ).resolves.toBeDefined()
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, author_kind) VALUES ($1, 'note', $2, 'agent')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).resolves.toBeDefined()
+
+    // Legal: assistant with author_assistant_id.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, author_kind, author_assistant_id) VALUES ($1, 'outbound', $2, 'awaiting_review', 'assistant', $3)`,
+        [conversation.id, 'support@example.test', assistant.id],
+      ),
+    ).resolves.toBeDefined()
+
+    // Illegal: customer carrying an author_agent_id.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, author_kind, author_agent_id) VALUES ($1, 'inbound', $2, 'customer', $3)`,
+        [conversation.id, 'customer@example.test', agent.id],
+      ),
+    ).rejects.toThrow()
+
+    // Illegal: assistant with NO author_assistant_id.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, author_kind) VALUES ($1, 'outbound', $2, 'awaiting_review', 'assistant')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+
+    // Illegal: agent carrying an author_assistant_id.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, author_kind, author_assistant_id) VALUES ($1, 'note', $2, 'agent', $3)`,
+        [conversation.id, 'support@example.test', assistant.id],
+      ),
+    ).rejects.toThrow()
+  })
+
+  it('migration 021 enforces draft_status as outbound-only, from the closed set, and ties it to delivery_status per the spec §2 predicate', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [conversation] = await db.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    // draft_status is illegal on inbound/note, whatever delivery_status says.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'inbound', $2, 'awaiting_review')`,
+        [conversation.id, 'customer@example.test'],
+      ),
+    ).rejects.toThrow()
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'note', $2, 'awaiting_review')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+
+    // draft_status out-of-domain value rejected.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'outbound', $2, 'bogus')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+
+    // The illegal state the whole predicate exists to forbid: an
+    // awaiting_review draft with a non-NULL delivery_status — reachable by
+    // the delivery worker, exactly what spec §2 says must be impossible.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status) VALUES ($1, 'outbound', $2, 'awaiting_review', 'pending')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+    // Same for 'discarded'.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status) VALUES ($1, 'outbound', $2, 'discarded', 'failed')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+    // An 'approved' draft with NO delivery_status is also illegal (the third
+    // arm requires one of pending/sent/failed once draft_status is NULL or
+    // 'approved').
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status) VALUES ($1, 'outbound', $2, 'approved', NULL)`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+
+    // Legal: awaiting_review/discarded with NULL delivery_status, and
+    // approved with a real one.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'outbound', $2, 'awaiting_review')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).resolves.toBeDefined()
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'outbound', $2, 'discarded')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).resolves.toBeDefined()
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status) VALUES ($1, 'outbound', $2, 'approved', 'sent')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).resolves.toBeDefined()
+  })
+
+  it('migration 022 creates webhook_endpoints with a default active status and 0 consecutive_failures, and enforces the https-only and status CHECKs', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [endpoint] = await db.query<{ status: string; consecutive_failures: number }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext, events, module)
+       VALUES ('https://example.test/hook', $1, '["conversation.message_received"]'::jsonb, 'draft-reply')
+       RETURNING status, consecutive_failures`,
+      [new Uint8Array([1, 2, 3])],
+    )
+    expect(endpoint.status).toBe('active')
+    expect(endpoint.consecutive_failures).toBe(0)
+
+    // https-only.
+    await expect(
+      db.query(
+        `INSERT INTO webhook_endpoints (url, secret_ciphertext) VALUES ('http://example.test/hook', $1)`,
+        [new Uint8Array([1])],
+      ),
+    ).rejects.toThrow()
+
+    // status CHECK.
+    await expect(
+      db.query(
+        `INSERT INTO webhook_endpoints (url, secret_ciphertext, status) VALUES ('https://example.test/hook2', $1, 'bogus')`,
+        [new Uint8Array([1])],
+      ),
+    ).rejects.toThrow()
+
+    // module is legitimately nullable.
+    await expect(
+      db.query(
+        `INSERT INTO webhook_endpoints (url, secret_ciphertext) VALUES ('https://example.test/hook3', $1)`,
+        [new Uint8Array([1])],
+      ),
+    ).resolves.toBeDefined()
+  })
+
+  it('migration 023 creates event_outbox keyed by event_id, ties conversation_id to a real conversation via FK cascade, and defaults dispatched_at to NULL', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [conversation] = await db.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    const [event] = await db.query<{ event_id: string; dispatched_at: string | null }>(
+      `INSERT INTO event_outbox (type, conversation_id, data)
+       VALUES ('conversation.created', $1, '{}'::jsonb)
+       RETURNING event_id, dispatched_at`,
+      [conversation.id],
+    )
+    expect(event.event_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    expect(event.dispatched_at).toBeNull()
+
+    // conversation_id is a real FK, NOT NULL.
+    await expect(
+      db.query(
+        `INSERT INTO event_outbox (type, conversation_id, data) VALUES ('x', $1, '{}'::jsonb)`,
+        ['00000000-0000-4000-8000-000000000000'],
+      ),
+    ).rejects.toThrow()
+
+    // ON DELETE CASCADE: deleting the conversation removes the event row too.
+    await db.query('DELETE FROM conversations WHERE id = $1', [conversation.id])
+    const remaining = await db.query('SELECT event_id FROM event_outbox WHERE event_id = $1', [
+      event.event_id,
+    ])
+    expect(remaining).toHaveLength(0)
   })
 })

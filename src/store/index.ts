@@ -8,6 +8,14 @@
  */
 
 export type {
+  AssistantPatch,
+  AssistantRecord,
+  AssistantStatus,
+  AssistantStore,
+  NewAssistant,
+} from './assistants.js'
+export { createAssistantStore } from './assistants.js'
+export type {
   NewThreadAttachment,
   StoredThreadAttachment,
   ThreadAttachmentStore,
@@ -18,17 +26,29 @@ export type {
   ConversationListCursor,
   ConversationStore,
   ConversationSummary,
+  DraftStatus,
+  ListAwaitingDraftsCursor,
   ListConversationsOptions,
   NewConversation,
+  NewDraft,
   NewThread,
+  ResolveDraftInput,
+  SendEnvelope,
   StoredConversation,
   StoredThread,
+  ThreadAuthorKind,
 } from './conversations.js'
 export {
   appendThreadInTx,
   createConversationInTx,
   createConversationStore,
 } from './conversations.js'
+export type {
+  EventOutboxStore,
+  NewOutboxEvent,
+  StoredOutboxEvent,
+} from './event-outbox.js'
+export { appendOutboxEventInTx, createEventOutboxStore } from './event-outbox.js'
 export type { GmailWatchStateStore } from './gmail-watch-state.js'
 export { createGmailWatchStateStore } from './gmail-watch-state.js'
 export type {
@@ -42,3 +62,12 @@ export type { MailboxTokenStore, StoredMailboxTokens, UpsertTokensInput } from '
 export { createMailboxTokenStore } from './mailbox-tokens.js'
 export type { MailboxRecord, MailboxStatus, MailboxStore } from './mailboxes.js'
 export { createMailboxStore } from './mailboxes.js'
+export type {
+  CreatedWebhookEndpoint,
+  NewWebhookEndpoint,
+  StoredWebhookEndpoint,
+  WebhookEndpointPatch,
+  WebhookEndpointStatus,
+  WebhookEndpointStore,
+} from './webhook-endpoints.js'
+export { createWebhookEndpointStore, WEBHOOK_AUTO_DISABLE_THRESHOLD } from './webhook-endpoints.js'
