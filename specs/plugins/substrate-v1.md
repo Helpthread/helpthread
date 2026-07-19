@@ -24,6 +24,25 @@ and nothing more: it hears about inbound mail (events → webhook), reads the co
 general scopes/permissions system, marketplace plumbing (license keys, registry,
 metering), webhook redelivery tooling. Each waits for a real module to need it.
 
+**The additive-forward rule (TJ, 2026-07-18): marketplace attaches, it never
+retrofits.** Everything in this spec must remain correct unmodified when the
+marketplace phase arrives — commerce is additions on top, never a rebuild of the
+substrate. The specific commitments that keep it true:
+
+- **Licensing is distribution-side, never runtime.** A license key authenticates
+  registry download and updates; no runtime license check ever enters the substrate,
+  and revoking a license can never reach into a running helpdesk. Security credentials
+  (§3, §5) and commercial entitlement stay decoupled permanently.
+- **Module identity is a first-class attribution from day one**: assistants and webhook
+  endpoints both carry a `module` slug, so a later `module_installs` bundle (one-click
+  provision/uninstall, per-module health) references existing rows instead of
+  backfilling identity.
+- **Capability enforcement lives at one point** (§3), so a future scopes system swaps
+  in behind the same gate additively.
+- **First-party dogfood modules are built product-shaped**: configured only by
+  credentials/env, no Resonant-IQ-specific behavior — the repo we dogfood is the
+  artifact the marketplace later distributes.
+
 ## 2. Completing the actor model (schema)
 
 Charter §4 promises that every thread records its authoring actor kind with
@@ -163,7 +182,9 @@ dedupe on `eventId`; no cross-event ordering guarantee.
 `webhook_endpoints` table: `id`, `url` (https only), `secret` (server-generated,
 returned once, encrypted at rest via the existing token-crypto AES-256-GCM envelope —
 signing needs the plaintext back), `events` (subset filter of §4's list, or all),
-`status ('active','disabled','auto_disabled')`, consecutive-failure counter, timestamps.
+`module text NULL` (attribution slug, mirroring `assistants.module` — the
+additive-forward rule in §1), `status ('active','disabled','auto_disabled')`,
+consecutive-failure counter, timestamps.
 
 - **Admin API**: `POST /api/v1/webhooks`, `GET /api/v1/webhooks`,
   `PATCH …/{id}`, `DELETE …/{id}`, `POST …/{id}/test` (fires a synthetic `test.ping`).
@@ -289,4 +310,6 @@ to land in `specs/api/agent-inbox-v1.md` alongside implementation:
   illegal-state-proof against migration 007's live constraint; thin events stripped of
   PII; soft-delete indistinguishability extended to drafts and events; agent-inbox-v1
   wire amendments made explicit; idempotency namespace scoped; author-identity
-  forward-carry specified).
+  forward-carry specified). Same day: the additive-forward rule added (§1) with
+  `module` attribution on webhook endpoints (§5) — marketplace attaches, never
+  retrofits (TJ).
