@@ -149,8 +149,13 @@ conversation engine; an integration consumes events and the public API.
    see `specs/modules/marketplace-v1.md` §7 / HT-82: once the marketplace ships,
    Resonant IQ's own install moves onto the real marketplace flow, not this
    shortcut.)*
-5. Marketplace plumbing (license keys, registry, update channel) stays deferred to its
-   charter phase.
+5. **Marketplace plumbing** (license keys, registry, update channel — pinned in
+   `specs/modules/marketplace-v1.md`, HT-79) is built now, during the dogfood phase,
+   not deferred to "once demand justifies it": the 2026-07-19 HT-79 charter amendment
+   made the marketplace itself the project's proven install path (HT-82), so this
+   step lands inside the dogfood phase rather than after launch. Step 4's point still
+   stands on its own terms — Resonant IQ's early installs didn't strictly *need* this
+   plumbing to use our own modules — but the plumbing is no longer future work.
 
 ## 5. Marketplace phase — additive by contract
 
@@ -203,3 +208,7 @@ now so the marketplace design inherits it:
   path, so the shortcut this step describes stops being current once that spec
   ships. Sentence left in place for history; the supersession note is the current
   instruction.
+- **2026-07-19** (HT-79, CodeRabbit PR review): §4 step 5 corrected — it still said
+  marketplace plumbing "stays deferred to its charter phase," which no longer
+  matches step 4's own supersession note or `marketplace-v1.md` §1's "launch-day,
+  built now" framing. Reworded so both steps agree.

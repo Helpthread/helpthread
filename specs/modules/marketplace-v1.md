@@ -62,19 +62,34 @@ substrate's own `assistants.module` / `webhook_endpoints.module` attribution,
 | **Module** | `id`, `slug` (matches substrate `module` attribution, e.g. `draft-assistant`), `name`, `summary`, `cluster` (catalog.md §3's cluster name, informational), `status` (`active`/`deprecated`) | One row per sellable module. Third-party modules are a non-goal v1 (§9) — every row here is first-party. |
 | **Release** | `id`, `module_id`, `semver`, `tarball_storage_path`, `checksum_sha256`, `changelog_md`, `published_at` | One row per published version. Immutable once published — a bad release ships a new version, never edits an old one. |
 | **Customer** | `id`, `stripe_customer_id`, `email`, `created_at` | The marketplace's own account, 1:1 with a Stripe Customer. Unrelated to the engine's `agents`/`assistants` tables — a store customer and a Helpthread Agent are different systems' users, even when the same human. |
-| **Subscription** | `id`, `customer_id`, `module_id`, `stripe_subscription_id`, `interval` (`year`, per TJ's annual decision), `stripe_status` (mirrors Stripe's own status string), `current_period_end`, `created_at` | One subscription per (customer, module, deployment) — see License key below for why "per deployment" lands here, not as a separate column. |
-| **License key** | `id`, `subscription_id` (1:1), `module_id`, `secret_hash` (SHA-256 digest of the token's secret half — the plaintext `ht_lic_<id>_<secret>` is never persisted), `state` (`active`\|`lapsed`\|`frozen`\|`refunded`\|`revoked`), `entitled_up_to_version` (semver, meaningful only while `lapsed`), `created_at`, `rotated_at`, `revealed_at` (null until the customer has viewed the plaintext once, §3) | **Mint/verify mechanism inherited verbatim from Assistant tokens** (`src/auth/assistant-token.ts`, `src/api/assistants.ts`, `src/store/assistants.ts`) — the id is generated first, `ht_lic_<id>_<secret>` minted against it, and only `secret_hash` is ever stored; verification looks the row up by the id embedded in the presented token, then does a constant-time digest compare, exactly as `getForAuth`'s single-snapshot read does for Assistants. The plaintext is returned to the caller exactly once — at first reveal or at rotation (§3, §9) — never logged, never persisted, no reveal endpoint. **"Scoped to one helpdesk deployment" is a licensing TERM, not a technical control.** Per TJ's "annual subscription per helpdesk deployment" decision, an operator running two helpdesks is expected to buy two subscriptions and hold two keys — but nothing in this schema records which deployment a key is actually used against, and nothing can: the no-phone-home posture (§1) means the marketplace never learns a deployment's identity at all, so per-deployment scoping is enforced by the terms of sale (§8) an operator agrees to, never by a technical check. A subscription and its license key stay 1:1 — the subscription is the billing object, the key is what the operator's tooling holds. |
+| **Subscription** | `id`, `customer_id`, `module_id`, `stripe_subscription_id`, `stripe_latest_payment_intent_id` (nullable; updated on each successful `invoice.paid` for this subscription), `interval` (`year`, per TJ's annual decision), `stripe_status` (mirrors Stripe's own status string), `current_period_end`, `created_at` | One subscription per (customer, module, deployment) — see License key below for why "per deployment" lands here, not as a separate column. **`stripe_latest_payment_intent_id` is the join key refund/dispute webhooks resolve against**: those events arrive on Stripe charge/payment-intent/dispute objects, not Subscription objects, and `stripe_customer_id` alone can't disambiguate which subscription a given charge belongs to when one customer holds multiple module subscriptions — see §3's webhook table. |
+| **License key** | `id`, `subscription_id` (1:1), `module_id`, `secret_hash` (SHA-256 digest of the token's secret half — the plaintext `ht_lic_<id>_<secret>` is never persisted), `state` (`active`\|`lapsed`\|`frozen`\|`refunded`\|`revoked`), `entitled_up_to_version` (semver, meaningful only while `lapsed`), `pre_freeze_state` and `stripe_dispute_id` (both nullable; set together on entering `frozen`, cleared together on leaving it), `created_at`, `rotated_at`, `revealed_at` (null until the customer has viewed the plaintext once, §3) | **Mint/verify mechanism inherited verbatim from Assistant tokens** (`src/auth/assistant-token.ts`, `src/api/assistants.ts`, `src/store/assistants.ts`) — the id is generated first, `ht_lic_<id>_<secret>` minted against it, and only `secret_hash` is ever stored; verification looks the row up by the id embedded in the presented token, then does a constant-time digest compare, exactly as `getForAuth`'s single-snapshot read does for Assistants. The plaintext is returned to the caller exactly once — at first reveal or at rotation (§3, §9) — never logged, never persisted, no reveal endpoint. **"Scoped to one helpdesk deployment" is a licensing TERM, not a technical control.** Per TJ's "annual subscription per helpdesk deployment" decision, an operator running two helpdesks is expected to buy two subscriptions and hold two keys — but nothing in this schema records which deployment a key is actually used against, and nothing can: the no-phone-home posture (§1) means the marketplace never learns a deployment's identity at all, so per-deployment scoping is enforced by the terms of sale (§8) an operator agrees to, never by a technical check. A subscription and its license key stay 1:1 — the subscription is the billing object, the key is what the operator's tooling holds. **Pre-freeze state is preserved, not assumed**: entering `frozen` snapshots the license's current `state` into `pre_freeze_state` and the triggering dispute's Stripe id into `stripe_dispute_id`; a `won` outcome restores exactly that saved state — a license that was `lapsed` before the dispute comes back `lapsed`, never promoted to `active` — see §2's states table and §3. |
 | **Download grant** | `id`, `license_key_id`, `release_id`, `issued_at`, `expires_at`, `redeemed_at`, `requester_ip` | Minted per download/update-check call (§3's download endpoint) as a short-lived, single-purpose authorization for one Supabase Storage object — never a standing credential. Exists so the download endpoint has an audit trail distinct from the long-lived license key itself, and so a leaked signed URL has a bounded blast radius (default expiry: 5 minutes). |
+| **Webhook event log** | `id` (Stripe `event.id`), `type`, `received_at`, `processed_at` | The idempotency/replay-protection ledger every incoming Stripe webhook is checked against before applying a state transition — keyed by Stripe's own event id, **never** by `stripe_subscription_id` (see the Implementation note below for why that would be wrong). |
 
-**Implementation note — uniqueness invariants must exclude terminal states.** Should
-implementation add any uniqueness constraint touching Subscription or License key rows
-(webhook-idempotency dedup on `stripe_subscription_id`, a future bundle-pricing
-constraint, etc.), it must be scoped to exclude `revoked`/`refunded` rows — e.g. a
-partial index `WHERE state NOT IN ('revoked', 'refunded')` rather than a bare
-`UNIQUE`. Otherwise a legitimate re-purchase after a refund or a lost dispute would
-collide with its own terminal predecessor row and fail at the database level, which
-would be a self-inflicted way to lock out exactly the customer §2 and §7 are careful
-to say never gets locked out of buying again.
+**Implementation note — webhook idempotency is keyed on `event.id`, not
+`stripe_subscription_id`.** A single subscription legitimately emits many events over
+its life — created, renewed, past_due, canceled, disputed, and so on — so
+`stripe_subscription_id` is not a dedup key; using it as one would silently collapse
+distinct, valid events into "already seen." Replay protection instead uses the
+Webhook event log above, keyed on Stripe's own `event.id`: on receipt, the handler
+inserts-or-checks the incoming event's id in that log before doing anything else; if
+it's already present, the event was already processed and the handler returns success
+without reapplying the transition — safe against Stripe's at-least-once redelivery and
+out-of-order arrival. The event-log insert and the entitlement state transition it
+triggers happen inside the **same database transaction**, so a crash between them can
+never leave a half-applied state change that then double-applies on retry, duplicates
+a purchase, or reopens a terminal license.
+
+Separately: should implementation add any **uniqueness constraint** on Subscription or
+License key rows (e.g. a future bundle-pricing constraint — this is a distinct
+concern from event-replay dedup above), it must be scoped to exclude
+`revoked`/`refunded` rows — e.g. a partial index
+`WHERE state NOT IN ('revoked', 'refunded')` rather than a bare `UNIQUE`. Otherwise a
+legitimate re-purchase after a refund or a lost dispute would collide with its own
+terminal predecessor row and fail at the database level, which would be a
+self-inflicted way to lock out exactly the customer §2 and §7 are careful to say never
+gets locked out of buying again.
 
 ### License key states — pinned, with justification
 
@@ -87,7 +102,7 @@ much as it was already true of `lapsed` and `revoked`; nothing below is an excep
 |---|---|---|---|
 | `active` | Subscription in good standing | Any published release, unrestricted | Reports true latest, entitled |
 | `lapsed` | Payment missed or subscription non-renewed — **not** a fraud finding | Releases published **up to `entitled_up_to_version`** remain downloadable indefinitely; a release newer than that requires resubscribing | Reports `entitledVersion` (frozen at lapse) **and** `latestAvailableVersion` (informational, so the operator sees what they're missing) |
-| `frozen` | A dispute has been **filed** (Stripe `charge.dispute.created`) and is under investigation — automatic, protective, and explicitly **not** a fraud finding: a filed dispute proves nothing about who's right yet | Fully paused — zero access, including versions already downloaded fine before the freeze — until the dispute resolves (§3) | Fully paused |
+| `frozen` | A dispute has been **filed** (Stripe `charge.dispute.created`) and is under investigation — automatic, protective, and explicitly **not** a fraud finding: a filed dispute proves nothing about who's right yet. The prior `state` is snapshotted (`pre_freeze_state`) so resolution can restore it exactly, not assume `active` | Fully paused — zero access, including versions already downloaded fine before the freeze — until the dispute resolves (§3) | Fully paused |
 | `refunded` | Entitlement ended with **no fraud finding**: a voluntary refund, or a dispute the merchant lost (the chargeback stands, funds are gone either way) — terminal for entitlement | Hard-refused | Hard-refused |
 | `revoked` | **Confirmed** fraud only — a manual admin action following an actual investigation (a stolen payment method, a confirmed ToS violation). **Never** set automatically by a dispute merely being filed — "filed" and "confirmed" are different claims, and only `frozen` reacts to "filed" | Hard-refused | Hard-refused |
 
@@ -121,13 +136,18 @@ point §10.3): **lapsed keeps downloading already-entitled versions.** Reasoning
   not brand an ordinary refund request as fraud. Running software already deployed is
   untouched either way, per §1's governing constraint.
 - **Dispute filed** (`charge.dispute.created`) → `frozen`, automatically, the moment
-  Stripe reports it — a precaution, not a verdict, because at filing time nobody yet
+  Stripe reports it, **snapshotting the license's current `state` into
+  `pre_freeze_state`** (and the dispute's Stripe id into `stripe_dispute_id`) before
+  overwriting `state` — a precaution, not a verdict, because at filing time nobody yet
   knows whether the dispute is legitimate.
 - **Dispute resolved** (`charge.dispute.closed`): outcome `won` (the charge was
-  legitimate) → restore to whatever state the subscription would otherwise be in
-  (normally `active`); outcome `lost` (the chargeback stands) → `refunded`, by the same
-  reasoning as a voluntary refund above — a lost dispute is not proof of fraud on the
-  cardholder's part, it only means the funds are gone.
+  legitimate) → restore `state` to the saved `pre_freeze_state` **exactly**, then
+  clear both `pre_freeze_state` and `stripe_dispute_id`. A license that was `lapsed`
+  before the dispute was filed comes back `lapsed`, not promoted to `active` — only a
+  license that was genuinely `active` before the freeze comes back `active`. Outcome
+  `lost` (the chargeback stands) → `refunded` regardless of `pre_freeze_state`, by the
+  same reasoning as a voluntary refund above — a lost dispute is not proof of fraud on
+  the cardholder's part, it only means the funds are gone.
 - `revoked` is reachable **only** by deliberate admin action after an actual
   investigation — never by any automatic webhook mapping, disputes included.
 
@@ -171,43 +191,100 @@ Agent users), so a lighter mechanism is the deliberate, not accidental, choice:
   checkout-session-keyed reveal page and no plaintext key in any webhook payload,
   email, or redirect URL. A License key row is created at `checkout.session.completed`
   time with `secret_hash` left `NULL` — the secret is not minted yet. The first time
-  the authenticated customer opens the account area and views that subscription's
-  key, the marketplace mints it at that moment (same id-then-secret ordering as
-  Assistant tokens, just deferred to first authenticated view instead of row-creation
-  time), stores only `secret_hash`, sets `revealed_at`, and returns the plaintext in
-  that one response. Nothing about this flow ever routes a plaintext key through a
-  webhook handler, an email, or an unauthenticated redirect.
+  the authenticated customer requests that subscription's key, the marketplace mints
+  and stores it inside a single **compare-and-set** transaction:
+  `UPDATE license_keys SET secret_hash = $hash, revealed_at = now() WHERE id = $id AND
+  secret_hash IS NULL RETURNING *`. If two concurrent requests race for the same
+  never-revealed license, exactly one `UPDATE` matches and commits; the other affects
+  zero rows and gets `409 { "error": { "code": "already_revealed" } }` — it never
+  returns a plaintext, because it never won the write, so a response can never
+  describe a secret other than the one actually persisted. This is the same
+  id-then-secret ordering as Assistant tokens, just deferred to first authenticated
+  view instead of row-creation time, made race-safe by construction rather than by
+  assuming two requests never overlap. Nothing about this flow ever routes a
+  plaintext key through a webhook handler, an email, or an unauthenticated redirect.
 
 **Key rotation** (task item 9). An account-area action, mirroring
 `POST /api/v1/assistants/{id}/rotate-token` exactly: the authenticated customer
 session (never the license key itself) triggers
-`POST /api/v1/licenses/{id}/rotate`, which mints a fresh secret for the *same*
-license id, overwrites `secret_hash` in place (no new row, no overlap window — the
-old secret stops verifying the instant the new one is stored), and returns the new
-plaintext once, in the account area, same as first reveal. **The operator must update
-their own tooling's stored key** (wherever their update-check/download workflow
-holds it, §5) — rotation is not detectable by that tooling on its own; a rotated key
-simply starts rejecting the old secret on its next call.
+`POST /api/v1/licenses/{id}/rotate`, which — inside a transaction that takes
+`SELECT ... FOR UPDATE` on the license_key row first — mints a fresh secret for the
+*same* license id, overwrites `secret_hash` in place (no new row, no overlap window —
+the old secret stops verifying the instant the new one is stored), and returns the
+new plaintext once, in the account area, same as first reveal. The row lock
+serializes concurrent rotate requests for the same license: a second request blocks
+until the first commits, then mints and returns its own fresh secret against the
+now-current row — whichever transaction actually wrote is the only one whose response
+is shown, so a response body can never describe a secret the database doesn't hold.
+**The operator must update their own tooling's stored key** (wherever their
+update-check/download workflow holds it, §5) — rotation is not detectable by that
+tooling on its own; a rotated key simply starts rejecting the old secret on its next
+call.
+
+**Authorization on reveal, rotation, and the account-area download route below.**
+Session-cookie authentication alone is not sufficient for any of these three
+state-changing (or entitlement-exposing) actions:
+
+- **Object-level ownership.** Every query is scoped by the authenticated customer's
+  own id in the `WHERE` clause —
+  `WHERE id = $licenseId AND subscription_id IN (SELECT id FROM subscriptions WHERE
+  customer_id = $sessionCustomerId)` — never a bare `WHERE id = $licenseId`. A license
+  id belonging to a different customer behaves exactly like a nonexistent one
+  (`404`), the same indistinguishable-from-nonexistent convention the engine already
+  uses for soft-deleted conversations — it neither confirms nor denies that the id
+  exists at all.
+- **CSRF.** `httpOnly`/`Secure` on the session cookie stop script-readable theft and
+  plain-HTTP interception, but do **not** stop a cross-site form or fetch from riding
+  an authenticated browser's cookies into a state change. Every state-changing
+  account-area endpoint requires `SameSite=Strict` on the session cookie **and** a
+  synchronizer CSRF token (issued to the account-area page, submitted with the
+  request, checked server-side) — belt and suspenders, since `SameSite=Strict` alone
+  has known browser/extension edge cases and a CSRF token alone doesn't stop
+  cookie-riding from a same-site XSS.
+
+**Account-area download route (session-authenticated)** (task item 7). The
+account-area "Download" button (§5 step 2) cannot literally present a `ht_lic_`
+Bearer token: after first reveal the marketplace holds only `secret_hash`, never the
+plaintext again, so the server itself cannot reconstruct a token to call its own
+Bearer-token endpoint (§3b) on the customer's behalf. It doesn't need to — the
+browser is never the right holder of the license key at all. The key exists for the
+operator's own out-of-band update/download tooling (§3c, §5), not for browser-driven
+downloads, and never needs to reach the browser to make one happen. Instead:
+
+`GET /account/subscriptions/{subscriptionId}/download?version=...` — session-cookie
+authenticated (Authentication above), with the same object-level ownership check and
+CSRF requirements as reveal/rotation just above
+(`subscription.customer_id == session.customer_id`, else `404`). Internally it runs
+the **same entitlement-resolution logic** §3b's state table defines (module-binding
+is moot here, since the route is already scoped to one subscription's one
+`module_id`), mints a Download grant, and responds with the same short-lived signed
+Supabase Storage URL (or redirects straight to it) plus checksum. **The plaintext
+license key never enters this path at any point** — the browser never sees it and
+never needs it.
 
 **Stripe webhook → state mapping:**
 
 | Stripe event | Effect |
 |---|---|
-| `checkout.session.completed` | Create/find Customer; create Subscription; create License key row (`active`, `secret_hash NULL` — not yet minted, see Authentication above) |
-| `customer.subscription.updated` → `active` | License → `active` (from `lapsed`, or restoring after a `frozen` dispute resolves `won`) |
+| `checkout.session.completed` | Create/find Customer; create Subscription (storing `stripe_latest_payment_intent_id`); create License key row (`active`, `secret_hash NULL` — not yet minted, see Authentication above) |
+| `customer.subscription.updated` → `active` | License → `active` — **only** when transitioning from `lapsed` on resumed payment; this is the sole automatic path to `active` and never fires the dispute-restore logic below |
 | `customer.subscription.updated` → `past_due`/`unpaid`, or `customer.subscription.deleted` (ordinary cancellation) | License → `lapsed`, snapshot `entitled_up_to_version` = that module's latest published release at the moment of lapse |
-| `charge.refunded` / `refund.created` | License → `refunded` (terminal, not a fraud finding) |
-| `charge.dispute.created` | License → `frozen` (automatic, protective, not a fraud finding — a dispute has been filed, nothing more) |
-| `charge.dispute.closed`, outcome `won` | License restores to its pre-dispute state (normally `active`) |
-| `charge.dispute.closed`, outcome `lost` | License → `refunded` (the chargeback stands; not a fraud finding on the cardholder) |
+| `charge.refunded` / `refund.created` | Resolve the Subscription via `stripe_latest_payment_intent_id` (§2 — a customer may hold multiple module subscriptions, so `customer_id` alone can't disambiguate); License → `refunded` (terminal, not a fraud finding) |
+| `charge.dispute.created` | Resolve the Subscription via `stripe_latest_payment_intent_id`; License → `frozen`, snapshotting `pre_freeze_state`/`stripe_dispute_id` (§2) — automatic, protective, not a fraud finding |
+| `charge.dispute.closed`, outcome `won` | License restores to the saved `pre_freeze_state` exactly (§2) — **not** unconditionally `active` |
+| `charge.dispute.closed`, outcome `lost` | License → `refunded` regardless of `pre_freeze_state` (the chargeback stands; not a fraud finding on the cardholder) |
 | Manual admin action, following a confirmed-fraud investigation | License → `revoked` (terminal — never automatic, never triggered by a dispute merely being filed; a legitimate re-purchase creates a new Subscription and License key, never an un-revoke) |
+
+Every row above processes inside the idempotent, transactional webhook handler
+described in §2's Implementation note (dedup on Stripe `event.id`, never
+`stripe_subscription_id`).
 
 **APIs** (all under the marketplace's own base URL, distinct from any Helpthread
 deployment's `/api/v1`):
 
 **a. Public metadata feed — unauthenticated.**
 
-```
+```http
 GET /api/v1/modules
 ```
 
@@ -256,18 +333,32 @@ revisit if per-module version history grows large enough to bloat the main feed.
 
 **b. Authenticated download endpoint.**
 
-```
+```http
 POST /api/v1/download
 Authorization: Bearer ht_lic_<id>_<secret>
 { "module": "draft-assistant", "version": "1.2.0" }   // version optional
 ```
 
-Behavior: `revoked` → `403`. `active` → any published release, `version` omitted
-defaults to latest. `lapsed` → `version` omitted defaults to `entitled_up_to_version`;
-an explicitly-requested `version` newer than that → `402 Payment Required` with a
-message pointing at the resubscribe flow (an honest, explicit refusal rather than a
-silent downgrade to an older tarball than requested). On success: mint a Download
-grant, respond with a short-lived signed Supabase Storage URL plus the checksum:
+**Every request is checked against the presented license's own scope before
+anything else**: if `module` doesn't match the license's `module_id`, the request is
+refused `403 { "error": { "code": "module_mismatch" } }` regardless of license
+state — an active license for one Module never authorizes another, full stop. The
+selected Release (the requested `version`, or the default) is always resolved by
+`(module_id, version)`, never by `version` alone, since semver strings are not
+unique across different modules' release histories.
+
+With the module confirmed, license state governs what happens next:
+
+| State | Download behavior |
+|---|---|
+| `active` | Any published release, unrestricted; `version` omitted defaults to latest |
+| `lapsed` | `version` omitted defaults to `entitled_up_to_version`; an explicitly-requested `version` newer than that → `402 Payment Required` pointing at the resubscribe flow (an honest, explicit refusal rather than a silent downgrade to an older tarball than requested) |
+| `frozen` | `403 { "error": { "code": "license_frozen" } }` — a dispute is under review; fully paused per §2, including versions already downloaded fine before the freeze |
+| `refunded` | `403 { "error": { "code": "license_refunded" } }` — terminal, not a fraud label |
+| `revoked` | `403 { "error": { "code": "license_revoked" } }` — terminal, confirmed fraud only |
+
+On success (`active`, or `lapsed` within its cap): mint a Download grant, respond
+with a short-lived signed Supabase Storage URL plus the checksum:
 
 ```json
 { "version": "1.2.0", "downloadUrl": "https://...", "expiresAt": "...", "checksumSha256": "..." }
@@ -275,11 +366,26 @@ grant, respond with a short-lived signed Supabase Storage URL plus the checksum:
 
 **c. Update-check endpoint** — deliberately not telemetry.
 
-```
+```http
 POST /api/v1/update-check
 Authorization: Bearer ht_lic_<id>_<secret>
 { "module": "draft-assistant" }
 ```
+
+Same module-binding check as the download endpoint: `module` must match the
+presented license's own `module_id`, or
+`403 { "error": { "code": "module_mismatch" } }`, regardless of state. With the
+module confirmed:
+
+| State | Update-check behavior |
+|---|---|
+| `active` | Full response — `entitledVersion` is the true latest |
+| `lapsed` | Full response — `entitledVersion` frozen at lapse, `latestAvailableVersion` shown as an upgrade nudge |
+| `frozen` | `403 { "error": { "code": "license_frozen" } }` — matches §2's "fully paused," no informational exception |
+| `refunded` | `403 { "error": { "code": "license_refunded" } }` |
+| `revoked` | `403 { "error": { "code": "license_revoked" } }` |
+
+`active`/`lapsed` response shape:
 
 ```json
 {
@@ -313,7 +419,7 @@ operator or anyone else as "usage."
 
 ## 4. Artifact pipeline
 
-```
+```text
 module repo CI (e.g. Helpthread/module-draft-assistant, on tag/release)
   → build a versioned tarball (source + package.json + lockfile; no node_modules —
     matches module-draft-assistant's existing "plain Vercel Functions project, no
@@ -347,9 +453,11 @@ exactly (the reference artifact already documents this flow one system early):
 1. **Buy** — Stripe Checkout on the store site (annual). The marketplace emails a
    magic link into the account area (§3's Authentication); the operator authenticates
    there and reveals the license key exactly once (§3 — never anywhere before that).
-2. **Download** — account area "Download" button (browser-session-authenticated;
-   under the hood, the same Download grant mechanism as the API path in §3b) fetches
-   the tarball.
+2. **Download** — account area "Download" button hits the session-authenticated
+   `GET /account/subscriptions/{subscriptionId}/download` route (§3) — a separate
+   path from the Bearer-token API in §3b that shares its entitlement logic but never
+   touches the plaintext license key, which the browser never holds. Fetches the
+   tarball.
 3. **Deploy to Vercel** — extract the tarball, push to the operator's own git
    provider (or import directly), `vercel` CLI or dashboard import — unchanged from
    `module-draft-assistant`'s existing README.
@@ -458,13 +566,21 @@ current on this point without also reading this section.
 4. **Refund**: trigger a test-mode refund (`charge.refunded`) → verify license flips
    to `refunded`, downloads/update-check hard-refuse immediately, and — again — the
    already-deployed module keeps running untouched.
-5. **Dispute lifecycle**, via Stripe test mode's dispute-simulation test cards:
-   - `charge.dispute.created` → verify license flips to `frozen` automatically,
-     downloads/update-check fully paused.
-   - Resolve `won` → verify the license restores to its pre-dispute state (`active`).
-   - Repeat and resolve `lost` → verify the license flips to `refunded`, not
-     `revoked` — confirming the fix that a filed-then-lost dispute is never treated
-     as a fraud finding.
+5. **Dispute lifecycle**, via Stripe test mode's dispute-simulation test cards —
+   run this twice, from two different starting states, to actually prove
+   `pre_freeze_state` fidelity (§2) rather than the one path that happens to look
+   right by coincidence:
+   - **From `active`**: `charge.dispute.created` → verify license flips to `frozen`
+     automatically, `pre_freeze_state = 'active'`, downloads/update-check fully
+     paused. Resolve `won` → verify the license restores to `active`.
+   - **From `lapsed`**: force the subscription into `past_due` first, confirm the
+     license is `lapsed`, *then* trigger `charge.dispute.created` → verify
+     `pre_freeze_state = 'lapsed'`, not `'active'`. Resolve `won` → verify the
+     license restores to `lapsed`, **not** `active` — this is the exact bug this
+     revision fixed; the test must fail loudly if it regresses.
+   - Repeat either starting state and resolve `lost` → verify the license flips to
+     `refunded` regardless of `pre_freeze_state`, and never to `revoked` — confirming
+     a filed-then-lost dispute is never treated as a fraud finding.
 6. **Revoke**: simulate a `revoked` state via *manual* admin action only (standing in
    for a confirmed-fraud investigation, never triggered by the dispute flow above) →
    verify both download and update-check hard-fail immediately.
@@ -491,10 +607,11 @@ dependencies" quietly become a catch-all label for anything pre-launch.
 | Privacy policy for the store | Counsel-drafted | Same gate (real customer PII starts flowing at first live charge) | Same |
 | **Stripe Tax enabled** (automated EU VAT / US sales-tax calculation and remittance on Checkout Sessions) | Compliance/finance configuration, not counsel-drafted | Same gate — charging real customers across jurisdictions without correct tax handling is its own launch blocker | Not pre-dogfood — Stripe test mode carries no real tax obligation. Which jurisdictions to register in first is decision point §10.9 |
 
-The §7 plugin-exception counsel deadline (CHARTER.md §3, unchanged by the HT-79
-amendment) stays separate and earlier: before the first external code contribution —
-unaffected by this spec, since every v1 marketplace module is out-of-process and needs
-no exception (charter amendment text, quoted in full in CHARTER.md).
+CHARTER.md §7's plugin exception counsel deadline (referenced above in this spec's
+§3, unchanged by the HT-79 amendment) stays separate and earlier: before the first
+external code contribution — unaffected by this spec, since every v1 marketplace
+Module is out-of-process and needs no exception (charter amendment text, quoted in
+full in CHARTER.md).
 
 ## 9. Non-goals v1
 
@@ -647,3 +764,43 @@ spec's honest deliverable on that front, not a silent scope-down.
   dogfood-through-marketplace test plan (§7) extended to exercise `refunded` and the
   full `frozen` dispute lifecycle, not just `lapsed`/`revoked`, so HT-82 actually
   proves the state machine this revision introduces.
+- **2026-07-19** (HT-79, CodeRabbit PR #87 review — 9 actionables, all applied):
+  **Persist a stable payment-object mapping** — Subscription gained
+  `stripe_latest_payment_intent_id`; refund/dispute webhooks (which arrive on Stripe
+  charge/payment-intent/dispute objects, not Subscription objects) resolve through
+  it, since `stripe_customer_id` alone can't disambiguate a customer with multiple
+  module subscriptions (§2, §3). **Persist the pre-dispute license state** — License
+  key gained `pre_freeze_state`/`stripe_dispute_id`; a `won` dispute now restores the
+  *exact* prior state instead of unconditionally `active` (this also caught and fixed
+  a leftover inconsistency in the `customer.subscription.updated → active` webhook
+  row from the same bug class, missed in the first pass; §2, §3, §7's test plan now
+  exercises dispute-from-`lapsed` specifically to prove it). **Webhook idempotency
+  corrected** — replay protection is keyed on Stripe `event.id` in a new Webhook
+  event log entity, not `stripe_subscription_id` (which the prior draft wrongly
+  suggested as an example dedup key — one subscription emits many valid events over
+  its life); processing is transactional (§2). **Serialized first-reveal and
+  rotation** — both now specified as compare-and-set/row-lock transactions so
+  concurrent requests can never return a plaintext that doesn't match what's
+  persisted (§3). **CSRF and object-level authorization on rotation** (and reveal,
+  and the new download route) — explicit ownership scoping
+  (`subscription.customer_id == session.customer_id`, 404 otherwise, matching the
+  engine's own indistinguishable-from-nonexistent convention) plus `SameSite=Strict`
+  + synchronizer CSRF token, stated once and applied to all three account-area
+  actions (§3). **License↔module binding enforced on both download and
+  update-check** — a `module_mismatch` 403 gate before any state check, plus
+  explicit `frozen`/`refunded`/`revoked` refusal codes on both endpoints where the
+  prior draft only pinned codes for download (§3b, §3c). **Account-area download
+  route specified** — a separate session-authenticated
+  `GET /account/subscriptions/{subscriptionId}/download`, since the server holds
+  only `secret_hash` after first reveal and literally cannot reconstruct a Bearer
+  token to call its own API on the customer's behalf (§3, §5). **`catalog.md` §4
+  step 5 aligned** — it still said marketplace plumbing "stays deferred to its
+  charter phase," contradicting both step 4's own supersession note and this spec's
+  §1; reworded. **Modules vocabulary fixed** — "§7 plugin-exception counsel
+  deadline" corrected to the exact legal phrase "plugin exception," with the
+  CHARTER.md-vs-this-doc's own §7 numbering disambiguated in the same pass (§8).
+  Also, incidentally: four fenced code blocks (§3a, §3b, §3c, §4) given language
+  tags to clear a markdownlint MD040 finding surfaced alongside the flagged one —
+  verified by running `markdownlint-cli2` locally with only MD040 enabled (the
+  vanilla default ruleset's other findings, e.g. MD013 line-length, do not reflect
+  what this repo's CI/CodeRabbit actually enforces and were left alone).
