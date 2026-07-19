@@ -75,12 +75,20 @@ import type { QueueMessage, QueueMessageHandler } from '../providers/queue.js'
 import { createAgentStore } from '../store/agents.js'
 import {
   createConversationStore,
+  createEventOutboxStore,
   createGmailWatchStateStore,
   createInboundDeliveryStore,
   createMailboxStore,
   createMailboxTokenStore,
   createThreadAttachmentStore,
+  createWebhookEndpointStore,
 } from '../store/index.js'
+import {
+  createWebhookDeliveryHandler,
+  WEBHOOK_DELIVERY_TOPIC,
+  type WebhookDeliveryJob,
+} from '../webhooks/delivery.js'
+import { drainEventOutbox } from '../webhooks/outbox-drain.js'
 import { createAppHandler } from './app.js'
 import { type AppConfig, loadConfig } from './config.js'
 import { runHealthCheck } from './health.js'
@@ -147,6 +155,15 @@ export async function buildApp(
   const inboundDeliveryStore = createInboundDeliveryStore(db)
   const attachmentStore = createThreadAttachmentStore(db)
   const agentStore = createAgentStore(db)
+
+  // --- Module substrate (HT-69; specs/modules/substrate-v1.md §4/§5): the
+  // event outbox and webhook endpoint stores. `webhookEndpointStore` reuses
+  // the SAME `tokenEncryptionKey` as `tokenStore` above (mailbox OAuth
+  // tokens) — `src/store/webhook-endpoints.ts`'s own module doc: "no new
+  // crypto code — this module reuses mailbox-tokens.ts's crypto primitives,
+  // not a second key hierarchy". ---
+  const eventOutboxStore = createEventOutboxStore(db)
+  const webhookEndpointStore = createWebhookEndpointStore(db, config.tokenEncryptionKey)
 
   // --- Agents & Authentication (HT-54): the core provider registry is just
   // `[password]` — an ordered list, no discovery mechanism (spec §4's
@@ -255,6 +272,10 @@ export async function buildApp(
       mailboxStore,
       ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),
     },
+    // Webhooks admin API (HT-69) — CORE, required like `agents` (spec §1:
+    // the substrate is core, free forever). `queue` is the SAME
+    // `PostgresQueue` instance every other enqueue in this root shares.
+    webhooks: { store: webhookEndpointStore, queue },
     // HT-49 review fix: Gmail delivers a sent reply's own copy back into the
     // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
     // it as a phantom inbound message (src/mail/send.ts's "The reply token's
@@ -273,14 +294,24 @@ export async function buildApp(
     createHistoryClient: (getAccessToken) => createGmailHistoryClient({ getAccessToken }),
   })
 
+  // --- The webhook delivery handler the SAME queue drain also dispatches to
+  // (HT-69) — the outbox drain (wired below, its own cron tick) is what
+  // ENQUEUES onto this topic; this handler is what the existing every-minute
+  // `queue.drainOnce` call actually DELIVERS with. ---
+  const webhookDeliveryHandler = createWebhookDeliveryHandler({
+    webhookEndpoints: webhookEndpointStore,
+  })
+
   // The drain's handler map is typed `QueueMessageHandler<unknown>` (the queue
   // stores arbitrary JSON payloads); the topic string is what guarantees the
-  // payload is a GmailReconcileJob, so the narrowing cast at this single wiring
-  // point is the honest boundary between "any queued job" and "this topic's
-  // job shape".
+  // payload is a GmailReconcileJob/WebhookDeliveryJob, so the narrowing cast
+  // at this single wiring point is the honest boundary between "any queued
+  // job" and "this topic's job shape".
   const drainHandlers: Record<string, QueueMessageHandler<unknown>> = {
     [GMAIL_RECONCILE_TOPIC]: (message) =>
       reconcileHandler(message as QueueMessage<GmailReconcileJob>),
+    [WEBHOOK_DELIVERY_TOPIC]: (message) =>
+      webhookDeliveryHandler(message as QueueMessage<WebhookDeliveryJob>),
   }
 
   // --- Watch-maintenance deps (daily re-arm + sweep). ---
@@ -311,6 +342,23 @@ export async function buildApp(
       // the signal.
       if (report.claimed > 0 || report.staleSkipped > 0) {
         console.info(JSON.stringify({ event: 'queue_drain', ...report }))
+      }
+      return report
+    },
+    // --- Outbox drain (HT-69) — a SEPARATE cron tick from the queue drain
+    // above: this one turns `event_outbox` rows into `queue_jobs` fan-out
+    // (`drainEventOutbox`, `src/webhooks/outbox-drain.ts`); the queue drain
+    // above is what then actually DELIVERS them, via `webhookDeliveryHandler`
+    // registered on `WEBHOOK_DELIVERY_TOPIC` in `drainHandlers`. Same
+    // quiet-tick log suppression as `drainQueue` above. ---
+    drainOutbox: async () => {
+      const report = await drainEventOutbox({
+        eventOutbox: eventOutboxStore,
+        webhookEndpoints: webhookEndpointStore,
+        queue,
+      })
+      if (report.claimed > 0) {
+        console.info(JSON.stringify({ event: 'outbox_drain', ...report }))
       }
       return report
     },

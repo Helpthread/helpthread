@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.js'
+import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
 import { FORGED_TOKEN_ALERT_THRESHOLD, type HealthReport, runHealthCheck } from './health.js'
 
 describe('runHealthCheck', () => {
@@ -74,6 +75,32 @@ describe('runHealthCheck', () => {
     )
   }
 
+  /** Insert a dead-lettered `WEBHOOK_DELIVERY_TOPIC` queue job (HT-69) parked `deadLetteredAgoHours` ago — distinct from {@link seedDeadLetteredJob}'s generic `'health-test'` topic, which must NOT trip the webhook-specific alert. */
+  async function seedDeadLetteredWebhookJob(
+    database: Db,
+    deadLetteredAgoHours: number,
+  ): Promise<void> {
+    await database.query(
+      `INSERT INTO queue_jobs (topic, payload, dead_lettered_at)
+       VALUES ($2, '{}'::jsonb, now() - ($1::double precision * interval '1 hour'))`,
+      [deadLetteredAgoHours, WEBHOOK_DELIVERY_TOPIC],
+    )
+  }
+
+  /** Insert a `webhook_endpoints` row directly, at a given `status`/`consecutiveFailures` — bypassing `WebhookEndpointStore` (this suite only needs raw rows for the health query, not the store's encrypt-at-rest/auto-disable behavior, which has its own tests). */
+  async function seedWebhookEndpoint(
+    database: Db,
+    url: string,
+    status: 'active' | 'disabled' | 'auto_disabled',
+    consecutiveFailures = 0,
+  ): Promise<void> {
+    await database.query(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext, status, consecutive_failures)
+       VALUES ($1, $2, $3, $4)`,
+      [url, new Uint8Array(28), status, consecutiveFailures],
+    )
+  }
+
   it('an empty (fresh-deploy) database is fully healthy: ok, no alerts, zero-filled sections', async () => {
     const { check } = await fresh()
 
@@ -97,6 +124,7 @@ describe('runHealthCheck', () => {
       alertThreshold: FORGED_TOKEN_ALERT_THRESHOLD,
     })
     expect(report.mailboxes).toEqual([])
+    expect(report.webhooks).toEqual({ autoDisabled: [], deliveryFailuresLast24h: 0 })
     expect(new Date(report.generatedAt).getTime()).not.toBeNaN()
   })
 
@@ -265,5 +293,56 @@ describe('runHealthCheck', () => {
     expect(report.alerts).toHaveLength(2)
     expect(report.alerts[0]).toMatch(/^queue-drain-stalled: /)
     expect(report.alerts[1]).toMatch(/^mailbox-needs-attention: /)
+  })
+
+  describe('webhooks (HT-69)', () => {
+    it('an auto_disabled endpoint trips webhook-endpoint-auto-disabled and is listed; active/disabled endpoints are silent', async () => {
+      const { database, check } = await fresh()
+      await seedWebhookEndpoint(database, 'https://active.example.test/hook', 'active')
+      await seedWebhookEndpoint(database, 'https://disabled.example.test/hook', 'disabled')
+      await seedWebhookEndpoint(database, 'https://broken.example.test/hook', 'auto_disabled', 20)
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.webhooks.autoDisabled).toHaveLength(1)
+      expect(report.webhooks.autoDisabled[0]).toMatchObject({
+        url: 'https://broken.example.test/hook',
+        consecutiveFailures: 20,
+      })
+      const alert = report.alerts.find((a) => a.startsWith('webhook-endpoint-auto-disabled: '))
+      expect(alert).toBeDefined()
+      expect(alert).toContain('1 webhook endpoint(s)')
+    })
+
+    it('a webhook.delivery dead-letter in the last 24h trips webhook-delivery-dead-letter-growth; an OLDER one, or one on a DIFFERENT topic, does not', async () => {
+      const { database, check } = await fresh()
+      // A generic dead-letter on an unrelated topic must not trip this
+      // webhook-specific alert (queue-dead-letter-growth is the general one).
+      await seedDeadLetteredJob(database, 1)
+
+      const beforeWebhookDeadLetter = await check()
+      expect(beforeWebhookDeadLetter.webhooks.deliveryFailuresLast24h).toBe(0)
+      expect(
+        beforeWebhookDeadLetter.alerts.some((a) =>
+          a.startsWith('webhook-delivery-dead-letter-growth'),
+        ),
+      ).toBe(false)
+
+      // An OLDER-than-24h webhook.delivery dead-letter is out of the window.
+      await seedDeadLetteredWebhookJob(database, 30)
+      const stillClean = await check()
+      expect(stillClean.webhooks.deliveryFailuresLast24h).toBe(0)
+
+      // A recent one trips it.
+      await seedDeadLetteredWebhookJob(database, 1)
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.webhooks.deliveryFailuresLast24h).toBe(1)
+      const alert = report.alerts.find((a) => a.startsWith('webhook-delivery-dead-letter-growth: '))
+      expect(alert).toBeDefined()
+      expect(alert).toContain('1 webhook delivery(ies)')
+    })
   })
 })

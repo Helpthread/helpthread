@@ -141,6 +141,7 @@
  */
 
 import type { Db, Queryable, SqlValue } from '../db/client.js'
+import { appendOutboxEventInTx } from './event-outbox.js'
 
 /**
  * A snapshot of the mail headers an outbound reply was sent with:
@@ -349,9 +350,20 @@ export interface StoredConversation {
  * outcome of running arbitrary inbound mail through the threading decision
  * (see the module doc's resolution of specs/mail/threading.md §5), and
  * callers should handle it as ordinary control flow.
+ *
+ * `reopened` (HT-69; specs/modules/substrate-v1.md §4's `conversation.
+ * message_received` event, `reopened` field) is `true` exactly when THIS
+ * call's `created && thread.draftStatus === undefined` reopen branch fired
+ * (module doc: a genuinely new, non-draft, non-note thread landing on a
+ * `closed`/`spam` conversation) — `false` for every other case, including a
+ * replay (`created: false`) and a note/draft insert, which never reopen by
+ * construction. Exposed so a caller that fires `conversation.message_
+ * received` (the inbound ingest pipeline, `src/mail/ingest.ts`) can report
+ * the spec's `reopened` fact without re-deriving it from a second read of
+ * the conversation's pre-append status.
  */
 export type AppendResult =
-  | { ok: true; threadId: string; created: boolean; thread: StoredThread }
+  | { ok: true; threadId: string; created: boolean; thread: StoredThread; reopened: boolean }
   | { ok: false; reason: 'not-found' | 'deleted' }
 
 /**
@@ -983,8 +995,15 @@ export async function appendThreadInTx(
   // than even a note. This is checked FIRST, ahead of the direction check
   // below, so a draft row (direction: 'outbound') never falls into the
   // reopen/bump branch a plain outbound send would.
+  //
+  // HT-69: `reopened` (AppendResult's own field — see its doc comment)
+  // mirrors this exact condition, computed here where the pre-append
+  // `row.status` is still in scope, rather than asking a caller to
+  // re-derive it from a second read.
+  let reopened = false
   if (created && thread.draftStatus === undefined) {
     if ((row.status === 'closed' || row.status === 'spam') && thread.direction !== 'note') {
+      reopened = true
       await tx.query(
         "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1",
         [conversationId],
@@ -994,7 +1013,7 @@ export async function appendThreadInTx(
     }
   }
 
-  return { ok: true, threadId, created, thread: toStoredThread(threadRow) }
+  return { ok: true, threadId, created, thread: toStoredThread(threadRow), reopened }
 }
 
 export function createConversationStore(db: Db): ConversationStore {
@@ -1090,15 +1109,41 @@ export function createConversationStore(db: Db): ConversationStore {
       // (see its doc comment) — kept as a separate method rather than a
       // parameter there so the pre-HT-16 no-idempotency-key send path keeps
       // calling setThreadDeliveryStatus completely unchanged.
-      const updated = await db.query<{ id: string }>(
-        "UPDATE threads SET delivery_status = $1, claimed_until = NULL WHERE id = $2 AND direction = 'outbound' RETURNING id",
-        [status, threadId],
-      )
-      if (updated.length === 0) {
-        throw new Error(
-          `releaseThreadLease: no outbound thread with id ${threadId} (wrong id, an inbound thread, or the row was deleted)`,
+      //
+      // HT-69 (spec §4's `conversation.reply_sent`, spec §9 decision 3:
+      // fired at 'sent' — truth, not intent): this is THE delivery-status
+      // transition this ticket owns (this method is shared by `sendReply`'s
+      // keyed-retry claim path AND `runDeliveryWorker`'s sweep,
+      // `src/mail/send.ts`'s `attemptDeliveryOfClaimedThread` — the ONE
+      // place either caller marks a claimed row `sent`/`failed`; the
+      // no-idempotency-key `setThreadDeliveryStatus` path above is legacy
+      // and unreachable from the real API, which requires `Idempotency-Key`
+      // on every reply — see this ticket's report for the full reasoning).
+      // Wrapped in a transaction so the status write and the outbox event
+      // commit or roll back together (spec §4: "an event never fires for a
+      // change that rolled back") — only on the 'sent' branch; 'failed'
+      // fires nothing (not in spec §4's vocabulary).
+      await db.transaction(async (tx) => {
+        const updated = await tx.query<ThreadRow>(
+          `UPDATE threads SET delivery_status = $1, claimed_until = NULL
+           WHERE id = $2 AND direction = 'outbound'
+           RETURNING ${THREAD_COLUMNS}`,
+          [status, threadId],
         )
-      }
+        if (updated.length === 0) {
+          throw new Error(
+            `releaseThreadLease: no outbound thread with id ${threadId} (wrong id, an inbound thread, or the row was deleted)`,
+          )
+        }
+        if (status === 'sent') {
+          const thread = toStoredThread(updated[0])
+          await appendOutboxEventInTx(tx, {
+            type: 'conversation.reply_sent',
+            conversationId: thread.conversationId,
+            data: { threadId: thread.id, authorKind: thread.authorKind },
+          })
+        }
+      })
     },
 
     async listDeliverableThreads(options) {
@@ -1177,15 +1222,49 @@ export function createConversationStore(db: Db): ConversationStore {
     },
 
     async setConversationStatus(conversationId, status) {
-      const rows = await db.query<ConversationSummaryRow>(
-        `UPDATE conversations
-         SET status = $1, updated_at = now()
-         WHERE id = $2 AND status <> 'deleted'
-         ${summaryReturningSql('$2')}`,
-        [status, conversationId],
-      )
-      const row = rows[0]
-      return row === undefined ? null : toConversationSummary(row)
+      // HT-69 (spec §4's `conversation.status_changed`, "status transition
+      // among the four API states"): the `from`/`to` payload needs the
+      // PRIOR status, which a plain UPDATE...RETURNING never exposes (only
+      // the post-update row). `SELECT ... FOR UPDATE` first — mirroring
+      // appendThreadInTx's own lock-then-act shape above — locks the row so
+      // no concurrent write can change `status` between this read and the
+      // UPDATE below, then the UPDATE and (when the status actually
+      // changed) the outbox event commit together in the SAME transaction
+      // (spec §4's transactional-outbox rule). `deleted` is excluded by
+      // TYPE (`ConversationStatus` has no `'deleted'` member) — this method
+      // can never be called with it, so "only the four API states fire
+      // this event" holds by construction, not by a runtime check.
+      return db.transaction(async (tx) => {
+        const priorRows = await tx.query<{ status: string }>(
+          'SELECT status FROM conversations WHERE id = $1 FOR UPDATE',
+          [conversationId],
+        )
+        const prior = priorRows[0]
+        if (prior === undefined || prior.status === 'deleted') return null
+
+        const rows = await tx.query<ConversationSummaryRow>(
+          `UPDATE conversations
+           SET status = $1, updated_at = now()
+           WHERE id = $2 AND status <> 'deleted'
+           ${summaryReturningSql('$2')}`,
+          [status, conversationId],
+        )
+        const row = rows[0]
+        if (row === undefined) return null
+
+        // "Transition" (spec §4) — a PATCH that re-asserts the SAME status
+        // touches nothing new, so it fires no event (mirrors updated_at
+        // still bumping either way — a no-op transition is idempotent
+        // storage-wise but not event-worthy).
+        if (prior.status !== status) {
+          await appendOutboxEventInTx(tx, {
+            type: 'conversation.status_changed',
+            conversationId,
+            data: { from: prior.status, to: status },
+          })
+        }
+        return toConversationSummary(row)
+      })
     },
 
     async setConversationTags(conversationId, tags) {
@@ -1193,28 +1272,64 @@ export function createConversationStore(db: Db): ConversationStore {
       // interface doc); jsonb columns take caller-serialized JSON text, the
       // same convention as send_envelope. No updated_at bump: metadata, not
       // activity (spec §4e).
-      const rows = await db.query<ConversationSummaryRow>(
-        `UPDATE conversations
-         SET tags = $1::jsonb
-         WHERE id = $2 AND status <> 'deleted'
-         ${summaryReturningSql('$2')}`,
-        [JSON.stringify(tags), conversationId],
-      )
-      const row = rows[0]
-      return row === undefined ? null : toConversationSummary(row)
+      //
+      // HT-69 (spec §4's `conversation.tags_changed`, "fired when: tag set
+      // replaced"): unconditional on every successful replace — unlike
+      // status_changed's "transition" wording, this event names the ACTION
+      // (a PUT that replaces the set), not a before/after diff, so it fires
+      // even when the replacement happens to equal the prior set. Wrapped
+      // in a transaction so the write and the event commit together (spec
+      // §4's transactional-outbox rule).
+      return db.transaction(async (tx) => {
+        const rows = await tx.query<ConversationSummaryRow>(
+          `UPDATE conversations
+           SET tags = $1::jsonb
+           WHERE id = $2 AND status <> 'deleted'
+           ${summaryReturningSql('$2')}`,
+          [JSON.stringify(tags), conversationId],
+        )
+        const row = rows[0]
+        if (row === undefined) return null
+        await appendOutboxEventInTx(tx, {
+          type: 'conversation.tags_changed',
+          conversationId,
+          data: { tags },
+        })
+        return toConversationSummary(row)
+      })
     },
 
     async setConversationAssignee(conversationId, assigneeAgentId) {
       // No updated_at bump: claiming is metadata, not activity (spec §4f).
-      let rows: ConversationSummaryRow[]
+      //
+      // HT-69 (spec §4's `conversation.assignee_changed`, "assignee
+      // set/cleared"): unconditional on every successful write, same
+      // "names the action, not a before/after diff" reasoning as
+      // setConversationTags above. Wrapped in a transaction so the write
+      // and the event commit together (spec §4's transactional-outbox
+      // rule); the FK-violation catch stays around the WHOLE transaction
+      // call (not just the UPDATE) since a rolled-back transaction due to
+      // the FK throw must not leave a dangling outbox row either — though
+      // in practice the throw happens before appendOutboxEventInTx is ever
+      // reached, since the UPDATE itself is what violates the FK.
       try {
-        rows = await db.query<ConversationSummaryRow>(
-          `UPDATE conversations
-           SET assignee_agent_id = $1
-           WHERE id = $2 AND status <> 'deleted'
-           ${summaryReturningSql('$2')}`,
-          [assigneeAgentId, conversationId],
-        )
+        return await db.transaction(async (tx) => {
+          const rows = await tx.query<ConversationSummaryRow>(
+            `UPDATE conversations
+             SET assignee_agent_id = $1
+             WHERE id = $2 AND status <> 'deleted'
+             ${summaryReturningSql('$2')}`,
+            [assigneeAgentId, conversationId],
+          )
+          const row = rows[0]
+          if (row === undefined) return null
+          await appendOutboxEventInTx(tx, {
+            type: 'conversation.assignee_changed',
+            conversationId,
+            data: { assigneeAgentId },
+          })
+          return toConversationSummary(row)
+        })
       } catch (err) {
         // The Agent was deleted between the caller's existence check and this
         // UPDATE — the FK is the authoritative guard for that race (interface
@@ -1222,8 +1337,6 @@ export function createConversationStore(db: Db): ConversationStore {
         if (isAssigneeFkViolation(err)) return 'invalid_agent'
         throw err
       }
-      const row = rows[0]
-      return row === undefined ? null : toConversationSummary(row)
     },
 
     async recordThreadView(threadId) {

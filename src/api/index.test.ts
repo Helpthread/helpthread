@@ -26,9 +26,11 @@ import { createGmailWatchStateStore } from '../store/gmail-watch-state.js'
 import { createMailboxTokenStore } from '../store/mailbox-tokens.js'
 import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
+import { createWebhookEndpointStore } from '../store/webhook-endpoints.js'
 import type { AgentsApiDeps } from './agents.js'
 import type { GmailReconcileJob } from './gmail-webhook.js'
 import { createInboxApi, type InboxApiDeps } from './index.js'
+import type { WebhooksApiDeps } from './webhooks.js'
 
 const TOKEN_ENC_KEY = randomBytes(ENCRYPTION_KEY_BYTES)
 
@@ -53,6 +55,21 @@ function testAgentsDeps(db: Db): AgentsApiDeps {
     store,
     providers: [createPasswordAuthProvider({ agentStore: store })],
     mailboxStore: createMailboxStore(db),
+  }
+}
+
+/**
+ * Build the REQUIRED `webhooks` deps (HT-69) for a `createInboxApi` call
+ * wired to `db` — a real PGlite-backed `WebhookEndpointStore` plus a
+ * no-op `QueueProvider` (nothing in this suite exercises delivery; that is
+ * `src/webhooks/*.test.ts`'s and `src/api/webhooks.test.ts`'s job). Just
+ * enough for `createInboxApi` to construct and for the existing routes
+ * this suite covers to behave unchanged.
+ */
+function testWebhooksDeps(db: Db): WebhooksApiDeps {
+  return {
+    store: createWebhookEndpointStore(db, TOKEN_ENC_KEY),
+    queue: { async enqueue() {} },
   }
 }
 
@@ -253,6 +270,7 @@ describe('createInboxApi', () => {
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
       agents: agentsDeps,
+      webhooks: testWebhooksDeps(db),
       ...(overrides.openTracking !== undefined ? { openTracking: overrides.openTracking } : {}),
       ...(overrides.gmailPush !== undefined ? { gmailPush: overrides.gmailPush } : {}),
       ...(overrides.gmailConnect !== undefined ? { gmailConnect: overrides.gmailConnect } : {}),
@@ -702,6 +720,7 @@ describe('createInboxApi', () => {
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
       })
 
       const res = await api(
@@ -809,6 +828,7 @@ describe('createInboxApi', () => {
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
       })
 
       const res = await api(
@@ -1014,6 +1034,7 @@ describe('createInboxApi', () => {
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
       })
 
       const res = await api(
@@ -1926,6 +1947,7 @@ describe('createInboxApi', () => {
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
         gmailPush: {
           verifySignature: async () => true,
           subscription: SUBSCRIPTION,
@@ -1957,6 +1979,7 @@ describe('createInboxApi', () => {
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
         gmailPush: {
           verifySignature: async () => true,
           subscription: SUBSCRIPTION,
@@ -2092,6 +2115,7 @@ describe('createInboxApi', () => {
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
         ...(gmailConnect !== undefined ? { gmailConnect } : {}),
       })
     }
@@ -2325,6 +2349,7 @@ describe('createInboxApi', () => {
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
         ...(gmailDisconnect !== undefined ? { gmailDisconnect } : {}),
       })
     }
@@ -2425,6 +2450,13 @@ describe('createInboxApi — hardening (Codex review)', () => {
       providers: [],
       mailboxStore: {} as unknown as MailboxStore,
     } satisfies AgentsApiDeps,
+    // Same "never invoked in this block" reasoning as `agents` above — these
+    // tests are purely about construction-time validation and the
+    // conversations-route error paths, never /webhooks/*.
+    webhooks: {
+      store: {} as unknown as WebhooksApiDeps['store'],
+      queue: {} as unknown as WebhooksApiDeps['queue'],
+    } satisfies WebhooksApiDeps,
   }
 
   it('throws at construction on an empty apiToken (fail closed — an empty token would authenticate every request)', () => {
