@@ -180,8 +180,12 @@ privilege).
 2. `PUBLIC_BASE_URL` = your production URL (e.g. `https://desk.resonantiq.app`),
    matching the OAuth redirect URI (A2.3) and the Pub/Sub push endpoint (A3.4).
    No trailing slash (the composition root strips one defensively either way).
-3. Deploy. `vercel.json` (in the repo) declares the two Vercel Cron jobs:
-   - `*/1 * * * *` → `GET /api/v1/internal/queue/drain` (drain the job queue).
+3. Deploy. `vercel.json` (in the repo) declares three Vercel Cron jobs:
+   - `*/1 * * * *` → `GET /api/v1/internal/queue/drain` (drain the job queue —
+     also delivers webhooks, HT-69: `WEBHOOK_DELIVERY_TOPIC` is handled here).
+   - `*/1 * * * *` → `GET /api/v1/internal/outbox/drain` (HT-69: turn
+     `event_outbox` rows into webhook-delivery queue jobs — a SEPARATE tick
+     from the queue drain above; that one then actually sends them).
    - `0 6 * * *` → `GET /api/v1/internal/cron/watch-maintenance` (daily renewal + sweep; UTC).
    Vercel Cron invokes these as HTTP GETs; the handlers require the
    `CRON_SECRET` (Vercel sends it as a bearer via the `Authorization` header on
@@ -277,9 +281,10 @@ Authorization: Bearer $CRON_SECRET
 
 Answers **`200` when healthy, `503` when any alert is tripped** (body is the
 full JSON report either way: `ok`, `alerts[]`, and per-section detail —
-queue stats, 24h ledger outcome counts, 24h forged-token aggregate, and
-per-mailbox status + Gmail `watch()` expiry). Read-only and cheap — polling
-every minute is fine.
+queue stats, 24h ledger outcome counts, 24h forged-token aggregate,
+per-mailbox status + Gmail `watch()` expiry, and — HT-69 — a `webhooks`
+section: currently `auto_disabled` endpoints and 24h webhook-delivery
+dead-letter count). Read-only and cheap — polling every minute is fine.
 
 **Wiring a monitor:** point any status-code poller that can send one custom
 header (UptimeRobot, Checkly, a `curl -fsS` in a cron you already own) at the
@@ -300,6 +305,8 @@ Each `alerts[]` entry is `<code>: <detail>`. The codes are stable:
 | `forged-token-burst` | ≥ threshold (default 5) stored deliveries in 24h carried reply tokens that FAILED signature verification — someone is guessing/tampering with threading tokens (threading.md §5) | Search Vercel logs for `forged_token_detected` (WARN); review `senderAddress`/`conversationId` across events. The mail itself threaded safely (a forged token never appends) |
 | `mailbox-needs-attention` | A mailbox is `paused` (cursor expired — gmail-push.md §5 rebaseline) or `needs_reconnect` (dead OAuth grant) — **inbound mail is not flowing** | `needs_reconnect`: re-run the Part E consent. `paused`: reconnect to rebaseline the cursor, then check for a gap |
 | `watch-expiring` | An active mailbox's Gmail `watch()` expires in < 72h (or was never armed) — the daily renewal has been failing for days | Function logs for `/internal/cron/watch-maintenance` (`gmail_watch_maintenance` events); a manual `GET` of that endpoint with the cron secret re-arms immediately |
+| `webhook-endpoint-auto-disabled` | HT-69: a webhook endpoint hit 20 consecutive delivery failures and auto-disabled — a module (or an operator's own integration) has silently stopped receiving events | `SELECT id, url, consecutive_failures FROM webhook_endpoints WHERE status = 'auto_disabled'`; fix the receiving side, then `PATCH /api/v1/webhooks/{id}` with `{"status":"active"}` to re-enable (resets the counter) |
+| `webhook-delivery-dead-letter-growth` | HT-69: a webhook delivery exhausted its retries in the last 24h (`WEBHOOK_DELIVERY_TOPIC` on `queue_jobs`) | `SELECT payload, last_error FROM queue_jobs WHERE topic = 'webhook.delivery' AND dead_lettered_at IS NOT NULL ORDER BY dead_lettered_at DESC` — `payload.endpointId` names the endpoint; this can precede (or accompany) an eventual auto-disable |
 
 ### G3. Structured log events (Vercel log search)
 
@@ -308,7 +315,11 @@ ingest outcome: threading decision, append-fallback reason, forgedTokenCount,
 parse size, attachment count, ledger outcome), `forged_token_detected` (WARN
 — the per-message security event behind `forged-token-burst`), `queue_drain`
 (per drain tick that claimed work or fenced a stale worker: claimed/acked/
-retried/deadLettered/staleSkipped; quiet ticks don't log), `gmail_reconcile`
+retried/deadLettered/staleSkipped; quiet ticks don't log — this is also
+where webhook-delivery attempts surface, since `WEBHOOK_DELIVERY_TOPIC` is
+handled by the SAME drain), `outbox_drain` (HT-69: per outbox-drain tick
+that claimed at least one `event_outbox` row — claimed/enqueued/dispatched;
+quiet ticks don't log, same convention as `queue_drain`), `gmail_reconcile`
 (per reconcile job: cursor positions, skip/retry/ack reasons), and
 `gmail_watch_maintenance` (the daily renewal + sweep). Correlate transport
 events to ingest events on `(mailboxId, providerMessageId)`

@@ -695,6 +695,243 @@ describe('ingestInboundMessage', () => {
     expect(await countRows(db, 'conversations')).toBe(0)
   })
 
+  // --- HT-69, spec §4: event emission on the ingestion append path. --------
+
+  describe('event emission (HT-69, spec §4)', () => {
+    interface OutboxEventRow {
+      type: string
+      conversation_id: string
+      data: Record<string, unknown>
+    }
+
+    async function outboxEventsFor(
+      database: Db,
+      conversationId: string,
+    ): Promise<OutboxEventRow[]> {
+      return database.query<OutboxEventRow>(
+        'SELECT type, conversation_id, data FROM event_outbox WHERE conversation_id = $1 ORDER BY occurred_at, event_id',
+        [conversationId],
+      )
+    }
+
+    it('a fresh message (new conversation) fires conversation.created + conversation.message_received(reopened:false), both thin', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const outcome = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+        deps,
+      )
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+
+      // Both rows land in the SAME transaction, so `occurred_at` (transaction
+      // start time in Postgres) TIES between them — spec §8 promises no
+      // cross-event ordering guarantee anyway, so these assertions are
+      // deliberately order-independent (by TYPE, not array position).
+      const events = await outboxEventsFor(db, outcome.conversationId)
+      expect(events).toHaveLength(2)
+      expect(events.map((e) => e.type).sort()).toEqual([
+        'conversation.created',
+        'conversation.message_received',
+      ])
+      const created = events.find((e) => e.type === 'conversation.created')
+      const messageReceived = events.find((e) => e.type === 'conversation.message_received')
+      expect(created?.data).toEqual({}) // conversation.created carries no data (spec §4)
+      expect(Object.keys(messageReceived?.data ?? {}).sort()).toEqual(['reopened', 'threadId'])
+      expect(messageReceived?.data).toEqual({ threadId: outcome.threadId, reopened: false })
+      // Thin: no bodyText/subject/fromAddress anywhere in either payload.
+      for (const event of events) {
+        expect(JSON.stringify(event.data)).not.toMatch(/order|customer@example|Help with/)
+      }
+    })
+
+    it('a replay (the SAME raw delivery — mailboxId+providerMessageId — redelivered) fires conversation.message_received exactly ONCE, never a second time with a fresh eventId (review fix)', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const raw = inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw())
+
+      const first = await ingestInboundMessage(raw, deps)
+      if (first.kind !== 'stored') throw new Error('unreachable')
+
+      // Redeliver the IDENTICAL raw message — `InboundDeliveryStore`'s own
+      // ledger dedup (keyed on mailboxId+providerMessageId) recognizes this
+      // as the SAME delivery and replays its already-`stored` outcome
+      // WITHOUT re-running writeParsedEmail/appendThreadInTx at all (module
+      // doc: "idempotent by step 1").
+      const replay = await ingestInboundMessage(raw, deps)
+      expect(replay).toMatchObject({
+        kind: 'stored',
+        conversationId: first.conversationId,
+        threadId: first.threadId,
+      })
+
+      const events = await outboxEventsFor(db, first.conversationId)
+      expect(events.filter((e) => e.type === 'conversation.message_received')).toHaveLength(1)
+      expect(events.filter((e) => e.type === 'conversation.created')).toHaveLength(1)
+    })
+
+    it('a valid-token reply to an ACTIVE conversation fires only conversation.message_received(reopened:false)', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const first = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+        deps,
+      )
+      if (first.kind !== 'stored') throw new Error('unreachable')
+
+      const replyToken = mintReplyMessageId(
+        { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+        keyring,
+      )
+      const second = await ingestInboundMessage(
+        inboundDelivery(
+          mailboxId,
+          'provider-msg-2',
+          rawMessage(
+            {
+              From: 'customer@example.test',
+              To: 'support@example.test',
+              Subject: 'Re: Help with my order',
+              'Message-ID': '<cust-2@customer.example.test>',
+              'In-Reply-To': replyToken,
+            },
+            'Still broken.',
+          ),
+        ),
+        deps,
+      )
+      if (second.kind !== 'stored') throw new Error('unreachable')
+
+      const events = await outboxEventsFor(db, first.conversationId)
+      // Exactly one conversation.created (the reply must NOT mint a second
+      // one) and two message_received (the original + the reply) — order
+      // is not asserted (spec §8: no cross-event ordering guarantee), so
+      // the reply's own event is found by its threadId, not array position.
+      expect(events.filter((e) => e.type === 'conversation.created')).toHaveLength(1)
+      expect(events.filter((e) => e.type === 'conversation.message_received')).toHaveLength(2)
+      const replyEvent = events.find(
+        (e) => e.type === 'conversation.message_received' && e.data.threadId === second.threadId,
+      )
+      expect(replyEvent?.data).toEqual({ threadId: second.threadId, reopened: false })
+    })
+
+    it('a valid-token reply to a CLOSED conversation reopens it and fires conversation.message_received(reopened:true)', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const first = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+        deps,
+      )
+      if (first.kind !== 'stored') throw new Error('unreachable')
+      await db.query("UPDATE conversations SET status = 'closed' WHERE id = $1", [
+        first.conversationId,
+      ])
+
+      const replyToken = mintReplyMessageId(
+        { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+        keyring,
+      )
+      const second = await ingestInboundMessage(
+        inboundDelivery(
+          mailboxId,
+          'provider-msg-2',
+          rawMessage(
+            {
+              From: 'customer@example.test',
+              To: 'support@example.test',
+              Subject: 'Re: Help with my order',
+              'Message-ID': '<cust-2@customer.example.test>',
+              'In-Reply-To': replyToken,
+            },
+            'Still broken.',
+          ),
+        ),
+        deps,
+      )
+      if (second.kind !== 'stored') throw new Error('unreachable')
+
+      const events = await outboxEventsFor(db, first.conversationId)
+      const reopenEvent = events.find(
+        (e) => e.type === 'conversation.message_received' && e.data.threadId === second.threadId,
+      )
+      expect(reopenEvent?.data).toEqual({ threadId: second.threadId, reopened: true })
+    })
+
+    it('the deleted/not-found append fallback fires conversation.created + conversation.message_received(reopened:false) on the FRESH conversation, not the orphaned one', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const first = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+        deps,
+      )
+      if (first.kind !== 'stored') throw new Error('unreachable')
+      await db.query("UPDATE conversations SET status = 'deleted' WHERE id = $1", [
+        first.conversationId,
+      ])
+
+      const replyToken = mintReplyMessageId(
+        { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+        keyring,
+      )
+      const second = await ingestInboundMessage(
+        inboundDelivery(
+          mailboxId,
+          'provider-msg-2',
+          rawMessage(
+            {
+              From: 'customer@example.test',
+              To: 'support@example.test',
+              Subject: 'Re: Help with my order',
+              'Message-ID': '<cust-2@customer.example.test>',
+              'In-Reply-To': replyToken,
+            },
+            'Still broken.',
+          ),
+        ),
+        deps,
+      )
+      if (second.kind !== 'stored') throw new Error('unreachable')
+      expect(second.conversationId).not.toBe(first.conversationId)
+
+      // The DELETED conversation's own events are untouched — still exactly
+      // its original two (soft-delete fires nothing, and this fallback never
+      // touches it).
+      expect(await outboxEventsFor(db, first.conversationId)).toHaveLength(2)
+
+      // The FRESH fallback conversation gets its own created + message_received
+      // (same-transaction pair — order not asserted, see the first test's note).
+      const freshEvents = await outboxEventsFor(db, second.conversationId)
+      expect(freshEvents.map((e) => e.type).sort()).toEqual([
+        'conversation.created',
+        'conversation.message_received',
+      ])
+      const freshMessageReceived = freshEvents.find(
+        (e) => e.type === 'conversation.message_received',
+      )
+      expect(freshMessageReceived?.data).toEqual({ threadId: second.threadId, reopened: false })
+    })
+
+    it('a step-5 transaction rollback leaves NO event row behind, along with no conversation/thread row (same transaction)', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      // Fails on the 2nd `.transaction()` call — claim's own transaction is
+      // the 1st, so this targets step 5 (storeAndMarkDelivered), the SAME
+      // transaction this ticket's event-emission calls run inside (module
+      // doc reference in ingest.test.ts's own dbFailingOnCall comment).
+      const faultyDb = dbFailingOnCall(db, 2)
+      const faultyDeps: IngestDeps = {
+        ...deps,
+        db: faultyDb,
+        inboundDeliveryStore: createInboundDeliveryStore(faultyDb),
+      }
+
+      const outcome = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+        faultyDeps,
+      )
+      expect(outcome.kind).toBe('failed')
+
+      expect(await countRows(db, 'conversations')).toBe(0)
+      const allEvents = await db.query<{ count: number }>(
+        'SELECT count(*)::int AS count FROM event_outbox',
+      )
+      expect(allEvents[0].count).toBe(0)
+    })
+  })
+
   // --- spec §5 / §8: the loop guard. ----------------------------------------
 
   describe('isOwnMessageReflection (pure unit)', () => {
