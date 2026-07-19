@@ -122,11 +122,13 @@ CREATE UNIQUE INDEX agent_auth_identities_one_password_per_agent
   secret_hash=NULL` — **no core migration**. The seam (§4) is the only code that reads this
   table by provider. **Amended (HT-75):** a `passkey` (WebAuthn) module does **not** use this
   table, despite an earlier draft of this section anticipating it would. WebAuthn's
-  per-credential mutable state (a signature counter, transports, backup flags) and an Agent
-  potentially holding many independent credentials don't fit this table's shape (one row, one
-  optional secret hash, per identity) — it gets its own table instead (`webauthn_credentials`;
-  `specs/auth/passkeys.md` §2.1), the same move `mailbox_oauth_tokens` (HT-38) already made
-  for Gmail's OAuth material. This table remains the right shape for single-secret,
+  per-credential mutable state (a signature counter, transports, backup flags) has no analog
+  in this table's shape (one row, one optional secret hash, per identity) — it gets its own
+  table instead (`webauthn_credentials`; `specs/auth/passkeys.md` §2.1, which is explicit that
+  cardinality — an Agent holding several credentials — is **not** the reason, since nothing
+  here restricts `provider='passkey'` to one row per Agent), the same move
+  `mailbox_oauth_tokens` (HT-38) already made for Gmail's OAuth material. This table remains
+  the right shape for single-secret,
   single-subject providers like `google`.
 - Deleting an Agent cascades their identities. An Agent may have several rows (`password` plus
   any OAuth-style provider such as `google`) — all resolving to the same `agents.id`. Linking
@@ -562,7 +564,11 @@ is retired (§8).
   would); it gets its own table, `webauthn_credentials`, specified in `specs/auth/passkeys.md`
   §2.1. No schema or behavior change to anything in THIS spec — a same-day correction of a
   forward-reference this section made before the passkey spec existed to contradict it,
-  caught by that spec's own review.
+  caught by that spec's own review. **Amended same-day (CodeRabbit, PR #88):** this entry's
+  own first pass cited "an Agent holding many credentials" as one of the reasons — that is
+  the cardinality argument `specs/auth/passkeys.md` §2.1 explicitly rejects (nothing here
+  restricts `provider='passkey'` to one row per Agent); the rationale now cites only the two
+  reasons that hold, mutable per-use state and the incompatible column shape.
 - **draft.5 (2026-07-18, TJ fidelity review):** mailbox-access semantics pinned and the
   Permissions UI pulled forward (§3.4): admins implicit-all, auto-grant-on-create,
   admin-only grant endpoints (§6: `GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes`);

@@ -1,6 +1,6 @@
 # Passkeys (WebAuthn) login for Agents
 
-Status: **draft.2** (2026-07-19). HT-75. Extends the auth-provider seam
+Status: **draft.3** (2026-07-19). HT-75. Extends the auth-provider seam
 `specs/auth/agents-and-auth.md` (HT-54) built with exactly one provider,
 `password` — this is the second provider, and the first thing to actually
 exercise the seam's "marketplace boundary" claim (agents-and-auth.md §1, §4)
@@ -518,7 +518,11 @@ verification is the actual guarantee). On success, `registrationInfo`
 yields the credential id, COSE public key, initial counter, credential
 device type (single-/multi-device — feeds `backup_eligible`), and
 `backedUp` (feeds `backup_state`) — inserted as one new `webauthn_credentials`
-row, and §5.3's notification email is sent. **Replay is naturally
+row. **`name` is required at the database (§2.1's `NOT NULL`) but optional
+on the wire** (§9's endpoint table): an omitted or blank `name` in the
+request is replaced with a server-computed default, `"Passkey — {date}"`,
+before the `INSERT` runs — the API surface is lenient, the write path never
+is. §5.3's notification email is sent. **Replay is naturally
 single-use here without extra bookkeeping**: a replayed attestation
 response can only ever re-submit the *same* credential id, and
 `credential_id`'s `UNIQUE` index rejects a second insert outright —
@@ -614,10 +618,31 @@ in §2.2's honestly-restated volume claim and its opportunistic-purge fix.)
 WHERE credential_id = $1`; not found → `null` (generic `401`, §4.3). Found →
 loads the stored `credential` (public key, counter, transports) as the
 library's `credential` param, `expectedChallenge`/`expectedOrigin`/
-`expectedRPID` as in §6.1, `requireUserVerification: true`. On success:
-update `sign_count`, `backup_state`, `last_used_at` on the credential row
-(§8 governs how a counter regression is handled), re-check
-`agents.status === 'active'`, return `VerifiedIdentity { agentId }`.
+`expectedRPID` as in §6.1, `requireUserVerification: true`. That first read
+is unlocked — it only needs to hand the stored public key to the library
+for the cryptographic check, and a stale read there is harmless.
+
+**The counter check and its persistence are one atomic unit, not two
+sequential steps.** On a successful signature verification, the handler
+re-reads the *same* row with `SELECT ... FOR UPDATE` inside a transaction,
+applies §8's Tier 1/Tier 2 comparison against **that freshly locked read**
+(not the earlier, pre-verification one), and — only if it passes — updates
+`sign_count` to the new value, plus `backup_state` and `last_used_at`,
+before committing. **Why the lock matters:** two concurrent, independently
+valid authentications against the same credential (a double-tap, two open
+tabs, or a narrow race window — each carries its own single-use challenge,
+§7, so both can be genuinely valid signatures) can both complete
+cryptographic verification against the *same* pre-verification counter
+read; without a lock, both could independently judge themselves "not a
+regression" relative to that shared stale value, and whichever write lands
+second — even carrying the *lower* of the two counters — would silently
+overwrite the higher one already stored, understating the true maximum ever
+observed and weakening every future §8 regression check built on top of it.
+`SELECT ... FOR UPDATE` serializes the two: the second transaction blocks
+until the first commits, then reads the value the first just wrote, and is
+correctly evaluated against it, not the stale one. `agents.status ===
+'active'` is re-checked inside the same transaction, before it returns
+`VerifiedIdentity { agentId }`.
 
 **`userHandle` cross-check.** A discoverable-credential assertion also
 returns `response.userHandle` — the same bytes minted as `userID` at
@@ -807,7 +832,13 @@ so plainly.
   authentication failure produces — §4.3's no-enumeration posture is
   unchanged; this is a server-side policy decision, not a new client-visible
   error class) **and the event is routed to the HT-44 alertable surface**,
-  not left in a log nobody reads.
+  not left in a log nobody reads. **"The stored maximum" means the value
+  read under §6.2's `SELECT ... FOR UPDATE`, not a value read earlier in
+  the request** — the comparison against it and the write that updates it
+  happen inside the same locked transaction, which is what makes "the
+  stored maximum" a value two concurrent requests can't both race past;
+  §6.2's atomicity fix is what makes this Tier mean what this paragraph
+  says it means, not just what it says in the common case.
 
 **Routing to `/internal/health` (HT-44, runbook Part G) — mirroring the
 existing pattern exactly, not inventing a new one.** `src/composition/
@@ -854,7 +885,7 @@ via the acting-Agent header where noted).
 | `POST /api/v1/auth/step-up/webauthn/options` | **required** (self) | mints a `webauthn_challenges` row, `ceremony='step-up'`; `allowCredentials` = the Agent's own existing credentials (§5.1) |
 | `POST /api/v1/auth/step-up/webauthn/verify` | **required** (self) | `{ response, challengeToken }`; requires resolved `agentId === session.sub`; on success mints a `webauthn_stepup_tokens` row, returns `{ stepUpToken }` (§5.1) |
 | `POST /api/v1/auth/webauthn/registration/options` | **required** (self) | `{ stepUpToken }` — mints a registration challenge + `webauthn_challenges` row (`ceremony='registration'`); consumes the step-up token (§5.2) |
-| `POST /api/v1/auth/webauthn/registration/verify` | **required** (self) | `{ response, challengeToken, stepUpToken, name? }` → inserts a `webauthn_credentials` row; re-validates (not re-consumes) `stepUpToken` (§5.2); sends the "new passkey added" notification email on success (§5.3); `409` if `credential_id` already claimed by a different Agent (§6.1) |
+| `POST /api/v1/auth/webauthn/registration/verify` | **required** (self) | `{ response, challengeToken, stepUpToken, name? }` — `name` is optional in the *request*; the server defaults an omitted or blank value to `"Passkey — {date}"` before insertion, so the `webauthn_credentials.name` column's `NOT NULL` (§2.1) is never at risk from a client that skips it → inserts a `webauthn_credentials` row; re-validates (not re-consumes) `stepUpToken` (§5.2); sends the "new passkey added" notification email on success (§5.3); `409` if `credential_id` already claimed by a different Agent (§6.1) |
 | `POST /api/v1/auth/webauthn/authentication/options` | **forbidden/ignored** (pre-session) | mints an authentication challenge (`ceremony='authentication'`), no `agent_id`; body: none |
 | `POST /api/v1/auth/verify` `{ providerKey: 'webauthn', response, challengeToken }` | **forbidden/ignored** (pre-session) | reuses the existing generic dispatcher (§4.2); on challenge-expiry specifically, returns `challenge_expired` (§6.2) rather than the generic `401` — every other failure mode stays generic |
 | `GET /api/v1/agents/{id}/webauthn-credentials` | **required** (self, or admin) | `{ credentials: [{ id, name, transports, backupEligible, backupState, createdAt, lastUsedAt }] }` — **never** the public key or the raw WebAuthn `credential_id`; the row's own `id` (uuid) is the API-facing handle for rename/revoke |
@@ -1098,6 +1129,26 @@ recollection of the package's reputation.
 
 ## Changelog
 
+- **draft.3 (2026-07-19, CodeRabbit review, PR #88):** Three fixes. (1)
+  §6.2's counter check and its persistence are now specified as one atomic
+  unit — a `SELECT ... FOR UPDATE` re-read inside a transaction, not a
+  compare against the same stale row the cryptographic check used —
+  closing a race where two concurrent valid authentications could both
+  pass against a stale counter and the later write (even with the *lower*
+  counter) could silently overwrite a higher one already stored,
+  undermining §8's Tier 2 entirely; §8 cross-references the locked read so
+  "the stored maximum" means what it needs to mean. (2) `registration/
+  verify`'s optional `name` field is now explicitly reconciled with
+  `webauthn_credentials.name`'s `NOT NULL` (§2.1) — an omitted/blank name
+  gets a server-computed default (`"Passkey — {date}"`) before the insert,
+  stated in both the endpoint table (§9) and §6.1's prose, not left
+  implicit. (3) agents-and-auth.md §3.2's amendment (added in draft.2) is
+  itself corrected — it had cited "an Agent holding many credentials" as
+  one of the reasons passkeys need their own table, which is exactly the
+  cardinality argument §2.1 explicitly rejects; the amendment now cites
+  only the two reasons that hold (mutable per-use state, incompatible
+  column shape) and cross-references §2.1's own cardinality-neutral
+  stance.
 - **draft.2 (2026-07-19, lead-tier + Codex review):** Enrollment hardening
   added — step-up re-authentication (§5, new section) gates
   `registration/options` **and** `registration/verify`, plus a best-effort
