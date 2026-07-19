@@ -42,14 +42,14 @@ export async function authenticateAssistantRequest(
   const parsed = parseAssistantToken(token)
   if (parsed === null) return null
 
-  const assistant = await store.get(parsed.assistantId)
-  if (assistant === null || assistant.status !== 'active') return null
-
-  const tokenHash = await store.getTokenHash(parsed.assistantId)
-  if (tokenHash === null) return null
+  // One-snapshot read (CodeRabbit #80): status and token_hash come from the
+  // SAME row read, so a disable or rotation can never be interleaved between
+  // separate status/hash queries and validate stale credentials.
+  const auth = await store.getForAuth(parsed.assistantId)
+  if (auth === null || auth.record.status !== 'active') return null
 
   const providedHash = hashAssistantSecret(parsed.secret)
-  if (!constantTimeHashEquals(providedHash, tokenHash)) return null
+  if (!constantTimeHashEquals(providedHash, auth.tokenHash)) return null
 
-  return assistant
+  return auth.record
 }

@@ -372,7 +372,17 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
     if (authenticateRequest(request, deps.apiToken)) {
       caller = { kind: 'service' }
     } else {
-      const assistant = await authenticateAssistantRequest(request, deps.assistants.store)
+      // This await runs BEFORE the response-shaping try below, so a store
+      // failure here must be contained locally or it escapes as an
+      // uncontrolled 500 (CodeRabbit #80) — same controlled shape as the
+      // catch-all, never the host runtime's.
+      let assistant: Awaited<ReturnType<typeof authenticateAssistantRequest>>
+      try {
+        assistant = await authenticateAssistantRequest(request, deps.assistants.store)
+      } catch (err) {
+        console.error('[inbox-api] assistant auth store failure', err)
+        return apiError(500, 'server_error', 'Internal server error.')
+      }
       if (assistant === null) {
         return apiError(401, 'unauthorized', 'Missing or invalid credentials.')
       }

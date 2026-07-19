@@ -18,8 +18,8 @@ import { type AgentRecord, type AgentStore, createAgentStore } from '../store/ag
 import { type AssistantStore, createAssistantStore } from '../store/assistants.js'
 import { createConversationStore } from '../store/conversations.js'
 import { createMailboxStore } from '../store/mailboxes.js'
-import type { WebhooksApiDeps } from './webhooks.js'
 import { createInboxApi } from './index.js'
+import type { WebhooksApiDeps } from './webhooks.js'
 
 const TOKEN = 'test-token-for-the-assistants-suite'
 const MAIL_DOMAIN = 'mail.example.test'
@@ -73,7 +73,10 @@ describe('Assistants admin API (HT-70)', () => {
         mailboxStore: createMailboxStore(db),
       },
       assistants: { store: assistantStore },
-      webhooks: { store: {} as unknown as WebhooksApiDeps['store'], queue: { async enqueue() {} } } satisfies WebhooksApiDeps,
+      webhooks: {
+        store: {} as unknown as WebhooksApiDeps['store'],
+        queue: { async enqueue() {} },
+      } satisfies WebhooksApiDeps,
     })
     return { db, agentStore, assistantStore, api }
   }
@@ -233,7 +236,7 @@ describe('Assistants admin API (HT-70)', () => {
 
   describe('POST /api/v1/assistants/{id}/rotate-token', () => {
     it('mints a fresh token for the SAME assistant id; the old token stops verifying', async () => {
-      const { api, agentStore, assistantStore } = await freshApi()
+      const { api, agentStore, assistantStore, db: freshDb } = await freshApi()
       const admin = await createActiveAgent(agentStore)
       const created = await api(
         req('POST', '/api/v1/assistants', {
@@ -255,7 +258,7 @@ describe('Assistants admin API (HT-70)', () => {
       expect(body.token).not.toBe(oldToken)
 
       const oldParsed = parseAssistantToken(oldToken)
-      const storedHash = await assistantStore.getTokenHash(assistant.id)
+      const storedHash = (await assistantStore.getForAuth(assistant.id))?.tokenHash ?? null
       expect(hashAssistantSecret(oldParsed?.secret ?? '')).not.toBe(storedHash)
 
       const newParsed = parseAssistantToken(body.token)
@@ -271,6 +274,54 @@ describe('Assistants admin API (HT-70)', () => {
         }),
       )
       expect(res.status).toBe(404)
+    })
+  })
+  describe('assistant auth failure containment (CodeRabbit #80)', () => {
+    it('a store failure during assistant auth returns the controlled 500 envelope, not an uncontrolled throw', async () => {
+      const { api, agentStore, assistantStore, db: freshDb } = await freshApi()
+      const admin = await createActiveAgent(agentStore)
+      const created = await api(
+        req('POST', '/api/v1/assistants', {
+          agentId: admin.id,
+          body: { name: 'Draft Bot', module: 'draft-reply' },
+        }),
+      )
+      const { token } = (await created.json()) as { token: string }
+
+      const failingStore = {
+        ...assistantStore,
+        async getForAuth(): Promise<never> {
+          throw new Error('database exploded')
+        },
+      }
+      const failingApi = createInboxApi({
+        store: createConversationStore(freshDb),
+        apiToken: TOKEN,
+        sender: createFakeSender().sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+        agents: {
+          store: agentStore,
+          providers: [createPasswordAuthProvider({ agentStore })],
+          mailboxStore: createMailboxStore(freshDb),
+        },
+        assistants: { store: failingStore },
+        webhooks: {
+          store: {} as unknown as WebhooksApiDeps['store'],
+          queue: { async enqueue() {} },
+        } satisfies WebhooksApiDeps,
+      })
+
+      const res = await failingApi(
+        new Request('https://x.example.test/api/v1/conversations', {
+          headers: { authorization: `Bearer ${token}` },
+        }),
+      )
+      expect(res.status).toBe(500)
+      expect(res.headers.get('cache-control')).toBe('no-store')
+      const body = (await res.json()) as { error: { code: string } }
+      expect(body.error.code).toBe('server_error')
     })
   })
 })

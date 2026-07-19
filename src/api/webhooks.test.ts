@@ -16,6 +16,7 @@ import { migrate } from '../db/migrate.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { EmailSender, EnqueueOptions, QueueProvider } from '../providers/index.js'
 import { type AgentRecord, type AgentStore, createAgentStore } from '../store/agents.js'
+import type { AssistantStore } from '../store/assistants.js'
 import { createConversationStore } from '../store/conversations.js'
 import { createMailboxStore } from '../store/mailboxes.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
@@ -24,7 +25,6 @@ import {
   type WebhookEndpointStore,
 } from '../store/webhook-endpoints.js'
 import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
-import type { AssistantStore } from '../store/assistants.js'
 import type { AssistantsApiDeps } from './assistants.js'
 import { createInboxApi } from './index.js'
 
