@@ -7,7 +7,15 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!node_modules", "!dist", "!coverage", "!fixtures/mail/observed"]
+    "includes": [
+      "**",
+      "!node_modules",
+      "!dist",
+      "!coverage",
+      "!fixtures/mail/observed",
+      "!web/next-env.d.ts",
+      "!web/tsconfig.json"
+    ]
   },
   "formatter": {
     "enabled": true,
