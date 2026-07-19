@@ -207,6 +207,15 @@ export function verifyWebhookSignature(
     return { valid: false, reason: 'stale timestamp — possible replay' }
   }
 
+  // Require an exact 64-character hex digest (a SHA-256 HMAC) before
+  // decoding — Buffer.from(str, 'hex') silently stops at the first
+  // non-hex character rather than rejecting the string, so a signature
+  // with trailing garbage after a valid prefix would otherwise decode
+  // instead of being caught here as malformed.
+  if (!/^[0-9a-fA-F]{64}$/.test(signature)) {
+    return { valid: false, reason: 'malformed signature header' }
+  }
+
   const expected = createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex')
   const expectedBuf = Buffer.from(expected, 'hex')
   const providedBuf = Buffer.from(signature, 'hex')
@@ -237,15 +246,18 @@ Reject a stale `t` (the 5-minute default above matches the spec's
 recommendation) to close a replay window — an attacker who captures one
 valid delivery cannot resend it indefinitely.
 
-> **Verified, not just written.** This exact function was checked two ways
-> before landing in this doc: (1) signed with the engine's own
-> `signWebhookPayload` (`src/webhooks/delivery.ts`) and verified successfully
-> by this function, byte-for-byte, with a real HMAC computed both ways; (2)
-> cross-checked against the independent verifier in
-> `module-draft-assistant/src/verify.ts` (the reference module referenced
-> throughout this guide) — both verifiers agree on the same signed payload,
-> and both correctly reject a wrong secret, a tampered body, and a stale
-> timestamp. The throwaway script that ran this check exited `0`.
+> **Verified, not just written.** This exact function was checked before
+> landing in this doc, and re-checked after the hex-validation fix above:
+> (1) signed with the engine's own `signWebhookPayload`
+> (`src/webhooks/delivery.ts`) and verified successfully by this function,
+> byte-for-byte, with a real HMAC computed both ways; (2) cross-checked
+> against the independent verifier in `module-draft-assistant/src/verify.ts`
+> (the reference module referenced throughout this guide) — both verifiers
+> agree on the same signed payload; (3) correctly rejects a wrong secret, a
+> tampered body, a stale timestamp, and a signature with trailing non-hex
+> garbage appended after a valid-length prefix (`Buffer.from(str, 'hex')`
+> otherwise silently truncates instead of rejecting it). The throwaway
+> script that ran these checks exited `0`.
 
 ## Delivery guarantees
 
@@ -254,8 +266,9 @@ valid delivery cannot resend it indefinitely.
 | **At-least-once** | The same event may arrive more than once. Always dedupe on `eventId`, never assume exactly-once. |
 | **No cross-event ordering** | Two events for the same conversation can arrive out of order (different retries, different queue timing). Don't infer sequence from delivery order — the envelope's `occurredAt` and your own read of current state via the API are the source of truth. |
 | **Thin payloads** | `data` never carries message content — fetch it via the read API with your own credentials. |
-| **2xx acks, anything else retries** | Any `2xx` status is success. A non-2xx, a timeout (10s hard deadline), or a connection error is a failed attempt and goes through the queue's retry/backoff. Redirects are never followed — a `3xx` is a failure, not a hop. |
+| **2xx acks, anything else retries** | Any `2xx` status is success. A non-2xx HTTP response, a timeout (10s hard deadline), or a connection error is a failed attempt and goes through the queue's retry/backoff. Redirects are never followed — a `3xx` is a failure, not a hop. |
 | **HTTPS only, SSRF-checked at delivery time** | Only `https://` endpoints are ever registered, and every delivery attempt resolves the endpoint's hostname and refuses to connect if it resolves to a private/loopback/link-local address — even if the hostname resolved to a public address when you registered it. If your endpoint's DNS changes to something disallowed, deliveries start failing, not the registration. |
+| **SSRF refusals are NOT retried** | Unlike an ordinary HTTP failure, an SSRF refusal is dead-lettered immediately on the first attempt, never queued for retry — retrying can't change what a hostname resolves to, so burning the retry budget on it would only delay the signal that your endpoint needs attention. This counts toward the endpoint's [auto-disable](#auto-disable-and-health-visibility) failure counter the same as any other dead-lettered delivery. |
 
 ## Auto-disable and health visibility
 

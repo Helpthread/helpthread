@@ -2,8 +2,8 @@
 
 This is the operator- and module-author-facing guide to Helpthread's **module
 substrate**: the HTTP surface that lets an out-of-process extension — a
-draft-writing AI, a CRM sync, a notification bot, anything — connect to a
-Helpthread deployment without any code living inside the core repo.
+draft-writing Assistant, a CRM sync, a notification bot, anything — connect
+to a Helpthread deployment without any code living inside the core repo.
 
 It documents the substrate as it is **shipped**, not as it was specified.
 Where the two disagree, this guide follows the code and says so.

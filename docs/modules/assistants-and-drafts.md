@@ -1,16 +1,15 @@
 # Assistants: identity, capabilities, drafts, and approval
 
-> **Status note.** This document covers the Assistants and Drafts APIs
-> (HT-70), which land on `main` via PR #80. The code referenced here lives on
-> branch `feat/ht-70-drafts-approval` until that PR merges; everything below
-> was verified against that branch's shipped code, not the spec alone.
-
 An **Assistant** is an AI actor principal — never a human (that's an
 **Agent**; see [README.md](./README.md)'s vocabulary section). A module that
 wants to read conversations and propose replies authenticates as an
 Assistant, using a bearer token an admin Agent mints for it. An Assistant
-can never send mail directly: everything it writes is a draft, and a human
-Agent must approve it before anything reaches the customer.
+can never send mail directly: every customer-facing reply it writes is a
+draft, and a human Agent must approve it before anything reaches the
+customer. An internal note is the one exception — `POST
+/api/v1/conversations/{id}/notes` (below) is a direct write, visible to
+Agents immediately, with no draft/approval step, because a note never
+reaches the customer in the first place.
 
 Examples below use the same `$BASE_URL`, `$HELPTHREAD_API_TOKEN`, and
 `$ADMIN_AGENT_ID` as [webhooks.md](./webhooks.md) for the **admin**
