@@ -45,6 +45,15 @@ export interface AssistantRecord {
 
 /** Input to {@link AssistantStore.create}. */
 export interface NewAssistant {
+  /**
+   * Caller-supplied id (HT-70) — mirrors `NewThread.id` in
+   * `src/store/conversations.ts`'s "id/token knot" pattern: the token format
+   * (`ht_asst_<assistantId>_<secret>`, spec §3) embeds the assistant's id, so
+   * the id must be known BEFORE the row exists in order to mint it
+   * (`src/auth/assistant-token.ts`'s `mintAssistantToken`). Omitted lets
+   * `gen_random_uuid()` assign one, same as before this field existed.
+   */
+  id?: string
   name: string
   module: string
   /** The SHA-256 digest of the token's secret part (spec §3) — already hashed by the caller. This store never sees the plaintext token. */
@@ -76,14 +85,16 @@ export interface AssistantStore {
   updateTokenHash(id: string, tokenHash: string): Promise<void>
 
   /**
-   * The raw `token_hash` for Assistant `id` — what wave 3's token verifier
-   * compares a presented token's secret part against (constant-time,
-   * outside this store). `null` if `id` doesn't exist. Never returned from
-   * {@link AssistantRecord} itself (module doc) — this is the one method
-   * that reaches the hash, by design, for the one caller that legitimately
-   * needs it.
+   * One-snapshot read for authentication: the full {@link AssistantRecord}
+   * PLUS the raw `token_hash`, from a single SELECT, so status and hash can
+   * never be observed from two different points in time (a disable or
+   * rotation between separate reads could otherwise validate a stale
+   * credential). The hash is never returned from {@link AssistantRecord}
+   * itself (module doc) — this is the one method that reaches it, by
+   * design, for the one caller that legitimately needs it. `null` if `id`
+   * doesn't exist.
    */
-  getTokenHash(id: string): Promise<string | null>
+  getForAuth(id: string): Promise<{ record: AssistantRecord; tokenHash: string } | null>
 }
 
 /** Raw `assistants` row shape, before mapping to {@link AssistantRecord}. */
@@ -119,12 +130,20 @@ function toAssistantRecord(row: AssistantRow): AssistantRecord {
 export function createAssistantStore(db: Db): AssistantStore {
   return {
     async create(input) {
-      const [row] = await db.query<AssistantRow>(
-        `INSERT INTO assistants (name, module, token_hash, created_by_agent_id)
-         VALUES ($1, $2, $3, $4)
-         RETURNING ${ASSISTANT_COLUMNS}`,
-        [input.name, input.module, input.tokenHash, input.createdByAgentId ?? null],
-      )
+      const [row] =
+        input.id !== undefined
+          ? await db.query<AssistantRow>(
+              `INSERT INTO assistants (id, name, module, token_hash, created_by_agent_id)
+               VALUES ($1, $2, $3, $4, $5)
+               RETURNING ${ASSISTANT_COLUMNS}`,
+              [input.id, input.name, input.module, input.tokenHash, input.createdByAgentId ?? null],
+            )
+          : await db.query<AssistantRow>(
+              `INSERT INTO assistants (name, module, token_hash, created_by_agent_id)
+               VALUES ($1, $2, $3, $4)
+               RETURNING ${ASSISTANT_COLUMNS}`,
+              [input.name, input.module, input.tokenHash, input.createdByAgentId ?? null],
+            )
       return toAssistantRecord(row)
     },
 
@@ -186,13 +205,15 @@ export function createAssistantStore(db: Db): AssistantStore {
       }
     },
 
-    async getTokenHash(id) {
-      const rows = await db.query<{ token_hash: string }>(
-        `SELECT token_hash FROM assistants WHERE id = $1`,
+    async getForAuth(id) {
+      const rows = await db.query<AssistantRow & { token_hash: string }>(
+        `SELECT ${ASSISTANT_COLUMNS}, token_hash FROM assistants WHERE id = $1`,
         [id],
       )
       const row = rows[0]
-      return row === undefined ? null : row.token_hash
+      return row === undefined
+        ? null
+        : { record: toAssistantRecord(row), tokenHash: row.token_hash }
     },
   }
 }

@@ -58,6 +58,19 @@ describe('AssistantStore', () => {
     expect(assistant.createdByAgentId).toBeNull()
   })
 
+  it('create with an explicit id (HT-70, the token/id knot) stores that id verbatim', async () => {
+    const { store } = await freshStore()
+    const explicitId = '11111111-1111-4111-8111-111111111111'
+    const assistant = await store.create({
+      id: explicitId,
+      name: 'Pre-minted Bot',
+      module: 'draft-reply',
+      tokenHash: 'hash',
+    })
+    expect(assistant.id).toBe(explicitId)
+    expect(await store.get(explicitId)).toEqual(assistant)
+  })
+
   it('get returns null for an unknown id', async () => {
     const { store } = await freshStore()
     expect(await store.get(RANDOM_UUID)).toBeNull()
@@ -99,19 +112,19 @@ describe('AssistantStore', () => {
     expect(await store.patch(RANDOM_UUID, { name: 'x' })).toBeNull()
   })
 
-  it('updateTokenHash replaces the hash (verified via getTokenHash) and throws for an unknown id', async () => {
+  it('updateTokenHash replaces the hash (verified via getForAuth) and throws for an unknown id', async () => {
     const { store } = await freshStore()
     const created = await store.create({ name: 'Bot', module: 'm', tokenHash: 'hash-v1' })
-    expect(await store.getTokenHash(created.id)).toBe('hash-v1')
+    expect((await store.getForAuth(created.id))?.tokenHash).toBe('hash-v1')
 
     await store.updateTokenHash(created.id, 'hash-v2')
-    expect(await store.getTokenHash(created.id)).toBe('hash-v2')
+    expect((await store.getForAuth(created.id))?.tokenHash).toBe('hash-v2')
 
     await expect(store.updateTokenHash(RANDOM_UUID, 'hash-v3')).rejects.toThrow()
   })
 
-  it('getTokenHash returns null for an unknown id', async () => {
+  it('getForAuth returns null for an unknown id', async () => {
     const { store } = await freshStore()
-    expect(await store.getTokenHash(RANDOM_UUID)).toBeNull()
+    expect(await store.getForAuth(RANDOM_UUID)).toBeNull()
   })
 })

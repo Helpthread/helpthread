@@ -307,6 +307,17 @@ export interface SendReplyInput {
    * Omitted entirely means no dedup protection — a fresh send every call.
    */
   idempotencyKey?: string
+  /**
+   * The acting Agent's id, when known (HT-70; specs/plugins/substrate-v1.md
+   * §3's author-identity forward-carry) — becomes `threads.author_agent_id`
+   * on the inserted row via `ConversationStore.appendThread`'s existing
+   * `NewThread.authorAgentId`. Omitted/`undefined` (every pre-HT-70 caller)
+   * behaves BYTE-IDENTICALLY to before this field existed: `appendThread`
+   * already defaults a missing `authorAgentId` to `null`, so passing
+   * `undefined` through unconditionally below is a no-op change to the
+   * persisted row.
+   */
+  authorAgentId?: string | null
 }
 
 /**
@@ -427,6 +438,7 @@ export async function sendReply(
     deliveryStatus: 'pending',
     idempotencyKey: input.idempotencyKey,
     sendEnvelope,
+    authorAgentId: input.authorAgentId ?? null,
   })
 
   if (!appended.ok) {

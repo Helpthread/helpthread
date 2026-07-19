@@ -18,7 +18,7 @@
  * decode into `400 validation_failed`, not a crash (spec §3, §3a).
  */
 
-import type { ConversationListCursor } from '../store/conversations.js'
+import type { ConversationListCursor, ListAwaitingDraftsCursor } from '../store/conversations.js'
 import { isUuid } from './uuid.js'
 
 /** The JSON shape actually encoded — short keys since it travels in a URL. `u` = updatedAt (ISO string), `i` = id. */
@@ -68,4 +68,49 @@ export function decodeCursor(value: string): ConversationListCursor | null {
   }
 
   return { updatedAt, id: payload.i }
+}
+
+/**
+ * The `GET /api/v1/drafts` (HT-70) sibling of {@link encodeCursor}/
+ * {@link decodeCursor} — same opaque base64url(JSON) shape and the same `u`/
+ * `i` short keys, scoped to {@link ListAwaitingDraftsCursor}'s
+ * `(createdAt, id)` instead of a conversation's `(updatedAt, id)`. Kept as
+ * separate functions rather than a generic pair: the two cursor types are
+ * unrelated wire contracts that happen to share a shape today, and this
+ * codebase's convention (see `src/store/conversations.ts`'s draft-aware
+ * queries) is to accept that duplication rather than couple two independent
+ * endpoints through a shared abstraction.
+ */
+export function encodeDraftCursor(cursor: ListAwaitingDraftsCursor): string {
+  const payload: CursorPayload = { u: cursor.createdAt.toISOString(), i: cursor.id }
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+}
+
+/** Decode a cursor string produced by {@link encodeDraftCursor}. Same totality contract as {@link decodeCursor} — never throws, `null` on anything malformed. */
+export function decodeDraftCursor(value: string): ListAwaitingDraftsCursor | null {
+  let json: unknown
+  try {
+    const decoded = Buffer.from(value, 'base64url').toString('utf8')
+    json = JSON.parse(decoded)
+  } catch {
+    return null
+  }
+
+  if (typeof json !== 'object' || json === null) {
+    return null
+  }
+  const payload = json as Partial<CursorPayload>
+  if (typeof payload.u !== 'string' || typeof payload.i !== 'string') {
+    return null
+  }
+  if (!isUuid(payload.i)) {
+    return null
+  }
+
+  const createdAt = new Date(payload.u)
+  if (Number.isNaN(createdAt.getTime())) {
+    return null
+  }
+
+  return { createdAt, id: payload.i }
 }

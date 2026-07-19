@@ -18,6 +18,7 @@ import { migrate } from '../db/migrate.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import { type AgentRecord, type AgentStore, createAgentStore } from '../store/agents.js'
+import { createAssistantStore } from '../store/assistants.js'
 import { createConversationStore } from '../store/conversations.js'
 import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
@@ -96,6 +97,7 @@ describe('Agents & Authentication API', () => {
         store: createWebhookEndpointStore(db, WEBHOOKS_ENC_KEY),
         queue: { async enqueue() {} },
       },
+      assistants: { store: createAssistantStore(db) },
     })
     return { db, agentStore, mailboxStore, api, sent }
   }
