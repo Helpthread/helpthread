@@ -318,6 +318,19 @@ export interface SendReplyInput {
    * persisted row.
    */
   authorAgentId?: string | null
+  /**
+   * "Send & Close" (HT-78; specs/api/agent-inbox-v1.md's send-and-close
+   * amendment): when present, threaded straight through to
+   * `ConversationStore.appendThread`'s `options.thenSetStatus` — applied in
+   * the SAME transaction as the reply's persist, immediately after it
+   * (BEFORE the network send below), and ONLY when this call's append was
+   * genuinely new (never on an idempotency-key replay). This field never
+   * touches the mail content, envelope, or send path in any way — see that
+   * store method's doc comment for the full transactional-event contract.
+   * Omitted (every pre-HT-78 caller) is byte-identical to before this field
+   * existed.
+   */
+  thenSetStatus?: 'closed' | 'pending'
 }
 
 /**
@@ -427,19 +440,23 @@ export async function sendReply(
     references,
   }
 
-  const appended = await store.appendThread(input.conversationId, {
-    id: threadId,
-    direction: 'outbound',
-    messageId,
-    inReplyTo: input.inReplyTo ?? null,
-    fromAddress: input.from,
-    bodyText: input.text ?? null,
-    bodyHtml: effectiveInput.html ?? null,
-    deliveryStatus: 'pending',
-    idempotencyKey: input.idempotencyKey,
-    sendEnvelope,
-    authorAgentId: input.authorAgentId ?? null,
-  })
+  const appended = await store.appendThread(
+    input.conversationId,
+    {
+      id: threadId,
+      direction: 'outbound',
+      messageId,
+      inReplyTo: input.inReplyTo ?? null,
+      fromAddress: input.from,
+      bodyText: input.text ?? null,
+      bodyHtml: effectiveInput.html ?? null,
+      deliveryStatus: 'pending',
+      idempotencyKey: input.idempotencyKey,
+      sendEnvelope,
+      authorAgentId: input.authorAgentId ?? null,
+    },
+    input.thenSetStatus !== undefined ? { thenSetStatus: input.thenSetStatus } : undefined,
+  )
 
   if (!appended.ok) {
     // Nothing was persisted; the minted token above is discarded unused.

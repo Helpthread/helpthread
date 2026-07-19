@@ -164,6 +164,21 @@ const AGENT_MAILBOXES: RouteDef = {
   methods: ['GET', 'PUT'],
 }
 
+// --- Saved replies & macros (HT-76; specs/api/agent-inbox-v1.md's
+// saved-replies amendment) ---------------------------------------------------
+
+/** `/api/v1/mailboxes/{id}/saved-replies` — list (any active Agent) and create (admin) — HT-76. Two named groups (`mailboxId`, no bare `id`), so it's matched with its own explicit branch below rather than the generic `id`-group fallback. */
+const SAVED_REPLIES_LIST: RouteDef = {
+  pattern: /^\/api\/v1\/mailboxes\/(?<mailboxId>[^/]+)\/saved-replies$/,
+  methods: ['GET', 'POST'],
+}
+
+/** `/api/v1/mailboxes/{id}/saved-replies/{replyId}` — patch/delete (admin only) — HT-76. */
+const SAVED_REPLY_ITEM: RouteDef = {
+  pattern: /^\/api\/v1\/mailboxes\/(?<mailboxId>[^/]+)\/saved-replies\/(?<replyId>[^/]+)$/,
+  methods: ['PATCH', 'DELETE'],
+}
+
 // --- Webhooks admin API (HT-69; specs/modules/substrate-v1.md §5) -----------
 //
 // Admin-only, acting-Agent header REQUIRED on every route (`src/api/
@@ -259,6 +274,8 @@ const ROUTES: readonly RouteDef[] = [
   AGENT_INVITE,
   MAILBOXES_LIST,
   AGENT_MAILBOXES,
+  SAVED_REPLY_ITEM,
+  SAVED_REPLIES_LIST,
   AGENT_ITEM,
   WEBHOOKS_LIST,
   WEBHOOK_TEST,
@@ -298,6 +315,10 @@ export type RouteMatch =
   | { kind: 'mailboxes-list' }
   | { kind: 'agent-mailboxes-get'; id: string }
   | { kind: 'agent-mailboxes-put'; id: string }
+  | { kind: 'saved-replies-list'; mailboxId: string }
+  | { kind: 'saved-replies-create'; mailboxId: string }
+  | { kind: 'saved-reply-patch'; mailboxId: string; replyId: string }
+  | { kind: 'saved-reply-delete'; mailboxId: string; replyId: string }
   | { kind: 'webhooks-list' }
   | { kind: 'webhooks-create' }
   | { kind: 'webhook-patch'; id: string }
@@ -444,6 +465,22 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     }
     if (route === DRAFTS_LIST) {
       return { kind: 'drafts-list' }
+    }
+    // SAVED_REPLIES_LIST/SAVED_REPLY_ITEM carry `mailboxId`(/`replyId`)
+    // named groups, not the generic `id` every other remaining route uses
+    // below — matched here, before the generic fallback reads `id`.
+    if (route === SAVED_REPLIES_LIST) {
+      const mailboxId = match.groups?.mailboxId as string
+      return method === 'GET'
+        ? { kind: 'saved-replies-list', mailboxId }
+        : { kind: 'saved-replies-create', mailboxId }
+    }
+    if (route === SAVED_REPLY_ITEM) {
+      const mailboxId = match.groups?.mailboxId as string
+      const replyId = match.groups?.replyId as string
+      return method === 'DELETE'
+        ? { kind: 'saved-reply-delete', mailboxId, replyId }
+        : { kind: 'saved-reply-patch', mailboxId, replyId }
     }
 
     // Every remaining route guarantees a present, non-empty `id` group (per

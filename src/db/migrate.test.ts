@@ -63,6 +63,8 @@ describe('migrate', () => {
       { id: 21, name: 'threads_actor_model' },
       { id: 22, name: 'webhook_endpoints' },
       { id: 23, name: 'event_outbox' },
+      { id: 24, name: 'saved_replies' },
+      { id: 25, name: 'conversation_snooze' },
     ])
   })
 
@@ -96,6 +98,8 @@ describe('migrate', () => {
       { id: 21 },
       { id: 22 },
       { id: 23 },
+      { id: 24 },
+      { id: 25 },
     ])
   })
 
@@ -1441,5 +1445,79 @@ describe('migrate', () => {
       event.event_id,
     ])
     expect(remaining).toHaveLength(0)
+  })
+
+  it('migration 024 creates saved_replies with a real mailbox_id FK, defaults actions to {} and sort_order to 0, and cascades on mailbox delete', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [mailbox] = await db.query<{ id: string }>(
+      `INSERT INTO mailboxes (address, provider) VALUES ('support@example.test', 'gmail') RETURNING id`,
+    )
+
+    const [row] = await db.query<{ actions: unknown; sort_order: number }>(
+      `INSERT INTO saved_replies (mailbox_id, name, body_text) VALUES ($1, 'Thanks', 'Thanks!') RETURNING actions, sort_order`,
+      [mailbox.id],
+    )
+    expect(row.actions).toEqual({})
+    expect(row.sort_order).toBe(0)
+
+    // mailbox_id is a real FK.
+    await expect(
+      db.query(`INSERT INTO saved_replies (mailbox_id, name, body_text) VALUES ($1, 'x', 'y')`, [
+        '00000000-0000-4000-8000-000000000000',
+      ]),
+    ).rejects.toThrow()
+
+    // ON DELETE CASCADE: deleting the mailbox removes its saved replies too.
+    await db.query('DELETE FROM mailboxes WHERE id = $1', [mailbox.id])
+    const remaining = await db.query('SELECT id FROM saved_replies WHERE mailbox_id = $1', [
+      mailbox.id,
+    ])
+    expect(remaining).toHaveLength(0)
+  })
+
+  it('migration 025 rejects snoozed_until on any non-pending conversation — the CHECK requires snoozed_until IS NULL OR status = pending', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    // pending + snoozed_until: legal.
+    await expect(
+      db.query(
+        `INSERT INTO conversations (customer_email, status, snoozed_until)
+         VALUES ('customer@example.test', 'pending', now() + interval '1 day')`,
+      ),
+    ).resolves.toBeDefined()
+
+    // Every OTHER status with a non-NULL snoozed_until: rejected by the CHECK.
+    for (const status of ['active', 'closed', 'spam', 'deleted']) {
+      await expect(
+        db.query(
+          `INSERT INTO conversations (customer_email, status, snoozed_until)
+           VALUES ('customer@example.test', $1, now() + interval '1 day')`,
+          [status],
+        ),
+      ).rejects.toThrow()
+    }
+
+    // NULL snoozed_until is legal on every status, including non-pending ones.
+    await expect(
+      db.query(
+        `INSERT INTO conversations (customer_email, status, snoozed_until)
+         VALUES ('customer@example.test', 'closed', NULL)`,
+      ),
+    ).resolves.toBeDefined()
+
+    // An existing pending+snoozed row that gets UPDATEd off pending WITHOUT
+    // also clearing snoozed_until is rejected too — the CHECK applies to
+    // UPDATE, not just INSERT (the exact mistake `deleteConversation`'s own
+    // doc comment names as the reason it clears snoozed_until on delete).
+    const [row] = await db.query<{ id: string }>(
+      `INSERT INTO conversations (customer_email, status, snoozed_until)
+       VALUES ('customer2@example.test', 'pending', now() + interval '1 day') RETURNING id`,
+    )
+    await expect(
+      db.query(`UPDATE conversations SET status = 'active' WHERE id = $1`, [row.id]),
+    ).rejects.toThrow()
   })
 })

@@ -61,6 +61,7 @@ import {
 } from '../mail/gmail-watch-maintenance.js'
 import { ingestInboundMessage } from '../mail/ingest.js'
 import type { Keyring } from '../mail/reply-token.js'
+import { runSnoozeWake } from '../mail/snooze-wake.js'
 import {
   createGmailEmailSender,
   createGmailHistoryClient,
@@ -81,6 +82,7 @@ import {
   createInboundDeliveryStore,
   createMailboxStore,
   createMailboxTokenStore,
+  createSavedReplyStore,
   createThreadAttachmentStore,
   createWebhookEndpointStore,
 } from '../store/index.js'
@@ -157,6 +159,7 @@ export async function buildApp(
   const attachmentStore = createThreadAttachmentStore(db)
   const agentStore = createAgentStore(db)
   const assistantStore = createAssistantStore(db)
+  const savedReplyStore = createSavedReplyStore(db)
 
   // --- Module substrate (HT-69; specs/modules/substrate-v1.md §4/§5): the
   // event outbox and webhook endpoint stores. `webhookEndpointStore` reuses
@@ -281,6 +284,11 @@ export async function buildApp(
     // Assistants + drafts (HT-70) — CORE, required (same posture as
     // `agents` above).
     assistants: { store: assistantStore },
+    // Saved replies & macros (HT-76) — CORE, required, same posture as
+    // `agents`/`webhooks`/`assistants` above. mailboxStore reuses the SAME
+    // MailboxStore instance every other mailbox-scoped feature in this root
+    // shares — no second store needed.
+    savedReplies: { store: savedReplyStore, mailboxStore },
     // HT-49 review fix: Gmail delivers a sent reply's own copy back into the
     // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
     // it as a phantom inbound message (src/mail/send.ts's "The reply token's
@@ -368,6 +376,20 @@ export async function buildApp(
       return report
     },
     runWatchMaintenance: () => runGmailWatchMaintenance(watchMaintenanceDeps),
+    // Snooze wake pass (HT-77) — a SEPARATE cron tick from the two drains
+    // above: flips due `pending`+snoozed conversations back to `active`
+    // (`runSnoozeWake`, `src/mail/snooze-wake.ts`) via the SAME
+    // `setConversationStatus` path a PATCH would use, so it needs no
+    // event-emission logic of its own. Quiet-tick log suppression matches
+    // `drainQueue`/`drainOutbox` above — an every-minute all-zeros line
+    // would bury the signal.
+    runSnoozeWake: async () => {
+      const report = await runSnoozeWake({ store })
+      if (report.due > 0) {
+        console.info(JSON.stringify({ event: 'snooze_wake', ...report }))
+      }
+      return report
+    },
     runHealthCheck: () => runHealthCheck({ db, queue }),
   })
 }

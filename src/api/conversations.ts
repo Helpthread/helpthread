@@ -96,6 +96,8 @@ interface ConversationSummaryJson {
   preview: string
   tags: string[]
   assigneeAgentId: string | null
+  /** A timed `pending`, ISO-8601, or `null` (HT-77) — always `null` for every non-`pending` status; see `ConversationStore.setConversationStatus`'s doc comment. */
+  snoozedUntil: string | null
   createdAt: string
   updatedAt: string
 }
@@ -259,6 +261,8 @@ export async function handleGetConversation(
     preview: previewFromThreads(conversation.threads),
     tags: conversation.tags,
     assigneeAgentId: conversation.assigneeAgentId,
+    snoozedUntil:
+      conversation.snoozedUntil === null ? null : conversation.snoozedUntil.toISOString(),
     createdAt: conversation.createdAt.toISOString(),
     updatedAt: conversation.updatedAt.toISOString(),
     threads: conversation.threads.map((thread) =>
@@ -349,8 +353,9 @@ function countResolvedThreads(threads: StoredThread[]): number {
 
 /**
  * Handle `POST /api/v1/conversations/{id}/replies` — the Agent replies to a
- * conversation (spec §4a). The client supplies only `{ text, html? }`; every
- * mail header (`to`, `from`, `subject`, `In-Reply-To`, `References`) is
+ * conversation (spec §4a). The client supplies `{ text, html?, thenSetStatus? }`
+ * (`thenSetStatus`: HT-78, "Send & Close" — see below); every mail header
+ * (`to`, `from`, `subject`, `In-Reply-To`, `References`) is
  * derived server-side from the conversation (see {@link deriveReplyHeaders})
  * so the client can never set recipients or threading headers.
  *
@@ -370,6 +375,22 @@ function countResolvedThreads(threads: StoredThread[]): number {
  * outcome (`sendReply`'s own replay handling, `src/mail/send.ts`): `201`
  * with the original `ThreadView` if that attempt already succeeded, without
  * touching the sender again.
+ *
+ * ## `thenSetStatus` (HT-78, "Send & Close")
+ *
+ * An optional `'closed' | 'pending'` — when present, the conversation's
+ * status is ALSO set to it, via `sendReply` → `ConversationStore.appendThread`'s
+ * `options.thenSetStatus` (`src/mail/send.ts`), in the SAME transaction as
+ * the reply's persist, applied immediately after it and BEFORE the network
+ * send. This never touches the mail content or envelope — the wire message
+ * sent is byte-identical whether or not `thenSetStatus` is present (see
+ * `send.test.ts`'s regression test). Only applies on a genuinely NEW send
+ * (never on an idempotency-key replay, matching this endpoint's existing
+ * "a replay touches the conversation not at all" posture) and fires
+ * `conversation.status_changed` (spec §4) transactionally, through the SAME
+ * store code path `PATCH .../status` uses — see that store method's doc
+ * comment for the full contract. Omitted, this endpoint's behavior is
+ * unchanged from before HT-78.
  *
  * Outcomes (spec §4a): `201` with the created `ThreadView` on success (a
  * reply to a `closed` or `spam` conversation reopens it to `active`, via
@@ -482,6 +503,7 @@ export async function handleReply(
       references,
       idempotencyKey,
       authorAgentId: deps.authorAgentId ?? null,
+      thenSetStatus: replyBody.thenSetStatus,
     },
     {
       store: deps.store,
@@ -533,15 +555,26 @@ export async function handleReply(
 
 /**
  * Handle `PATCH /api/v1/conversations/{id}` — set a conversation's status
- * (spec §4b, v1.1). Body: `{ status: 'active' | 'pending' | 'closed' |
- * 'spam' }` — `'deleted'` is deliberately not a settable value here (`400`,
- * not `404`, since the body itself is malformed regardless of whether
- * `{id}` exists).
+ * (spec §4b, v1.1), optionally with a snooze timer (HT-77). Body:
+ * `{ status: 'active' | 'pending' | 'closed' | 'spam'; snoozedUntil?: string }`
+ * — `'deleted'` is deliberately not a settable value here (`400`, not `404`,
+ * since the body itself is malformed regardless of whether `{id}` exists).
+ *
+ * `snoozedUntil`, when present, must be an ISO-8601 timestamp AND
+ * `status` must be `'pending'` — any other status carrying `snoozedUntil` is
+ * `400 validation_failed` (HT-77's "snoozedUntil legal ONLY with pending").
+ * `status: 'pending'` WITHOUT `snoozedUntil` is "plain pending" — a manual
+ * park with no timer — and CLEARS any snooze the conversation previously
+ * had (a full-replace semantics for the snooze field, matching this
+ * endpoint's PATCH-the-whole-status-facet shape): an Agent explicitly
+ * un-snoozing by re-sending plain `{status:'pending'}` is a real, expected
+ * use of this same body shape, not a special case.
  *
  * Outcomes: `200` with the updated `ConversationSummary` on success; `404
  * not_found` if `{id}` is missing or names a `deleted` conversation (a
  * deleted conversation is not reachable through this endpoint — spec §4b);
- * `400 validation_failed` on any other `status` value.
+ * `400 validation_failed` on any other `status` value, or an invalid/
+ * misplaced `snoozedUntil`.
  */
 export async function handlePatchConversation(
   id: string,
@@ -557,16 +590,18 @@ export async function handlePatchConversation(
     return apiError(400, 'validation_failed', 'Request body must be valid JSON.')
   }
 
-  const status = parsePatchStatusBody(parsedBody.value)
-  if (status === null) {
+  const parsed = parsePatchStatusBody(parsedBody.value)
+  if (parsed === null) {
     return apiError(
       400,
       'validation_failed',
-      "status must be 'active', 'pending', 'closed' or 'spam'.",
+      "status must be 'active', 'pending', 'closed' or 'spam'; snoozedUntil (an ISO-8601 timestamp) is only allowed alongside status 'pending'.",
     )
   }
 
-  const updated = await deps.store.setConversationStatus(id, status)
+  const updated = await deps.store.setConversationStatus(id, parsed.status, {
+    snoozedUntil: parsed.snoozedUntil ?? null,
+  })
   if (updated === null) {
     return apiError(404, 'not_found', 'No conversation with that id.')
   }
@@ -799,20 +834,23 @@ async function parseJsonBody(
   }
 }
 
-/** Validated shape of `POST .../replies`'s request body (spec §4a). */
+/** Validated shape of `POST .../replies`'s request body (spec §4a, amended HT-78 with `thenSetStatus`). */
 interface ReplyRequestBody {
   text: string
   html?: string
+  /** "Send & Close" (HT-78) — see {@link handleReply}'s doc comment. */
+  thenSetStatus?: 'closed' | 'pending'
 }
 
 /**
  * Validate a parsed reply body against spec §4a: `text` must be a string of
  * `[MIN_REPLY_TEXT_LENGTH, MAX_REPLY_TEXT_LENGTH]` chars; `html`, if
- * present, must be a string. Returns `null` on any violation — never throws.
+ * present, must be a string; `thenSetStatus` (HT-78), if present, must be
+ * `'closed'` or `'pending'`. Returns `null` on any violation — never throws.
  */
 function parseReplyBody(raw: unknown): ReplyRequestBody | null {
   if (typeof raw !== 'object' || raw === null) return null
-  const { text, html } = raw as Record<string, unknown>
+  const { text, html, thenSetStatus } = raw as Record<string, unknown>
 
   if (
     typeof text !== 'string' ||
@@ -822,21 +860,41 @@ function parseReplyBody(raw: unknown): ReplyRequestBody | null {
     return null
   }
   if (html !== undefined && typeof html !== 'string') return null
+  if (thenSetStatus !== undefined && thenSetStatus !== 'closed' && thenSetStatus !== 'pending') {
+    return null
+  }
 
-  return html === undefined ? { text } : { text, html }
+  return {
+    text,
+    ...(html !== undefined ? { html } : {}),
+    ...(thenSetStatus !== undefined ? { thenSetStatus } : {}),
+  }
 }
 
 /**
- * Validate a parsed PATCH body against spec §4b (v1.1): `status` must be one
- * of the four {@link ConversationStatus} values — notably `'deleted'` is NOT
- * settable here. Returns `null` on any violation — never throws.
+ * Validate a parsed PATCH body against spec §4b (v1.1) plus HT-77's
+ * `snoozedUntil` amendment: `status` must be one of the four
+ * {@link ConversationStatus} values — notably `'deleted'` is NOT settable
+ * here. `snoozedUntil`, if present, must be a string that parses to a valid
+ * `Date` AND `status` must be `'pending'` — present alongside any other
+ * status, or an unparseable value, is a violation. Returns `null` on any
+ * violation — never throws.
  */
-function parsePatchStatusBody(raw: unknown): ConversationStatus | null {
+function parsePatchStatusBody(
+  raw: unknown,
+): { status: ConversationStatus; snoozedUntil?: Date } | null {
   if (typeof raw !== 'object' || raw === null) return null
-  const { status } = raw as Record<string, unknown>
-  return status === 'active' || status === 'pending' || status === 'closed' || status === 'spam'
-    ? status
-    : null
+  const { status, snoozedUntil } = raw as Record<string, unknown>
+  if (status !== 'active' && status !== 'pending' && status !== 'closed' && status !== 'spam') {
+    return null
+  }
+  if (snoozedUntil === undefined) {
+    return { status }
+  }
+  if (status !== 'pending' || typeof snoozedUntil !== 'string') return null
+  const parsed = new Date(snoozedUntil)
+  if (Number.isNaN(parsed.getTime())) return null
+  return { status, snoozedUntil: parsed }
 }
 
 /**
@@ -908,6 +966,7 @@ function toConversationSummaryJson(row: {
   preview: string
   tags: string[]
   assigneeAgentId: string | null
+  snoozedUntil: Date | null
   createdAt: Date
   updatedAt: Date
 }): ConversationSummaryJson {
@@ -921,6 +980,7 @@ function toConversationSummaryJson(row: {
     preview: row.preview,
     tags: row.tags,
     assigneeAgentId: row.assigneeAgentId,
+    snoozedUntil: row.snoozedUntil === null ? null : row.snoozedUntil.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }

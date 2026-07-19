@@ -101,6 +101,14 @@ async function setUpdatedAt(db: Db, conversationId: string, updatedAt: Date) {
   ])
 }
 
+/** Directly sets a conversation's `snoozed_until` for test setup (HT-77) — bypasses `setConversationStatus` so a test can set up a snoozed-pending fixture without going through the API-shaped write path. */
+async function setSnoozedUntil(db: Db, conversationId: string, snoozedUntil: Date | null) {
+  await db.query('UPDATE conversations SET snoozed_until = $1 WHERE id = $2', [
+    snoozedUntil,
+    conversationId,
+  ])
+}
+
 // --- suite ---------------------------------------------------------------------
 
 describe('createConversationStore', () => {
@@ -246,6 +254,167 @@ describe('createConversationStore', () => {
     const conversation = await store.getConversation(conversationId)
     expect(conversation?.status).toBe('pending')
     expect(conversation?.threads).toHaveLength(2)
+  })
+
+  describe('snooze wake on inbound append (HT-77)', () => {
+    it('an INBOUND message on a SNOOZED pending conversation wakes it: reopens to active, clears snoozed_until, reopened: true, and fires NO event of its own (message_received is emitted by src/mail/ingest.ts, layered on `reopened` — see ingest.test.ts)', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'pending')
+      await setSnoozedUntil(db, conversationId, new Date('2026-08-01T00:00:00.000Z'))
+
+      const result = await store.appendThread(
+        conversationId,
+        newThread({ direction: 'inbound', messageId: '<inbound-2@customer.example.test>' }),
+      )
+      expect(result).toMatchObject({ ok: true, created: true, reopened: true })
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('active')
+      expect(conversation?.snoozedUntil).toBeNull()
+
+      // The reopen branch itself (appendThreadInTx) never touches the event
+      // outbox — same as the pre-existing closed/spam reopen branch it sits
+      // beside. In particular, this is NOT conversation.status_changed: the
+      // inbound wake surfaces exclusively via conversation.message_received's
+      // reopened:true field, emitted by src/mail/ingest.ts's writeParsedEmail
+      // from AppendResult.reopened — see that describe block for the
+      // end-to-end assertion.
+      expect(await outboxEventsFor(db, conversationId)).toEqual([])
+    })
+
+    it('an OUTBOUND reply to a SNOOZED pending conversation does NOT wake it — only inbound mail wakes (HT-77)', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'pending')
+      const snoozedUntil = new Date('2026-08-01T00:00:00.000Z')
+      await setSnoozedUntil(db, conversationId, snoozedUntil)
+
+      const result = await store.appendThread(conversationId, newThread())
+      expect(result).toMatchObject({ ok: true, created: true, reopened: false })
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('pending')
+      expect(conversation?.snoozedUntil?.getTime()).toBe(snoozedUntil.getTime())
+    })
+
+    it('a NOTE on a SNOOZED pending conversation does NOT wake it (spec §4c — notes never change status)', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'pending')
+      const snoozedUntil = new Date('2026-08-01T00:00:00.000Z')
+      await setSnoozedUntil(db, conversationId, snoozedUntil)
+
+      const result = await store.appendThread(
+        conversationId,
+        newThread({ direction: 'note', messageId: null }),
+      )
+      expect(result).toMatchObject({ ok: true, created: true, reopened: false })
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('pending')
+      expect(conversation?.snoozedUntil?.getTime()).toBe(snoozedUntil.getTime())
+    })
+
+    it('an INBOUND message on a PLAIN (non-snoozed) pending conversation still just leaves it pending, unchanged — the existing rule stays byte-identical', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await setStatus(db, conversationId, 'pending')
+      // snoozed_until left NULL — a plain, un-timed pending.
+
+      const result = await store.appendThread(
+        conversationId,
+        newThread({ direction: 'inbound', messageId: '<inbound-2@customer.example.test>' }),
+      )
+      expect(result).toMatchObject({ ok: true, created: true, reopened: false })
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('pending')
+      expect(conversation?.snoozedUntil).toBeNull()
+    })
+  })
+
+  describe('appendThread options.thenSetStatus (HT-78, "Send & Close")', () => {
+    it('sets the conversation status in the SAME call as a genuinely new insert', async () => {
+      const { store, db } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const result = await store.appendThread(conversationId, newThread(), {
+        thenSetStatus: 'closed',
+      })
+      expect(result.ok).toBe(true)
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('closed')
+
+      const events = await outboxEventsFor(db, conversationId)
+      expect(events.map((e) => ({ type: e.type, data: e.data }))).toContainEqual({
+        type: 'conversation.status_changed',
+        data: { from: 'active', to: 'closed' },
+      })
+    })
+
+    it('clears snoozed_until even though this path never accepts a snoozedUntil of its own', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await store.setConversationStatus(conversationId, 'pending', {
+        snoozedUntil: new Date('2026-08-01T00:00:00.000Z'),
+      })
+
+      await store.appendThread(conversationId, newThread(), { thenSetStatus: 'pending' })
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('pending')
+      expect(conversation?.snoozedUntil).toBeNull()
+    })
+
+    it('does NOT apply on an idempotency-key replay (a replay touches the conversation not at all)', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const first = await store.appendThread(
+        conversationId,
+        newThread({ idempotencyKey: 'send-close-key' }),
+        { thenSetStatus: 'closed' },
+      )
+      expect(first).toMatchObject({ created: true })
+      await store.setConversationStatus(conversationId, 'active')
+
+      const replay = await store.appendThread(
+        conversationId,
+        newThread({ idempotencyKey: 'send-close-key' }),
+        { thenSetStatus: 'closed' },
+      )
+      expect(replay).toMatchObject({ ok: true, created: false })
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('active')
+    })
+
+    it('never fires the event when the target status equals the prior status (no-op transition)', async () => {
+      const { store, db } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      // conversation starts 'active' by default — thenSetStatus can't literally
+      // request 'active' (the API type is 'closed' | 'pending' at the wire
+      // layer), but the STORE method accepts any ConversationStatus, so this
+      // exercises the same-status branch directly at the store layer.
+      await store.appendThread(conversationId, newThread({ idempotencyKey: 'noop-transition' }), {
+        thenSetStatus: 'active',
+      })
+      const events = await outboxEventsFor(db, conversationId)
+      expect(events.filter((e) => e.type === 'conversation.status_changed')).toEqual([])
+    })
+
+    it('behaves byte-identically to before HT-78 when options is omitted entirely', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const result = await store.appendThread(conversationId, newThread())
+      expect(result.ok).toBe(true)
+
+      const conversation = await store.getConversation(conversationId)
+      expect(conversation?.status).toBe('active')
+    })
   })
 
   it('appendThread to a DELETED conversation is rejected and inserts nothing', async () => {
@@ -406,6 +575,75 @@ describe('createConversationStore', () => {
       // And it really wasn't touched — still deleted.
       const conversation = await store.getConversation(conversationId)
       expect(conversation?.status).toBe('deleted')
+    })
+
+    describe('options.snoozedUntil (HT-77)', () => {
+      it('setting status pending with snoozedUntil persists a timed snooze', async () => {
+        const { store } = await freshStore()
+        const { conversationId } = await store.createConversation(newConversation())
+        const snoozedUntil = new Date('2026-08-01T00:00:00.000Z')
+
+        const summary = await store.setConversationStatus(conversationId, 'pending', {
+          snoozedUntil,
+        })
+        expect(summary?.status).toBe('pending')
+        expect(summary?.snoozedUntil?.getTime()).toBe(snoozedUntil.getTime())
+      })
+
+      it('setting status pending WITHOUT snoozedUntil clears a prior snooze — plain pending', async () => {
+        const { store } = await freshStore()
+        const { conversationId } = await store.createConversation(newConversation())
+        await store.setConversationStatus(conversationId, 'pending', {
+          snoozedUntil: new Date('2026-08-01T00:00:00.000Z'),
+        })
+
+        const summary = await store.setConversationStatus(conversationId, 'pending')
+        expect(summary?.status).toBe('pending')
+        expect(summary?.snoozedUntil).toBeNull()
+      })
+
+      it('a snoozedUntil is forced to NULL for every non-pending target status, regardless of what is passed (schema CHECK invariant)', async () => {
+        const { store } = await freshStore()
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const summary = await store.setConversationStatus(conversationId, 'closed', {
+          snoozedUntil: new Date('2026-08-01T00:00:00.000Z'),
+        })
+        expect(summary?.status).toBe('closed')
+        expect(summary?.snoozedUntil).toBeNull()
+      })
+    })
+
+    describe('options.requireStatus (HT-77 wake-pass guard)', () => {
+      it('proceeds and returns the updated summary when the current status matches', async () => {
+        const { store } = await freshStore()
+        const { conversationId } = await store.createConversation(newConversation())
+        await store.setConversationStatus(conversationId, 'pending')
+
+        const summary = await store.setConversationStatus(conversationId, 'active', {
+          requireStatus: 'pending',
+        })
+        expect(summary?.status).toBe('active')
+      })
+
+      it('refuses (returns null, no write) when the current status does NOT match', async () => {
+        const { db, store } = await freshStore()
+        const { conversationId } = await store.createConversation(newConversation())
+        await setUpdatedAt(db, conversationId, new Date('2020-01-01T00:00:00.000Z'))
+        // status is 'active' (default) — requireStatus 'pending' does not match.
+
+        const summary = await store.setConversationStatus(conversationId, 'active', {
+          requireStatus: 'pending',
+        })
+        expect(summary).toBeNull()
+
+        const conversation = await store.getConversation(conversationId)
+        expect(conversation?.status).toBe('active')
+        // untouched — updated_at is still the pinned past value, not bumped.
+        expect(conversation?.updatedAt.getTime()).toBe(
+          new Date('2020-01-01T00:00:00.000Z').getTime(),
+        )
+      })
     })
   })
 
@@ -1035,6 +1273,22 @@ describe('createConversationStore', () => {
       expect(await store.deleteConversation(conversationId)).toBe(true)
       expect(await store.deleteConversation(conversationId)).toBe(false)
       expect(await store.deleteConversation(RANDOM_UUID)).toBe(false)
+    })
+
+    it('deleting a SNOOZED pending conversation clears snoozed_until too (HT-77 — migration 025 CHECK requires snoozed_until IS NULL OR status = pending)', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await store.setConversationStatus(conversationId, 'pending', {
+        snoozedUntil: new Date('2026-08-01T00:00:00.000Z'),
+      })
+
+      expect(await store.deleteConversation(conversationId)).toBe(true)
+
+      const raw = await db.query<{ status: string; snoozed_until: unknown }>(
+        'SELECT status, snoozed_until FROM conversations WHERE id = $1',
+        [conversationId],
+      )
+      expect(raw[0]).toEqual({ status: 'deleted', snoozed_until: null })
     })
   })
 

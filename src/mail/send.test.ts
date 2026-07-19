@@ -420,6 +420,178 @@ describe('sendReply', () => {
   })
 })
 
+// --- thenSetStatus ("Send & Close", HT-78) ----------------------------------
+
+describe('sendReply thenSetStatus (HT-78, "Send & Close")', () => {
+  let db: Db | undefined
+
+  afterEach(async () => {
+    await db?.close()
+    db = undefined
+  })
+
+  async function freshStore(): Promise<{ db: Db; store: ConversationStore }> {
+    db = await createPgliteDb()
+    await migrate(db)
+    return { db, store: createConversationStore(db) }
+  }
+
+  async function seedConversation(store: ConversationStore) {
+    return store.createConversation({
+      subject: 'Help with my order',
+      customerEmail: 'customer@example.test',
+      firstMessage: {
+        direction: 'inbound',
+        messageId: '<inbound-1@customer.example.test>',
+        fromAddress: 'customer@example.test',
+        bodyText: 'Where is my order?',
+      },
+    })
+  }
+
+  it('sets the conversation status alongside a genuinely new send', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+        thenSetStatus: 'closed',
+      },
+      deps,
+    )
+    expect(result.ok).toBe(true)
+
+    const conversation = await store.getConversation(conversationId)
+    expect(conversation?.status).toBe('closed')
+  })
+
+  it('sends byte-identical mail whether or not thenSetStatus is present (reuses the wire-level test pattern)', async () => {
+    const { store: storeA } = await freshStore()
+    const { conversationId: idA } = await seedConversation(storeA)
+    const senderA = fakeSender()
+    await sendReply(
+      {
+        conversationId: idA,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        inReplyTo: '<inbound-1@customer.example.test>',
+        references: ['<inbound-1@customer.example.test>'],
+        text: 'Same body',
+      },
+      { store: storeA, sender: senderA, keyring, mailDomain },
+    )
+
+    const { store: storeB } = await freshStore()
+    const { conversationId: idB } = await seedConversation(storeB)
+    const senderB = fakeSender()
+    await sendReply(
+      {
+        conversationId: idB,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        inReplyTo: '<inbound-1@customer.example.test>',
+        references: ['<inbound-1@customer.example.test>'],
+        text: 'Same body',
+        thenSetStatus: 'closed',
+      },
+      { store: storeB, sender: senderB, keyring, mailDomain },
+    )
+
+    expect(senderA.sent).toHaveLength(1)
+    expect(senderB.sent).toHaveLength(1)
+    // messageId/references' final entry embed the conversation id — necessarily
+    // distinct per conversation — every OTHER field must be identical.
+    expect({ ...senderA.sent[0], messageId: undefined, references: undefined }).toEqual({
+      ...senderB.sent[0],
+      messageId: undefined,
+      references: undefined,
+    })
+  })
+
+  it('fires conversation.status_changed transactionally, through the same store path PATCH .../status uses', async () => {
+    const { db, store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+
+    await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: 'Closing this out.',
+        thenSetStatus: 'closed',
+      },
+      { store, sender, keyring, mailDomain },
+    )
+
+    const events = await db.query<{ type: string; data: unknown }>(
+      'SELECT type, data FROM event_outbox WHERE conversation_id = $1 AND type = $2',
+      [conversationId, 'conversation.status_changed'],
+    )
+    expect(events).toEqual([
+      { type: 'conversation.status_changed', data: { from: 'active', to: 'closed' } },
+    ])
+  })
+
+  it('does not re-apply on an idempotency-key replay', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+    const deps: SendReplyDeps = { store, sender, keyring, mailDomain }
+    const input = {
+      conversationId,
+      from: 'support@example.test',
+      to: ['customer@example.test'],
+      subject: 'Re: Help with my order',
+      text: 'Closing this out.',
+      idempotencyKey: 'send-close-key',
+      thenSetStatus: 'closed' as const,
+    }
+
+    await sendReply(input, deps)
+    // Manually reopen — a replay must NOT re-close it.
+    await store.setConversationStatus(conversationId, 'active')
+
+    const replay = await sendReply(input, deps)
+    expect(replay.ok).toBe(true)
+    expect(sender.sent).toHaveLength(1) // no second send either — the replay rule
+
+    const conversation = await store.getConversation(conversationId)
+    expect(conversation?.status).toBe('active')
+  })
+
+  it('omitted thenSetStatus behaves byte-identically to before HT-78', async () => {
+    const { store } = await freshStore()
+    const { conversationId } = await seedConversation(store)
+    const sender = fakeSender()
+
+    const result = await sendReply(
+      {
+        conversationId,
+        from: 'support@example.test',
+        to: ['customer@example.test'],
+        subject: 'Re: Help with my order',
+        text: "We're looking into it!",
+      },
+      { store, sender, keyring, mailDomain },
+    )
+    expect(result.ok).toBe(true)
+
+    const conversation = await store.getConversation(conversationId)
+    expect(conversation?.status).toBe('active') // untouched
+  })
+})
+
 // --- self-echo guard (HT-49 review fix) -------------------------------------
 //
 // Gmail delivers a sent reply's own copy back into the SAME mailbox it was

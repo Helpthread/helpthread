@@ -63,6 +63,14 @@ export { createMailboxTokenStore } from './mailbox-tokens.js'
 export type { MailboxRecord, MailboxStatus, MailboxStore } from './mailboxes.js'
 export { createMailboxStore } from './mailboxes.js'
 export type {
+  NewSavedReply,
+  SavedReplyActions,
+  SavedReplyPatch,
+  SavedReplyRecord,
+  SavedReplyStore,
+} from './saved-replies.js'
+export { createSavedReplyStore } from './saved-replies.js'
+export type {
   CreatedWebhookEndpoint,
   NewWebhookEndpoint,
   StoredWebhookEndpoint,

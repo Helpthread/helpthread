@@ -56,6 +56,9 @@ export const WATCH_MAINTENANCE_PATH = '/api/v1/internal/cron/watch-maintenance'
 /** `GET` (Vercel Cron) → drain one bounded batch of `event_outbox` into `queue_jobs` webhook-delivery fan-out (HT-69; `src/webhooks/outbox-drain.ts`; runbook Part C: every minute, same cadence as {@link QUEUE_DRAIN_PATH}). A SEPARATE endpoint from the queue drain — this one turns outbox rows into queue jobs; the queue drain is what then delivers them. */
 export const OUTBOX_DRAIN_PATH = '/api/v1/internal/outbox/drain'
 
+/** `GET` (Vercel Cron) → the snooze wake pass (HT-77; `src/mail/snooze-wake.ts`): flip due `pending`+snoozed conversations back to `active`. A SEPARATE dedicated endpoint, same every-minute cadence as {@link QUEUE_DRAIN_PATH}/{@link OUTBOX_DRAIN_PATH} — a snooze is a user-visible timer, so it deserves the same promptness as outbound delivery, not the once-daily cadence {@link WATCH_MAINTENANCE_PATH} uses for infrastructure upkeep. */
+export const SNOOZE_WAKE_PATH = '/api/v1/internal/cron/snooze-wake'
+
 /**
  * `GET` (an HTTP monitor, or an operator's curl) → the point-in-time
  * {@link HealthReport} (`./health.ts`; HT-44, runbook Part G). Same
@@ -75,6 +78,8 @@ export interface AppHandlerDeps {
   drainQueue: () => Promise<unknown>
   /** Drain one bounded batch of `event_outbox` into webhook-delivery queue jobs (HT-69, {@link OUTBOX_DRAIN_PATH}); returns a JSON-serializable report for the response body + logs. */
   drainOutbox: () => Promise<unknown>
+  /** Run one snooze wake pass (HT-77, {@link SNOOZE_WAKE_PATH}); returns a JSON-serializable report for the response body + logs. */
+  runSnoozeWake: () => Promise<unknown>
   /** Run one daily watch-renewal + reconciliation-sweep pass; returns a JSON-serializable report. */
   runWatchMaintenance: () => Promise<unknown>
   /** Assemble the health report (`./health.ts`) — the {@link HEALTH_PATH} endpoint's work. */
@@ -105,6 +110,9 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
     }
     if (pathname === OUTBOX_DRAIN_PATH) {
       return handleCronEndpoint(request, deps.cronSecret, 'outbox-drain', deps.drainOutbox)
+    }
+    if (pathname === SNOOZE_WAKE_PATH) {
+      return handleCronEndpoint(request, deps.cronSecret, 'snooze-wake', deps.runSnoozeWake)
     }
     if (pathname === WATCH_MAINTENANCE_PATH) {
       return handleCronEndpoint(

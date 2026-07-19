@@ -19,6 +19,7 @@ import { type AgentRecord, type AgentStore, createAgentStore } from '../store/ag
 import type { AssistantStore } from '../store/assistants.js'
 import { createConversationStore } from '../store/conversations.js'
 import { createMailboxStore } from '../store/mailboxes.js'
+import { createSavedReplyStore } from '../store/saved-replies.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
 import {
   createWebhookEndpointStore,
@@ -94,6 +95,7 @@ describe('Webhooks admin API', () => {
       },
       webhooks: { store: webhookStore, queue },
       assistants: { store: {} as unknown as AssistantStore } satisfies AssistantsApiDeps,
+      savedReplies: { store: createSavedReplyStore(db), mailboxStore },
     })
     return { db, agentStore, webhookStore, api, enqueued }
   }

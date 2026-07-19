@@ -129,6 +129,52 @@ describe('buildApp — end-to-end wiring over PGlite', () => {
     expect(body.report.total).toBe(0)
   })
 
+  it('drives the snooze-wake cron endpoint (HT-77): authenticated GET → 200 report (0 due), and actually wakes a due snoozed conversation end-to-end', async () => {
+    const emptyRes = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/cron/snooze-wake`, {
+        headers: { Authorization: `Bearer ${CRON_SECRET}` },
+      }),
+    )
+    expect(emptyRes.status).toBe(200)
+    const emptyBody = (await emptyRes.json()) as {
+      ok: boolean
+      report: { due: number; woken: number }
+    }
+    expect(emptyBody.ok).toBe(true)
+    expect(emptyBody.report).toEqual({ due: 0, woken: 0 })
+
+    // Seed a due-snoozed conversation directly, then confirm a real tick
+    // wakes it — proves the composition root's `store` closure (not a
+    // separately-constructed one) is what the cron handler actually uses.
+    const [{ id: conversationId }] = await db.query<{ id: string }>(
+      "INSERT INTO conversations (customer_email, status, snoozed_until) VALUES ('c@example.test', 'pending', now() - interval '1 minute') RETURNING id",
+    )
+
+    const wakeRes = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/cron/snooze-wake`, {
+        headers: { Authorization: `Bearer ${CRON_SECRET}` },
+      }),
+    )
+    expect(wakeRes.status).toBe(200)
+    const wakeBody = (await wakeRes.json()) as { report: { due: number; woken: number } }
+    expect(wakeBody.report).toEqual({ due: 1, woken: 1 })
+
+    const [row] = await db.query<{ status: string; snoozed_until: unknown }>(
+      'SELECT status, snoozed_until FROM conversations WHERE id = $1',
+      [conversationId],
+    )
+    expect(row).toEqual({ status: 'active', snoozed_until: null })
+  })
+
+  it('rejects the snooze-wake endpoint with a wrong cron secret → 401', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/cron/snooze-wake`, {
+        headers: { Authorization: 'Bearer wrong-secret-0000000000' },
+      }),
+    )
+    expect(res.status).toBe(401)
+  })
+
   it('drives the health endpoint: authenticated GET over the empty database → 200 ok report (HT-44)', async () => {
     const res = await handler(
       new Request(`${ORIGIN}/api/v1/internal/health`, {

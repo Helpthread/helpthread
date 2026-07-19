@@ -53,6 +53,8 @@ interface ConversationSummary {
   assignee: 'me' | null      // v1.1: null = Anyone; single-Agent shaped (§4f)
   tags: string[]             // v1.1: short lowercase labels, [] default (§4e)
   preview: string            // v1.1: latest bodyText excerpt, '' when none (derivation below)
+  snoozedUntil: string | null  // v1.1 (HT-77): ISO-8601, a timed `pending`; always null for
+                                // every other status — see §4b's snooze amendment
   createdAt: string          // ISO-8601
   updatedAt: string          // ISO-8601 — last activity; the inbox sort key
 }
@@ -111,6 +113,16 @@ customer, a third party, a release); nothing sets it automatically in v1, and it
 counts as open work (§3a). `closed` is resolved. `spam` is junk an Agent has thrown out
 of the inbox; nothing classifies spam automatically in v1. Status pills in the UI:
 Active = accent, Pending = warn, Closed = dim, Spam = critical.
+
+**Snooze exception to "pending is never cleared automatically" (v1.1, HT-77).** A snooze
+is a TIMED `pending` — `pending` plus a `snoozedUntil` timestamp (§4b) — and it is the
+ONE case where `pending` clears itself: a periodic wake pass flips a snoozed conversation
+`pending` → `active` (clearing `snoozedUntil`) once `now() >= snoozedUntil`, with no Agent
+action. Inbound mail on a snoozed conversation ALSO wakes it early, the same way inbound
+mail reopens a `closed`/`spam` conversation (§4a). **Plain `pending` — no `snoozedUntil`
+— is unaffected: it still stays `pending` forever until an Agent changes it, exactly as
+originally specified.** The snooze exception is additive and narrowly scoped to rows that
+opted in with a timestamp; it does not change plain-pending semantics at all.
 
 **`number`** is assigned from a per-deployment monotone sequence at conversation
 creation (existing rows are backfilled in creation order by the HT-27 migration). It
@@ -229,9 +241,11 @@ must be non-empty and **at most 255 characters** after trimming. A missing heade
 header that is empty (or all whitespace) after trimming, or a trimmed value over 255
 characters is `400 validation_failed`, checked before the body is parsed.
 
-Body: `{ text: string; html?: string }` — `text` 1–5000 chars, server-enforced; `html`
-optional. The Agent supplies only the message; every mail header is DERIVED server-side
-from the conversation, so the client never sets recipients or threading headers:
+Body: `{ text: string; html?: string; thenSetStatus?: 'closed' | 'pending' }` — `text`
+1–5000 chars, server-enforced; `html` optional; `thenSetStatus` optional (v1.1, HT-78,
+"Send & Close" — see below). The Agent supplies only the message; every mail header is
+DERIVED server-side from the conversation, so the client never sets recipients or
+threading headers:
 
 - **`to`** = the conversation's `customerEmail`.
 - **`from`** = the deployment's configured support address (`supportAddress` dep).
@@ -257,6 +271,36 @@ through. `sendReply` mints the reply token into the outbound `Message-ID` (on a 
 new send), persists the outbound thread with a snapshot of its envelope
 (`send_envelope`: `to`/`cc`/`subject`/`references`, `sending.md` §3a), and sends via the
 injected `EmailSender`.
+
+**`thenSetStatus` — "Send & Close" (v1.1, HT-78).** An optional `'closed' | 'pending'` in
+the request body. When present, the conversation's status is ALSO set to it, applied in
+the SAME database transaction as the reply's persist, immediately after it — BEFORE the
+network send, matching this endpoint's existing persist→send→mark ordering (the status
+change is a property of the PERSIST step, not the delivery outcome). This is purely a
+conversation-status side effect: it never touches the reply's mail content, envelope, or
+threading headers, and the wire message sent is byte-identical whether or not
+`thenSetStatus` is present. Applies ONLY on a genuinely new send — never on an
+idempotency-key replay (§4a's own replay rule, immediately below, applies unchanged: a
+replay touches the conversation not at all). Fires `conversation.status_changed`
+transactionally, through the exact same store code path §4b's `PATCH` uses, `from` set to
+the conversation's status FROM BEFORE THIS WHOLE OPERATION (captured prior to any reply
+reopening it — see below). Any `snoozed_until` the conversation had is cleared (this
+endpoint never accepts a `snoozedUntil` of its own — only §4b's `PATCH` does).
+
+**Not identical to a two-step reply-then-`PATCH`, and deliberately so.** A reply to a
+`closed`/`spam` conversation reopens it (§4a's own reopen rule, above) — silently, no
+event of its own, exactly as an ordinary reply already does. `thenSetStatus`'s `from` is
+the conversation's status captured BEFORE that reopen, not the transient `active` it
+passes through — this is MORE correct than a two-step sequence (reply, then a separate
+`PATCH`) would report, since a separate `PATCH` call can only see the ALREADY-reopened
+`active` state and would report `from: 'active'` regardless of what the conversation
+actually was. Two concrete consequences: replying to a `closed` conversation with
+`thenSetStatus: 'closed'` fires **no** `status_changed` at all (the net status never
+changed — `closed` in, `closed` out — even though it silently passed through `active`
+internally); replying to a `closed` conversation with `thenSetStatus: 'pending'` fires
+`status_changed` with `from: 'closed'`, never `from: 'active'`. A caller reading the event
+log therefore sees the conversation's REAL prior state, not an artifact of the reopen
+implementation.
 
 **Replay semantics: same key + same conversation = same logical send, never re-diffed
 against the body.** If a call reuses a key already recorded against this conversation, the
@@ -300,15 +344,45 @@ Outcomes:
   delivered, so a subsequent failure to record `'sent'` is NOT a `send_failed` — it resolves
   to `201`, since reporting a delivered message as failed would invite a resend.)
 
-### 4b. `PATCH /api/v1/conversations/{id}` — set status
+### 4b. `PATCH /api/v1/conversations/{id}` — set status (+ snooze, v1.1 HT-77)
 
-Body: `{ status: ConversationStatus }` — any of `active`, `pending`, `closed`, `spam`
-(v1.1, HT-26). Returns the updated `ConversationSummary` (`200`) and bumps `updatedAt`
+Body: `{ status: ConversationStatus; snoozedUntil?: string }` — `status` any of `active`,
+`pending`, `closed`, `spam` (v1.1, HT-26); `snoozedUntil` an optional ISO-8601 timestamp
+(v1.1, HT-77). Returns the updated `ConversationSummary` (`200`) and bumps `updatedAt`
 (a status change is activity — the conversation resurfaces in its folder). The store's
-`setConversationStatus(id, status)` **excludes `deleted`** (a deleted conversation is not
+`setConversationStatus(id, status, options)` **excludes `deleted`** (a deleted conversation is not
 reachable through this endpoint): missing or deleted → `404 not_found`; a body whose
 `status` is not one of the four values (notably `deleted`, which is not settable here) →
 `400 validation_failed`.
+
+**Snooze (`snoozedUntil`).** Legal ONLY alongside `status: 'pending'` — present with any
+other status is `400 validation_failed` (a snooze IS a timed `pending`, not an independent
+concept; see §2's snooze exception to "pending is never cleared automatically"). Must
+parse as a valid timestamp, or `400 validation_failed`. Sending `{status: 'pending'}`
+WITHOUT `snoozedUntil` is "plain pending" (the original, un-timed meaning, unchanged) and
+CLEARS any snooze the conversation previously had — un-snoozing by re-PATCHing plain
+`pending` is a real, expected use of this same body shape. `snoozedUntil` is `null` in
+the response (`ConversationSummary.snoozedUntil`) for every status other than a timed
+`pending`.
+
+A snoozed conversation wakes itself two ways, both ending in `status: 'active'` and
+`snoozedUntil: null` — but the two are NOT event-identical, and deliberately so: each
+reports through the SAME event a structurally-equivalent non-timed transition already
+uses, rather than both being forced through one shape.
+
+- **Timer wake.** A periodic engine-internal pass flips it once `now() >= snoozedUntil`, no
+  Agent action, via `setConversationStatus` — the exact same write path (and therefore the
+  exact same event) an Agent's own `PATCH` to `active` uses. Fires
+  `conversation.status_changed` (`from: 'pending', to: 'active'`).
+- **Inbound wake.** Inbound customer mail on a snoozed conversation wakes it immediately —
+  the same "the customer came back" reasoning §4a's closed/spam reopen already uses,
+  applied to a snoozed `pending` conversation instead, and reported the SAME way that
+  reopen already is: through `conversation.message_received`'s existing `reopened: true`
+  field (spec §4's vocabulary table), NOT `conversation.status_changed` — an inbound reopen
+  has never fired `status_changed` (§2's original framing: only an Agent's `PATCH` does),
+  and a snoozed conversation's inbound wake is the same kind of reopen, not a new one.
+  Scoped to genuinely inbound mail only: an Agent's own outbound reply or an internal note
+  to a snoozed conversation never wakes it early.
 
 ### 4c. `POST /api/v1/conversations/{id}/notes` — internal note (v1.1, HT-28)
 
@@ -400,6 +474,60 @@ Both §4a write paths grow `InboxApiDeps` with what `sendReply` needs — `sende
 alongside `store` and `apiToken`; HT-32 adds the open-tracking configuration described
 above.
 
+### 4h. Saved replies & macros (v1.1, HT-76)
+
+A saved reply is a per-mailbox, reusable message definition an Agent can post as a reply
+body; a "macro" is the same row carrying `actions` — a set of state changes the CLIENT
+also applies once the reply is sent. **The engine stores DEFINITIONS ONLY.** Applying a
+macro's `actions` — posting the body via §4a, then calling §4b/§4e/§4f as needed — is
+entirely a client-side composition of endpoints this API already exposes. This feature
+adds zero new mail or status semantics of its own; it is bookkeeping plus the existing
+write paths.
+
+```ts
+interface SavedReply {
+  id: string                 // uuid
+  mailboxId: string           // uuid — every saved reply belongs to exactly one mailbox
+  name: string                // 1-200 chars
+  bodyText: string             // 1-5000 chars
+  bodyHtml: string | null
+  actions: {                   // {} default — a plain saved reply has no macro side effects
+    setStatus?: 'closed' | 'pending'
+    addTags?: string[]         // each 1-40 chars, trimmed + lowercased, deduplicated
+    assignToSelf?: boolean
+  }
+  sortOrder: number            // 0 default — display order within the mailbox's list
+  createdAt: string            // ISO-8601
+  updatedAt: string            // ISO-8601
+}
+```
+
+**`GET /api/v1/mailboxes/{id}/saved-replies`** — any ACTIVE acting Agent (the reply
+composer's picker needs the list for every Agent, not just admins). Returns
+`{ savedReplies: SavedReply[] }`, ordered by `sortOrder` then creation order. Unknown
+`{id}` → `404 not_found`.
+
+**`POST /api/v1/mailboxes/{id}/saved-replies`** — admin only, v1. Body:
+`{ name: string; bodyText: string; bodyHtml?: string; actions?: {...}; sortOrder?: number }`
+— `name`/`bodyText` required (limits above); `bodyHtml`/`actions`/`sortOrder` optional.
+`201` with the created `SavedReply`. Unknown mailbox → `404 not_found`; a body violating
+the limits, or an `actions` object with an unrecognized key or an invalid `setStatus`
+value → `400 validation_failed`.
+
+**`PATCH /api/v1/mailboxes/{id}/saved-replies/{replyId}`** — admin only, v1. Body: any
+subset of `{ name, bodyText, bodyHtml, actions, sortOrder }` — only the fields present are
+changed. `200` with the updated `SavedReply`. `{replyId}` not found, or found but under a
+DIFFERENT mailbox than `{id}`, → `404 not_found` (the same "no such row reachable through
+this path" shape as everywhere else in this API — never a cross-mailbox edit).
+
+**`DELETE /api/v1/mailboxes/{id}/saved-replies/{replyId}`** — admin only, v1. Hard delete
+(no soft-delete concept for a saved reply — it carries no customer data). `204` on
+success; `404 not_found` for an unknown or cross-mailbox `{replyId}` (same rule as PATCH).
+
+Role gate is deliberately admin-only for every write in v1 — a future increment may relax
+authoring to any Agent, but that is not this ticket's call to make. `GET` is open to every
+Agent so the picker works regardless of who authored the library.
+
 ## 5. Security notes
 
 - **`bodyHtml` is untrusted and unsanitized.** The parser stores inbound HTML verbatim,
@@ -458,6 +586,24 @@ above.
 
 ## 7. Changelog
 
+- **v1.1 (2026-07-19, HT-76/HT-77/HT-78 — "inbox basics").** Three additive features, none
+  breaking:
+  - **HT-76, saved replies & macros (§4h).** New `/api/v1/mailboxes/{id}/saved-replies`
+    (+ `/{replyId}`) surface. Engine stores definitions only; applying a macro's `actions`
+    is a client-side composition of §4a/§4b/§4e/§4f — zero new mail or status semantics.
+  - **HT-77, snooze (§2, §4b).** `ConversationSummary` gains `snoozedUntil`; `PATCH
+    .../status` gains the optional `snoozedUntil` field, legal only alongside
+    `status: 'pending'`. A snooze wakes itself on a timer OR on inbound customer mail
+    (§2's "snoozed exception to `pending` is never cleared automatically" amendment) —
+    both routes end in `active`/`null`, but report through DIFFERENT events: the timer
+    wake fires `conversation.status_changed` (the same `setConversationStatus` path an
+    Agent's own `PATCH` uses); the inbound wake reports through `conversation.
+    message_received`'s existing `reopened: true` field, exactly like every other
+    inbound reopen (§4a) — never `status_changed`.
+  - **HT-78, send & close (§4a).** `POST .../replies` gains the optional
+    `thenSetStatus: 'closed' | 'pending'` field — applied transactionally alongside the
+    reply's persist, never touching mail content/envelope/threading. Fires
+    `conversation.status_changed` through the same store path §4b uses.
 - **v1.1 (HT-70).** Wire-contract amendments from specs/plugins/substrate-v1.md §7
   (drafts kept in `threads` rather than a separate table): `ThreadView` gains
   `authorKind` and `draftStatus` (§2); the `deliveryStatus` invariant widens (outbound
