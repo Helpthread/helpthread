@@ -132,7 +132,31 @@ validate it).
 5. Marketplace plumbing (license keys, registry, update channel) stays deferred to its
    charter phase.
 
-## 5. Changelog
+## 5. Marketplace phase — additive by contract
+
+The standing rule (TJ, 2026-07-18): **everything built for dogfood must be sellable
+without rebuild — the marketplace only ever adds.** What that means concretely, recorded
+now so the marketplace design inherits it:
+
+- **Runtime credentials ≠ licenses.** Modules authenticate with security credentials
+  (assistant tokens, webhook signing secrets — substrate v1, free core, every module
+  uses them). A license key is a *distribution* credential: it authenticates registry
+  download and the update channel. No runtime license check exists in the substrate,
+  ever — a runtime phone-home inside a self-hosted product is both hostile to the
+  own-your-data posture and trivially strippable; enforcement in this market is
+  distribution + updates + support. Revoking a license stops updates; it never breaks a
+  running helpdesk.
+- **Dogfooding needs no licensing** — we are the vendor; our installs are direct
+  deployments of product-shaped module repos (credentials/env config only, no
+  first-party special-casing). The dogfooded artifact IS the marketplace artifact.
+- **Install bundles come later, attribution starts now**: assistants and webhook
+  endpoints carry a `module` slug from substrate v1, so marketplace-phase
+  install/uninstall/health tooling references existing rows rather than retrofitting
+  identity.
+- Modules **we host** as convenience services are ordinary SaaS billing — no special
+  machinery in the product.
+
+## 6. Changelog
 
 - **2026-07-18**: initial version (HT-66). Free/paid line decided by TJ from the
   FreeScout official-catalog inventory + charter constraints; passkeys-core,
