@@ -743,6 +743,30 @@ describe('ingestInboundMessage', () => {
       }
     })
 
+    it('a replay (the SAME raw delivery — mailboxId+providerMessageId — redelivered) fires conversation.message_received exactly ONCE, never a second time with a fresh eventId (review fix)', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+      const raw = inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw())
+
+      const first = await ingestInboundMessage(raw, deps)
+      if (first.kind !== 'stored') throw new Error('unreachable')
+
+      // Redeliver the IDENTICAL raw message — `InboundDeliveryStore`'s own
+      // ledger dedup (keyed on mailboxId+providerMessageId) recognizes this
+      // as the SAME delivery and replays its already-`stored` outcome
+      // WITHOUT re-running writeParsedEmail/appendThreadInTx at all (module
+      // doc: "idempotent by step 1").
+      const replay = await ingestInboundMessage(raw, deps)
+      expect(replay).toMatchObject({
+        kind: 'stored',
+        conversationId: first.conversationId,
+        threadId: first.threadId,
+      })
+
+      const events = await outboxEventsFor(db, first.conversationId)
+      expect(events.filter((e) => e.type === 'conversation.message_received')).toHaveLength(1)
+      expect(events.filter((e) => e.type === 'conversation.created')).toHaveLength(1)
+    })
+
     it('a valid-token reply to an ACTIVE conversation fires only conversation.message_received(reopened:false)', async () => {
       const { db, deps, mailboxId } = await freshDeps()
       const first = await ingestInboundMessage(

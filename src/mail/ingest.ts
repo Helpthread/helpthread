@@ -686,6 +686,24 @@ async function storeAndMarkDelivered(
  * conversation. A successful `append` fires only `conversation.message_
  * received`, with `reopened` taken verbatim from `AppendResult.reopened`
  * (`src/store/conversations.ts`) rather than re-derived here.
+ *
+ * **The `append` branch's event is gated on `appended.created` (review
+ * fix)** — `AppendResult.ok: true` alone does not mean a row was actually
+ * INSERTED; `created: false` is a replay (the get-or-insert found a
+ * pre-existing row instead, `appendThreadInTx`'s own doc comment). Nothing
+ * about `firstMessage` here sets `idempotencyKey` today (inbound threads
+ * never carry one — migration 003's CHECK forbids it, and a genuine
+ * redelivery of the SAME raw message is already intercepted one layer up by
+ * `InboundDeliveryStore`'s own ledger dedup, which never calls this
+ * function twice for one delivery — see `ingestInboundMessage`'s "idempotent
+ * by step 1" doc), so `created` is always `true` at this call site as
+ * things stand. The gate is defensive, not a fix for an exploitable path
+ * today: `AppendResult`'s type does not promise `created` is always `true`
+ * here, and firing `conversation.message_received` with a FRESH `eventId`
+ * on a replay would defeat every consumer's `eventId` dedupe (spec §4) —
+ * this is exactly the same "a genuinely NEW row is the only thing that
+ * counts" discipline `appendThreadInTx` already applies to its own reopen/
+ * `updated_at`-bump decision, applied here to event emission too.
  */
 async function writeParsedEmail(
   tx: Queryable,
@@ -713,11 +731,15 @@ async function writeParsedEmail(
 
   const appended = await appendThreadInTx(tx, decision.conversationId, firstMessage)
   if (appended.ok) {
-    await appendOutboxEventInTx(tx, {
-      type: 'conversation.message_received',
-      conversationId: decision.conversationId,
-      data: { threadId: appended.threadId, reopened: appended.reopened },
-    })
+    // Gated on `created` (review fix, module doc above): a replay
+    // (`created: false`) must never re-fire the event with a fresh eventId.
+    if (appended.created) {
+      await appendOutboxEventInTx(tx, {
+        type: 'conversation.message_received',
+        conversationId: decision.conversationId,
+        data: { threadId: appended.threadId, reopened: appended.reopened },
+      })
+    }
     return { conversationId: decision.conversationId, threadId: appended.threadId }
   }
 
