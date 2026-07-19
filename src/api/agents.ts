@@ -154,9 +154,14 @@ function validateMailboxIds(raw: unknown): string[] | null {
   const ids: string[] = []
   for (const entry of raw) {
     if (typeof entry !== 'string' || !isUuid(entry)) return null
-    if (!seen.has(entry)) {
-      seen.add(entry)
-      ids.push(entry)
+    // Lowercase before dedupe AND storage: uuids are case-insensitive, and
+    // Postgres normalizes the uuid column on insert — a mixed-case duplicate
+    // that survived a case-sensitive dedupe here would collide with
+    // `agent_mailbox_access`'s primary key inside the store's single INSERT.
+    const normalized = entry.toLowerCase()
+    if (!seen.has(normalized)) {
+      seen.add(normalized)
+      ids.push(normalized)
     }
   }
   return ids

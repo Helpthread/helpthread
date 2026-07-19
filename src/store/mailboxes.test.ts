@@ -534,10 +534,16 @@ describe('createMailboxStore', () => {
         address: 'disconnected2@example.test',
         status: 'disconnected',
       })
+      const needsReconnectId = await insertMailbox(db, {
+        address: 'needs-reconnect2@example.test',
+        status: 'needs_reconnect',
+      })
 
       const mailboxes = await store.listMailboxes()
 
-      expect(mailboxes.map((m) => m.id).sort()).toEqual([activeId, pausedId, disconnectedId].sort())
+      expect(mailboxes.map((m) => m.id).sort()).toEqual(
+        [activeId, pausedId, disconnectedId, needsReconnectId].sort(),
+      )
     })
 
     it('orders by created_at', async () => {

@@ -331,9 +331,27 @@ async function grantAllMailboxes(tx: Queryable, agentId: string): Promise<void> 
  */
 function isMailboxFkViolation(err: unknown): boolean {
   if (typeof err !== 'object' || err === null) return false
-  const { code, message } = err as { code?: unknown; message?: unknown }
-  if (code === '23503') return true
-  return typeof message === 'string' && message.includes('mailbox_id')
+  const { code, message, constraint } = err as {
+    code?: unknown
+    message?: unknown
+    constraint?: unknown
+  }
+  // SQLSTATE 23503 alone is NOT enough: `agent_mailbox_access` carries TWO
+  // foreign keys, and the agent_id one can also fire (the target Agent
+  // hard-deleted between the existence check and the INSERT). Require the
+  // mailbox_id constraint specifically — via the driver's `constraint` field
+  // when present, the message text otherwise — so an agent-side violation
+  // surfaces as the caller's not_found path, never a bogus 'invalid_mailbox'.
+  const namesMailboxFk = (value: unknown): boolean =>
+    typeof value === 'string' && value.includes('mailbox_id')
+  if (code === '23503') return namesMailboxFk(constraint) || namesMailboxFk(message)
+  return namesMailboxFk(message)
+}
+
+/** Any SQLSTATE 23503 (foreign_key_violation), regardless of which constraint fired. Total over non-object input. */
+function isFkViolation(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  return (err as { code?: unknown }).code === '23503'
 }
 
 function toAgentRecord(row: AgentRow): AgentRecord {
@@ -638,6 +656,11 @@ export function createAgentStore(db: Db): AgentStore {
           )
         } catch (err) {
           if (isMailboxFkViolation(err)) return 'invalid_mailbox'
+          // The OTHER 23503 this INSERT can raise: the target Agent was
+          // hard-deleted between the existence check above and here (the
+          // check-then-act pair is not atomic; the agent_id FK is the real
+          // guard). That is the caller's not_found outcome, not a 500.
+          if (isFkViolation(err)) return 'not_found'
           throw err
         }
         return 'ok'

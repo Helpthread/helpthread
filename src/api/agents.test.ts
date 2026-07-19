@@ -1082,10 +1082,19 @@ describe('Agents & Authentication API', () => {
         provider: 'gmail',
       })
       await mailboxStore.markPaused(paused.id)
+      const disconnected = await mailboxStore.upsertConnectedMailbox({
+        address: 'c@example.test',
+        provider: 'gmail',
+      })
+      await mailboxStore.markDisconnected(disconnected.id)
 
       const res = await api(req('GET', '/api/v1/mailboxes', { agentId: admin.id }))
       const body = (await res.json()) as { mailboxes: Array<{ status: string }> }
-      expect(body.mailboxes.map((m) => m.status).sort()).toEqual(['active', 'paused'])
+      expect(body.mailboxes.map((m) => m.status).sort()).toEqual([
+        'active',
+        'disconnected',
+        'paused',
+      ])
     })
 
     it('403s for a non-admin', async () => {
@@ -1237,6 +1246,13 @@ describe('Agents & Authentication API', () => {
       )
       expect(res.status).toBe(200)
       expect(await res.json()).toEqual({ mailboxIds: [] })
+
+      // The response merely echoes the submitted set — re-read through the
+      // GET endpoint to prove the clear actually PERSISTED.
+      const readBack = await api(
+        req('GET', `/api/v1/agents/${target.id}/mailboxes`, { agentId: admin.id }),
+      )
+      expect(await readBack.json()).toEqual({ mailboxIds: [] })
     })
 
     it('400s when mailboxIds is not an array', async () => {

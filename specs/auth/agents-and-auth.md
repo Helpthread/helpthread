@@ -138,13 +138,13 @@ existing surface (§10), coordinated backend+UI in a single deploy — exactly a
 `agent-inbox-v1.md` §4f anticipated ("the multi-Agent increment replaces `'me'` with real
 Agent ids") and how HT-26 was handled.
 
-### 3.4 Per-Agent mailbox scoping — **schema now, behavior deferred** (§12.4, decided)
+### 3.4 Per-Agent mailbox scoping — **grants managed now, enforcement deferred** (§12.4, decided)
 
 FreeScout scopes each user to specific mailboxes, and Helpthread already carries `mailbox_id`
-throughout. **Decided (TJ, 2026-07-18): model the join table in this migration; build no
-scoping behavior or UI.** v1 grants every Agent access to all mailboxes — nothing reads or
-writes this table yet; it exists so the future scoping increment is data-model-compatible
-from day one rather than a later migration against live rows.
+throughout. Originally decided as schema-only; **superseded the same day by TJ's fidelity
+review**: the grants are real, managed data now — auto-granted at Agent creation, read and
+written through the §6 endpoints and the per-Agent Permissions screen (§7). What remains
+deferred is *enforcement of conversation visibility*, per the pinned semantics below.
 
 ```sql
 CREATE TABLE agent_mailbox_access (
