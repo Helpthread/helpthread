@@ -15,15 +15,12 @@
  * spec §5: "subset filter... or all"). This function fans each claimed
  * event out to one `QueueProvider.enqueue` call PER matching active
  * endpoint, `dedupeKey = ` `` `${eventId}:${endpointId}` `` — per-pair, not
- * per-event, because the SAME event fans to several endpoints and each
- * needs its own independent delivery/retry lifecycle in `queue_jobs`. (The
- * schema doc on `event_outbox`, migration 023, describes the hand-off as
- * "keyed by dedupe_key = event_id" in the singular — written before this
- * fan-out shape was finalized; this per-pair key is the actual, correct
- * behavior implemented here, since a single `dedupeKey` shared across
- * every endpoint would collide the first enqueue against all the others
- * for the same event and silently drop delivery to every endpoint but the
- * first.)
+ * per-event (migration 023's doc comment on `event_outbox`, `src/db/
+ * migrate.ts`, states this same fan-out key), because the SAME event fans
+ * to several endpoints and each needs its own independent delivery/retry
+ * lifecycle in `queue_jobs`: a single `dedupeKey` shared across every
+ * endpoint would collide the first enqueue against all the others for the
+ * same event and silently drop delivery to every endpoint but the first.
  *
  * An event with ZERO matching active endpoints (no subscriber cares, or
  * every matching endpoint is `disabled`/`auto_disabled`) is still marked

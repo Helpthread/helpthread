@@ -1123,11 +1123,26 @@ export function createConversationStore(db: Db): ConversationStore {
       // commit or roll back together (spec §4: "an event never fires for a
       // change that rolled back") — only on the 'sent' branch; 'failed'
       // fires nothing (not in spec §4's vocabulary).
+      //
+      // Soft-delete carve-out (review fix, HT-69): mail delivery is NOT
+      // conversation-status-scoped — a thread claimed/leased before its
+      // conversation was soft-deleted can still legitimately be delivered
+      // and marked 'sent' here (charter invariant #1: never lose or corrupt
+      // customer mail; the send already happened by the time this write
+      // runs). But spec §4 is absolute: "No event of any type fires for a
+      // soft-deleted conversation after its deletion" — the SAME
+      // indistinguishable-from-nonexistent rule `listAwaitingDrafts`
+      // already enforces for drafts via its `c.status <> 'deleted'` join.
+      // The correlated `conversation_status` column below is read in the
+      // SAME statement as the delivery-status write (no separate query, no
+      // TOCTOU against a concurrent delete), and gates the event append —
+      // never the delivery-status write itself, which always proceeds.
       await db.transaction(async (tx) => {
-        const updated = await tx.query<ThreadRow>(
+        const updated = await tx.query<ThreadRow & { conversation_status: string }>(
           `UPDATE threads SET delivery_status = $1, claimed_until = NULL
            WHERE id = $2 AND direction = 'outbound'
-           RETURNING ${THREAD_COLUMNS}`,
+           RETURNING ${THREAD_COLUMNS},
+             (SELECT status FROM conversations WHERE id = threads.conversation_id) AS conversation_status`,
           [status, threadId],
         )
         if (updated.length === 0) {
@@ -1135,7 +1150,7 @@ export function createConversationStore(db: Db): ConversationStore {
             `releaseThreadLease: no outbound thread with id ${threadId} (wrong id, an inbound thread, or the row was deleted)`,
           )
         }
-        if (status === 'sent') {
+        if (status === 'sent' && updated[0].conversation_status !== 'deleted') {
           const thread = toStoredThread(updated[0])
           await appendOutboxEventInTx(tx, {
             type: 'conversation.reply_sent',
