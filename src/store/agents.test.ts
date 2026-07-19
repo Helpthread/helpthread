@@ -20,6 +20,15 @@ describe('AgentStore', () => {
     return { db, store }
   }
 
+  /** Insert a `mailboxes` row directly (no `MailboxStore` needed for these fixtures) — mirrors `src/store/mailboxes.test.ts`'s own `insertMailbox` helper. Returns the new row's id. */
+  async function insertMailbox(testDb: Db, address: string): Promise<string> {
+    const rows = await testDb.query<{ id: string }>(
+      'INSERT INTO mailboxes (address, provider) VALUES ($1, $2) RETURNING id',
+      [address, 'gmail'],
+    )
+    return rows[0].id
+  }
+
   // --- createFirstAdmin -------------------------------------------------------
 
   describe('createFirstAdmin', () => {
@@ -121,6 +130,33 @@ describe('AgentStore', () => {
       expect(agentsReadIndex).toBeGreaterThanOrEqual(0)
       expect(lockIndex).toBeLessThan(agentsReadIndex)
     })
+
+    it('auto-grants every existing mailbox to the first admin, in the same transaction (spec §3.4)', async () => {
+      const { db, store } = await freshStore()
+      const mailboxA = await insertMailbox(db, 'a@example.test')
+      const mailboxB = await insertMailbox(db, 'b@example.test')
+
+      const admin = await store.createFirstAdmin({
+        name: 'Ada Admin',
+        email: 'ada@example.test',
+        passwordHash: 'scrypt$hash1',
+      })
+      expect(admin).not.toBeNull()
+
+      const grants = await store.listAgentMailboxIds(admin?.id as string)
+      expect(grants?.sort()).toEqual([mailboxA, mailboxB].sort())
+    })
+
+    it('zero mailboxes existing → zero grant rows, no error (not a failed setup)', async () => {
+      const { store } = await freshStore()
+      const admin = await store.createFirstAdmin({
+        name: 'Ada Admin',
+        email: 'ada@example.test',
+        passwordHash: 'scrypt$hash1',
+      })
+      expect(admin).not.toBeNull()
+      expect(await store.listAgentMailboxIds(admin?.id as string)).toEqual([])
+    })
   })
 
   // --- createAgent -------------------------------------------------------------
@@ -171,6 +207,60 @@ describe('AgentStore', () => {
         status: 'invited',
       })
       expect(result).toEqual({ ok: false, reason: 'email_taken' })
+    })
+
+    it('auto-grants every existing mailbox — both the invited and admin-set-password paths, any role (spec §3.4)', async () => {
+      const { db, store } = await freshStore()
+      const mailboxA = await insertMailbox(db, 'a@example.test')
+      const mailboxB = await insertMailbox(db, 'b@example.test')
+
+      const invited = await store.createAgent({
+        name: 'Invitee',
+        email: 'invitee2@example.test',
+        role: 'agent',
+        status: 'invited',
+      })
+      const activeAdmin = await store.createAgent({
+        name: 'Active Admin',
+        email: 'activeadmin@example.test',
+        role: 'admin',
+        status: 'active',
+        passwordHash: 'scrypt$hash',
+      })
+      if (!invited.ok || !activeAdmin.ok) throw new Error('expected ok')
+
+      expect((await store.listAgentMailboxIds(invited.agent.id))?.sort()).toEqual(
+        [mailboxA, mailboxB].sort(),
+      )
+      expect((await store.listAgentMailboxIds(activeAdmin.agent.id))?.sort()).toEqual(
+        [mailboxA, mailboxB].sort(),
+      )
+    })
+
+    it('a duplicate-email failure grants nothing (no orphan grant rows for the rejected insert)', async () => {
+      const { db, store } = await freshStore()
+      await insertMailbox(db, 'a@example.test')
+      await store.createAgent({
+        name: 'First',
+        email: 'dup2@example.test',
+        role: 'agent',
+        status: 'invited',
+      })
+      const result = await store.createAgent({
+        name: 'Second',
+        email: 'dup2@example.test',
+        role: 'agent',
+        status: 'invited',
+      })
+      expect(result).toEqual({ ok: false, reason: 'email_taken' })
+
+      const [{ count }] = await db.query<{ count: number }>(
+        'SELECT count(*)::int AS count FROM agent_mailbox_access',
+      )
+      // Exactly one grant row: the FIRST (successful) createAgent's own
+      // auto-grant of the one mailbox — the rejected second call inserted
+      // nothing.
+      expect(count).toBe(1)
     })
   })
 
@@ -598,6 +688,100 @@ describe('AgentStore', () => {
         status: 'invited',
       })
       expect(await store.countAgents()).toBe(2)
+    })
+  })
+
+  // --- mailbox access (HT-54 follow-up; spec §3.4/§6) -------------------------
+
+  describe('listAgentMailboxIds', () => {
+    it('returns null for an unknown agent', async () => {
+      const { store } = await freshStore()
+      expect(await store.listAgentMailboxIds('00000000-0000-0000-0000-000000000000')).toBeNull()
+    })
+
+    it('returns [] for a real Agent with no grants', async () => {
+      const { store } = await freshStore()
+      const result = await store.createAgent({
+        name: 'No Mailboxes',
+        email: 'nomailboxes@example.test',
+        role: 'agent',
+        status: 'invited',
+      })
+      if (!result.ok) throw new Error('expected ok')
+      // No mailbox existed at creation time, so auto-grant produced [].
+      expect(await store.listAgentMailboxIds(result.agent.id)).toEqual([])
+    })
+  })
+
+  describe('replaceAgentMailboxAccess', () => {
+    it('returns not_found for an unknown agent', async () => {
+      const { store } = await freshStore()
+      const result = await store.replaceAgentMailboxAccess(
+        '00000000-0000-0000-0000-000000000000',
+        [],
+      )
+      expect(result).toBe('not_found')
+    })
+
+    it('replace-set: a second call fully replaces the first grant set (DELETE + INSERT, one transaction)', async () => {
+      const { db, store } = await freshStore()
+      const agent = await store.createAgent({
+        name: 'Replaceable',
+        email: 'replaceable@example.test',
+        role: 'agent',
+        status: 'invited',
+      })
+      if (!agent.ok) throw new Error('expected ok')
+      const mailboxA = await insertMailbox(db, 'a@example.test')
+      const mailboxB = await insertMailbox(db, 'b@example.test')
+
+      const first = await store.replaceAgentMailboxAccess(agent.agent.id, [mailboxA, mailboxB])
+      expect(first).toBe('ok')
+      expect((await store.listAgentMailboxIds(agent.agent.id))?.sort()).toEqual(
+        [mailboxA, mailboxB].sort(),
+      )
+
+      const second = await store.replaceAgentMailboxAccess(agent.agent.id, [mailboxB])
+      expect(second).toBe('ok')
+      expect(await store.listAgentMailboxIds(agent.agent.id)).toEqual([mailboxB])
+    })
+
+    it('an empty array clears every grant', async () => {
+      const { db, store } = await freshStore()
+      const agent = await store.createAgent({
+        name: 'Clearable',
+        email: 'clearable@example.test',
+        role: 'agent',
+        status: 'invited',
+      })
+      if (!agent.ok) throw new Error('expected ok')
+      const mailboxA = await insertMailbox(db, 'a@example.test')
+      await store.replaceAgentMailboxAccess(agent.agent.id, [mailboxA])
+
+      const result = await store.replaceAgentMailboxAccess(agent.agent.id, [])
+      expect(result).toBe('ok')
+      expect(await store.listAgentMailboxIds(agent.agent.id)).toEqual([])
+    })
+
+    it('an id naming no mailbox is invalid_mailbox (FK translated), and rolls back — the PRIOR grant set survives untouched', async () => {
+      const { db, store } = await freshStore()
+      const agent = await store.createAgent({
+        name: 'Guarded',
+        email: 'guarded@example.test',
+        role: 'agent',
+        status: 'invited',
+      })
+      if (!agent.ok) throw new Error('expected ok')
+      const mailboxA = await insertMailbox(db, 'a@example.test')
+      await store.replaceAgentMailboxAccess(agent.agent.id, [mailboxA])
+
+      const bogusMailboxId = '99999999-9999-4999-8999-999999999999'
+      const result = await store.replaceAgentMailboxAccess(agent.agent.id, [bogusMailboxId])
+      expect(result).toBe('invalid_mailbox')
+
+      // Rolled back inside the transaction: the PRIOR grant set (mailboxA)
+      // is untouched, never partially replaced.
+      expect(await store.listAgentMailboxIds(agent.agent.id)).toEqual([mailboxA])
     })
   })
 })

@@ -45,9 +45,12 @@ import {
   handleCreateAgent,
   handleDeleteAgent,
   handleGetAgent,
+  handleGetAgentMailboxes,
   handleInviteAccept,
   handleListAgents,
+  handleListMailboxes,
   handlePatchAgent,
+  handlePutAgentMailboxes,
   handleResendInvite,
   handleSetAgentPassword,
   handleSetup,
@@ -467,6 +470,29 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             route.id,
             await resolveActingAgent(request, deps.agents.store),
             agentsHandlerDeps(deps),
+          )
+
+        // --- Mailbox access (HT-54 follow-up; spec §3.4/§6) -----------------
+
+        case 'mailboxes-list':
+          return await handleListMailboxes(
+            await resolveActingAgent(request, deps.agents.store),
+            deps.agents,
+          )
+
+        case 'agent-mailboxes-get':
+          return await handleGetAgentMailboxes(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            deps.agents,
+          )
+
+        case 'agent-mailboxes-put':
+          return await handlePutAgentMailboxes(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.agents,
           )
       }
     } catch (err) {

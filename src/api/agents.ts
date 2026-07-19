@@ -1,8 +1,10 @@
 /**
  * The Agents & Authentication API handlers (HT-54; specs/auth/agents-and-auth.md
  * §6) — auth bootstrap (`/auth/providers`, `/setup`, `/auth/verify`,
- * `/auth/me`, `/auth/invite/accept`) and Agent management (`/agents`,
- * `/agents/{id}`, `/agents/{id}/password`, `/agents/{id}/invite`).
+ * `/auth/me`, `/auth/invite/accept`), Agent management (`/agents`,
+ * `/agents/{id}`, `/agents/{id}/password`, `/agents/{id}/invite`), and
+ * mailbox access (HT-54 follow-up, spec §3.4/§6: `/mailboxes`,
+ * `/agents/{id}/mailboxes`).
  *
  * Same shape as `src/api/conversations.ts`: each handler is a pure function
  * of an already-authenticated (service Bearer), already-routed `Request`
@@ -34,6 +36,9 @@
  *   someone else, `/invite`) — admin-only, except a self `PATCH` (own
  *   name/timezone) and a self `/password` (own password), both spec-pinned
  *   exceptions.
+ * - `GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes` — admin-only, no
+ *   self carve-out (spec §3.4/§6: mailbox grants are admin-only bookkeeping,
+ *   not a self-service profile field).
  *
  * ## Error codes
  *
@@ -53,6 +58,7 @@ import type { Keyring } from '../mail/reply-token.js'
 import type { OutboundEmail } from '../providers/email-sender.js'
 import type { EmailSender } from '../providers/index.js'
 import type { AgentRecord, AgentRole, AgentStore } from '../store/agents.js'
+import type { MailboxRecord, MailboxStore } from '../store/mailboxes.js'
 import { apiError, json, noContent } from './responses.js'
 import { isUuid } from './uuid.js'
 
@@ -68,6 +74,13 @@ import { isUuid } from './uuid.js'
 export interface AgentsApiDeps {
   store: AgentStore
   providers: AuthProvider[]
+  /**
+   * Mailbox access (HT-54 follow-up; spec §3.4/§6): REQUIRED, not
+   * absent-by-default — `GET /api/v1/mailboxes` is the Permissions screen's
+   * roster and has no meaningful "feature off" state on a deployment that
+   * already has the `agents`/`agent_mailbox_access` tables (migration 018).
+   */
+  mailboxStore: MailboxStore
   /** The web UI's base URL (`HELPTHREAD_UI_BASE_URL`) — ABSENT when unset (spec §8's "a fresh deploy can't email before it can"): `sendInvite` still creates the Agent (`inviteSent: false`), and `/agents/{id}/invite` refuses with `409 conflict`. */
   uiBaseUrl?: string
 }
@@ -127,6 +140,28 @@ function validateTimezone(raw: unknown): string | null {
   }
 }
 
+/**
+ * `body.mailboxIds` (`PUT /api/v1/agents/{id}/mailboxes`, spec §3.4/§6) must
+ * be an array of uuid-shaped strings — `null` on a non-array or any
+ * non-uuid entry. Dedupes while preserving first-occurrence order (the
+ * brief's pinned rule): the deduped array is both what gets stored
+ * (`AgentStore.replaceAgentMailboxAccess` does not re-dedupe — see its own
+ * doc) and what the 200 response echoes back as "the stored set."
+ */
+function validateMailboxIds(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null
+  const seen = new Set<string>()
+  const ids: string[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || !isUuid(entry)) return null
+    if (!seen.has(entry)) {
+      seen.add(entry)
+      ids.push(entry)
+    }
+  }
+  return ids
+}
+
 /** Read and JSON-parse `request`'s body without ever throwing — mirrors `src/api/conversations.ts`'s helper of the same name (kept local per this codebase's per-file convention). */
 async function parseJsonBody(
   request: Request,
@@ -167,6 +202,23 @@ function toAgentJson(agent: AgentRecord): AgentJson {
     createdAt: agent.createdAt.toISOString(),
     updatedAt: agent.updatedAt.toISOString(),
   }
+}
+
+/**
+ * `GET /api/v1/mailboxes`' wire shape (spec §3.4/§6): `id`/`address`/`status`
+ * ONLY — never `provider`, and certainly never a token or other OAuth
+ * internal. `MailboxRecord` carries `provider` too, but this mapper is the
+ * one place that decides what crosses the wire, matching `toAgentJson`'s
+ * "never a secret" discipline for Agents.
+ */
+interface MailboxJson {
+  id: string
+  address: string
+  status: MailboxRecord['status']
+}
+
+function toMailboxJson(mailbox: MailboxRecord): MailboxJson {
+  return { id: mailbox.id, address: mailbox.address, status: mailbox.status }
 }
 
 const UNAUTHORIZED = () => apiError(401, 'unauthorized', 'Missing or invalid Agent identity.')
@@ -607,4 +659,84 @@ export async function handleInviteAccept(
   if (agent === null) return apiError(401, 'unauthorized', 'Invalid or expired invite.')
 
   return json(200, { agent: toAgentJson(agent) })
+}
+
+// --- Mailbox access (HT-54 follow-up; spec §3.4/§6) --------------------------
+//
+// All three admin-only, acting-Agent header required — the Permissions
+// screen's whole read/write surface. No self-service exception (unlike
+// `/agents/{id}` PATCH/password): mailbox grants are an admin-only
+// bookkeeping concern, spec §6 pins all three as "admin-only" with no self
+// carve-out.
+
+// --- GET /api/v1/mailboxes ---------------------------------------------------
+
+/** `GET /api/v1/mailboxes` (spec §3.4/§6) — admin only. The full roster regardless of status (a `MailboxStore.listMailboxes` unfiltered read) — the Permissions screen renders checkboxes for disconnected mailboxes too. */
+export async function handleListMailboxes(
+  actingAgent: AgentRecord | null,
+  deps: Pick<AgentsHandlerDeps, 'mailboxStore'>,
+): Promise<Response> {
+  if (actingAgent === null) return UNAUTHORIZED()
+  if (actingAgent.role !== 'admin') return apiError(403, 'forbidden', 'Admin role required.')
+
+  const mailboxes = await deps.mailboxStore.listMailboxes()
+  return json(200, { mailboxes: mailboxes.map(toMailboxJson) })
+}
+
+// --- GET /api/v1/agents/{id}/mailboxes ---------------------------------------
+
+/** `GET /api/v1/agents/{id}/mailboxes` (spec §3.4/§6) — admin only. Returns the target's raw grants AS STORED, even for an admin target (the UI decides how to render an admin's implicit-access case, not this endpoint). Unknown agent → `404`. */
+export async function handleGetAgentMailboxes(
+  id: string,
+  actingAgent: AgentRecord | null,
+  deps: Pick<AgentsHandlerDeps, 'store'>,
+): Promise<Response> {
+  if (actingAgent === null) return UNAUTHORIZED()
+  if (actingAgent.role !== 'admin') return apiError(403, 'forbidden', 'Admin role required.')
+  if (!isUuid(id)) return NOT_FOUND()
+
+  const mailboxIds = await deps.store.listAgentMailboxIds(id)
+  if (mailboxIds === null) return NOT_FOUND()
+  return json(200, { mailboxIds })
+}
+
+// --- PUT /api/v1/agents/{id}/mailboxes ---------------------------------------
+
+/**
+ * `PUT /api/v1/agents/{id}/mailboxes` (spec §3.4/§6) — admin only. Replaces
+ * the target's mailbox grants with exactly `body.mailboxIds` (deduped by
+ * {@link validateMailboxIds} before it ever reaches the store). Non-array/
+ * non-uuid entries → `400 validation_failed`; an id naming no mailbox
+ * (`AgentStore.replaceAgentMailboxAccess`'s FK-translated `'invalid_mailbox'`)
+ * → `400 validation_failed`; unknown agent → `404`. Valid for any target
+ * status (spec: "grants are lifecycle-agnostic bookkeeping") — no
+ * invited/disabled check, unlike `/password`.
+ */
+export async function handlePutAgentMailboxes(
+  id: string,
+  actingAgent: AgentRecord | null,
+  request: Request,
+  deps: Pick<AgentsHandlerDeps, 'store'>,
+): Promise<Response> {
+  if (actingAgent === null) return UNAUTHORIZED()
+  if (actingAgent.role !== 'admin') return apiError(403, 'forbidden', 'Admin role required.')
+  if (!isUuid(id)) return NOT_FOUND()
+
+  const parsed = await parseJsonBody(request)
+  if (!parsed.ok) return apiError(400, 'validation_failed', 'Request body must be valid JSON.')
+  const body = asRecord(parsed.value)
+  if (body === null)
+    return apiError(400, 'validation_failed', 'Request body must be a JSON object.')
+
+  const mailboxIds = validateMailboxIds(body.mailboxIds)
+  if (mailboxIds === null) {
+    return apiError(400, 'validation_failed', 'mailboxIds must be an array of uuid strings.')
+  }
+
+  const result = await deps.store.replaceAgentMailboxAccess(id, mailboxIds)
+  if (result === 'not_found') return NOT_FOUND()
+  if (result === 'invalid_mailbox') {
+    return apiError(400, 'validation_failed', 'mailboxIds must name existing mailboxes.')
+  }
+  return json(200, { mailboxIds })
 }

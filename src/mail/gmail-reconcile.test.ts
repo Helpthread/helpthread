@@ -72,6 +72,9 @@ function fakeMailboxStore(initial: MailboxRecord): {
       async listActiveMailboxes() {
         throw new Error('listActiveMailboxes: not used by the reconcile handler')
       },
+      async listMailboxes() {
+        throw new Error('listMailboxes: not used by the reconcile handler')
+      },
     },
     records,
   }
@@ -1002,6 +1005,9 @@ describe('createGmailReconcileHandler', () => {
         },
         async listActiveMailboxes() {
           throw new Error('listActiveMailboxes: not used by this test')
+        },
+        async listMailboxes() {
+          throw new Error('listMailboxes: not used by this test')
         },
       }
       const { store: watchStateStore, setCalls } = fakeWatchStateStore({

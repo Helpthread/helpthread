@@ -37,9 +37,28 @@
  * "always guard once locked" code path is far easier to prove correct than
  * a "guard only on the branches that reduce" one; see each method's comment
  * for the exact condition.
+ *
+ * ## Mailbox access (HT-54 follow-up; spec §3.4/§6, semantics pinned 2026-07-18)
+ *
+ * {@link createFirstAdmin} and {@link createAgent} each auto-grant the new
+ * Agent every mailbox that exists at creation time, in the SAME transaction
+ * as the `agents` insert — spec §3.4: "no Agent is born locked out of the
+ * deployment's only inbox," any role, both provisioning paths. This is a
+ * plain `INSERT ... SELECT id FROM mailboxes` (no `MailboxStore` dependency
+ * needed — one extra statement in the same transaction, not a second store
+ * call): zero mailboxes existing means the `SELECT` returns zero rows and
+ * the `INSERT` is a harmless no-op, never an error.
+ *
+ * {@link replaceAgentMailboxAccess}'s `'invalid_mailbox'` outcome mirrors
+ * `ConversationStore.setConversationAssignee`'s `isAssigneeFkViolation`
+ * pattern (`src/store/conversations.ts`): {@link isMailboxFkViolation} below
+ * matches SQLSTATE 23503 (foreign_key_violation) on the
+ * `agent_mailbox_access.mailbox_id` FK, translating a bad id in the
+ * replacement set to a caller-facing outcome rather than an uncontrolled
+ * thrown error.
  */
 
-import type { Db, SqlValue } from '../db/client.js'
+import type { Db, Queryable, SqlValue } from '../db/client.js'
 
 /** An Agent's role (spec §5): `admin` manages Agents/settings and can do everything an `agent` can; `agent` works the inbox and their own profile. */
 export type AgentRole = 'admin' | 'agent'
@@ -90,6 +109,16 @@ export type UpdateAgentResult =
 
 /** The outcome of {@link AgentStore.deleteAgent}. */
 export type DeleteAgentResult = { ok: true } | { ok: false; reason: 'not_found' | 'last_admin' }
+
+/**
+ * The outcome of {@link AgentStore.replaceAgentMailboxAccess} (spec §3.4/§6):
+ * `'ok'` on a successful replace, `'not_found'` when `agentId` names no
+ * Agent, `'invalid_mailbox'` when some id in the replacement set names no
+ * `mailboxes` row (the `agent_mailbox_access.mailbox_id` FK rejecting it,
+ * translated here — see the module doc's `isMailboxFkViolation` note —
+ * rather than escaping as an uncontrolled error).
+ */
+export type ReplaceMailboxAccessResult = 'ok' | 'not_found' | 'invalid_mailbox'
 
 /** Persistence operations for `agents` and `agent_auth_identities`. See the module doc for the last-admin locking discipline. */
 export interface AgentStore {
@@ -207,6 +236,44 @@ export interface AgentStore {
 
   /** Count every Agent regardless of status — `needsSetup` (`GET /api/v1/auth/providers`, spec §6) is `count === 0`. */
   countAgents(): Promise<number>
+
+  /**
+   * The Agent's raw `agent_mailbox_access` grants (spec §3.4/§6) — `GET
+   * /api/v1/agents/{id}/mailboxes`'s whole read path. Returned AS STORED
+   * even for an admin target: admins have IMPLICIT access to every mailbox
+   * (grants rows are never consulted for them), so a bare admin's row set
+   * may be empty or stale — the API layer/UI is what applies the
+   * "admin → implicit-access note instead of checkboxes" policy, not this
+   * method. `null` when `agentId` names no Agent (the caller's `404`);
+   * `[]` for a real Agent with no grants (a non-admin locked out of every
+   * mailbox — a real, representable state, not an error).
+   */
+  listAgentMailboxIds(agentId: string): Promise<string[] | null>
+
+  /**
+   * Replace-set Agent `agentId`'s mailbox grants: DELETE every existing
+   * `agent_mailbox_access` row for this Agent, then INSERT one row per id in
+   * `mailboxIds`, in ONE transaction — `PUT /api/v1/agents/{id}/mailboxes`'s
+   * whole write path (spec §6). The caller (`src/api/agents.ts`) has already
+   * deduped `mailboxIds` before calling this; this method does not re-dedupe
+   * (a duplicate id here would violate the `(agent_id, mailbox_id)` PRIMARY
+   * KEY within the same INSERT). `mailboxIds: []` is a valid replace — it
+   * clears every grant, taking the Agent to zero-mailbox access.
+   *
+   * Returns `'not_found'` when `agentId` names no Agent (checked FIRST,
+   * before any DELETE/INSERT). Returns `'invalid_mailbox'` when some id in
+   * `mailboxIds` names no `mailboxes` row — the `agent_mailbox_access.
+   * mailbox_id` FK is the real guard (same "check-then-act is not atomic, so
+   * the FK is authoritative" reasoning as
+   * `ConversationStore.setConversationAssignee`'s `'invalid_agent'`), its
+   * violation translated here rather than escaping as an uncontrolled error.
+   * On `'invalid_mailbox'` the whole transaction rolls back — the Agent's
+   * PRIOR grant set is left untouched, never partially replaced.
+   */
+  replaceAgentMailboxAccess(
+    agentId: string,
+    mailboxIds: string[],
+  ): Promise<ReplaceMailboxAccessResult>
 }
 
 /**
@@ -237,6 +304,36 @@ const AGENT_COLUMNS = 'id, email, name, role, status, timezone, created_at, upda
 
 function toDate(value: Date | string): Date {
   return value instanceof Date ? value : new Date(value)
+}
+
+/**
+ * Grant `agentId` every mailbox that exists right now, inside `tx` — the
+ * auto-grant-on-create step {@link createFirstAdmin}/{@link createAgent}
+ * both run in the SAME transaction as their `agents` insert (module doc,
+ * spec §3.4). A single `INSERT ... SELECT id FROM mailboxes`: zero mailboxes
+ * existing means zero rows selected and a no-op `INSERT`, never an error —
+ * no separate "is the table empty" branch needed.
+ */
+async function grantAllMailboxes(tx: Queryable, agentId: string): Promise<void> {
+  await tx.query(
+    'INSERT INTO agent_mailbox_access (agent_id, mailbox_id) SELECT $1, id FROM mailboxes',
+    [agentId],
+  )
+}
+
+/**
+ * Is `err` the `agent_mailbox_access.mailbox_id` FK rejecting an id that
+ * names no `mailboxes` row? Matched by SQLSTATE 23503
+ * (foreign_key_violation) when the driver surfaces it (`pg` and PGlite both
+ * set `code`), with the constraint/message text as a fallback — same shape
+ * as `src/store/conversations.ts`'s `isAssigneeFkViolation`. Total: any
+ * non-object input is simply "no".
+ */
+function isMailboxFkViolation(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const { code, message } = err as { code?: unknown; message?: unknown }
+  if (code === '23503') return true
+  return typeof message === 'string' && message.includes('mailbox_id')
 }
 
 function toAgentRecord(row: AgentRow): AgentRecord {
@@ -273,6 +370,7 @@ export function createAgentStore(db: Db): AgentStore {
            VALUES ($1, 'password', $2, $3)`,
           [agentRow.id, email, input.passwordHash],
         )
+        await grantAllMailboxes(tx, agentRow.id)
         return toAgentRecord(agentRow)
       })
     },
@@ -298,6 +396,7 @@ export function createAgentStore(db: Db): AgentStore {
             [agentRow.id, email, input.passwordHash],
           )
         }
+        await grantAllMailboxes(tx, agentRow.id)
         return { ok: true, agent: toAgentRecord(agentRow) }
       })
     },
@@ -502,6 +601,47 @@ export function createAgentStore(db: Db): AgentStore {
         'SELECT count(*)::int AS count FROM agents',
       )
       return count
+    },
+
+    async listAgentMailboxIds(agentId) {
+      const agentRows = await db.query<{ id: string }>('SELECT id FROM agents WHERE id = $1', [
+        agentId,
+      ])
+      if (agentRows.length === 0) return null
+
+      const rows = await db.query<{ mailbox_id: string }>(
+        'SELECT mailbox_id FROM agent_mailbox_access WHERE agent_id = $1 ORDER BY created_at',
+        [agentId],
+      )
+      return rows.map((row) => row.mailbox_id)
+    },
+
+    async replaceAgentMailboxAccess(agentId, mailboxIds) {
+      return db.transaction(async (tx) => {
+        const agentRows = await tx.query<{ id: string }>('SELECT id FROM agents WHERE id = $1', [
+          agentId,
+        ])
+        if (agentRows.length === 0) return 'not_found'
+
+        await tx.query('DELETE FROM agent_mailbox_access WHERE agent_id = $1', [agentId])
+        if (mailboxIds.length === 0) return 'ok'
+
+        const params: SqlValue[] = [agentId]
+        const valuePlaceholders = mailboxIds.map((mailboxId) => {
+          params.push(mailboxId)
+          return `($1, $${params.length})`
+        })
+        try {
+          await tx.query(
+            `INSERT INTO agent_mailbox_access (agent_id, mailbox_id) VALUES ${valuePlaceholders.join(', ')}`,
+            params,
+          )
+        } catch (err) {
+          if (isMailboxFkViolation(err)) return 'invalid_mailbox'
+          throw err
+        }
+        return 'ok'
+      })
     },
   }
 }

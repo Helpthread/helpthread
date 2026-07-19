@@ -24,7 +24,7 @@ import {
 } from '../store/conversations.js'
 import { createGmailWatchStateStore } from '../store/gmail-watch-state.js'
 import { createMailboxTokenStore } from '../store/mailbox-tokens.js'
-import { createMailboxStore } from '../store/mailboxes.js'
+import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
 import type { AgentsApiDeps } from './agents.js'
 import type { GmailReconcileJob } from './gmail-webhook.js'
@@ -49,7 +49,11 @@ const KEYRING: Keyring = { current: { keyId: 'k1', secret: 'a'.repeat(32) } }
  */
 function testAgentsDeps(db: Db): AgentsApiDeps {
   const store = createAgentStore(db)
-  return { store, providers: [createPasswordAuthProvider({ agentStore: store })] }
+  return {
+    store,
+    providers: [createPasswordAuthProvider({ agentStore: store })],
+    mailboxStore: createMailboxStore(db),
+  }
 }
 
 /** A fake `EmailSender` that records every `OutboundEmail` it's asked to send, never fails. */
@@ -1826,6 +1830,9 @@ describe('createInboxApi', () => {
         async listActiveMailboxes() {
           throw new Error('listActiveMailboxes: not used by the push-webhook path')
         },
+        async listMailboxes() {
+          throw new Error('listMailboxes: not used by the push-webhook path')
+        },
       }
     }
 
@@ -2413,7 +2420,11 @@ describe('createInboxApi — hardening (Codex review)', () => {
     keyring: KEYRING,
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,
-    agents: { store: {} as unknown as AgentStore, providers: [] } satisfies AgentsApiDeps,
+    agents: {
+      store: {} as unknown as AgentStore,
+      providers: [],
+      mailboxStore: {} as unknown as MailboxStore,
+    } satisfies AgentsApiDeps,
   }
 
   it('throws at construction on an empty apiToken (fail closed — an empty token would authenticate every request)', () => {

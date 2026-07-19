@@ -45,6 +45,7 @@ import { seedDevData } from '../src/dev/seed.js'
 import type { Keyring } from '../src/mail/reply-token.js'
 import { createAgentStore } from '../src/store/agents.js'
 import { createConversationStore } from '../src/store/conversations.js'
+import { createMailboxStore } from '../src/store/mailboxes.js'
 
 const PORT = Number(process.env.HT_DEV_PORT ?? 8787)
 const API_TOKEN = process.env.HT_DEV_TOKEN ?? 'helpthread-dev-token'
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
   // wired up here), so uiBaseUrl stays absent: sendInvite still creates the
   // Agent but inviteSent is always false, matching a fresh, UI-less deploy.
   const agentStore = createAgentStore(db)
+  const mailboxStore = createMailboxStore(db)
   const authProviders: AuthProvider[] = [createPasswordAuthProvider({ agentStore })]
 
   let seededCount: number | undefined
@@ -92,7 +94,7 @@ async function main(): Promise<void> {
     keyring: KEYRING,
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,
-    agents: { store: agentStore, providers: authProviders },
+    agents: { store: agentStore, providers: authProviders, mailboxStore },
   })
 
   const baseUrl = `http://127.0.0.1:${PORT}`
