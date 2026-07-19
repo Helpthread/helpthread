@@ -25,8 +25,8 @@ describe('migrate', () => {
     )
 
     const [thread] = await db.query<{ id: string }>(
-      `INSERT INTO threads (conversation_id, direction, from_address)
-       VALUES ($1, 'inbound', $2) RETURNING id`,
+      `INSERT INTO threads (conversation_id, direction, from_address, author_kind)
+       VALUES ($1, 'inbound', $2, 'customer') RETURNING id`,
       [conversation.id, 'customer@example.test'],
     )
     expect(thread.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
@@ -110,16 +110,16 @@ describe('migrate', () => {
 
     // Inbound → NULL is the only legal value.
     const [nullRow] = await db.query<{ delivery_status: string | null }>(
-      `INSERT INTO threads (conversation_id, direction, from_address)
-       VALUES ($1, 'inbound', $2) RETURNING delivery_status`,
+      `INSERT INTO threads (conversation_id, direction, from_address, author_kind)
+       VALUES ($1, 'inbound', $2, 'customer') RETURNING delivery_status`,
       [conversation.id, 'customer@example.test'],
     )
     expect(nullRow.delivery_status).toBeNull()
 
     // Outbound → one of the three outbox states.
     const [pendingRow] = await db.query<{ delivery_status: string | null }>(
-      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-       VALUES ($1, 'outbound', $2, 'pending') RETURNING delivery_status`,
+      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+       VALUES ($1, 'outbound', $2, 'pending', 'agent') RETURNING delivery_status`,
       [conversation.id, 'support@example.test'],
     )
     expect(pendingRow.delivery_status).toBe('pending')
@@ -127,8 +127,8 @@ describe('migrate', () => {
     // Outbound with an out-of-domain value → rejected.
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-         VALUES ($1, 'outbound', $2, 'bogus')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+         VALUES ($1, 'outbound', $2, 'bogus', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -136,8 +136,8 @@ describe('migrate', () => {
     // Cross-column invariant: an INBOUND thread may NOT carry a status...
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-         VALUES ($1, 'inbound', $2, 'sent')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+         VALUES ($1, 'inbound', $2, 'sent', 'customer')`,
         [conversation.id, 'customer@example.test'],
       ),
     ).rejects.toThrow()
@@ -145,8 +145,8 @@ describe('migrate', () => {
     // ...and an OUTBOUND thread may NOT be left NULL (invisible to a delivery worker).
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-         VALUES ($1, 'outbound', $2, NULL)`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+         VALUES ($1, 'outbound', $2, NULL, 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -181,8 +181,8 @@ describe('migrate', () => {
     expect(row.delivery_status).toBe('pending')
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-         VALUES ($1, 'outbound', $2, NULL)`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+         VALUES ($1, 'outbound', $2, NULL, 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -203,8 +203,8 @@ describe('migrate', () => {
       send_envelope: { to: string[]; subject: string } | null
       claimed_until: string | null
     }>(
-      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, idempotency_key, send_envelope)
-       VALUES ($1, 'outbound', $2, 'pending', $3, $4)
+      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, idempotency_key, send_envelope, author_kind)
+       VALUES ($1, 'outbound', $2, 'pending', $3, $4, 'agent')
        RETURNING idempotency_key, send_envelope, claimed_until`,
       [
         conversation.id,
@@ -222,8 +222,8 @@ describe('migrate', () => {
 
     // Outbound with neither column set (the no-key path) is also legal.
     const [outboundNoKeyRow] = await db.query<{ idempotency_key: string | null }>(
-      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-       VALUES ($1, 'outbound', $2, 'pending') RETURNING idempotency_key`,
+      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+       VALUES ($1, 'outbound', $2, 'pending', 'agent') RETURNING idempotency_key`,
       [conversation.id, 'support@example.test'],
     )
     expect(outboundNoKeyRow.idempotency_key).toBeNull()
@@ -231,8 +231,8 @@ describe('migrate', () => {
     // Inbound may NOT carry an idempotency_key...
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, idempotency_key)
-         VALUES ($1, 'inbound', $2, $3)`,
+        `INSERT INTO threads (conversation_id, direction, from_address, idempotency_key, author_kind)
+         VALUES ($1, 'inbound', $2, $3, 'customer')`,
         [conversation.id, 'customer@example.test', 'some-key'],
       ),
     ).rejects.toThrow()
@@ -240,8 +240,8 @@ describe('migrate', () => {
     // ...nor a send_envelope.
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, send_envelope)
-         VALUES ($1, 'inbound', $2, $3)`,
+        `INSERT INTO threads (conversation_id, direction, from_address, send_envelope, author_kind)
+         VALUES ($1, 'inbound', $2, $3, 'customer')`,
         [conversation.id, 'customer@example.test', JSON.stringify({ to: [], subject: '' })],
       ),
     ).rejects.toThrow()
@@ -257,16 +257,16 @@ describe('migrate', () => {
     )
 
     await db.query(
-      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, idempotency_key)
-       VALUES ($1, 'outbound', $2, 'pending', 'dup-key')`,
+      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, idempotency_key, author_kind)
+       VALUES ($1, 'outbound', $2, 'pending', 'dup-key', 'agent')`,
       [conversation.id, 'support@example.test'],
     )
 
     // A second outbound row in the SAME conversation with the SAME key collides.
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, idempotency_key)
-         VALUES ($1, 'outbound', $2, 'pending', 'dup-key')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, idempotency_key, author_kind)
+         VALUES ($1, 'outbound', $2, 'pending', 'dup-key', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -275,14 +275,14 @@ describe('migrate', () => {
     // partial index excludes NULL keys entirely) — this is the "no key ⇒ no
     // dedup protection" contract, enforced at the schema level too.
     await db.query(
-      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-       VALUES ($1, 'outbound', $2, 'pending')`,
+      `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+       VALUES ($1, 'outbound', $2, 'pending', 'agent')`,
       [conversation.id, 'support@example.test'],
     )
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-         VALUES ($1, 'outbound', $2, 'pending')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+         VALUES ($1, 'outbound', $2, 'pending', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).resolves.toBeDefined()
@@ -500,8 +500,8 @@ describe('migrate', () => {
 
     // A note with NULL delivery status is legal…
     const [note] = await database.query<{ delivery_status: string | null }>(
-      `INSERT INTO threads (conversation_id, direction, from_address, body_text)
-       VALUES ($1, 'note', $2, 'internal context') RETURNING delivery_status`,
+      `INSERT INTO threads (conversation_id, direction, from_address, body_text, author_kind)
+       VALUES ($1, 'note', $2, 'internal context', 'agent') RETURNING delivery_status`,
       [conversation.id, 'support@example.test'],
     )
     expect(note.delivery_status).toBeNull()
@@ -510,8 +510,8 @@ describe('migrate', () => {
     // for a message that is never sent)…
     await expect(
       database.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-         VALUES ($1, 'note', $2, 'sent')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+         VALUES ($1, 'note', $2, 'sent', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -520,15 +520,15 @@ describe('migrate', () => {
     // must carry a status, and an unknown direction is still rejected.
     await expect(
       database.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status)
-         VALUES ($1, 'outbound', $2, NULL)`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind)
+         VALUES ($1, 'outbound', $2, NULL, 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
     await expect(
       database.query(
-        `INSERT INTO threads (conversation_id, direction, from_address)
-         VALUES ($1, 'bogus', $2)`,
+        `INSERT INTO threads (conversation_id, direction, from_address, author_kind)
+         VALUES ($1, 'bogus', $2, 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -545,18 +545,19 @@ describe('migrate', () => {
 
     await expect(
       database.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, customer_viewed_at)
-         VALUES ($1, 'outbound', $2, 'sent', now())`,
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, customer_viewed_at, author_kind)
+         VALUES ($1, 'outbound', $2, 'sent', now(), 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).resolves.toBeDefined()
 
     for (const direction of ['inbound', 'note']) {
+      const authorKind = direction === 'inbound' ? 'customer' : 'agent'
       await expect(
         database.query(
-          `INSERT INTO threads (conversation_id, direction, from_address, customer_viewed_at)
-           VALUES ($1, $2, $3, now())`,
-          [conversation.id, direction, 'customer@example.test'],
+          `INSERT INTO threads (conversation_id, direction, from_address, customer_viewed_at, author_kind)
+           VALUES ($1, $2, $3, now(), $4)`,
+          [conversation.id, direction, 'customer@example.test', authorKind],
         ),
       ).rejects.toThrow()
     }
@@ -830,8 +831,8 @@ describe('migrate', () => {
       ['customer@example.test'],
     )
     const [thread] = await db.query<{ id: string }>(
-      `INSERT INTO threads (conversation_id, direction, from_address)
-       VALUES ($1, 'inbound', $2) RETURNING id`,
+      `INSERT INTO threads (conversation_id, direction, from_address, author_kind)
+       VALUES ($1, 'inbound', $2, 'customer') RETURNING id`,
       [conversation.id, 'customer@example.test'],
     )
 
@@ -1245,13 +1246,13 @@ describe('migrate', () => {
     // draft_status is illegal on inbound/note, whatever delivery_status says.
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'inbound', $2, 'awaiting_review')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, author_kind) VALUES ($1, 'inbound', $2, 'awaiting_review', 'customer')`,
         [conversation.id, 'customer@example.test'],
       ),
     ).rejects.toThrow()
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'note', $2, 'awaiting_review')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, author_kind) VALUES ($1, 'note', $2, 'awaiting_review', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -1259,7 +1260,7 @@ describe('migrate', () => {
     // draft_status out-of-domain value rejected.
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'outbound', $2, 'bogus')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, author_kind) VALUES ($1, 'outbound', $2, 'bogus', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -1269,14 +1270,14 @@ describe('migrate', () => {
     // the delivery worker, exactly what spec §2 says must be impossible.
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status) VALUES ($1, 'outbound', $2, 'awaiting_review', 'pending')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status, author_kind) VALUES ($1, 'outbound', $2, 'awaiting_review', 'pending', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
     // Same for 'discarded'.
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status) VALUES ($1, 'outbound', $2, 'discarded', 'failed')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status, author_kind) VALUES ($1, 'outbound', $2, 'discarded', 'failed', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -1285,7 +1286,22 @@ describe('migrate', () => {
     // 'approved').
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status) VALUES ($1, 'outbound', $2, 'approved', NULL)`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status, author_kind) VALUES ($1, 'outbound', $2, 'approved', NULL, 'agent')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
+
+    // The NULL-trap state itself, pinned where the predicate lives: an
+    // ORDINARY outbound row (draft_status NULL — not a draft at all) with a
+    // NULL delivery_status must ALSO be rejected. Copied verbatim from spec
+    // §2's literal SQL, the predicate's second and third arms both contain
+    // an `x IN (...)` test over a column that is NULL here, which evaluates
+    // to SQL NULL rather than FALSE — and a CHECK treats NULL as a PASS.
+    // This migration's IS NOT NULL guards (see its doc comment's "Deviation
+    // from spec §2's literal SQL" section) are what make this reject.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status, author_kind) VALUES ($1, 'outbound', $2, NULL, NULL, 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).rejects.toThrow()
@@ -1294,22 +1310,65 @@ describe('migrate', () => {
     // approved with a real one.
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'outbound', $2, 'awaiting_review')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, author_kind) VALUES ($1, 'outbound', $2, 'awaiting_review', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).resolves.toBeDefined()
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status) VALUES ($1, 'outbound', $2, 'discarded')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, author_kind) VALUES ($1, 'outbound', $2, 'discarded', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).resolves.toBeDefined()
     await expect(
       db.query(
-        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status) VALUES ($1, 'outbound', $2, 'approved', 'sent')`,
+        `INSERT INTO threads (conversation_id, direction, from_address, draft_status, delivery_status, author_kind) VALUES ($1, 'outbound', $2, 'approved', 'sent', 'agent')`,
         [conversation.id, 'support@example.test'],
       ),
     ).resolves.toBeDefined()
+  })
+
+  it('migration 021 enforces the author_kind/direction biconditional: inbound is always customer, and only inbound may be customer', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const [conversation] = await db.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    // Legal: inbound+customer, outbound+agent, outbound+assistant (with a
+    // real assistant row), note+agent.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, author_kind) VALUES ($1, 'inbound', $2, 'customer')`,
+        [conversation.id, 'customer@example.test'],
+      ),
+    ).resolves.toBeDefined()
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind) VALUES ($1, 'outbound', $2, 'sent', 'agent')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).resolves.toBeDefined()
+
+    // Illegal: an INBOUND row labeled 'agent' (the exact case the reviewer
+    // asked to pin) — inbound mail is always customer-authored.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, author_kind) VALUES ($1, 'inbound', $2, 'agent')`,
+        [conversation.id, 'customer@example.test'],
+      ),
+    ).rejects.toThrow()
+
+    // Illegal, the mirror case: an OUTBOUND row labeled 'customer' — only
+    // inbound mail may be customer-authored.
+    await expect(
+      db.query(
+        `INSERT INTO threads (conversation_id, direction, from_address, delivery_status, author_kind) VALUES ($1, 'outbound', $2, 'sent', 'customer')`,
+        [conversation.id, 'support@example.test'],
+      ),
+    ).rejects.toThrow()
   })
 
   it('migration 022 creates webhook_endpoints with a default active status and 0 consecutive_failures, and enforces the https-only and status CHECKs', async () => {

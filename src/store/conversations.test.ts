@@ -1520,6 +1520,62 @@ describe('createConversationStore', () => {
         ).toBeNull()
       })
 
+      it('a draft already APPROVED cannot be discarded, or approved again — both find no awaiting_review row', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Approved, then someone tries to resolve it again.',
+          idempotencyKey: 'double-resolve-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        const approved = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+        })
+        expect(approved?.draftStatus).toBe('approved')
+
+        // approve-then-discard: the row is no longer awaiting_review, so
+        // discard is a no-op — it must NOT flip an already-approved,
+        // already-delivery-pending row to 'discarded' out from under the
+        // delivery worker.
+        const discardAfterApprove = await store.resolveDraft({
+          action: 'discard',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+        })
+        expect(discardAfterApprove).toBeNull()
+
+        // approve-twice: a second approve must NOT re-mint a message_id/
+        // envelope over the already-approved row.
+        const approveAgain = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.SECOND-ATTEMPT@mail.example.test>',
+          sendEnvelope: { ...testEnvelope, subject: 'A different subject' },
+        })
+        expect(approveAgain).toBeNull()
+
+        // The row is untouched by either failed resolution attempt — still
+        // approved, still carrying the ORIGINAL message_id/envelope/subject.
+        const unchanged = (await store.getConversation(conversationId))?.threads.find(
+          (t) => t.id === draft.threadId,
+        )
+        expect(unchanged).toMatchObject({
+          draftStatus: 'approved',
+          deliveryStatus: 'pending',
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+        })
+      })
+
       it('an APPROVED draft flows through listDeliverableThreads/claimThreadForDelivery exactly like an ordinary reply — the delivery worker sees it only after approval', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)

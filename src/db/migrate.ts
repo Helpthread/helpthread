@@ -1012,28 +1012,40 @@ CREATE TABLE assistants (
  * ordering: `author_kind` is added nullable, backfilled (`inbound` →
  * `customer`; `outbound`/`note` → `agent` — every pre-substrate row was
  * authored by a human, since Assistants didn't exist before this
- * migration), THEN given a `DEFAULT 'agent'` and set `NOT NULL` and
- * CHECK-constrained. The `DEFAULT` mirrors migration 004's own
- * `status DEFAULT 'active'` rationale ("so `createConversation`'s
- * status-less INSERT... keeps working unchanged") applied here defensively
- * rather than for a real write path: every application insert
+ * migration), THEN set `NOT NULL` and CHECK-constrained. NO column
+ * `DEFAULT` is added: every application insert
  * (`src/store/conversations.ts`'s `insertThread`) ALWAYS computes and
  * supplies `author_kind` explicitly (spec §2: "every insert path supplies
- * it in the same change") — the column default is never exercised by this
- * codebase's own writes, only by hand-written SQL (a test fixture, a
- * script) that doesn't care about authorship and would otherwise trip the
- * `NOT NULL` constraint for no reason relevant to what it's testing.
- * `author_agent_id`/
- * `author_assistant_id` need no backfill: `NULL` is the correct, honest
- * value for every backfilled row and every future service-token caller with
- * no acting-agent header (spec §3: "a service-token caller without the
- * header still writes author_kind='agent' with NULL identity — the
- * pre-HT-54 posture, preserved rather than broken"). `threads_author_
- * identity_check` makes the spec's three-way consistency rule
- * unrepresentable-otherwise: a `customer` row carries neither id; an
- * `assistant` row carries `author_assistant_id` and never `author_agent_id`;
- * an `agent` row may carry `author_agent_id` (or not) and never `author_
- * assistant_id`.
+ * it in the same change"), so a default would only ever mask a hand-written
+ * INSERT that forgot the column — exactly the kind of silent wrong-value
+ * risk this schema's CHECK-heavy convention exists to avoid, not paper
+ * over. (An earlier revision of this migration added `DEFAULT 'agent'` for
+ * test-fixture convenience; reviewed and reverted — a masking default is
+ * strictly worse than fixing the ~handful of raw-SQL fixtures that needed
+ * an explicit value, see `src/db/migrate.test.ts`'s `threads` inserts.)
+ *
+ * `threads_author_kind_direction_check` is the real invariant a default
+ * would have masked: `(direction = 'inbound') = (author_kind = 'customer')`
+ * — a biconditional, both sides always boolean (never NULL: `direction` is
+ * `NOT NULL` since migration 001, `author_kind` is `NOT NULL` as of the
+ * statement just above). Inbound mail is ALWAYS customer-authored, and only
+ * inbound mail is — outbound/note rows are free to be `'agent'` or
+ * `'assistant'`, but never `'customer'`. This is stronger than the backfill
+ * CASE alone: the backfill sets the right value once; this CHECK keeps it
+ * right forever, rejecting e.g. an inbound row mislabeled `'agent'` or an
+ * outbound row mislabeled `'customer'` at insert/update time, not just at
+ * migration time.
+ *
+ * `author_agent_id`/`author_assistant_id` need no backfill: `NULL` is the
+ * correct, honest value for every backfilled row and every future
+ * service-token caller with no acting-agent header (spec §3: "a
+ * service-token caller without the header still writes author_kind='agent'
+ * with NULL identity — the pre-HT-54 posture, preserved rather than
+ * broken"). `threads_author_identity_check` makes the spec's three-way
+ * consistency rule unrepresentable-otherwise: a `customer` row carries
+ * neither id; an `assistant` row carries `author_assistant_id` and never
+ * `author_agent_id`; an `agent` row may carry `author_agent_id` (or not)
+ * and never `author_assistant_id`.
  *
  * ## Draft lifecycle (spec §2)
  *
@@ -1099,9 +1111,9 @@ CREATE TABLE assistants (
 const MIGRATION_021_THREADS_ACTOR_MODEL = `
 ALTER TABLE threads ADD COLUMN author_kind text;
 UPDATE threads SET author_kind = CASE WHEN direction = 'inbound' THEN 'customer' ELSE 'agent' END;
-ALTER TABLE threads ALTER COLUMN author_kind SET DEFAULT 'agent';
 ALTER TABLE threads ALTER COLUMN author_kind SET NOT NULL;
 ALTER TABLE threads ADD CONSTRAINT threads_author_kind_check CHECK (author_kind IN ('customer','agent','assistant'));
+ALTER TABLE threads ADD CONSTRAINT threads_author_kind_direction_check CHECK ((direction = 'inbound') = (author_kind = 'customer'));
 ALTER TABLE threads ADD COLUMN author_agent_id uuid REFERENCES agents(id);
 ALTER TABLE threads ADD COLUMN author_assistant_id uuid REFERENCES assistants(id);
 ALTER TABLE threads ADD CONSTRAINT threads_author_identity_check CHECK (
