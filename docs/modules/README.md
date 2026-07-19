@@ -28,7 +28,7 @@ credentials and different capabilities.
 
 | Surface | What it does | Guide |
 |---|---|---|
-| **Typed events** | The engine records eight kinds of domain event (a new conversation, inbound mail, a status change, a resolved draft, …) reliably, in the same transaction as the change they describe. | [webhooks.md](./webhooks.md) |
+| **Typed events** | The engine records eight kinds of domain event (a new conversation, inbound mail, a status change, a resolved draft, …) reliably — each written in the same database transaction as the state change it describes, so a rolled-back change never emits and a committed one never silently drops its event. (The synthetic `test.ping` is the one exception: it exercises the delivery path directly and never touches the outbox.) | [webhooks.md](./webhooks.md) |
 | **Webhook delivery** | Registered HTTPS endpoints receive signed, at-least-once notifications of those events. | [webhooks.md](./webhooks.md) |
 | **Assistant actors** | AI principals that authenticate with a bearer token, read conversations through the same read API Agents use, and post draft replies that a human Agent must approve before anything is sent. | [assistants-and-drafts.md](./assistants-and-drafts.md) |
 
