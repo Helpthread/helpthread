@@ -407,18 +407,28 @@ export interface ListAwaitingDraftsCursor {
 }
 
 /**
- * Input to {@link ConversationStore.resolveDraft} (HT-68; spec §6): either
- * branch of `POST /api/v1/drafts/{threadId}/approve` or `.../discard`.
- * `resolvedByAgentId` is written to `threads.approved_by_agent_id` on both
- * branches (spec §2: that column is the resolution audit field generally,
- * not "approval" specifically).
+ * Input to {@link ConversationStore.resolveDraft} (HT-68/HT-70; spec §6):
+ * either branch of `POST /api/v1/drafts/{threadId}/approve` or
+ * `.../discard`. `resolvedByAgentId` is written to
+ * `threads.approved_by_agent_id` on both branches (spec §2: that column is
+ * the resolution audit field generally, not "approval" specifically).
  *
  * The `approve` branch takes `messageId`/`sendEnvelope` as OPAQUE inputs —
  * this store does NOT mint a reply token or derive an envelope (spec §6
  * steps 1-3 are the caller's job; `sendReply` cannot be reused for an
- * existing row, see spec §6's "what approval actually does"). `edit`,
- * when present, is spec §6's "approve with edits": the given fields replace
- * the draft's stored body and `draft_edited` is recorded `true`.
+ * existing row, see spec §6's "what approval actually does").
+ *
+ * `edit` and `edited` are DELIBERATELY separate (HT-70 — the wave-1 shape
+ * fused them into one `edit !== undefined` check, revised during the
+ * approval-orchestration build): `edit`, when present, replaces the
+ * draft's stored `body_text`/`body_html` (omitted fields left unchanged via
+ * `COALESCE`) — but the caller (`src/mail/approve-draft.ts`) also uses it
+ * to persist an HT-32 pixel-injected `bodyHtml` even when the approving
+ * Agent submitted no edit at all. `edited` is therefore the ONLY signal for
+ * spec §2's `draft_edited` audit column ("did the approving Agent change
+ * the body before sending") — the caller computes it from whether an Agent
+ * override was actually submitted, never from whether `edit` happens to be
+ * present.
  */
 export type ResolveDraftInput =
   | {
@@ -427,7 +437,22 @@ export type ResolveDraftInput =
       resolvedByAgentId: string
       messageId: string
       sendEnvelope: SendEnvelope
+      /**
+       * The `In-Reply-To` header for the eventual outbound mail (HT-70) —
+       * derived by the caller (`src/mail/approve-draft.ts`, the same
+       * `deriveReplyHeaders` derivation `handleReply` uses) at APPROVAL
+       * time, exactly like `sendEnvelope`. A draft's own `in_reply_to`
+       * column is never set at draft-creation time (spec §6 scopes envelope
+       * derivation to approval, not draft creation) — this is what makes
+       * {@link StoredThread.inReplyTo} correct on the approved row, which
+       * `attemptDeliveryOfClaimedThread` (`src/mail/send.ts`) reads
+       * directly (never from `sendEnvelope`) when rebuilding the
+       * `OutboundEmail` to send.
+       */
+      inReplyTo: string | null
       edit?: { bodyText?: string; bodyHtml?: string }
+      /** Did the APPROVING AGENT explicitly change the body before sending — spec §2's `draft_edited` audit column. See this type's doc comment for why it is decoupled from `edit`'s presence. */
+      edited: boolean
     }
   | {
       action: 'discard'
@@ -720,6 +745,24 @@ export interface ConversationStore {
    * has the conversation already loaded.
    */
   resolveDraft(input: ResolveDraftInput): Promise<StoredThread | null>
+
+  /**
+   * Read one conversation (with all of its threads) by the id of ANY thread
+   * within it (HT-70). The draft-approval path (`POST /api/v1/drafts/{threadId}/approve`
+   * and `.../discard`) is handed only a `threadId` in the URL, never the
+   * conversation id, so it needs this lookup to derive the reply envelope
+   * (spec §6 step 2) and check the conversation's status (soft-deleted/spam)
+   * before resolving. Same `includeDeleted` contract as {@link getConversation}
+   * (default `true`; pass `false` on a public read path so a soft-deleted
+   * conversation's thread is indistinguishable from a nonexistent one).
+   * Returns `null` when `threadId` names no thread at all, or (with
+   * `includeDeleted: false`) names a thread whose conversation is
+   * soft-deleted.
+   */
+  getConversationByThreadId(
+    threadId: string,
+    options?: { includeDeleted?: boolean },
+  ): Promise<(StoredConversation & { threads: StoredThread[] }) | null>
 }
 
 /**
@@ -733,8 +776,16 @@ export interface ConversationStore {
  * plain `number` like every other count in this codebase, e.g. the
  * `count(*)::int` precedent in `conversations.test.ts`).
  */
+// HT-70 (spec §7): an unresolved or discarded draft is "not conversation
+// content until sent" — both subqueries below exclude
+// `draft_status IN ('awaiting_review','discarded')` rows. `IS DISTINCT FROM`
+// (not `NOT IN`) on each value handles the three-valued-logic NULL trap
+// correctly for every non-draft row (`draft_status IS NULL`) — the same
+// guard this file's other draft-aware queries already use (e.g.
+// `claimThreadForDelivery`), rather than a `NOT IN` that would silently
+// exclude every non-draft row too (`NULL NOT IN (...)` is NULL, not TRUE).
 const THREAD_COUNT_SUBQUERY =
-  '(SELECT count(*) FROM threads t WHERE t.conversation_id = c.id)::int AS thread_count'
+  "(SELECT count(*) FROM threads t WHERE t.conversation_id = c.id AND t.draft_status IS DISTINCT FROM 'awaiting_review' AND t.draft_status IS DISTINCT FROM 'discarded')::int AS thread_count"
 
 /**
  * Correlated subquery for a conversation's most recent thread body that has
@@ -743,9 +794,12 @@ const THREAD_COUNT_SUBQUERY =
  * direction). The whitespace collapse and truncation happen in JS
  * ({@link derivePreview}), not SQL — string munging is clearer and cheaper
  * to test there; SQL's only job is picking the right row.
+ *
+ * HT-70 (spec §7): also excludes `draft_status IN ('awaiting_review',
+ * 'discarded')` rows — see {@link THREAD_COUNT_SUBQUERY}'s comment above.
  */
 const LATEST_BODY_TEXT_SUBQUERY =
-  '(SELECT t.body_text FROM threads t WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text'
+  "(SELECT t.body_text FROM threads t WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL AND t.draft_status IS DISTINCT FROM 'awaiting_review' AND t.draft_status IS DISTINCT FROM 'discarded' ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text"
 
 /** Maximum length of a derived `preview`, per spec §2 (v1.1, HT-27). */
 const PREVIEW_MAX_LENGTH = 120
@@ -1363,8 +1417,8 @@ export function createConversationStore(db: Db): ConversationStore {
     },
 
     async appendDraft(conversationId, draft) {
-      return db.transaction((tx) =>
-        appendThreadInTx(tx, conversationId, {
+      return db.transaction(async (tx) => {
+        const result = await appendThreadInTx(tx, conversationId, {
           direction: 'outbound',
           messageId: null,
           fromAddress: draft.fromAddress ?? '',
@@ -1374,8 +1428,23 @@ export function createConversationStore(db: Db): ConversationStore {
           authorAssistantId: draft.assistantId,
           draftStatus: 'awaiting_review',
           idempotencyKey: `draft:${draft.idempotencyKey}`,
-        }),
-      )
+        })
+        // HT-70 (spec §4): fire draft.created ONLY for a genuinely NEW row
+        // (result.created) — an idempotency-key replay must never re-fire an
+        // event for the same logical draft, and a refused append
+        // (not-found/deleted) has nothing to announce (spec: "no event... for
+        // a soft-deleted conversation, including stranded drafts"). Written
+        // in the SAME transaction as the insert (spec §4's transactional
+        // outbox rule).
+        if (result.ok && result.created) {
+          await appendOutboxEventInTx(tx, {
+            type: 'draft.created',
+            conversationId,
+            data: { threadId: result.threadId, assistantId: draft.assistantId },
+          })
+        }
+        return result
+      })
     },
 
     async listAwaitingDrafts(options) {
@@ -1403,50 +1472,101 @@ export function createConversationStore(db: Db): ConversationStore {
     },
 
     async resolveDraft(input) {
-      if (input.action === 'discard') {
-        const rows = await db.query<ThreadRow>(
+      return db.transaction(async (tx) => {
+        if (input.action === 'discard') {
+          const rows = await tx.query<ThreadRow>(
+            `UPDATE threads
+             SET draft_status = 'discarded', approved_by_agent_id = $2, draft_resolved_at = now()
+             WHERE id = $1 AND direction = 'outbound' AND draft_status = 'awaiting_review'
+             RETURNING ${THREAD_COLUMNS}`,
+            [input.threadId, input.resolvedByAgentId],
+          )
+          const row = rows[0]
+          if (row === undefined) return null
+          // HT-70 (spec §4): draft.resolved, in the SAME transaction as the
+          // write. No event for a row this UPDATE didn't touch (see above).
+          await appendOutboxEventInTx(tx, {
+            type: 'draft.resolved',
+            conversationId: row.conversation_id,
+            data: { threadId: row.id, resolution: 'discarded', edited: false },
+          })
+          return toStoredThread(row)
+        }
+
+        // approve (spec §6 step 4): writes the caller-derived envelope
+        // snapshot + message id, flips draft_status → 'approved' and
+        // delivery_status → 'pending' in the SAME statement (so the row is
+        // NEVER observably in a state where draft_status is 'approved' but
+        // delivery_status is still NULL, or vice versa), and records the
+        // approve-with-edits audit fields. `input.edited` (HT-70) is the
+        // ONLY signal for draft_edited — see ResolveDraftInput's doc comment
+        // for why it is no longer inferred from `edit`'s presence.
+        const rows = await tx.query<ThreadRow>(
           `UPDATE threads
-           SET draft_status = 'discarded', approved_by_agent_id = $2, draft_resolved_at = now()
+           SET message_id = $2,
+               send_envelope = $3::jsonb,
+               in_reply_to = $8,
+               draft_status = 'approved',
+               delivery_status = 'pending',
+               approved_by_agent_id = $4,
+               draft_resolved_at = now(),
+               draft_edited = $5,
+               body_text = COALESCE($6, body_text),
+               body_html = COALESCE($7, body_html)
            WHERE id = $1 AND direction = 'outbound' AND draft_status = 'awaiting_review'
            RETURNING ${THREAD_COLUMNS}`,
-          [input.threadId, input.resolvedByAgentId],
+          [
+            input.threadId,
+            input.messageId,
+            JSON.stringify(input.sendEnvelope),
+            input.resolvedByAgentId,
+            input.edited,
+            input.edit?.bodyText ?? null,
+            input.edit?.bodyHtml ?? null,
+            input.inReplyTo,
+          ],
         )
         const row = rows[0]
-        return row === undefined ? null : toStoredThread(row)
+        if (row === undefined) return null
+        await appendOutboxEventInTx(tx, {
+          type: 'draft.resolved',
+          conversationId: row.conversation_id,
+          data: { threadId: row.id, resolution: 'approved', edited: input.edited },
+        })
+        return toStoredThread(row)
+      })
+    },
+
+    /**
+     * HT-70: see the interface doc comment. A plain join-then-select, not a
+     * transaction — this is a read.
+     */
+    async getConversationByThreadId(threadId, options) {
+      const includeDeleted = options?.includeDeleted ?? true
+      const conversationRows = await db.query<ConversationRow>(
+        includeDeleted
+          ? `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.created_at, c.updated_at
+             FROM conversations c JOIN threads t ON t.conversation_id = c.id
+             WHERE t.id = $1`
+          : `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.created_at, c.updated_at
+             FROM conversations c JOIN threads t ON t.conversation_id = c.id
+             WHERE t.id = $1 AND c.status <> 'deleted'`,
+        [threadId],
+      )
+      const conversationRow = conversationRows[0]
+      if (conversationRow === undefined) {
+        return null
       }
 
-      // approve (spec §6 step 4): writes the caller-derived envelope
-      // snapshot + message id, flips draft_status → 'approved' and
-      // delivery_status → 'pending' in the SAME statement (so the row is
-      // NEVER observably in a state where draft_status is 'approved' but
-      // delivery_status is still NULL, or vice versa), and records the
-      // approve-with-edits audit fields.
-      const edited = input.edit !== undefined
-      const rows = await db.query<ThreadRow>(
-        `UPDATE threads
-         SET message_id = $2,
-             send_envelope = $3::jsonb,
-             draft_status = 'approved',
-             delivery_status = 'pending',
-             approved_by_agent_id = $4,
-             draft_resolved_at = now(),
-             draft_edited = $5,
-             body_text = COALESCE($6, body_text),
-             body_html = COALESCE($7, body_html)
-         WHERE id = $1 AND direction = 'outbound' AND draft_status = 'awaiting_review'
-         RETURNING ${THREAD_COLUMNS}`,
-        [
-          input.threadId,
-          input.messageId,
-          JSON.stringify(input.sendEnvelope),
-          input.resolvedByAgentId,
-          edited,
-          input.edit?.bodyText ?? null,
-          input.edit?.bodyHtml ?? null,
-        ],
+      const threadRows = await db.query<ThreadRow>(
+        `SELECT ${THREAD_COLUMNS} FROM threads WHERE conversation_id = $1 ORDER BY created_at, id`,
+        [conversationRow.id],
       )
-      const row = rows[0]
-      return row === undefined ? null : toStoredThread(row)
+
+      return {
+        ...toStoredConversation(conversationRow),
+        threads: threadRows.map(toStoredThread),
+      }
     },
 
     async deleteConversation(conversationId) {

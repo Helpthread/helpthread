@@ -1448,6 +1448,8 @@ describe('createConversationStore', () => {
           resolvedByAgentId: agentId,
           messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
           sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
         })
 
         expect(resolved).toMatchObject({
@@ -1462,6 +1464,31 @@ describe('createConversationStore', () => {
           bodyText: 'Original draft body.',
         })
         expect(resolved?.draftResolvedAt).toBeInstanceOf(Date)
+      })
+
+      it('approve (HT-70) also persists in_reply_to, derived by the caller at approval time — StoredThread.inReplyTo is what attemptDeliveryOfClaimedThread reads, never sendEnvelope', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'A reply to the inbound message.',
+          idempotencyKey: 'approve-inreplyto-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        const resolved = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          inReplyTo: '<inbound-1@customer.example.test>',
+          edited: false,
+        })
+
+        expect(resolved?.inReplyTo).toBe('<inbound-1@customer.example.test>')
       })
 
       it('approve with edits: replaces the body and records draft_edited = true', async () => {
@@ -1482,7 +1509,9 @@ describe('createConversationStore', () => {
           resolvedByAgentId: agentId,
           messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
           sendEnvelope: testEnvelope,
+          inReplyTo: null,
           edit: { bodyText: 'Edited by the Agent before sending.' },
+          edited: true,
         })
 
         expect(resolved).toMatchObject({
@@ -1581,6 +1610,8 @@ describe('createConversationStore', () => {
           resolvedByAgentId: agentId,
           messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
           sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
         })
         expect(approved?.draftStatus).toBe('approved')
 
@@ -1603,6 +1634,8 @@ describe('createConversationStore', () => {
           resolvedByAgentId: agentId,
           messageId: '<ht.k1.c1.t2.SECOND-ATTEMPT@mail.example.test>',
           sendEnvelope: { ...testEnvelope, subject: 'A different subject' },
+          inReplyTo: null,
+          edited: false,
         })
         expect(approveAgain).toBeNull()
 
@@ -1640,6 +1673,8 @@ describe('createConversationStore', () => {
           resolvedByAgentId: agentId,
           messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
           sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
         })
         // Age it so it's past the staleness threshold for a 'pending' row.
         await db.query('UPDATE threads SET created_at = $1 WHERE id = $2', [
@@ -1652,6 +1687,243 @@ describe('createConversationStore', () => {
 
         const claimed = await store.claimThreadForDelivery(draft.threadId, 60_000)
         expect(claimed?.id).toBe(draft.threadId)
+      })
+    })
+
+    describe('draft.created / draft.resolved events (HT-70, spec §4)', () => {
+      /** Read back every `event_outbox` row for `conversationId`, oldest first. */
+      async function outboxEventsFor(
+        db: Db,
+        conversationId: string,
+      ): Promise<Array<{ type: string; data: Record<string, unknown> }>> {
+        const rows = await db.query<{ type: string; data: unknown }>(
+          `SELECT type, data FROM event_outbox WHERE conversation_id = $1 ORDER BY occurred_at, event_id`,
+          [conversationId],
+        )
+        return rows.map((r) => ({ type: r.type, data: r.data as Record<string, unknown> }))
+      }
+
+      it('appendDraft fires draft.created exactly once, never again on an idempotency-key replay', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const first = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'A draft.',
+          idempotencyKey: 'event-key-1',
+        })
+        if (!first.ok) throw new Error('unreachable')
+
+        // Replay with the SAME key: `created: false`, no second event.
+        const replay = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'A draft.',
+          idempotencyKey: 'event-key-1',
+        })
+        expect(replay).toMatchObject({ ok: true, created: false })
+
+        const events = await outboxEventsFor(db, conversationId)
+        expect(events).toEqual([
+          { type: 'draft.created', data: { threadId: first.threadId, assistantId } },
+        ])
+      })
+
+      it('appendDraft fires NO event when the conversation is missing or soft-deleted', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        await store.deleteConversation(conversationId)
+
+        const result = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Stranded draft.',
+          idempotencyKey: 'event-key-deleted',
+        })
+        expect(result).toMatchObject({ ok: false, reason: 'deleted' })
+        expect(await outboxEventsFor(db, conversationId)).toEqual([])
+      })
+
+      it('resolveDraft(discard) fires draft.resolved with resolution=discarded, edited=false', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'To discard.',
+          idempotencyKey: 'event-discard-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        await store.resolveDraft({
+          action: 'discard',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+        })
+
+        const events = await outboxEventsFor(db, conversationId)
+        expect(events).toContainEqual({
+          type: 'draft.resolved',
+          data: { threadId: draft.threadId, resolution: 'discarded', edited: false },
+        })
+      })
+
+      it('resolveDraft(approve) fires draft.resolved with resolution=approved and the real edited flag', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'To approve, edited.',
+          idempotencyKey: 'event-approve-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edit: { bodyText: 'Edited body.' },
+          edited: true,
+        })
+
+        const events = await outboxEventsFor(db, conversationId)
+        expect(events).toContainEqual({
+          type: 'draft.resolved',
+          data: { threadId: draft.threadId, resolution: 'approved', edited: true },
+        })
+      })
+
+      it('a resolveDraft call that matches no row (already resolved, unknown id) fires no event', async () => {
+        const { store, db } = await freshStore()
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const result = await store.resolveDraft({
+          action: 'discard',
+          threadId: RANDOM_UUID,
+          resolvedByAgentId: agentId,
+        })
+        expect(result).toBeNull()
+        expect(await outboxEventsFor(db, conversationId)).toEqual([])
+      })
+    })
+
+    describe('getConversationByThreadId (HT-70)', () => {
+      it('finds the conversation by ANY thread id within it, including the original inbound thread', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const { conversationId, threadId: inboundId } = await store.createConversation(
+          newConversation(),
+        )
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'A draft.',
+          idempotencyKey: 'lookup-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+
+        const byInbound = await store.getConversationByThreadId(inboundId)
+        expect(byInbound?.id).toBe(conversationId)
+
+        const byDraft = await store.getConversationByThreadId(draft.threadId)
+        expect(byDraft?.id).toBe(conversationId)
+        expect(byDraft?.threads.map((t) => t.id)).toEqual(
+          expect.arrayContaining([inboundId, draft.threadId]),
+        )
+      })
+
+      it('returns null for an unknown thread id', async () => {
+        const { store } = await freshStore()
+        expect(await store.getConversationByThreadId(RANDOM_UUID)).toBeNull()
+      })
+
+      it('with includeDeleted: false, a thread on a soft-deleted conversation is indistinguishable from unknown', async () => {
+        const { store } = await freshStore()
+        const { conversationId, threadId } = await store.createConversation(newConversation())
+        await store.deleteConversation(conversationId)
+
+        expect(await store.getConversationByThreadId(threadId)).not.toBeNull()
+        expect(
+          await store.getConversationByThreadId(threadId, { includeDeleted: false }),
+        ).toBeNull()
+      })
+    })
+
+    describe('threadCount/preview exclude unresolved and discarded drafts (HT-70, spec §7)', () => {
+      it('listConversations: an awaiting_review draft is invisible to threadCount and preview', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const before = (await store.listConversations({ limit: 10 })).find(
+          (c) => c.id === conversationId,
+        )
+        expect(before?.threadCount).toBe(1)
+
+        await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'A draft nobody has approved yet.',
+          idempotencyKey: 'preview-1',
+        })
+
+        const after = (await store.listConversations({ limit: 10 })).find(
+          (c) => c.id === conversationId,
+        )
+        // Still 1 — the draft does not count, and does not become the preview.
+        expect(after?.threadCount).toBe(1)
+        expect(after?.preview).not.toContain('A draft nobody has approved yet.')
+      })
+
+      it('listConversations: a discarded draft stays invisible; an APPROVED draft counts and can become the preview', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const discarded = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Will be discarded.',
+          idempotencyKey: 'preview-discard',
+        })
+        if (!discarded.ok) throw new Error('unreachable')
+        await store.resolveDraft({
+          action: 'discard',
+          threadId: discarded.threadId,
+          resolvedByAgentId: agentId,
+        })
+
+        const afterDiscard = (await store.listConversations({ limit: 10 })).find(
+          (c) => c.id === conversationId,
+        )
+        expect(afterDiscard?.threadCount).toBe(1)
+
+        const approved = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Will be approved and should become the preview.',
+          idempotencyKey: 'preview-approve',
+        })
+        if (!approved.ok) throw new Error('unreachable')
+        await store.resolveDraft({
+          action: 'approve',
+          threadId: approved.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
+        })
+
+        const afterApprove = (await store.listConversations({ limit: 10 })).find(
+          (c) => c.id === conversationId,
+        )
+        expect(afterApprove?.threadCount).toBe(2)
+        expect(afterApprove?.preview).toContain('Will be approved and should become the preview.')
       })
     })
   })

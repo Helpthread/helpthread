@@ -73,6 +73,7 @@ import { createSupabaseStorageBlobStore } from '../providers/adapters/supabase-s
 import type { BlobStore } from '../providers/blob.js'
 import type { QueueMessage, QueueMessageHandler } from '../providers/queue.js'
 import { createAgentStore } from '../store/agents.js'
+import { createAssistantStore } from '../store/assistants.js'
 import {
   createConversationStore,
   createEventOutboxStore,
@@ -155,6 +156,7 @@ export async function buildApp(
   const inboundDeliveryStore = createInboundDeliveryStore(db)
   const attachmentStore = createThreadAttachmentStore(db)
   const agentStore = createAgentStore(db)
+  const assistantStore = createAssistantStore(db)
 
   // --- Module substrate (HT-69; specs/modules/substrate-v1.md §4/§5): the
   // event outbox and webhook endpoint stores. `webhookEndpointStore` reuses
@@ -276,6 +278,9 @@ export async function buildApp(
     // the substrate is core, free forever). `queue` is the SAME
     // `PostgresQueue` instance every other enqueue in this root shares.
     webhooks: { store: webhookEndpointStore, queue },
+    // Assistants + drafts (HT-70) — CORE, required (same posture as
+    // `agents` above).
+    assistants: { store: assistantStore },
     // HT-49 review fix: Gmail delivers a sent reply's own copy back into the
     // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
     // it as a phantom inbound message (src/mail/send.ts's "The reply token's

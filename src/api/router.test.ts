@@ -212,6 +212,82 @@ describe('matchRoute', () => {
       id: 'abc-123/mailboxes',
     })
   })
+
+  // --- Assistants (HT-70) -----------------------------------------------
+
+  it('matches GET/POST /api/v1/assistants', () => {
+    expect(matchRoute('GET', '/api/v1/assistants')).toEqual({ kind: 'assistants-list' })
+    expect(matchRoute('POST', '/api/v1/assistants')).toEqual({ kind: 'assistants-create' })
+    expect(matchRoute('DELETE', '/api/v1/assistants')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET', 'POST'],
+    })
+  })
+
+  it('matches PATCH /api/v1/assistants/{id}, extracting the id', () => {
+    expect(matchRoute('PATCH', '/api/v1/assistants/abc-123')).toEqual({
+      kind: 'assistant-patch',
+      id: 'abc-123',
+    })
+    expect(matchRoute('GET', '/api/v1/assistants/abc-123')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['PATCH'],
+    })
+  })
+
+  it('matches POST /api/v1/assistants/{id}/rotate-token, extracting the id, never falling into assistant-patch', () => {
+    expect(matchRoute('POST', '/api/v1/assistants/abc-123/rotate-token')).toEqual({
+      kind: 'assistant-rotate-token',
+      id: 'abc-123',
+    })
+    expect(matchRoute('GET', '/api/v1/assistants/abc-123/rotate-token')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+  })
+
+  // --- Drafts (HT-70) -----------------------------------------------------
+
+  it('matches POST /api/v1/conversations/{id}/drafts, extracting the id', () => {
+    expect(matchRoute('POST', '/api/v1/conversations/abc-123/drafts')).toEqual({
+      kind: 'conversation-draft-create',
+      id: 'abc-123',
+    })
+    expect(matchRoute('GET', '/api/v1/conversations/abc-123/drafts')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+  })
+
+  it('conversation item route never matches a /drafts suffix (anchored, same as /replies and /notes)', () => {
+    expect(matchRoute('GET', '/api/v1/conversations/abc-123/drafts')).not.toEqual({
+      kind: 'conversation-item',
+      id: 'abc-123/drafts',
+    })
+  })
+
+  it('matches GET /api/v1/drafts', () => {
+    expect(matchRoute('GET', '/api/v1/drafts')).toEqual({ kind: 'drafts-list' })
+    expect(matchRoute('POST', '/api/v1/drafts')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET'],
+    })
+  })
+
+  it('matches POST /api/v1/drafts/{threadId}/approve and .../discard, extracting the id', () => {
+    expect(matchRoute('POST', '/api/v1/drafts/thread-123/approve')).toEqual({
+      kind: 'draft-approve',
+      id: 'thread-123',
+    })
+    expect(matchRoute('POST', '/api/v1/drafts/thread-123/discard')).toEqual({
+      kind: 'draft-discard',
+      id: 'thread-123',
+    })
+    expect(matchRoute('GET', '/api/v1/drafts/thread-123/approve')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+  })
 })
 
 describe('matchGmailPushWebhook', () => {

@@ -58,6 +58,19 @@ describe('AssistantStore', () => {
     expect(assistant.createdByAgentId).toBeNull()
   })
 
+  it('create with an explicit id (HT-70, the token/id knot) stores that id verbatim', async () => {
+    const { store } = await freshStore()
+    const explicitId = '11111111-1111-4111-8111-111111111111'
+    const assistant = await store.create({
+      id: explicitId,
+      name: 'Pre-minted Bot',
+      module: 'draft-reply',
+      tokenHash: 'hash',
+    })
+    expect(assistant.id).toBe(explicitId)
+    expect(await store.get(explicitId)).toEqual(assistant)
+  })
+
   it('get returns null for an unknown id', async () => {
     const { store } = await freshStore()
     expect(await store.get(RANDOM_UUID)).toBeNull()

@@ -69,7 +69,12 @@ interface ThreadView {
   from: string               // the message's From address; the support address for notes
   bodyText: string | null
   bodyHtml: string | null    // ⚠ UNTRUSTED, UNSANITIZED — see §5
-  deliveryStatus: 'pending' | 'sent' | 'failed' | null   // outbound only; null otherwise
+  deliveryStatus: 'pending' | 'sent' | 'failed' | null
+                             // outbound only; null otherwise. HT-70: the invariant widens
+                             // — an outbound thread's deliveryStatus is ALSO null while it
+                             // is an unapproved or discarded draft (draftStatus below is
+                             // 'awaiting_review' or 'discarded'); a draft becomes eligible
+                             // for pending/sent/failed only once approved.
   customerViewedAt: string | null
                              // v1.1: outbound only, and only when open tracking is
                              // enabled (§4g) — first time the customer viewed the reply;
@@ -80,6 +85,14 @@ interface ThreadView {
                              // attachment read-path deps (config-gated, absent by default
                              // — same posture as open tracking, §4g)
   createdAt: string          // ISO-8601
+  authorKind: 'customer' | 'agent' | 'assistant'
+                             // HT-70 (specs/plugins/substrate-v1.md §2, §7): who authored
+                             // this thread — 'customer' for inbound mail, 'agent' for
+                             // human-authored outbound/notes, 'assistant' for an
+                             // AI-authored draft (specs/plugins/substrate-v1.md §3, §6)
+  draftStatus: 'awaiting_review' | 'approved' | 'discarded' | null
+                             // HT-70: a draft's lifecycle state; null for every non-draft
+                             // thread (specs/plugins/substrate-v1.md §2, §6)
 }
 
 interface AttachmentView {
@@ -108,7 +121,13 @@ an identifier anywhere in this API.
 **`preview`** is derived at read time, not stored: the most recent thread with a
 non-null `bodyText` (any direction — notes included; this is an Agent-only surface),
 whitespace collapsed to single spaces, trimmed, first 120 characters; `''` when no
-thread has text.
+thread has text. **HT-70:** `preview` and `threadCount` both IGNORE an unresolved or
+discarded draft (`draftStatus IN ('awaiting_review', 'discarded')`) — a draft is not
+conversation content until an Agent approves it, so it contributes to neither the
+count nor the latest-body derivation. An `'approved'` draft (i.e. sent mail) counts and
+can become the preview like any other outbound thread. Conversation detail (§3b) still
+returns the draft ROW itself in `threads` regardless of its status — only the
+summary-level `preview`/`threadCount` derivations exclude it.
 
 Ids are **UUID strings**, verbatim as the store generates them — the uuid is canonical
 and `number` is a human-facing convenience, not a surrogate key. There is no `customer`
@@ -127,10 +146,17 @@ added when a real need appears, not preemptively.
   wrong token is `401 unauthorized` with a generic message — the response never reveals
   which of those it was. (The open-tracking pixel, §4g, is the one deliberate exception
   to Bearer auth — it is fetched by customer mail clients and carries its own rules.)
-  **This is still the API's only auth model (HT-51, §5).** The Agent Inbox web app now
-  requires an operator to sign in before it will render any page, but that is a web-layer
-  door in front of this same Bearer token, not a second API auth mechanism — see §5 for
-  the full justification.
+  **This is still the API's only auth model — with one addition (HT-70).** The Agent
+  Inbox web app now requires an operator to sign in before it will render any page, but
+  that is a web-layer door in front of this same Bearer token, not a second API auth
+  mechanism — see §5 for the full justification. HT-70 (specs/plugins/substrate-v1.md
+  §3) DOES add a genuine second credential class, checked ALONGSIDE the service Bearer
+  token, never replacing it: a per-Assistant token (`ht_asst_<assistantId>_<secret>`),
+  verified before routing under the same constant-time discipline (parse the embedded
+  id → single-row lookup → constant-time digest compare). An Assistant's capability set
+  is fixed and narrow (read conversations, create drafts, create notes — spec §3) and
+  enforced at one gate, distinct from every Agent-facing endpoint this document
+  describes.
 - **Never cache:** every response carries `Cache-Control: no-store`. This is authenticated
   support data; no edge or CDN copy, ever.
 - **Error envelope:**
@@ -178,6 +204,14 @@ echo back, never parsed.
 Returns a `ConversationDetail` — the conversation plus its `threads`, oldest-first. `404
 not_found` if `{id}` is not a conversation (or is a `deleted` one — a deleted conversation
 is indistinguishable from a nonexistent one to this API, on purpose).
+
+**HT-70:** `threads` includes draft rows (`draftStatus` non-null) for Agent/service
+callers, at every lifecycle stage — the timeline shows an `awaiting_review`/`discarded`
+draft alongside real mail, distinguishable by `authorKind: 'assistant'` and
+`draftStatus`. An Assistant caller reads the same endpoint and sees its own drafts
+through it too (no separate read surface). Only the summary-level `preview`/
+`threadCount` derivations exclude an unresolved/discarded draft (§2) — the full
+`threads` array is never filtered by draft status.
 
 ## 4. Write paths
 
@@ -424,6 +458,15 @@ above.
 
 ## 7. Changelog
 
+- **v1.1 (HT-70).** Wire-contract amendments from specs/plugins/substrate-v1.md §7
+  (drafts kept in `threads` rather than a separate table): `ThreadView` gains
+  `authorKind` and `draftStatus` (§2); the `deliveryStatus` invariant widens (outbound
+  stays `null` while a draft is unapproved or discarded, §2); `preview`/`threadCount`
+  ignore an unresolved or discarded draft (§2); conversation detail (§3b) still returns
+  every draft row regardless of status; and §3's auth-model statement is amended — a
+  second, per-Assistant credential class now authenticates alongside the service Bearer
+  token, for the fixed, narrow Assistant capability set specs/plugins/substrate-v1.md §3
+  defines.
 - **v1.1 (2026-07-17, HT-51).** Documented the Agent Inbox web app's new operator login
   (§3, §5) — a session cookie the UI now requires before rendering any page. No API
   behavior changed: this is a web-layer addition in front of the unchanged

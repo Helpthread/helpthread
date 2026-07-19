@@ -45,6 +45,15 @@ export interface AssistantRecord {
 
 /** Input to {@link AssistantStore.create}. */
 export interface NewAssistant {
+  /**
+   * Caller-supplied id (HT-70) — mirrors `NewThread.id` in
+   * `src/store/conversations.ts`'s "id/token knot" pattern: the token format
+   * (`ht_asst_<assistantId>_<secret>`, spec §3) embeds the assistant's id, so
+   * the id must be known BEFORE the row exists in order to mint it
+   * (`src/auth/assistant-token.ts`'s `mintAssistantToken`). Omitted lets
+   * `gen_random_uuid()` assign one, same as before this field existed.
+   */
+  id?: string
   name: string
   module: string
   /** The SHA-256 digest of the token's secret part (spec §3) — already hashed by the caller. This store never sees the plaintext token. */
@@ -119,12 +128,20 @@ function toAssistantRecord(row: AssistantRow): AssistantRecord {
 export function createAssistantStore(db: Db): AssistantStore {
   return {
     async create(input) {
-      const [row] = await db.query<AssistantRow>(
-        `INSERT INTO assistants (name, module, token_hash, created_by_agent_id)
-         VALUES ($1, $2, $3, $4)
-         RETURNING ${ASSISTANT_COLUMNS}`,
-        [input.name, input.module, input.tokenHash, input.createdByAgentId ?? null],
-      )
+      const [row] =
+        input.id !== undefined
+          ? await db.query<AssistantRow>(
+              `INSERT INTO assistants (id, name, module, token_hash, created_by_agent_id)
+               VALUES ($1, $2, $3, $4, $5)
+               RETURNING ${ASSISTANT_COLUMNS}`,
+              [input.id, input.name, input.module, input.tokenHash, input.createdByAgentId ?? null],
+            )
+          : await db.query<AssistantRow>(
+              `INSERT INTO assistants (name, module, token_hash, created_by_agent_id)
+               VALUES ($1, $2, $3, $4)
+               RETURNING ${ASSISTANT_COLUMNS}`,
+              [input.name, input.module, input.tokenHash, input.createdByAgentId ?? null],
+            )
       return toAssistantRecord(row)
     },
 

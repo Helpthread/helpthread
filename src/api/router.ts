@@ -188,6 +188,56 @@ const WEBHOOK_TEST: RouteDef = {
   methods: ['POST'],
 }
 
+// --- Assistants (HT-70; specs/modules/substrate-v1.md §3) -------------------
+//
+// Admin-only, acting-Agent header REQUIRED (same conventions as /agents) —
+// never reachable by an Assistant's own token (the capability gate in
+// `src/api/index.ts` refuses every route not in its allowed set).
+
+/** `/api/v1/assistants` — list (GET) and create (POST), both admin only — spec §3. */
+const ASSISTANTS_LIST: RouteDef = {
+  pattern: /^\/api\/v1\/assistants$/,
+  methods: ['GET', 'POST'],
+}
+
+/** `/api/v1/assistants/{id}/rotate-token` — mint a fresh secret for the SAME assistant id (admin only) — spec §3, POST only. Checked before `ASSISTANT_ITEM` per this file's specific-before-generic convention (`AGENT_PASSWORD`/`AGENT_INVITE` before `AGENT_ITEM`), though the two patterns cannot actually collide (`[^/]+` excludes `/`). */
+const ASSISTANT_ROTATE_TOKEN: RouteDef = {
+  pattern: /^\/api\/v1\/assistants\/(?<id>[^/]+)\/rotate-token$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/assistants/{id}` — patch name/status (admin only) — spec §3, PATCH only (no GET-by-id or DELETE in v1). */
+const ASSISTANT_ITEM: RouteDef = {
+  pattern: /^\/api\/v1\/assistants\/(?<id>[^/]+)$/,
+  methods: ['PATCH'],
+}
+
+// --- Drafts (HT-70; specs/plugins/substrate-v1.md §6) ------------------------
+
+/** `/api/v1/conversations/{id}/drafts` — an Assistant posts a draft (spec §6), POST only. Anchored like `CONVERSATION_REPLIES`/`CONVERSATION_NOTES` — `CONVERSATION_ITEM`'s `[^/]+$` pattern can never match this `/drafts` suffix. */
+const CONVERSATION_DRAFTS: RouteDef = {
+  pattern: /^\/api\/v1\/conversations\/(?<id>[^/]+)\/drafts$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/drafts` — the cross-conversation `?status=awaiting_review` review queue (spec §6), GET only. */
+const DRAFTS_LIST: RouteDef = {
+  pattern: /^\/api\/v1\/drafts$/,
+  methods: ['GET'],
+}
+
+/** `/api/v1/drafts/{threadId}/approve` — approve, optionally with edits (spec §6), POST only. */
+const DRAFT_APPROVE: RouteDef = {
+  pattern: /^\/api\/v1\/drafts\/(?<id>[^/]+)\/approve$/,
+  methods: ['POST'],
+}
+
+/** `/api/v1/drafts/{threadId}/discard` — discard (spec §6), POST only. */
+const DRAFT_DISCARD: RouteDef = {
+  pattern: /^\/api\/v1\/drafts\/(?<id>[^/]+)\/discard$/,
+  methods: ['POST'],
+}
+
 /** Every route this API recognizes, checked in order. */
 const ROUTES: readonly RouteDef[] = [
   CONVERSATIONS_LIST,
@@ -196,6 +246,7 @@ const ROUTES: readonly RouteDef[] = [
   CONVERSATION_NOTES,
   CONVERSATION_TAGS,
   CONVERSATION_ASSIGNEE,
+  CONVERSATION_DRAFTS,
   GMAIL_CONNECT,
   GMAIL_DISCONNECT,
   AUTH_PROVIDERS,
@@ -212,6 +263,12 @@ const ROUTES: readonly RouteDef[] = [
   WEBHOOKS_LIST,
   WEBHOOK_TEST,
   WEBHOOK_ITEM,
+  ASSISTANTS_LIST,
+  ASSISTANT_ROTATE_TOKEN,
+  ASSISTANT_ITEM,
+  DRAFTS_LIST,
+  DRAFT_APPROVE,
+  DRAFT_DISCARD,
 ]
 
 /** The outcome of matching a `(method, pathname)` pair against {@link ROUTES}. */
@@ -246,6 +303,14 @@ export type RouteMatch =
   | { kind: 'webhook-patch'; id: string }
   | { kind: 'webhook-delete'; id: string }
   | { kind: 'webhook-test'; id: string }
+  | { kind: 'assistants-list' }
+  | { kind: 'assistants-create' }
+  | { kind: 'assistant-patch'; id: string }
+  | { kind: 'assistant-rotate-token'; id: string }
+  | { kind: 'conversation-draft-create'; id: string }
+  | { kind: 'drafts-list' }
+  | { kind: 'draft-approve'; id: string }
+  | { kind: 'draft-discard'; id: string }
   | { kind: 'method-not-allowed'; allow: string[] }
   | { kind: 'not-found' }
 
@@ -374,6 +439,12 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     if (route === WEBHOOKS_LIST) {
       return method === 'GET' ? { kind: 'webhooks-list' } : { kind: 'webhooks-create' }
     }
+    if (route === ASSISTANTS_LIST) {
+      return method === 'GET' ? { kind: 'assistants-list' } : { kind: 'assistants-create' }
+    }
+    if (route === DRAFTS_LIST) {
+      return { kind: 'drafts-list' }
+    }
 
     // Every remaining route guarantees a present, non-empty `id` group (per
     // its `[^/]+` pattern) whenever it matched.
@@ -407,6 +478,21 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     if (route === WEBHOOK_ITEM) {
       if (method === 'DELETE') return { kind: 'webhook-delete', id }
       return { kind: 'webhook-patch', id }
+    }
+    if (route === CONVERSATION_DRAFTS) {
+      return { kind: 'conversation-draft-create', id }
+    }
+    if (route === DRAFT_APPROVE) {
+      return { kind: 'draft-approve', id }
+    }
+    if (route === DRAFT_DISCARD) {
+      return { kind: 'draft-discard', id }
+    }
+    if (route === ASSISTANT_ROTATE_TOKEN) {
+      return { kind: 'assistant-rotate-token', id }
+    }
+    if (route === ASSISTANT_ITEM) {
+      return { kind: 'assistant-patch', id }
     }
     if (route === AGENT_ITEM) {
       if (method === 'GET') return { kind: 'agent-item', id }

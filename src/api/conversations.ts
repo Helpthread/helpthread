@@ -15,6 +15,7 @@
  * remember it.
  */
 
+import { deriveReplyHeaders } from '../mail/reply-headers.js'
 import type { Keyring } from '../mail/reply-token.js'
 import { type SelfEchoGuardDeps, sendReply } from '../mail/send.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
@@ -65,8 +66,8 @@ interface AttachmentViewJson {
   url: string
 }
 
-/** The wire shape of one `ThreadView` (specs/api/agent-inbox-v1.md §2) — `StoredThread` with `Date` fields as ISO strings and `fromAddress` renamed to `from`. */
-interface ThreadViewJson {
+/** The wire shape of one `ThreadView` (specs/api/agent-inbox-v1.md §2, amended HT-70 §7) — `StoredThread` with `Date` fields as ISO strings and `fromAddress` renamed to `from`. */
+export interface ThreadViewJson {
   id: string
   direction: 'inbound' | 'outbound' | 'note'
   from: string
@@ -78,6 +79,10 @@ interface ThreadViewJson {
   /** HT-46: `[]` unless this thread has stored attachment references AND the deployment wired `attachments` deps (see {@link handleGetConversation}) — absent-by-default, like `openTracking`. */
   attachments: AttachmentViewJson[]
   createdAt: string
+  /** HT-70 (agent-inbox-v1.md §7): who authored this thread — `'customer'` (inbound mail), `'agent'` (human), or `'assistant'` (an AI-authored draft). */
+  authorKind: 'customer' | 'agent' | 'assistant'
+  /** HT-70 (agent-inbox-v1.md §7): a draft's lifecycle state, or `null` for every non-draft thread. */
+  draftStatus: 'awaiting_review' | 'approved' | 'discarded' | null
 }
 
 /** The wire shape of one `ConversationSummary` (specs/api/agent-inbox-v1.md §2) — `Date` fields as ISO strings. */
@@ -243,7 +248,14 @@ export async function handleGetConversation(
     subject: conversation.subject,
     customerEmail: conversation.customerEmail,
     status: conversation.status,
-    threadCount: conversation.threads.length,
+    // HT-70 (spec §7): an unresolved or discarded draft is not conversation
+    // content until sent — excluded from the count here exactly as
+    // ConversationStore.listConversations' own subqueries exclude it from
+    // the list view's threadCount/preview. The FULL thread list below
+    // (`threads:`) still includes every draft row — Agent/service callers
+    // see them in the timeline (spec §7's last bullet); only the count and
+    // the derived preview ignore them.
+    threadCount: countResolvedThreads(conversation.threads),
     preview: previewFromThreads(conversation.threads),
     tags: conversation.tags,
     assigneeAgentId: conversation.assigneeAgentId,
@@ -305,20 +317,34 @@ async function toAttachmentViewJson(
   }
 }
 
+/** HT-70 (spec §7): true for a draft that is not yet conversation content — unresolved or discarded. An `'approved'` or non-draft (`null`) thread is real content. */
+function isUnresolvedOrDiscardedDraft(thread: StoredThread): boolean {
+  return thread.draftStatus === 'awaiting_review' || thread.draftStatus === 'discarded'
+}
+
 /**
  * Derive a detail response's `preview` from the threads it already carries —
  * the SAME rule the store applies for list summaries (`derivePreview`, spec
  * §2): the most recent thread with a non-null `bodyText`. Threads arrive
- * oldest-first, so this walks from the end.
+ * oldest-first, so this walks from the end. HT-70 (spec §7): skips any
+ * unresolved or discarded draft — the same exclusion
+ * `ConversationStore.listConversations`' `LATEST_BODY_TEXT_SUBQUERY`
+ * applies at the store layer for the list view.
  */
 function previewFromThreads(threads: StoredThread[]): string {
   for (let i = threads.length - 1; i >= 0; i--) {
-    const bodyText = threads[i].bodyText
-    if (bodyText !== null) {
-      return derivePreview(bodyText)
+    const thread = threads[i]
+    if (isUnresolvedOrDiscardedDraft(thread)) continue
+    if (thread.bodyText !== null) {
+      return derivePreview(thread.bodyText)
     }
   }
   return ''
+}
+
+/** HT-70 (spec §7): the detail response's `threadCount`, excluding unresolved/discarded drafts — mirrors `ConversationStore.listConversations`' `THREAD_COUNT_SUBQUERY` exclusion at the store layer. */
+function countResolvedThreads(threads: StoredThread[]): number {
+  return threads.filter((thread) => !isUnresolvedOrDiscardedDraft(thread)).length
 }
 
 /**
@@ -373,6 +399,8 @@ export async function handleReply(
     supportAddress: string
     openTracking?: { publicBaseUrl: string }
     selfEchoGuard?: SelfEchoGuardDeps
+    /** HT-70 (spec §3's author-identity forward-carry): the acting Agent's id from `X-Helpthread-Agent-Id`, or `null` when absent/unknown — `src/api/index.ts` resolves this before dispatch. Never an error when absent (spec §9 decision 4). */
+    authorAgentId?: string | null
   },
 ): Promise<Response> {
   if (!isUuid(id)) {
@@ -435,6 +463,7 @@ export async function handleReply(
       inReplyTo,
       references,
       idempotencyKey,
+      authorAgentId: deps.authorAgentId ?? null,
     },
     {
       store: deps.store,
@@ -556,14 +585,33 @@ export async function handleDeleteConversation(
 }
 
 /**
+ * Who is authoring a note (HT-70; specs/plugins/substrate-v1.md §3, §6) —
+ * an Agent (identity from the acting-agent header, possibly unknown) or an
+ * authenticated Assistant (identity from its token — spec §6 makes this
+ * endpoint "now legal for assistants"). `src/api/index.ts` builds this from
+ * whichever credential authenticated the request before dispatching here.
+ */
+export type NoteAuthor =
+  | { kind: 'agent'; agentId: string | null }
+  | { kind: 'assistant'; assistantId: string }
+
+/**
  * Handle `POST /api/v1/conversations/{id}/notes` — append an internal note
- * (spec §4c, v1.1). Body: `{ text: string }`, 1–5000 chars, plain text only
- * in v1. A note is Agent-only context: it is NEVER emailed — this handler
- * never touches `sendReply`, mints no token, creates no outbox row (the
- * boundary spec §4c calls a bug if crossed; the tests assert the sender is
- * never invoked). It bumps `updatedAt` (a note is activity) but never
- * changes `status` — noting a closed conversation does not reopen it
+ * (spec §4c, v1.1; HT-70 spec §6 opens this endpoint to Assistants too).
+ * Body: `{ text: string }`, 1–5000 chars, plain text only in v1. A note is
+ * Agent/Assistant-only context: it is NEVER emailed — this handler never
+ * touches `sendReply`, mints no token, creates no outbox row (the boundary
+ * spec §4c calls a bug if crossed; the tests assert the sender is never
+ * invoked). It bumps `updatedAt` (a note is activity) but never changes
+ * `status` — noting a closed conversation does not reopen it
  * (`appendThread`'s note-aware policy).
+ *
+ * HT-70 (spec §3): every caller's identity is now recorded —
+ * `deps.author.kind === 'assistant'` writes `author_kind: 'assistant'` +
+ * `author_assistant_id`; an Agent/service caller writes `author_agent_id`
+ * (possibly `null`, when no acting-agent header was presented — never an
+ * error, spec §9 decision 4). This is the ONE handler HT-70 makes start
+ * recording author identity for every caller — pre-HT-70 it recorded none.
  *
  * Outcomes: `201` with the created `ThreadView` (`direction: 'note'`,
  * `from` = the support address, `deliveryStatus: null`);
@@ -573,7 +621,7 @@ export async function handleDeleteConversation(
 export async function handlePostNote(
   id: string,
   request: Request,
-  deps: { store: ConversationStore; supportAddress: string },
+  deps: { store: ConversationStore; supportAddress: string; author: NoteAuthor },
 ): Promise<Response> {
   if (!isUuid(id)) {
     return apiError(404, 'not_found', 'No conversation with that id.')
@@ -598,6 +646,9 @@ export async function handlePostNote(
     messageId: null,
     fromAddress: deps.supportAddress,
     bodyText: note.text,
+    ...(deps.author.kind === 'assistant'
+      ? { authorKind: 'assistant' as const, authorAssistantId: deps.author.assistantId }
+      : { authorAgentId: deps.author.agentId }),
   })
   if (!result.ok) {
     // not-found and deleted are one generic 404 (spec §5's no-existence-leak).
@@ -829,47 +880,6 @@ function parseAssigneeBody(raw: unknown): string | null | undefined {
   return typeof assigneeAgentId === 'string' ? assigneeAgentId : undefined
 }
 
-/**
- * Derive a reply's mail headers from the conversation being replied to
- * (spec §4a):
- *
- * - `subject`: the conversation's subject, `Re: `-prefixed unless it already
- *   starts with `re:` (case-insensitive) — never double-prefixed.
- * - `inReplyTo`: the `messageId` of the most-recent INBOUND thread that has
- *   one. Threads are stored oldest-first, so this walks from the end
- *   looking for the first (i.e. most recent) inbound thread with a
- *   non-null `messageId`. `undefined` if there is none (e.g. every inbound
- *   message arrived without a `Message-ID`).
- * - `references`: every thread's `messageId`, in chronological order, that
- *   is non-null. `undefined` (the key omitted entirely, per spec §4a) when
- *   NO thread has one — never an empty array in that case.
- */
-function deriveReplyHeaders(conversation: { subject: string; threads: StoredThread[] }): {
-  subject: string
-  inReplyTo: string | undefined
-  references: string[] | undefined
-} {
-  const subject = /^re:/i.test(conversation.subject)
-    ? conversation.subject
-    : `Re: ${conversation.subject}`
-
-  let inReplyTo: string | undefined
-  for (let i = conversation.threads.length - 1; i >= 0; i--) {
-    const thread = conversation.threads[i]
-    if (thread.direction === 'inbound' && thread.messageId !== null) {
-      inReplyTo = thread.messageId
-      break
-    }
-  }
-
-  const referencesList = conversation.threads
-    .map((t) => t.messageId)
-    .filter((messageId): messageId is string => messageId !== null)
-  const references = referencesList.length > 0 ? referencesList : undefined
-
-  return { subject, inReplyTo, references }
-}
-
 function toConversationSummaryJson(row: {
   id: string
   number: number
@@ -904,8 +914,13 @@ function toConversationSummaryJson(row: {
  * thread this API just created (a reply or a note) cannot yet have any
  * (HT-46: attachments are inbound-only, and only `handleGetConversation`'s
  * deps carry the `ThreadAttachmentStore`/`BlobStore` needed to look them up).
+ *
+ * Exported (HT-70): `src/api/drafts.ts`'s handlers build the SAME
+ * `ThreadView` shape for a draft row (a draft IS a thread, per the
+ * substrate spec's "keeping it in `threads`" decision) — one mapper, not a
+ * second copy that could drift on the `authorKind`/`draftStatus` fields.
  */
-function toThreadViewJson(
+export function toThreadViewJson(
   thread: StoredThread,
   attachments: AttachmentViewJson[] = [],
 ): ThreadViewJson {
@@ -920,5 +935,7 @@ function toThreadViewJson(
       thread.customerViewedAt === null ? null : thread.customerViewedAt.toISOString(),
     attachments,
     createdAt: thread.createdAt.toISOString(),
+    authorKind: thread.authorKind,
+    draftStatus: thread.draftStatus,
   }
 }

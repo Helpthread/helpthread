@@ -33,6 +33,7 @@ import { TRANSPARENT_GIF, verifyViewToken } from '../mail/open-tracking.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { SelfEchoGuardDeps } from '../mail/send.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
+import type { AssistantRecord } from '../store/assistants.js'
 import type { ThreadAttachmentStore } from '../store/attachments.js'
 import type { ConversationStore } from '../store/conversations.js'
 import { resolveActingAgent } from './acting-agent.js'
@@ -55,6 +56,14 @@ import {
   handleSetAgentPassword,
   handleSetup,
 } from './agents.js'
+import { authenticateAssistantRequest } from './assistant-auth.js'
+import {
+  type AssistantsApiDeps,
+  handleCreateAssistant,
+  handleListAssistants,
+  handlePatchAssistant,
+  handleRotateAssistantToken,
+} from './assistants.js'
 import { authenticateRequest } from './auth.js'
 import {
   handleDeleteConversation,
@@ -66,6 +75,13 @@ import {
   handlePutTags,
   handleReply,
 } from './conversations.js'
+import {
+  type DraftsHandlerDeps,
+  handleApproveDraft,
+  handleCreateDraft,
+  handleDiscardDraft,
+  handleListDrafts,
+} from './drafts.js'
 import {
   type GmailConnectDeps,
   handleGmailConnect,
@@ -80,6 +96,7 @@ import {
   matchGmailPushWebhook,
   matchOpenTrackingPixel,
   matchRoute,
+  type RouteMatch,
 } from './router.js'
 import {
   handleCreateWebhook,
@@ -98,6 +115,24 @@ import {
  * start without one (see {@link createInboxApi}).
  */
 const MIN_API_TOKEN_LENGTH = 16
+
+/**
+ * The Assistant capability gate (HT-70; specs/plugins/substrate-v1.md §3):
+ * "an assistant may read conversations/threads, create drafts, and create
+ * notes. It may not send, approve, change status/tags/assignee, touch
+ * admin surfaces, or read soft-deleted conversations." Enforced at ONE
+ * point (spec §1's additive-forward rule: "a future scopes system swaps in
+ * behind the same gate") — a `RouteMatch['kind']` not in this set is
+ * refused for an Assistant caller, checked once right after routing,
+ * before any handler runs. Never consulted for a service-Bearer caller
+ * (unrestricted, as before this feature).
+ */
+const ASSISTANT_ALLOWED_ROUTE_KINDS: ReadonlySet<RouteMatch['kind']> = new Set([
+  'conversations-list',
+  'conversation-item',
+  'conversation-note',
+  'conversation-draft-create',
+])
 
 /**
  * Dependencies `createInboxApi` closes over: the HT-17 read paths need only
@@ -128,6 +163,16 @@ export interface InboxApiDeps {
    * than duplicating them here).
    */
   agents: AgentsApiDeps
+  /**
+   * Assistants (HT-70; specs/plugins/substrate-v1.md §1, §3) — REQUIRED,
+   * same posture as `agents` above: the module substrate is core AGPL
+   * surface, free forever, not an absent-by-default feature. Backs the
+   * Assistants admin API (`src/api/assistants.ts`) AND the second,
+   * per-Assistant-token credential class the main pipeline below checks
+   * alongside the service Bearer token (`authenticateAssistantRequest`,
+   * `src/api/assistant-auth.ts`).
+   */
+  assistants: AssistantsApiDeps
   /**
    * Open tracking (spec §4g, v1.1 — HT-32): ABSENT BY DEFAULT — a deliberate
    * privacy stance, not an unset knob. When present, outbound replies get a
@@ -316,8 +361,22 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
         : apiError(404, 'not_found', 'No such route.')
     }
 
-    if (!authenticateRequest(request, deps.apiToken)) {
-      return apiError(401, 'unauthorized', 'Missing or invalid credentials.')
+    // HT-70 (spec §3): a SECOND credential class, checked ALONGSIDE the
+    // service Bearer token, never replacing it — the service token is tried
+    // FIRST (unchanged order/behavior for every existing caller), and only
+    // on a miss is the Authorization header re-parsed as an Assistant
+    // token. Either success authenticates the request; both misses are the
+    // SAME generic 401 a caller cannot use to distinguish "no such
+    // Assistant" from "wrong service token" from "malformed header".
+    let caller: { kind: 'service' } | { kind: 'assistant'; assistant: AssistantRecord }
+    if (authenticateRequest(request, deps.apiToken)) {
+      caller = { kind: 'service' }
+    } else {
+      const assistant = await authenticateAssistantRequest(request, deps.assistants.store)
+      if (assistant === null) {
+        return apiError(401, 'unauthorized', 'Missing or invalid credentials.')
+      }
+      caller = { kind: 'assistant', assistant }
     }
 
     // Everything past auth runs inside a catch-all so no store/serialization
@@ -328,6 +387,24 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
     try {
       const url = new URL(request.url)
       const route = matchRoute(request.method, url.pathname)
+
+      // HT-70's ONE capability-enforcement point (spec §3, §1's
+      // additive-forward rule) — checked AFTER routing (so `not-found`/
+      // `method-not-allowed` behave identically for every caller, exactly
+      // as they did before Assistants existed) but BEFORE any handler runs.
+      // Never consulted for a service-Bearer caller.
+      if (
+        caller.kind === 'assistant' &&
+        route.kind !== 'not-found' &&
+        route.kind !== 'method-not-allowed' &&
+        !ASSISTANT_ALLOWED_ROUTE_KINDS.has(route.kind)
+      ) {
+        return apiError(
+          403,
+          'forbidden',
+          'This Assistant is not permitted to access this endpoint.',
+        )
+      }
 
       switch (route.kind) {
         case 'not-found':
@@ -375,9 +452,21 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
           return await handleDeleteConversation(route.id, { store: deps.store })
 
         case 'conversation-note':
+          // HT-70 (spec §6): now legal for an Assistant too — the SAME
+          // route serves both credential classes, distinguished by which
+          // one actually authenticated this request (the capability gate
+          // above already refused any OTHER route for an assistant caller,
+          // so `caller.kind` alone decides the author here).
           return await handlePostNote(route.id, request, {
             store: deps.store,
             supportAddress: deps.supportAddress,
+            author:
+              caller.kind === 'assistant'
+                ? { kind: 'assistant', assistantId: caller.assistant.id }
+                : {
+                    kind: 'agent',
+                    agentId: (await resolveActingAgent(request, deps.agents.store))?.id ?? null,
+                  },
           })
 
         case 'conversation-tags':
@@ -396,12 +485,17 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
           )
 
         case 'conversation-reply':
+          // Never reachable by an assistant caller (the capability gate
+          // above already refused it), so this is always a service caller —
+          // resolveActingAgent's result (possibly null) is HT-70's
+          // author-identity forward-carry (spec §3), threaded to sendReply.
           return await handleReply(route.id, request, {
             store: deps.store,
             sender: deps.sender,
             keyring: deps.keyring,
             mailDomain: deps.mailDomain,
             supportAddress: deps.supportAddress,
+            authorAgentId: (await resolveActingAgent(request, deps.agents.store))?.id ?? null,
             ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
             ...(deps.selfEchoGuard !== undefined ? { selfEchoGuard: deps.selfEchoGuard } : {}),
           })
@@ -546,6 +640,84 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             route.id,
             await resolveActingAgent(request, deps.agents.store),
             deps.webhooks,
+          )
+
+        // --- Assistants (HT-70; specs/modules/substrate-v1.md §3) ----------
+
+        case 'assistants-list':
+          return await handleListAssistants(
+            await resolveActingAgent(request, deps.agents.store),
+            deps.assistants,
+          )
+
+        case 'assistants-create':
+          return await handleCreateAssistant(
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.assistants,
+          )
+
+        case 'assistant-patch':
+          return await handlePatchAssistant(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.assistants,
+          )
+
+        case 'assistant-rotate-token':
+          return await handleRotateAssistantToken(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            deps.assistants,
+          )
+
+        // --- Drafts (HT-70; specs/modules/substrate-v1.md §6) ---------------
+
+        case 'conversation-draft-create': {
+          const draftsDeps: DraftsHandlerDeps = {
+            store: deps.store,
+            sender: deps.sender,
+            keyring: deps.keyring,
+            mailDomain: deps.mailDomain,
+            supportAddress: deps.supportAddress,
+            ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
+            ...(deps.selfEchoGuard !== undefined ? { selfEchoGuard: deps.selfEchoGuard } : {}),
+          }
+          // Assistant-auth ONLY (spec §6) — a service-Bearer caller reaching
+          // this route (the capability gate allows it through, since a
+          // service token is unrestricted) has no Assistant identity to
+          // attribute the draft to.
+          if (caller.kind !== 'assistant') {
+            return apiError(403, 'forbidden', 'Only an Assistant may create a draft.')
+          }
+          return await handleCreateDraft(route.id, caller.assistant, request, draftsDeps)
+        }
+
+        case 'drafts-list':
+          return await handleListDrafts(request, { store: deps.store })
+
+        case 'draft-approve':
+          return await handleApproveDraft(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            {
+              store: deps.store,
+              sender: deps.sender,
+              keyring: deps.keyring,
+              mailDomain: deps.mailDomain,
+              supportAddress: deps.supportAddress,
+              ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
+              ...(deps.selfEchoGuard !== undefined ? { selfEchoGuard: deps.selfEchoGuard } : {}),
+            },
+          )
+
+        case 'draft-discard':
+          return await handleDiscardDraft(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            { store: deps.store },
           )
       }
     } catch (err) {

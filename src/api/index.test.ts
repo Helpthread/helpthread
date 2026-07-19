@@ -16,6 +16,7 @@ import type {
   QueueProvider,
 } from '../providers/index.js'
 import { type AgentRecord, type AgentStore, createAgentStore } from '../store/agents.js'
+import { type AssistantStore, createAssistantStore } from '../store/assistants.js'
 import { createThreadAttachmentStore, insertThreadAttachmentsInTx } from '../store/attachments.js'
 import {
   type ConversationStore,
@@ -28,6 +29,7 @@ import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
 import { createWebhookEndpointStore } from '../store/webhook-endpoints.js'
 import type { AgentsApiDeps } from './agents.js'
+import type { AssistantsApiDeps } from './assistants.js'
 import type { GmailReconcileJob } from './gmail-webhook.js'
 import { createInboxApi, type InboxApiDeps } from './index.js'
 import type { WebhooksApiDeps } from './webhooks.js'
@@ -71,6 +73,11 @@ function testWebhooksDeps(db: Db): WebhooksApiDeps {
     store: createWebhookEndpointStore(db, TOKEN_ENC_KEY),
     queue: { async enqueue() {} },
   }
+}
+
+/** Build the REQUIRED `assistants` deps (HT-70) for a `createInboxApi` call wired to `db` — a real PGlite-backed `AssistantStore`, matching how `src/composition/root.ts` wires it. */
+function testAssistantsDeps(db: Db): AssistantsApiDeps {
+  return { store: createAssistantStore(db) }
 }
 
 /** A fake `EmailSender` that records every `OutboundEmail` it's asked to send, never fails. */
@@ -253,6 +260,7 @@ describe('createInboxApi', () => {
     db: Db
     store: ConversationStore
     agentStore: AgentStore
+    assistantStore: AssistantStore
     api: (request: Request) => Promise<Response>
     /** Emails recorded by the default fake sender (empty if `overrides.sender` was supplied instead). */
     sent: OutboundEmail[]
@@ -261,6 +269,7 @@ describe('createInboxApi', () => {
     await migrate(db)
     const store = createConversationStore(db)
     const agentsDeps = testAgentsDeps(db)
+    const assistantsDeps = testAssistantsDeps(db)
     const { sender: defaultSender, sent } = createFakeSender()
     const api = createInboxApi({
       store,
@@ -271,6 +280,7 @@ describe('createInboxApi', () => {
       supportAddress: SUPPORT_ADDRESS,
       agents: agentsDeps,
       webhooks: testWebhooksDeps(db),
+      assistants: assistantsDeps,
       ...(overrides.openTracking !== undefined ? { openTracking: overrides.openTracking } : {}),
       ...(overrides.gmailPush !== undefined ? { gmailPush: overrides.gmailPush } : {}),
       ...(overrides.gmailConnect !== undefined ? { gmailConnect: overrides.gmailConnect } : {}),
@@ -283,7 +293,14 @@ describe('createInboxApi', () => {
           }
         : {}),
     })
-    return { db, store, agentStore: agentsDeps.store, api, sent }
+    return {
+      db,
+      store,
+      agentStore: agentsDeps.store,
+      assistantStore: assistantsDeps.store,
+      api,
+      sent,
+    }
   }
 
   // --- auth ------------------------------------------------------------------
@@ -721,6 +738,7 @@ describe('createInboxApi', () => {
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
       })
 
       const res = await api(
@@ -829,6 +847,7 @@ describe('createInboxApi', () => {
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
       })
 
       const res = await api(
@@ -1035,6 +1054,7 @@ describe('createInboxApi', () => {
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
       })
 
       const res = await api(
@@ -1948,6 +1968,7 @@ describe('createInboxApi', () => {
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
         gmailPush: {
           verifySignature: async () => true,
           subscription: SUBSCRIPTION,
@@ -1980,6 +2001,7 @@ describe('createInboxApi', () => {
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
         gmailPush: {
           verifySignature: async () => true,
           subscription: SUBSCRIPTION,
@@ -2116,6 +2138,7 @@ describe('createInboxApi', () => {
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
         ...(gmailConnect !== undefined ? { gmailConnect } : {}),
       })
     }
@@ -2350,6 +2373,7 @@ describe('createInboxApi', () => {
         supportAddress: SUPPORT_ADDRESS,
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
         ...(gmailDisconnect !== undefined ? { gmailDisconnect } : {}),
       })
     }
@@ -2457,6 +2481,10 @@ describe('createInboxApi — hardening (Codex review)', () => {
       store: {} as unknown as WebhooksApiDeps['store'],
       queue: {} as unknown as WebhooksApiDeps['queue'],
     } satisfies WebhooksApiDeps,
+    // Same "never invoked, dummy is fine" posture as the AgentStore above —
+    // none of these tests exercise an /assistants/* route or the assistant-
+    // token auth path.
+    assistants: { store: {} as unknown as AssistantStore } satisfies AssistantsApiDeps,
   }
 
   it('throws at construction on an empty apiToken (fail closed — an empty token would authenticate every request)', () => {
