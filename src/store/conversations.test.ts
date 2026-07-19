@@ -1773,6 +1773,33 @@ describe('createConversationStore', () => {
       expect(events[0].data).toEqual({ threadId: sentThread.threadId, authorKind: 'agent' })
     })
 
+    it("a thread stranded 'pending'/claimed when its conversation is soft-deleted still delivers ('sent' recorded) but fires NO event (spec §4's absolute soft-delete exclusion, review fix)", async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const strandedThread = await store.appendThread(conversationId, newThread())
+      if (!strandedThread.ok) throw new Error('unreachable')
+
+      // Claim the lease FIRST (as the delivery worker/keyed retry would),
+      // THEN the conversation is soft-deleted underneath it — mail delivery
+      // is not conversation-status-scoped, so this claimed thread can still
+      // be force-delivered after the fact.
+      await store.claimThreadForDelivery(strandedThread.threadId, 30_000)
+      const deleted = await store.deleteConversation(conversationId)
+      expect(deleted).toBe(true)
+
+      await store.releaseThreadLease(strandedThread.threadId, 'sent')
+
+      // The delivery status write itself is honest and unaffected — the
+      // mail really did go out (charter invariant #1).
+      const raw = await store.getConversation(conversationId)
+      const thread = raw?.threads.find((t) => t.id === strandedThread.threadId)
+      expect(thread?.deliveryStatus).toBe('sent')
+
+      // But NO event fired — soft delete fires nothing, ever, with no
+      // exception for a delivery that happened to land after the fact.
+      expect(await outboxEventsFor(db, conversationId)).toHaveLength(0)
+    })
+
     it('soft delete fires NOTHING, ever — deleting a conversation with prior events adds no new row for the deletion', async () => {
       const { db, store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())

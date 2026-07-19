@@ -1224,11 +1224,17 @@ CREATE TABLE webhook_endpoints (
  * table is only the DURABLE STAGING AREA between "the state change
  * committed" and "the drain step handed this off to the real queue" (spec
  * §4: "a drain step... turns outbox rows into QueueProvider deliveries").
- * Once a row is handed to `queue_jobs` (keyed by `dedupe_key = event_id`,
- * so a double-enqueue from a crashed drain is harmless per migration 013's
- * own dedupe precedent), ALL retry/backoff/dead-letter bookkeeping for
- * actually delivering the event lives there, not here — this table needs no
- * `attempts`/`last_error`/`dead_lettered_at` columns of its own.
+ * One outbox row FANS OUT to one `queue_jobs` row PER matching active
+ * webhook endpoint (spec §5's subset filter — an event can have several
+ * subscribers), keyed `dedupe_key = ` `` `${eventId}:${endpointId}` ``
+ * (HT-69, `src/webhooks/outbox-drain.ts`) — per-pair, not per-event, since
+ * a single shared `eventId` key would collide the first endpoint's enqueue
+ * against every other endpoint's and silently drop their deliveries. A
+ * double-enqueue of the SAME pair (a crashed drain retried on the next
+ * tick) is harmless per migration 013's own dedupe precedent. ALL retry/
+ * backoff/dead-letter bookkeeping for actually delivering an event lives in
+ * `queue_jobs`, not here — this table needs no `attempts`/`last_error`/
+ * `dead_lettered_at` columns of its own.
  *
  * What it DOES need, mirroring `queue_jobs`'s lease shape narrowly: `locked_
  * until`, so two overlapping drain invocations (an overlapping cron tick, a
