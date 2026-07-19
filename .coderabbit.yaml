@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+#
+# CodeRabbit review-budget tuning.
+#
+# Our plan (Pro Plus) is not unlimited: it applies adaptive per-developer limits
+# once recent review activity reaches the 95th percentile among CodeRabbit users.
+# We crossed that on 2026-07-19 (15 PRs merged in one day) and PR #92 went
+# unreviewed as a result — and, importantly, its status check still reported
+# "pass / Review completed". A skipped review is indistinguishable from a clean
+# one, so the check is not a merge gate; the real gate is the tiered review
+# escalation in .claude/rules/delegation-ladder.md.
+#
+# Usage-based billing is deliberately not enabled, so the lever is volume.
+# Specs stay in scope on purpose: PR #87 was docs-only and CodeRabbit found nine
+# real defects in it (CSRF on key rotation, license-module binding, webhook
+# idempotency keyed on the wrong field). Prose here carries engineering
+# substance — that is where the review earns its cost.
+reviews:
+  auto_review:
+    # Default re-runs the full review on every push. Our rebase-on-feedback loop
+    # means one PR can burn three or four reviews for a single set of findings.
+    # One review per PR instead, at no loss of coverage.
+    auto_incremental_review: false
+
+    # Mechanical PRs with nothing for a reviewer to find: CI plumbing and STATUS
+    # refreshes. Substring match, case-insensitive — deliberately narrow, so
+    # chore(engine) and docs(modules) are still reviewed.
+    ignore_title_keywords:
+      - "chore(ci)"
+      - "docs(status)"
