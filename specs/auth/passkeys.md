@@ -1,16 +1,17 @@
 # Passkeys (WebAuthn) login for Agents
 
-Status: **draft.3** (2026-07-19). HT-75. Extends the auth-provider seam
+Status: **draft.4** (2026-07-19). HT-75. Extends the auth-provider seam
 `specs/auth/agents-and-auth.md` (HT-54) built with exactly one provider,
 `password` — this is the second provider, and the first thing to actually
-exercise the seam's "marketplace boundary" claim (agents-and-auth.md §1, §4)
+exercise the seam's multi-provider extensibility (agents-and-auth.md §1, §4)
 with real code. Spec only: no migrations, no implementation. Every schema
 block below is a design artifact, not a runnable migration — same
 convention agents-and-auth.md's own `CREATE TABLE` blocks use. **draft.2**
 is a review-driven revision (lead-tier + Codex, 2026-07-19) — see the
 Changelog for the full list of what changed and why; nothing in draft.1
 survives unexamined, several conclusions reverse outright (§8 most
-notably).
+notably). **draft.4** corrects a core-vs-marketplace classification error
+that survived drafts 1–3 unnoticed — see §1 and the Changelog.
 
 Read first: `specs/auth/agents-and-auth.md` §3.2 (`agent_auth_identities`
 — **amended in this same review round**, §2.1 below), §4 (the seam), §8
@@ -24,14 +25,36 @@ password-provider.ts`, `src/auth/invite-token.ts`, `src/auth/invite-email.ts`
 
 ## 1. Purpose & scope
 
-Per agents-and-auth.md §1, `password` is the free-core provider; passkeys
-are a **licensed marketplace module** — same boundary, same waiting-on-HT-5
-posture (the AGPL §7 exception text must be counsel-final before this or any
-premium module merges). This spec is written now so the boundary has a
-second real provider to test itself against, exactly as agents-and-auth.md
-§4 anticipated ("adding Google SSO later is still a core code edit... a
-module targets [the interface]"). Building this spec does not authorize
-merging the module ahead of HT-5.
+**Passkey login (WebAuthn) is core — not a marketplace module.**
+agents-and-auth.md §1 states this as the one deliberate exception to the
+core/marketplace boundary: "Passkey login (WebAuthn) is the one
+exception — it is core, not a marketplace module... it ships as a second
+**core** auth provider on this same seam (catalog §2.2), never through the
+marketplace path." This matches the module catalog's own free-core line
+(`specs/modules/catalog.md` §1, §2.2 — accepted 2026-07-18, HT-66):
+"Security hygiene is always free: passkey login (WebAuthn) is core,
+deliberately, where the reference ecosystem sells 2FA."
+
+**Corrected here, draft.4 (2026-07-19).** Drafts 1–3 of this spec carried a
+stale "licensed marketplace module... waiting-on-HT-5" framing — written
+*after* the catalog decision above but *before* `agents-and-auth.md` itself
+caught and fixed the identical staleness in its own text (HT-76, PR #85,
+merged 2026-07-19, same day). This spec inherited the error rather than the
+fix; nothing downstream of §1 depended on the wrong framing (no code,
+schema, or endpoint in this spec is gated behind an entitlement check
+anywhere), so this is a documentation-only correction. HT-5 (the AGPL §7
+module exception) gates **in-process third-party modules and external
+contributions** — Google SSO, magic-link, and SAML/enterprise SSO remain
+marketplace and wait on it (agents-and-auth.md §11) — it does **not** gate
+first-party core code, and never gated this spec.
+
+This is still the second real provider to exercise the auth-provider seam
+(agents-and-auth.md §4) with real code beyond `password` — exactly as §4
+anticipated ("adding Google SSO later is still a core code edit... a module
+targets [the interface]") — it simply is not the marketplace-module case
+that sentence was illustrating; it's core proving the same seam
+accommodates a second **core** provider just as readily as a future
+marketplace one.
 
 **Additive only.** No existing Agent, provisioning path, or endpoint from
 HT-54 changes. Every Agent still gets a `password` identity through the
@@ -1024,9 +1047,12 @@ footgun someone has to remember to re-derive later.
   platform feature this spec doesn't need to do anything special to
   support — `transports` simply records `hybrid` when reported — but no
   bespoke UI is designed around it here).
-- **No entitlement/licensing enforcement** for this being a paid module —
-  same carve-out agents-and-auth.md §11 already states for the seam
-  generally; separate marketplace infrastructure.
+- **No entitlement/licensing enforcement — none is needed.** Passkey login
+  is core (§1, corrected draft.4), not a paid module, so there is no
+  license check for anything in this spec to ever gate. Contrast a genuine
+  marketplace provider (Google SSO, magic-link, SAML/enterprise SSO), which
+  DOES wait on the HT-5 §7 exception text and on entitlement infrastructure
+  that neither exists yet nor is built here (agents-and-auth.md §11).
 - **No rate limiting** (§10) — HT-53, unresolved, called out not solved.
 - **No session revocation / active-session management for Agents.** §10
   states plainly that a session cannot be individually invalidated today;
@@ -1129,6 +1155,19 @@ recollection of the package's reputation.
 
 ## Changelog
 
+- **draft.4 (2026-07-19, HT-75 engine-implementation review):** Corrects a
+  core-vs-marketplace classification error that survived drafts 1–3
+  unnoticed (§1, §12). Passkey login is core, not a licensed marketplace
+  module — `specs/modules/catalog.md` §1/§2.2 decided this on 2026-07-18
+  (HT-66, the day before draft.1), and `agents-and-auth.md` §1 already
+  carries the corrected framing as of HT-76/PR #85 (merged 2026-07-19,
+  the same day as draft.1–3 were written). This spec's own "licensed
+  marketplace module... waiting-on-HT-5" language was stale from the
+  moment it was written; caught during HT-75's engine-implementation
+  review, not by an independent re-read of the catalog. No prior draft's
+  technical content (schema, ceremonies, tokens, counter policy, endpoint
+  surface) depended on the marketplace framing — this is a documentation
+  correction only, not a design change.
 - **draft.3 (2026-07-19, CodeRabbit review, PR #88):** Three fixes. (1)
   §6.2's counter check and its persistence are now specified as one atomic
   unit — a `SELECT ... FOR UPDATE` re-read inside a transaction, not a

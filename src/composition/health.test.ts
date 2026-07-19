@@ -125,6 +125,7 @@ describe('runHealthCheck', () => {
     })
     expect(report.mailboxes).toEqual([])
     expect(report.webhooks).toEqual({ autoDisabled: [], deliveryFailuresLast24h: 0 })
+    expect(report.webauthn).toEqual({ counterRegressionsLast24h: 0 })
     expect(new Date(report.generatedAt).getTime()).not.toBeNaN()
   })
 
@@ -343,6 +344,55 @@ describe('runHealthCheck', () => {
       const alert = report.alerts.find((a) => a.startsWith('webhook-delivery-dead-letter-growth: '))
       expect(alert).toBeDefined()
       expect(alert).toContain('1 webhook delivery(ies)')
+    })
+  })
+
+  describe('passkey counter regressions (HT-75; specs/auth/passkeys.md §8)', () => {
+    /** Insert an Agent + a `webauthn_credentials` row directly (no `AgentStore`/`WebAuthnStore` needed for this fixture). */
+    async function seedRegressedCredential(
+      database: Db,
+      regressedAgoHours: number | null,
+    ): Promise<void> {
+      const [agent] = await database.query<{ id: string }>(
+        `INSERT INTO agents (email, name, role, status) VALUES ($1, 'Agent', 'agent', 'active') RETURNING id`,
+        [`agent-${Math.random()}@example.test`],
+      )
+      await database.query(
+        `INSERT INTO webauthn_credentials
+           (agent_id, credential_id, public_key, sign_count, backup_eligible, backup_state, name, sign_count_regression_at)
+         VALUES ($1, $2, $3, 10, false, false, 'Key', ${
+           regressedAgoHours === null ? 'NULL' : `now() - interval '${regressedAgoHours} hours'`
+})`,
+        [agent.id, `cred-${Math.random()}`, new Uint8Array([1])],
+      )
+    }
+
+    it('a credential regressed in the last 24h trips webauthn-counter-regression; one with no regression is silent', async () => {
+      const { database, check } = await fresh()
+      await seedRegressedCredential(database, null) // never regressed
+
+      const clean = await check()
+      expect(clean.webauthn.counterRegressionsLast24h).toBe(0)
+      expect(clean.alerts.some((a) => a.startsWith('webauthn-counter-regression'))).toBe(false)
+
+      await seedRegressedCredential(database, 1) // regressed 1h ago
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.webauthn.counterRegressionsLast24h).toBe(1)
+      const alert = report.alerts.find((a) => a.startsWith('webauthn-counter-regression: '))
+      expect(alert).toBeDefined()
+      expect(alert).toContain('1 credential(s)')
+    })
+
+    it('a regression OLDER than 24h does not trip the alert (growth, not standing count)', async () => {
+      const { database, check } = await fresh()
+      await seedRegressedCredential(database, 30) // regressed 30h ago — outside the window
+
+      const report = await check()
+      expect(report.ok).toBe(true)
+      expect(report.webauthn.counterRegressionsLast24h).toBe(0)
+      expect(report.alerts.some((a) => a.startsWith('webauthn-counter-regression'))).toBe(false)
     })
   })
 })

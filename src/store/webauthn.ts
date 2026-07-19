@@ -18,7 +18,7 @@
  * `SELECT ... FOR UPDATE` re-read spec §6.2 mandates: the counter/clone
  * comparison and the write that updates it must happen against the SAME
  * locked row, not the earlier, unlocked read used for cryptographic
- * verification. `src/auth/webauthn-service.ts` is the one caller.
+ * verification. `src/auth/webauthn-ceremony.ts` is the one caller.
  *
  * ## Opportunistic purge, no cron (spec §2.2)
  *

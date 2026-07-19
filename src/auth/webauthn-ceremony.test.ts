@@ -242,12 +242,33 @@ describe('verifyAuthenticationCeremony', () => {
     expect(result).toEqual({ ok: true, agentId })
   })
 
-  it('Tier 2 (has ever reported nonzero): a counter <= the stored maximum is REJECTED and the regression is marked', async () => {
+  it("Tier 2 (has ever reported nonzero): a counter <= the stored maximum is REJECTED and the regression is marked — using a mock that FAITHFULLY reproduces the real library's own throw-on-regression behavior", async () => {
     const { store: s, agentStore: as } = await setup()
     const agentId = await makeAgent(as, 'a@example.test')
     await makeCredential(s, agentId, 10) // already graduated to Tier 2
     const minted = await mintAuthChallenge(s)
-    verifyAuthenticationResponse.mockResolvedValue(verifiedResult(5)) // <= 10: a regression
+
+    // The REAL `verifyAuthenticationResponse` runs its own regression guard
+    // BEFORE the signature check: `if ((counter > 0 || credential.counter >
+    // 0) && counter <= credential.counter) throw`. A mock that just
+    // RESOLVES with a regressed counter (the old version of this test) is a
+    // false-green over a dead path — the real library never resolves in
+    // that shape, it throws. This mock reproduces the library's exact
+    // guard against whatever `credential.counter` our code actually passes,
+    // so it throws in EXACTLY the case the real library would.
+    const RESPONSE_COUNTER = 5 // <= the stored maximum of 10: a genuine regression
+    verifyAuthenticationResponse.mockImplementation(async (opts) => {
+      const credentialCounter = (opts as { credential: { counter: number } }).credential.counter
+      if (
+        (RESPONSE_COUNTER > 0 || credentialCounter > 0) &&
+        RESPONSE_COUNTER <= credentialCounter
+      ) {
+        throw new Error(
+          `Response counter value ${RESPONSE_COUNTER} was lower than expected ${credentialCounter}`,
+        )
+      }
+      return verifiedResult(RESPONSE_COUNTER)
+    })
 
     const result = await verifyAuthenticationCeremony(
       { db: db as Db, store: s, keyring: KEYRING, rp: RP },
@@ -259,9 +280,53 @@ describe('verifyAuthenticationCeremony', () => {
     )
     expect(result).toEqual({ ok: false, reason: 'invalid' })
 
+    // Proves the fix directly: we deliberately pass `counter: 0` (never the
+    // real stored `signCount`) so the library's own guard above can never
+    // fire — our locked Tier-1/Tier-2 logic is the sole authority. If a
+    // future change regressed to passing the real counter, THIS mock would
+    // throw before our own logic ever ran, `markCounterRegression` would
+    // never fire, and the assertions below would fail.
+    expect(verifyAuthenticationResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ credential: expect.objectContaining({ counter: 0 }) }),
+    )
+
     const after = await s.getCredentialByCredentialId('cred-1')
     expect(after?.signCountRegressionAt).not.toBeNull() // the HT-44 health signal persisted
     expect(after?.signCount).toBe(10) // NOT overwritten by the lower, rejected value
+  })
+
+  it('a loud, structured log line is emitted at the point a regression is detected (spec §8: "the log line is what makes it investigable")', async () => {
+    const { store: s, agentStore: as } = await setup()
+    const agentId = await makeAgent(as, 'a@example.test')
+    const credentialId = await makeCredential(s, agentId, 10)
+    const minted = await mintAuthChallenge(s)
+    verifyAuthenticationResponse.mockResolvedValue(verifiedResult(3))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await verifyAuthenticationCeremony(
+        { db: db as Db, store: s, keyring: KEYRING, rp: RP },
+        {
+          ceremony: 'authentication',
+          responseJson: responseFor('cred-1', agentId),
+          challengeToken: minted.token,
+        },
+      )
+      const call = warnSpy.mock.calls.find((c) =>
+        String(c[0]).includes('webauthn_counter_regression'),
+      )
+      expect(call).toBeDefined()
+      const logged = JSON.parse(call?.[0] as string)
+      expect(logged).toMatchObject({
+        event: 'webauthn_counter_regression',
+        credentialId,
+        agentId,
+        storedCounter: 10,
+        responseCounter: 3,
+      })
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('Tier 2: a counter strictly greater than the stored maximum is accepted and persisted', async () => {

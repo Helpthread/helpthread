@@ -22,6 +22,19 @@
  * unlocked compare-then-write here would let two concurrent valid
  * authentications silently understate the true stored maximum.
  *
+ * ## The library's OWN counter check is deliberately disabled
+ *
+ * `verifyAuthenticationResponse` is called with `credential.counter: 0`
+ * ALWAYS, never the credential's real stored `signCount` — see the inline
+ * comment at the call site ("Why counter: 0") for the full reasoning. In
+ * short: the library throws its own regression error using the UNLOCKED
+ * pre-verification counter, which (if not suppressed) swallows the spec §8
+ * signal for every ordinary, sequential replay before this module's own
+ * locked Tier-1/Tier-2 logic ever runs — leaving `markCounterRegression`
+ * reachable only in a narrow concurrent-race window. This module is the
+ * sole authority on counter policy; the library verifies the signature
+ * only.
+ *
  * ## Counter regression is a COMMIT, not a rollback
  *
  * When a Tier-2 regression is detected, `markCounterRegression`'s write
@@ -132,7 +145,9 @@ export async function verifyAuthenticationCeremony(
         // (typed `Uint8Array<ArrayBufferLike>`) does not structurally
         // satisfy even though it works correctly at runtime.
         publicKey: new Uint8Array(credential.publicKey),
-        counter: credential.signCount,
+        // DELIBERATELY 0, never `credential.signCount` — see "Why counter:
+        // 0" below. This is load-bearing, not a placeholder.
+        counter: 0,
         transports: credential.transports as AuthenticatorTransportFuture[],
       },
       requireUserVerification: true,
@@ -141,6 +156,36 @@ export async function verifyAuthenticationCeremony(
     return { ok: false, reason: 'invalid' }
   }
   if (!verification.verified) return { ok: false, reason: 'invalid' }
+
+  // --- Why counter: 0 above ---------------------------------------------
+  //
+  // `verifyAuthenticationResponse` runs its OWN counter-regression guard
+  // BEFORE the signature check, against whatever `credential.counter` it's
+  // handed: `if ((counter > 0 || credential.counter > 0) && counter <=
+  // credential.counter) throw`. Had this been given the real
+  // `credential.signCount` (from the UNLOCKED pre-verification read above),
+  // that guard would THROW on any ordinary, non-concurrent counter
+  // regression — caught by the try/catch above and folded into a generic
+  // `{ ok: false, reason: 'invalid' }` BEFORE `authenticationInfo.newCounter`
+  // is ever obtained and BEFORE the transaction below runs at all. That
+  // makes `markCounterRegression` (and the HT-44 alert it feeds) reachable
+  // ONLY in the narrow race where the unlocked read was stale enough to slip
+  // past the library's check but the locked re-read below still catches
+  // it — the library's own guard would silently eat the spec §8 signal for
+  // the common, sequential-replay case, which is exactly the case the
+  // signal exists to catch.
+  //
+  // Passing `counter: 0` makes `(counter > 0 || false) && counter <= 0`
+  // structurally unsatisfiable (a uint32 response counter cannot be both
+  // `> 0` and `<= 0`), so the library NEVER throws for this reason — it
+  // verifies ONLY the cryptographic signature and hands back the response's
+  // raw counter in `authenticationInfo.newCounter`. This is also the
+  // architecture spec §6.2 itself describes: "On a successful SIGNATURE
+  // verification, the handler re-reads the same row with SELECT ... FOR
+  // UPDATE... applies §8's Tier 1/Tier 2 comparison" — signature
+  // verification and counter policy are two separate steps, and OUR
+  // Tier-1/Tier-2 logic under the lock below is the sole, sequential- and
+  // concurrent-case-alike authority on the latter.
 
   // --- userHandle cross-check (spec §6.2) — defense in depth, not the
   // identity-resolution path (that was credential_id, above). Optional
@@ -170,6 +215,20 @@ export async function verifyAuthenticationCeremony(
     const isTierTwo = locked.signCount > 0
     const isRegression = isTierTwo && newCounter <= locked.signCount
     if (isRegression) {
+      // The log line is what makes this investigable; the DB column
+      // (below) is what makes it alertable (spec §8, mirroring
+      // `src/mail/ingest.ts`'s `forged_token_detected` event — the
+      // identical "structured warn + a health-check-visible column"
+      // shape for a sibling clone/forgery signal).
+      console.warn(
+        JSON.stringify({
+          event: 'webauthn_counter_regression',
+          credentialId: locked.id,
+          agentId: locked.agentId,
+          storedCounter: locked.signCount,
+          responseCounter: newCounter,
+        }),
+      )
       // COMMIT this write — see the module doc on why this is a return,
       // not a throw.
       await deps.store.markCounterRegression(locked.id, tx)

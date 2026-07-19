@@ -55,6 +55,15 @@
  *   delivery.ts`'s module doc — so this is a SEPARATE signal from the
  *   auto-disable alert: an endpoint can shed individual failed deliveries
  *   for a while before crossing 20 consecutive and auto-disabling).
+ * - **Passkey counter regressions** (HT-75; specs/auth/passkeys.md §8):
+ *   `webauthn-counter-regression` for any `webauthn_credentials` row whose
+ *   `sign_count_regression_at` (set by `src/auth/webauthn-ceremony.ts` on a
+ *   Tier-2 clone-signal rejection) falls in the last 24h — a directly
+ *   analogous check to `forged-token-burst` above (a per-row marker column,
+ *   not a log table; the signal is growth, never the standing count),
+ *   except tripped on ANY count `> 0`, not a threshold: spec §8 is explicit
+ *   this is a "high-quality clone signal for a non-synced credential," not
+ *   noise to average over a burst window.
  *
  * ## What it deliberately does NOT check
  *
@@ -139,6 +148,11 @@ export interface HealthReport {
     autoDisabled: WebhookHealth[]
     /** `queue_jobs` rows on `WEBHOOK_DELIVERY_TOPIC` dead-lettered in the last 24h. */
     deliveryFailuresLast24h: number
+  }
+  /** HT-75 (specs/auth/passkeys.md §8) — see the module doc's Passkey counter regressions section. */
+  webauthn: {
+    /** `webauthn_credentials` rows whose `sign_count_regression_at` falls in the last 24h. Any value `> 0` trips the `webauthn-counter-regression` alert. */
+    counterRegressionsLast24h: number
   }
 }
 
@@ -301,6 +315,20 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
     )
   }
 
+  // --- Passkey counter regressions (HT-75; specs/auth/passkeys.md §8). ------
+  const webauthnRegressionRows = await deps.db.query<{ count: number }>(
+    `SELECT count(*)::int AS count FROM webauthn_credentials
+     WHERE sign_count_regression_at > now() - interval '24 hours'`,
+  )
+  const webauthnCounterRegressionsLast24h = webauthnRegressionRows[0]?.count ?? 0
+  if (webauthnCounterRegressionsLast24h > 0) {
+    alerts.push(
+      `webauthn-counter-regression: ${webauthnCounterRegressionsLast24h} credential(s) rejected ` +
+        'for signature-counter regression in the last 24h — a high-quality clone signal for a ' +
+        'non-synced credential; inspect and consider revoking (runbook Part G)',
+    )
+  }
+
   return {
     ok: alerts.length === 0,
     alerts,
@@ -314,6 +342,7 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
     },
     mailboxes,
     webhooks: { autoDisabled, deliveryFailuresLast24h },
+    webauthn: { counterRegressionsLast24h: webauthnCounterRegressionsLast24h },
   }
 }
 
