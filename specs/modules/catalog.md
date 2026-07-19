@@ -30,9 +30,9 @@ inventoried; revisit at grooming if a gap appears.
   commit and touches core only through public extension points. Nothing intended for the
   paid catalog is ever prototyped inside the AGPL tree.
 - **Zero privileged first-party access**: any hook a paid module needs ships in the public
-  plugin API first (charter module boundary).
+  module API first (charter module boundary).
 - **Preferred module shape is out-of-process** — typed events/webhooks plus the public
-  API — which needs no §7 exception at all. The in-process build-time plugin API is built
+  API — which needs no §7 exception at all. The in-process build-time module API is built
   only when a module genuinely needs UI presence, and not before a real module hits that
   wall.
 - Positioning corollary, used deliberately in marketing: tags, the public API + webhooks,
@@ -118,7 +118,7 @@ validate it).
 
 ## 4. Build sequence
 
-1. **HT-67 — plugin substrate v1 spec**: typed event vocabulary, webhook delivery
+1. **HT-67 — module substrate v1 spec**: typed event vocabulary, webhook delivery
    (registration, signed payloads, retries), assistant-actor API (draft-post,
    list-pending, approve/send with audit). Doubles as counsel raw material for the
    §7-exception text (HT-5) — the exception gets drafted against a real API, before the
