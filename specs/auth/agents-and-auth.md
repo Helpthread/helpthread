@@ -155,8 +155,22 @@ CREATE TABLE agent_mailbox_access (
 );
 ```
 
-An absent row set means "unrestricted" in v1 by definition (the table is empty and
-unconsulted); the semantics of a populated table are pinned when scoping actually ships.
+**Semantics pinned (TJ, 2026-07-18 — the Permissions UI ships now):**
+
+- **Admins have implicit access to all mailboxes** — grants rows are never consulted for
+  an admin (FreeScout's own rule: "Administrators have access to all mailboxes").
+- A non-admin Agent's mailbox access = their rows in this table.
+- **Every newly created Agent (any role, both provisioning paths and `/setup`) is
+  auto-granted all mailboxes existing at creation time**, in the same transaction — no
+  Agent is born locked out of the deployment's only inbox, and rows on an admin are
+  harmless bookkeeping that becomes meaningful if they are ever demoted.
+- Grants are managed via the §6 endpoints and the per-Agent Permissions screen (§7).
+- **Enforcement of conversation visibility is explicitly deferred to the multi-mailbox
+  increment**: `conversations` carries no `mailbox_id` today, so there is nothing to
+  filter by. When conversations gain a mailbox, reads filter by the acting Agent's
+  grants (admins unfiltered). Until then the grants are real, managed data that the
+  enforcement increment consults on arrival — stated here so the gap is a documented
+  plan, not an oversight.
 
 ## 4. The auth-provider seam
 
@@ -304,6 +318,16 @@ throughout, extensible without breaking clients, matching the wrapped shapes bel
 - **`DELETE /api/v1/agents/{id}`** (admin) → **hard delete** (cascades identities;
   `ON DELETE SET NULL` un-assigns their conversations). Distinct from disable
   (`PATCH status='disabled'`, the reversible soft-off). Blocked for the last admin.
+Mailbox access (§3.4, all admin-only; the acting-Agent header is required):
+- **`GET /api/v1/mailboxes`** → `{ mailboxes: [{ id, address, status }] }` — the roster the
+  Permissions screen renders checkboxes from.
+- **`GET /api/v1/agents/{id}/mailboxes`** → `{ mailboxIds: string[] }` — the target Agent's
+  raw grants (returned as stored even for admin targets; the UI shows admins the
+  implicit-access note instead of checkboxes).
+- **`PUT /api/v1/agents/{id}/mailboxes`** `{ mailboxIds: string[] }` → replace-set in one
+  transaction; every id must name an existing mailbox (`400` otherwise); unknown agent →
+  `404`. Valid for any target status — grants are lifecycle-agnostic bookkeeping.
+
 - **`POST /api/v1/agents/{id}/password`** (self, or admin reset) `{ password }` → sets/replaces
   the `password` identity's hash. **Refused (`409`) for an `invited` Agent** — a password on a
   record whose status still gates login off would be a credential that cannot be used and an
@@ -504,6 +528,11 @@ is retired (§8).
 
 ## Changelog
 
+- **draft.5 (2026-07-18, TJ fidelity review):** mailbox-access semantics pinned and the
+  Permissions UI pulled forward (§3.4): admins implicit-all, auto-grant-on-create,
+  admin-only grant endpoints (§6: `GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes`);
+  conversation-visibility enforcement explicitly deferred to the multi-mailbox increment
+  (conversations carry no `mailbox_id` yet).
 - **draft.4 (2026-07-18, HT-54 build):** `GET /agents` opened to any active Agent (was
   admin-only) — the assignee UI needs the roster; mutations stay admin-gated (§6).
 - **draft.3 (2026-07-18):** status is a closed lifecycle (CodeRabbit round 2): PATCH may
