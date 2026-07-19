@@ -1,10 +1,11 @@
 # Agents & Authentication
 
-Status: **draft** (2026-07-18) — the contract for real per-Agent identity, login, and user
-management, replacing the single shared operator password that HT-51 shipped as a
-deliberate placeholder. Authored native (Helpthread's own domain model); the *experience*
-is modelled on the Help Scout / FreeScout user-management UX (black-box observation only —
-never their source), rendered entirely in Helpthread's own design system.
+Status: **draft** (2026-07-18, amended 2026-07-19 — see Changelog draft.6) — the contract for
+real per-Agent identity, login, and user management, replacing the single shared operator
+password that HT-51 shipped as a deliberate placeholder. Authored native (Helpthread's own
+domain model); the *experience* is modelled on the Help Scout / FreeScout user-management UX
+(black-box observation only — never their source), rendered entirely in Helpthread's own
+design system.
 
 This supersedes the single-operator posture of `agent-inbox-v1.md` §1/§5/§6, whose own note
 mandates the direction: *"when multi-Agent lands it is expected to **replace** this single
@@ -19,7 +20,11 @@ splitting them at a seam:
   with no dependency on any hosted identity service or third-party provider. That is
   **username/password** — a real, self-contained auth system.
 - **Resonant IQ's own deployment, and paying customers:** want Google SSO, magic-link,
-  passkeys, SAML. These are **licensed marketplace modules**, not part of the free core.
+  SAML/enterprise SSO. These are **licensed marketplace modules**, not part of the free
+  core. **Passkey login (WebAuthn) is the one exception — it is core, not a marketplace
+  module:** security hygiene is always free (module catalog §1, HT-66, 2026-07-18); when
+  built, it ships as a second **core** auth provider on this same seam (catalog §2.2),
+  never through the marketplace path below. It is not yet built in this increment (§11).
 
 The mechanism that makes both true at once is an **auth-provider seam** (§4). The core ships
 the seam and exactly one provider — `password`. A marketplace module is a package that
@@ -88,7 +93,8 @@ This is the table that makes the marketplace work. **One Agent, many login metho
 CREATE TABLE agent_auth_identities (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   agent_id     uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-  provider     text NOT NULL,          -- 'password' (core); 'google','passkey',... (marketplace)
+  provider     text NOT NULL,          -- 'password' (core, v1); 'google','saml',... (marketplace);
+                                       -- 'passkey' is core too but not yet built (§1, §11)
   subject      text NOT NULL,          -- provider's stable identifier for this Agent
   secret_hash  text,                   -- scrypt hash for 'password'; NULL for OAuth-style providers
   created_at   timestamptz NOT NULL DEFAULT now(),
@@ -112,11 +118,13 @@ CREATE UNIQUE INDEX agent_auth_identities_one_password_per_agent
   guarding a freed old email against later collision — deferred rather than half-built. An
   Agent record is re-created if the email must change.
 - A marketplace `google` module inserts `provider='google', subject=<google sub>,
-  secret_hash=NULL` — **no core migration**. A `passkey` module inserts its own rows. The
+  secret_hash=NULL` — **no core migration**. A `saml` module inserts its own rows. The
   seam (§4) is the only code that reads this table by provider.
 - Deleting an Agent cascades their identities. An Agent may have several rows (password +
-  google + passkey) — all resolving to the same `agents.id`. Linking additional methods to an
-  existing Agent is a marketplace-module concern; core only ever writes `password`.
+  google + saml) — all resolving to the same `agents.id`. Linking a *marketplace* method to
+  an existing Agent is a marketplace-module concern; in this increment core only ever writes
+  `password` (passkey is core too, per §1, but is not yet built — it lands as a second
+  core-written provider, not a marketplace one).
 
 ### 3.3 `assignee` graduates from a flag to an identity — **breaking**
 
@@ -497,8 +505,12 @@ is retired (§8).
 
 ## 11. What this is NOT (scope)
 
-- **No marketplace providers** (Google SSO, magic-link, passkey, SAML) — only the seam + the
-  free `password` provider. Premium modules wait on the HT-5 §7 exception text.
+- **No marketplace providers** (Google SSO, magic-link, SAML/enterprise SSO) — only the seam
+  + the free `password` provider. Premium modules wait on the HT-5 §7 exception text.
+- **No passkey provider either** — passkey (WebAuthn) is core, not a marketplace module
+  (module catalog §1/§2.2, HT-66), but it is not yet built in this increment. It lands later
+  as a second **core** auth provider on the §4 seam, wired in `root.ts` alongside
+  `PasswordAuthProvider`, not through the marketplace path.
 - **No entitlement/licensing machinery** — separate marketplace infrastructure.
 - **No per-Agent mailbox scoping** (§3.4) — deferred; the model accommodates it.
 - **No teams/groups, granular permissions, or per-mailbox roles** (FreeScout has these;
@@ -528,6 +540,15 @@ is retired (§8).
 
 ## Changelog
 
+- **draft.6 (2026-07-19, catalog reconciliation, HT-76):** flagged by CodeRabbit on PR #82 —
+  this spec (written 2026-07-18, pre-dating the module catalog) classified passkey login as
+  a marketplace-only add-on; the catalog decision the same day (`specs/modules/catalog.md`
+  §1/§2.2, HT-66) made passkey login core, security hygiene, never paid. Reclassified
+  throughout (§1, §3.2, §11): passkey is core, just not yet built — it will land as a second
+  **core** auth provider on the §4 seam, not a marketplace module. Google SSO, magic-link,
+  and SAML/enterprise SSO remain marketplace, unchanged. The provider-abstraction
+  architecture (§3.2, §4) is unaffected — it already supports multiple core providers, not
+  just marketplace ones.
 - **draft.5 (2026-07-18, TJ fidelity review):** mailbox-access semantics pinned and the
   Permissions UI pulled forward (§3.4): admins implicit-all, auto-grant-on-create,
   admin-only grant endpoints (§6: `GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes`);
