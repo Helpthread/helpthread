@@ -15,7 +15,8 @@ inventoried; revisit at grooming if a gap appears.
 
 ## 1. The line, stated once
 
-**Free core = parity and hygiene. Paid = intelligence, channels, and enterprise.**
+**Free core = parity and hygiene. Paid = intelligence, channels, enterprise, and
+self-service surfaces (§3.4).**
 
 - Everything a self-hosted helpdesk operator would call table stakes — including features
   FreeScout paywalls — ships AGPL-free in core. Security hygiene is always free:
