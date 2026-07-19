@@ -324,14 +324,43 @@ export function createWebAuthnStore(db: Db): WebAuthnStore {
 
     async deleteCredential(id, agentId) {
       return db.transaction(async (tx) => {
+        // Lock EVERY credential row belonging to this Agent — not just the
+        // target row being deleted — so two concurrent `deleteCredential`
+        // calls for the SAME Agent (even on DIFFERENT credential ids)
+        // serialize on this SELECT rather than each computing the
+        // last-credential guard against a stale, unlocked count.
+        //
+        // The bug this closes (CodeRabbit, PR #94): with a `FOR UPDATE`
+        // scoped only to `id = $1`, two concurrent deletes of DIFFERENT
+        // credentials for the same passwordless Agent each locked a
+        // DIFFERENT row and then ran an UNLOCKED `count(*) WHERE id <> $2`
+        // — each transaction saw the OTHER's row as still present, so both
+        // computed `other_count > 0`, both passed the guard, and both
+        // committed. Net effect: the Agent reached zero credentials with no
+        // password identity — locked out, exactly the outcome §9.1's guard
+        // exists to make unreachable.
+        //
+        // Locking the whole set fixes this: the second transaction's
+        // `SELECT ... FOR UPDATE` blocks until the first commits (or rolls
+        // back), then re-reads under READ COMMITTED — so by the time it
+        // computes the guard, the first transaction's delete is already
+        // visible (or the whole set already reflects fewer rows), and the
+        // guard is evaluated against the Agent's REAL, current credential
+        // count rather than a snapshot from before either delete ran.
         const rows = await tx.query<{ id: string }>(
-          'SELECT id FROM webauthn_credentials WHERE id = $1 AND agent_id = $2 FOR UPDATE',
-          [id, agentId],
+          'SELECT id FROM webauthn_credentials WHERE agent_id = $1 FOR UPDATE',
+          [agentId],
         )
-        if (rows.length === 0) return 'not_found'
+        if (!rows.some((row) => row.id === id)) return 'not_found'
 
         // Spec §9.1: refuse if this Agent would be left with neither a
-        // password identity nor any OTHER webauthn credential.
+        // password identity nor any OTHER webauthn credential. Read AFTER
+        // the lock above is acquired, so it's part of the same consistent
+        // view the guard decides against — there is no code path in this
+        // codebase that removes a password identity independently of a
+        // full Agent delete (only `setPassword`/`acceptInvite` write one,
+        // and only ever add/replace it), so no analogous lock is needed on
+        // `agent_auth_identities` for this guard to be race-free.
         const [{ has_password }] = await tx.query<{ has_password: boolean }>(
           `SELECT EXISTS(
              SELECT 1 FROM agent_auth_identities WHERE agent_id = $1 AND provider = 'password'
@@ -339,12 +368,8 @@ export function createWebAuthnStore(db: Db): WebAuthnStore {
           [agentId],
         )
         if (!has_password) {
-          const [{ other_count }] = await tx.query<{ other_count: number }>(
-            `SELECT count(*)::int AS other_count FROM webauthn_credentials
-             WHERE agent_id = $1 AND id <> $2`,
-            [agentId, id],
-          )
-          if (other_count === 0) return 'last_credential'
+          const otherCount = rows.filter((row) => row.id !== id).length
+          if (otherCount === 0) return 'last_credential'
         }
 
         await tx.query('DELETE FROM webauthn_credentials WHERE id = $1', [id])

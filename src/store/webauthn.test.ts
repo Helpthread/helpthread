@@ -210,6 +210,103 @@ describe('WebAuthnStore', () => {
 
       expect(await store.deleteCredential(inserted.credential.id, agent2)).toBe('not_found')
     })
+
+    // --- The account-lockout TOCTOU (CodeRabbit, PR #94) ---------------------
+    //
+    // Bug: the original `FOR UPDATE` scoped only to the TARGET row
+    // (`id = $1 AND agent_id = $2`); the "does this Agent have another
+    // credential" count was a separate, UNLOCKED read. Two concurrent
+    // `deleteCredential` calls for DIFFERENT credentials of the same
+    // passwordless Agent could each see the other's row as still present,
+    // both pass `otherCount === 0` as false, and both commit — leaving the
+    // Agent with zero credentials and no password: locked out.
+    //
+    // Fix: lock EVERY credential row for the Agent (`WHERE agent_id = $1
+    // FOR UPDATE`) before computing the guard, so a second, real concurrent
+    // Postgres transaction targeting the SAME Agent blocks on this SELECT
+    // until the first commits, then re-reads the Agent's CURRENT row set —
+    // never a stale one.
+    //
+    // What CANNOT be proven here: a literal `Promise.all` of two
+    // `deleteCredential()` calls does NOT reproduce genuine interleaving
+    // against PGlite — verified empirically (a `SELECT ... FOR UPDATE`
+    // inside one `db.transaction()` held open while a second
+    // `db.transaction()` is kicked off: the second call's callback does not
+    // even START running until the first's `db.transaction()` call has
+    // fully COMMITTED). PGlite is a single, in-process connection that
+    // serializes whole transactions, not just individual row locks — the
+    // exact same limitation `src/store/agents.test.ts` already documents
+    // for `createFirstAdmin`'s advisory-lock guard ("true concurrency isn't
+    // reproducible against single-connection PGlite... waits for a
+    // Supabase-backed Db"). A naive concurrent-call test would pass
+    // identically against the OLD, buggy code too (PGlite's own
+    // serialization already prevents interleaving, independent of this
+    // fix), so it would prove nothing about THIS bug specifically.
+    //
+    // What IS proven instead, matching that same file's own precedent for
+    // this exact limitation: (1) an instrumented `Db` asserting the lock
+    // SQL actually targets the Agent's WHOLE credential set, not just the
+    // target row — the structural fact a real concurrent Postgres session
+    // relies on to serialize two deletes on the SAME lock; and (2) that the
+    // guard's arithmetic, now computed from that locked row set rather than
+    // a separate count query, is correct.
+    it('the row lock targets EVERY credential for the Agent, not just the one being deleted (instrumented Db)', async () => {
+      const { db: testDb, agentStore } = await freshStore()
+      const agentId = await makeAgent(agentStore, 'a@example.test')
+      await testDb.query('DELETE FROM agent_auth_identities WHERE agent_id = $1', [agentId])
+      const first = await createWebAuthnStore(testDb).insertCredential({
+        agentId,
+        ...CREDENTIAL_1,
+        credentialId: 'c1',
+      })
+      if (!first.ok) throw new Error('expected ok')
+
+      const statements: { sql: string; params: unknown[] }[] = []
+      const instrumented: Db = {
+        query: (sql, params = []) => {
+          statements.push({ sql, params })
+          return testDb.query(sql, params)
+        },
+        transaction: (fn) =>
+          testDb.transaction((tx) =>
+            fn({
+              query: (sql, params = []) => {
+                statements.push({ sql, params })
+                return tx.query(sql, params)
+              },
+            }),
+          ),
+        close: () => testDb.close(),
+      }
+      const instrumentedStore = createWebAuthnStore(instrumented)
+
+      await instrumentedStore.deleteCredential(first.credential.id, agentId)
+
+      const lockStatement = statements.find((s) => s.sql.includes('FOR UPDATE'))
+      expect(lockStatement).toBeDefined()
+      // The load-bearing fix: parameterized on agent_id ALONE (locks the
+      // whole set) — never additionally scoped to the target credential id.
+      expect(lockStatement?.sql).toMatch(/WHERE agent_id = \$1\s+FOR UPDATE/)
+      expect(lockStatement?.sql).not.toMatch(/id = \$1 AND agent_id = \$2/)
+      expect(lockStatement?.params).toEqual([agentId])
+    })
+
+    it('computes the last-credential guard from the SAME locked row set — deleting one of two leaves exactly one, and THAT delete then correctly refuses', async () => {
+      const { store, agentStore, db: testDb } = await freshStore()
+      const agentId = await makeAgent(agentStore, 'a@example.test')
+      await testDb.query('DELETE FROM agent_auth_identities WHERE agent_id = $1', [agentId])
+      const first = await store.insertCredential({ agentId, ...CREDENTIAL_1, credentialId: 'c1' })
+      const second = await store.insertCredential({ agentId, ...CREDENTIAL_1, credentialId: 'c2' })
+      if (!first.ok || !second.ok) throw new Error('expected ok')
+
+      // Deleting the first while the second still exists succeeds.
+      expect(await store.deleteCredential(first.credential.id, agentId)).toBe('ok')
+
+      // The Agent must never reach zero: the SAME store, immediately after,
+      // refuses to delete the now-only-remaining credential.
+      expect(await store.deleteCredential(second.credential.id, agentId)).toBe('last_credential')
+      expect(await store.listCredentialsForAgent(agentId)).toHaveLength(1)
+    })
   })
 
   // --- challenges -------------------------------------------------------------
