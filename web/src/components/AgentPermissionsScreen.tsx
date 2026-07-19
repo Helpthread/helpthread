@@ -61,7 +61,18 @@ export function AgentPermissionsScreen({
   function save(): void {
     if (isPending) return
     startTransition(async () => {
-      const result = await putAgentMailboxesAction(agent.id, Array.from(selected))
+      let result: Awaited<ReturnType<typeof putAgentMailboxesAction>>
+      try {
+        result = await putAgentMailboxesAction(agent.id, Array.from(selected))
+      } catch {
+        // The action invocation itself rejected (network) — same recoverable
+        // toast as a failed result; never an unhandled rejection.
+        showToast({
+          title: "Couldn't save",
+          detail: 'Could not reach the server. Please try again.',
+        })
+        return
+      }
       if (!result.ok) {
         showToast({ title: "Couldn't save", detail: result.message })
         return
