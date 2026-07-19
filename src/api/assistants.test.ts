@@ -18,6 +18,7 @@ import { type AgentRecord, type AgentStore, createAgentStore } from '../store/ag
 import { type AssistantStore, createAssistantStore } from '../store/assistants.js'
 import { createConversationStore } from '../store/conversations.js'
 import { createMailboxStore } from '../store/mailboxes.js'
+import type { WebhooksApiDeps } from './webhooks.js'
 import { createInboxApi } from './index.js'
 
 const TOKEN = 'test-token-for-the-assistants-suite'
@@ -72,6 +73,7 @@ describe('Assistants admin API (HT-70)', () => {
         mailboxStore: createMailboxStore(db),
       },
       assistants: { store: assistantStore },
+      webhooks: { store: {} as unknown as WebhooksApiDeps['store'], queue: { async enqueue() {} } } satisfies WebhooksApiDeps,
     })
     return { db, agentStore, assistantStore, api }
   }

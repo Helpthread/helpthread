@@ -22,6 +22,7 @@ import {
 } from '../store/assistants.js'
 import { type ConversationStore, createConversationStore } from '../store/conversations.js'
 import { createMailboxStore } from '../store/mailboxes.js'
+import type { WebhooksApiDeps } from './webhooks.js'
 import { createInboxApi } from './index.js'
 
 const TOKEN = 'test-token-for-the-drafts-suite'
@@ -88,6 +89,7 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
         mailboxStore: createMailboxStore(db),
       },
       assistants: { store: assistantStore },
+      webhooks: { store: {} as unknown as WebhooksApiDeps['store'], queue: { async enqueue() {} } } satisfies WebhooksApiDeps,
     })
     return { db, store, agentStore, assistantStore, api, sent }
   }
@@ -680,6 +682,7 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
             mailboxStore: createMailboxStore(db),
           },
           assistants: { store: assistantStore },
+          webhooks: { store: {} as unknown as WebhooksApiDeps['store'], queue: { async enqueue() {} } } satisfies WebhooksApiDeps,
         })
       }
 

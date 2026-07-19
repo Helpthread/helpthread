@@ -24,6 +24,8 @@ import {
   type WebhookEndpointStore,
 } from '../store/webhook-endpoints.js'
 import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
+import type { AssistantStore } from '../store/assistants.js'
+import type { AssistantsApiDeps } from './assistants.js'
 import { createInboxApi } from './index.js'
 
 const TOKEN = 'test-token-for-the-webhooks-admin-suite'
@@ -91,6 +93,7 @@ describe('Webhooks admin API', () => {
         mailboxStore,
       },
       webhooks: { store: webhookStore, queue },
+      assistants: { store: {} as unknown as AssistantStore } satisfies AssistantsApiDeps,
     })
     return { db, agentStore, webhookStore, api, enqueued }
   }
