@@ -36,8 +36,8 @@ inventoried; revisit at grooming if a gap appears.
   only when a module genuinely needs UI presence, and not before a real module hits that
   wall.
 - Positioning corollary, used deliberately in marketing: tags, the public API + webhooks,
-  the knowledge base, dark mode, keyboard shortcuts, and passkey-class security are paid
-  modules in the FreeScout ecosystem and free in Helpthread core.
+  dark mode, keyboard shortcuts, and passkey-class security are paid modules in the
+  FreeScout ecosystem and free in Helpthread core.
 
 ## 2. Free core
 
@@ -55,14 +55,20 @@ list) · open-tracking privacy default OFF (HT-32).
 Saved replies · custom folders · send & close · satisfaction ratings · basic reports ·
 basic workflows/automations · global search · basic custom fields (conversations and
 customers) · custom mailbox signatures · office hours / auto-reply windows · out of
-office · followers · @mentions in notes · snooze-until-a-date (extends `pending`) ·
-sender time zone · noreply-address warnings and external-image blocking · CSV export ·
-GDPR-grade hard delete and export (extends soft delete) · extended editor · dark mode
-(full surface) · **passkey login** (WebAuthn on the HT-54 session infrastructure) ·
-knowledge base (charter-core) · notifications matrix (email/browser, per admin-ia).
+office · followers · @mentions in notes · sticky notes on conversations ·
+snooze-until-a-date (extends `pending`) · sender time zone · noreply-address warnings
+and external-image blocking · extra security (reCAPTCHA, IP allowlisting) · CSV export ·
+GDPR-grade hard delete and export (extends soft delete) · extended editor · inline
+embedded images · extended attachments (richer file management/search) · dark mode
+(full surface) · **passkey login** and baseline **OAuth/social login** (WebAuthn plus
+alt-provider login on the HT-54 session infrastructure, same hygiene logic) · custom
+agent profile fields · global cross-mailbox inbox view · sent-folder tracking ·
+notifications matrix (email/browser, per admin-ia).
 
 The chat channel is core engine work when it arrives (charter §4: a second channel over
-the same engine), distinct from any paid trappings layered on it.
+the same engine), distinct from any paid trappings layered on it — including
+FreeScout's own paywalled Live Chat module; ours ships free by the same logic as
+passkeys and tags.
 
 ### 2.3 Not ported — obsolete by architecture
 
@@ -71,7 +77,7 @@ Postgres-native) · Auto Login from notification emails · Custom Homepage · Ti
 in subject (threading never depends on it; display numbers shipped in HT-27) · Mailbox
 Icons · Twitter/X DM integration (API effectively dead).
 
-## 3. Paid modules — three clusters
+## 3. Paid modules — four clusters
 
 Each entry is born proprietary (closed repo), integrates out-of-process unless noted, and
 ships through the marketplace when that phase opens (charter §5). Order within clusters is
@@ -91,30 +97,40 @@ rough priority.
 ### 3.2 Channels & integrations (the reference ecosystem's biggest paid cluster)
 
 WhatsApp · Telegram (integration + notifications) · SMS (Twilio-class) · Facebook
-Messenger · Slack notifications · Jira · commerce order-context panes
-(Shopify/WooCommerce-class) · mobile push (paired with any future mobile surface).
+Messenger · Slack notifications · Rocket.Chat notifications · Jira · commerce
+order-context panes (Shopify/WooCommerce-class, incl. Easy-Digital-Downloads-class
+digital-goods stores) · mobile push (paired with any future mobile surface).
 All are out-of-process by nature: a channel adapter feeds the same channel-agnostic
 conversation engine; an integration consumes events and the public API.
 
 ### 3.3 Enterprise & ops
 
-- **Enterprise Auth** — SAML/OIDC SSO, SCIM/directory sync, 2FA *policy enforcement*,
-  login audit. (Passkeys themselves are core, per §1.)
+- **Enterprise Auth** — SAML/OIDC SSO, SCIM/directory sync, LDAP directory
+  integration, 2FA *policy enforcement*, login audit. (Passkeys and baseline
+  OAuth/social login themselves are core, per §1 and §2.2.)
 - **PGP / S-MIME** signing and encryption.
 - **Wallboards & advanced analytics** (basic reports stay core).
-- **Kanban view** · **time tracking** · **CRM-grade customer management** (basic
-  customer records and fields stay core).
-- **White-labeling** — see §3.4.
+- **Kanban view** · **time tracking** · **checklists** (task lists within
+  conversations) · **CRM-grade customer management** (basic customer records and
+  fields stay core).
+- **White-labeling** — see §3.4 (the embeddable widget's branding removal only; the
+  end-user portal itself is paid in full, also §3.4).
 - *Possible, deliberately undecided*: an advanced-workflows module above core's basic
   automations. Deciding it is deferred; the core/paid seam inside "workflows" gets drawn
   when basic automations are specced, not retroactively.
 
-### 3.4 The white-label pattern
+### 3.4 Self-service surfaces
 
-The embeddable support widget and end-user portal ship **free with Helpthread branding**;
-**branding removal is paid**. Every free install is distribution; the pattern is additive
-monetization and thus charter-clean (Help Scout's Beacon and the reference ecosystem both
-validate it).
+- **Knowledge base** — the entire KB ships as a paid module, not core: content-as-code
+  (docs in git, static build, build-time search index) as its initial form, a runtime
+  editor later. Reclassified 2026-07-19 (HT-75, charter-amended) — FreeScout's own
+  reference instance runs its Knowledge Base as a paid purchase (`admin-ia.md`), which
+  is market signal, not just a differentiator play.
+- **End-user portal** — customer ticket submission and history ships as a paid module
+  in full. No free tier; distinct from the embeddable widget below.
+- **Embeddable support widget** — ships **free with Helpthread branding**; **branding
+  removal is paid** (the Beacon pattern, unchanged). Every free install is
+  distribution; additive monetization, charter-clean.
 
 ## 4. Build sequence
 
@@ -161,3 +177,19 @@ now so the marketplace design inherits it:
 - **2026-07-18**: initial version (HT-66). Free/paid line decided by TJ from the
   FreeScout official-catalog inventory + charter constraints; passkeys-core,
   Enterprise-Auth-paid, white-label pattern, and the three paid clusters locked.
+- **2026-07-19** (HT-75): full 71-module FreeScout listing re-audited item-by-item
+  against this catalog's coverage; ~14 gaps found and classified using the existing
+  free/paid logic. New free-core items (§2.2): extended attachments, sent-folder
+  tracking, inline image embeds, global cross-mailbox inbox view, sticky notes,
+  custom agent profile fields, baseline OAuth/social login, extra security
+  (reCAPTCHA/IP allowlisting). New paid items: checklists (§3.3, folded LDAP directory
+  sync into Enterprise Auth rather than a separate line), Rocket.Chat notifications
+  and Easy-Digital-Downloads-class commerce (§3.2). **Knowledge base reclassified
+  free-core → paid module in full** (charter-amended; see CHARTER.md's 2026-07-19
+  amendment) — not a retroactive paywall, since it was never shipped. **End-user
+  portal reclassified free-with-branding → paid module in full** (§3.4); the
+  embeddable widget keeps the unchanged free/branding-paid pattern. Live chat's
+  free-core status (§2.2, charter §4) reaffirmed as a deliberate divergence from
+  FreeScout's paid Live Chat module. Paid catalog now 21 line items across four
+  clusters (Intelligence 3, Channels & integrations 8, Enterprise & ops 8,
+  Self-service surfaces 2 paid + 1 free-with-branding).
