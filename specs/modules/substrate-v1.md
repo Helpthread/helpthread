@@ -84,13 +84,21 @@ CHECK (draft_status IS NULL OR direction = 'outbound');
 CHECK (
   (direction IN ('inbound','note') AND delivery_status IS NULL)
   OR (direction = 'outbound'
+      AND draft_status IS NOT NULL
       AND draft_status IN ('awaiting_review','discarded')
       AND delivery_status IS NULL)
   OR (direction = 'outbound'
       AND (draft_status IS NULL OR draft_status = 'approved')
+      AND delivery_status IS NOT NULL
       AND delivery_status IN ('pending','sent','failed'))
 );
 ```
+
+The `IS NOT NULL` guards are load-bearing, not belt: without them, SQL's three-valued
+logic lets the illegal row `(outbound, draft_status NULL, delivery_status NULL)` pass —
+each `IN` test evaluates to NULL, the OR-chain yields NULL, and a NULL CHECK is
+accepted. This is the same NULL-trap migration 002's doc comment warns about, and it
+was caught by a failing test during HT-68 implementation, not by review of this spec.
 
 The deliverable-thread queries (`listDeliverableThreads`, `claimThreadForDelivery`)
 additionally gain an explicit `draft_status IS DISTINCT FROM 'awaiting_review'` guard —
@@ -317,4 +325,6 @@ to land in `specs/api/agent-inbox-v1.md` alongside implementation:
   wire amendments made explicit; idempotency namespace scoped; author-identity
   forward-carry specified). Same day: the additive-forward rule added (§1) with
   `module` attribution on webhook endpoints (§5) — marketplace attaches, never
-  retrofits (TJ).
+  retrofits (TJ). Same day, from HT-68 implementation: §2's CHECK predicate corrected
+  for the three-valued-logic NULL trap (`IS NOT NULL` guards added; found by a failing
+  store test).
