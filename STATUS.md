@@ -15,14 +15,20 @@ Codex pass.
 
 ## Now
 
-**Phase 1 shipped; the module substrate is the new floor.** The designed v1.1 engine, the Agent
-Inbox UI, per-Agent auth, and inbound observability are all live. The current build-out is the
-**module substrate** (`specs/modules/`) — the out-of-process extension surface (events + webhooks
-+ assistant actors) that lets AI and third-party modules extend Helpthread without touching core.
-Waves 1–3 are merged to `main`; the **first module**, a draft-reply assistant, is scaffolded in
-its own closed repo. What's in flight: the substrate **operator guide** ([HT-71](https://resonantiq.atlassian.net/browse/HT-71),
-PR [#81](https://github.com/Helpthread/helpthread/pull/81) — open) and building the draft-reply
-assistant out against the live substrate ([HT-73](https://resonantiq.atlassian.net/browse/HT-73)).
+**Phase 1 shipped; the substrate is the floor; the marketplace is now launch-day work.** The
+designed v1.1 engine, the Agent Inbox UI, per-Agent auth, and inbound observability are all live.
+The **module substrate** (`specs/modules/`) — the out-of-process extension surface (events +
+webhooks + assistant actors) that lets AI and third-party modules extend Helpthread without
+touching core — is merged across waves 1–3 and documented for operators (`docs/modules/`); the
+**first module**, a draft-reply assistant, is scaffolded in its own closed repo.
+
+The charter was amended 2026-07-19 ([HT-79](https://resonantiq.atlassian.net/browse/HT-79)) to
+move the **marketplace from a deferred phase to a launch-day component of Phase 3** — built now,
+proven first as Resonant IQ's own dogfood install path. That reframes what's next: commerce
+plumbing (license keys, distribution, update feed) is current work, not speculation. In flight:
+the marketplace v1 spec is **draft for TJ review** (`specs/modules/marketplace-v1.md`), the
+passkey login spec is at **draft.3** (`specs/auth/passkeys.md`), and the draft-reply assistant
+is being built out against the live substrate ([HT-73](https://resonantiq.atlassian.net/browse/HT-73)).
 
 ## Done
 
@@ -74,17 +80,28 @@ assistant out against the live substrate ([HT-73](https://resonantiq.atlassian.n
 - **Wave 2** ([HT-69](https://resonantiq.atlassian.net/browse/HT-69), PR [#79](https://github.com/Helpthread/helpthread/pull/79)) — typed events, the outbox drain, signed webhook delivery, and the module admin API.
 - **Wave 3** ([HT-70](https://resonantiq.atlassian.net/browse/HT-70), PR [#80](https://github.com/Helpthread/helpthread/pull/80)) — assistant authentication, the drafts API, and the draft-approval orchestration an Agent drives in core.
 - **First module scaffold** ([HT-73](https://resonantiq.atlassian.net/browse/HT-73)) — the draft-reply assistant, born proprietary in its own closed repo (`Helpthread/module-draft-assistant`), bootstrapped as a product-shaped scaffold that will ride the public substrate (events → webhook, API read, assistant draft) and touch core only through those extension points.
+- **Operator guide** ([HT-71](https://resonantiq.atlassian.net/browse/HT-71), PRs [#81](https://github.com/Helpthread/helpthread/pull/81), [#84](https://github.com/Helpthread/helpthread/pull/84), `docs/modules/`) — README, assistants-and-drafts, and webhooks documentation for running the substrate, plus a precision follow-up pinning event-transaction scope and payload sensitivity.
+
+**Catalog & licensing refinements**
+- **KB and portal reclassified to paid** ([HT-75](https://resonantiq.atlassian.net/browse/HT-75), PR [#82](https://github.com/Helpthread/helpthread/pull/82)) — the full 71-module FreeScout listing re-audited item-by-item, closing the gap audit. The knowledge base ships entirely as a paid module (not core), as does the end-user portal; the open-core line is restated as **free = parity and hygiene; paid = intelligence, channels, enterprise, and self-service surfaces**. Passkey login (WebAuthn) stays core, deliberately.
+- **Passkey classification reconciled** ([HT-76](https://resonantiq.atlassian.net/browse/HT-76), PR [#85](https://github.com/Helpthread/helpthread/pull/85)) — `specs/auth/agents-and-auth.md` squared with the catalog: passkeys core, enterprise SSO paid.
+- **Marketplace becomes launch-day** ([HT-79](https://resonantiq.atlassian.net/browse/HT-79), PR [#86](https://github.com/Helpthread/helpthread/pull/86)) — CHARTER §3/§4/§5 amended: the marketplace moves from "a later phase, once demand justifies it" to a **Phase 3 launch-day component**, because the substrate and first modules shipped during dogfood, leaving commerce plumbing rather than speculation. New counsel items before it takes real money: commercial module license text and terms of sale. The §7 plugin-exception deadline is unchanged (every v1 marketplace module is out-of-process and needs no exception).
+
+**Inbox basics** ([HT-76](https://resonantiq.atlassian.net/browse/HT-76)/[HT-77](https://resonantiq.atlassian.net/browse/HT-77)/[HT-78](https://resonantiq.atlassian.net/browse/HT-78), PR [#90](https://github.com/Helpthread/helpthread/pull/90), migrations 24–25)
+- **Saved replies & macros** (`src/api/saved-replies.ts`, `src/store/saved-replies.ts`, migration 24 `saved_replies`) — the canned-response surface behind the native API.
+- **Snooze** (`src/mail/snooze-wake.ts`, migration 25 `conversation_snooze`) — a conversation sleeps until its wake time, then returns to the working folder.
+- **Send & close** (`src/mail/send.ts`) — reply and resolve in one action, the highest-frequency Agent gesture.
 
 ## Next
 
-- **Substrate operator guide** ([HT-71](https://resonantiq.atlassian.net/browse/HT-71), PR [#81](https://github.com/Helpthread/helpthread/pull/81) — open) — `docs/modules/` README + assistants-and-drafts + webhooks operator documentation for running the substrate.
+- **Marketplace v1** ([HT-79](https://resonantiq.atlassian.net/browse/HT-79), `specs/modules/marketplace-v1.md` — draft for TJ review) — the commerce plumbing around the substrate: license keys, subscriptions, module distribution, an update feed. Child tickets scoped by the spec: an in-product module directory ([HT-81](https://resonantiq.atlassian.net/browse/HT-81)) and dogfooding Resonant IQ's own install through the marketplace ([HT-82](https://resonantiq.atlassian.net/browse/HT-82)).
+- **Passkey (WebAuthn) login** ([HT-75](https://resonantiq.atlassian.net/browse/HT-75), `specs/auth/passkeys.md` — draft.3, spec only) — the second auth provider on the HT-54 seam, and the first real exercise of that seam's marketplace-boundary claim. No migrations or implementation yet.
 - **Build out the draft-reply assistant** ([HT-73](https://resonantiq.atlassian.net/browse/HT-73)) against the live substrate — the first real consumer, proving the module boundary end-to-end.
-- **HT-5 counsel work** — plugin exception text (now drafted against the real, shipped substrate API), board consent memo, and trademark policy (charter §3/§7, per the DCO amendment) — gates opening the project to external contributions.
+- **HT-5 counsel work** — plugin exception text (now drafted against the real, shipped substrate API), board consent memo, and trademark policy (charter §3/§7, per the DCO amendment) — gates opening the project to external contributions. Per the HT-79 amendment, the marketplace adds two more before it takes money: commercial module license text and terms of sale.
 
 ## Not yet / deferred
 
 - The in-process/build-time module API, UI injection points, and a general scopes/permissions system (each waits for a real module to need it — substrate v1 non-goals).
-- Marketplace plumbing: paid modules, license keys, module registry, metering (additive-forward — it attaches to the substrate, never retrofits it).
 - A customer-side / self-service API (a separate future surface, designed native when there are customers to serve).
 
 ---
