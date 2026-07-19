@@ -80,12 +80,13 @@ describe('verifyAuthenticationCeremony', () => {
   async function mintAuthChallenge(
     s: WebAuthnStore,
     ceremony: 'authentication' | 'registration' | 'step-up' = 'authentication',
+    agentId: string | null = null,
   ) {
-    const minted = mintChallengeToken(ceremony, null, KEYRING)
+    const minted = mintChallengeToken(ceremony, agentId, KEYRING)
     await s.mintChallenge({
       nonce: minted.nonce,
       ceremony,
-      agentId: null,
+      agentId,
       expiresAt: new Date(Date.now() + 5 * 60 * 1000),
     })
     return minted
@@ -190,7 +191,9 @@ describe('verifyAuthenticationCeremony', () => {
     const owner = await makeAgent(as, 'owner@example.test')
     const impersonator = await makeAgent(as, 'other@example.test')
     await makeCredential(s, owner, 0)
-    const minted = await mintAuthChallenge(s, 'step-up')
+    // Minted FOR the impersonator, so the Agent-binding check below passes and
+    // this test still exercises what it names: the CREDENTIAL-owner check.
+    const minted = await mintAuthChallenge(s, 'step-up', impersonator)
 
     const result = await verifyAuthenticationCeremony(
       { db: db as Db, store: s, keyring: KEYRING, rp: RP },
@@ -203,6 +206,32 @@ describe('verifyAuthenticationCeremony', () => {
     )
     expect(result).toEqual({ ok: false, reason: 'invalid' })
     expect(verifyAuthenticationResponse).not.toHaveBeenCalled()
+  })
+
+  it("a step-up challenge minted for one Agent cannot be spent — or burned — from another Agent's session", async () => {
+    const { store: s, agentStore: as } = await setup()
+    const victim = await makeAgent(as, 'victim@example.test')
+    const attacker = await makeAgent(as, 'attacker@example.test')
+    await makeCredential(s, victim, 0)
+    // The victim starts step-up; the attacker has somehow obtained the token.
+    const minted = await mintAuthChallenge(s, 'step-up', victim)
+
+    const result = await verifyAuthenticationCeremony(
+      { db: db as Db, store: s, keyring: KEYRING, rp: RP },
+      {
+        ceremony: 'step-up',
+        responseJson: responseFor('no-such-credential'),
+        challengeToken: minted.token,
+        requireAgentId: attacker,
+      },
+    )
+    expect(result).toEqual({ ok: false, reason: 'invalid' })
+    expect(verifyAuthenticationResponse).not.toHaveBeenCalled()
+
+    // The point of the fix: the victim's challenge row survives the attempt.
+    // Before this binding existed the consume ran first, so the row was burned
+    // and the victim's own verify came back `challenge_expired`.
+    expect(await s.consumeChallenge(minted.nonce, 'step-up', victim)).toBe(true)
   })
 
   it('a userHandle that resolves to a different Agent than the credential is rejected (defense in depth)', async () => {

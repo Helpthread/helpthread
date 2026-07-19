@@ -378,7 +378,14 @@ export async function handleRegistrationVerify(
   ) {
     return CEREMONY_FAILED()
   }
-  const consumed = await deps.store.consumeChallenge(verifiedChallenge.nonce, 'registration')
+  // `actingAgent.id` is passed so the DB layer enforces the same binding the
+  // app-level check above already applies — defense in depth, matching the
+  // step-up path. Without it the binding would rest solely on that check.
+  const consumed = await deps.store.consumeChallenge(
+    verifiedChallenge.nonce,
+    'registration',
+    actingAgent.id,
+  )
   if (!consumed) return CEREMONY_FAILED()
 
   let verification: Awaited<ReturnType<typeof verifyRegistrationResponse>>

@@ -338,6 +338,37 @@ describe('WebAuthnStore', () => {
       expect(await store.consumeChallenge('n2', 'registration')).toBe(true)
     })
 
+    it('the Agent binding is enforced at the database layer, independently of any caller check', async () => {
+      const { store, agentStore } = await freshStore()
+      const owner = await makeAgent(agentStore, 'owner@example.test')
+      const other = await makeAgent(agentStore, 'other@example.test')
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000)
+      await store.mintChallenge({ nonce: 'n4', ceremony: 'step-up', agentId: owner, expiresAt })
+
+      // The whole point of the `expectedAgentId` clause: a row minted for one
+      // Agent is not consumable under another, with NO application-layer check
+      // in front of it. `webauthn-ceremony.ts`'s own check short-circuits
+      // before the store is ever reached, so without this test the SQL clause
+      // would be dead weight no test would notice losing.
+      expect(await store.consumeChallenge('n4', 'step-up', other)).toBe(false)
+      expect(await store.consumeChallenge('n4', 'step-up', owner)).toBe(true)
+    })
+
+    it('a login challenge (agent_id NULL) is still consumable when no Agent is expected', async () => {
+      const { store } = await freshStore()
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000)
+      await store.mintChallenge({
+        nonce: 'n5',
+        ceremony: 'authentication',
+        agentId: null,
+        expiresAt,
+      })
+
+      // Guards the SQL branch: binding unconditionally would emit
+      // `AND agent_id = NULL`, which matches nothing, breaking every login.
+      expect(await store.consumeChallenge('n5', 'authentication')).toBe(true)
+    })
+
     it('an expired challenge cannot be consumed', async () => {
       const { store } = await freshStore()
       const alreadyExpired = new Date(Date.now() - 1000)

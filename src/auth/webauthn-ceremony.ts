@@ -107,10 +107,38 @@ export async function verifyAuthenticationCeremony(
     return { ok: false, reason: 'invalid' }
   }
 
+  // --- Step-up only: the challenge must have been minted FOR the acting
+  // Agent, checked BEFORE the consume below (Codex review, PR #94).
+  //
+  // `requireAgentId` was previously enforced only against the resolved
+  // credential's owner, further down — after the challenge row had already
+  // been burned. That let anyone holding a victim's step-up challenge token
+  // spend it from their own session with any garbage `response`: the consume
+  // succeeded, verification then failed, and the victim's own legitimate
+  // verify came back `challenge_expired`. Not a bypass — the assertion is
+  // still cryptographically verified and `requireAgentId` still gates the
+  // credential — but a griefing DoS against a real user's step-up.
+  //
+  // The login ceremony deliberately does NOT get this check: its challenge
+  // is minted with `agentId: null` (the credential is discoverable, so no
+  // Agent is known at options time, spec §4.3), which is exactly why the
+  // binding is conditional on `requireAgentId` rather than unconditional.
+  if (params.requireAgentId !== undefined && verifiedToken.agentId !== params.requireAgentId) {
+    return { ok: false, reason: 'invalid' }
+  }
+
   // --- DB-level single-use consume — the actual enforcement (spec §7). A
-  // zero-row consume (missing, expired, already-used, or wrong ceremony)
-  // is the one case the caller may surface as `challenge_expired`. ---
-  const consumed = await deps.store.consumeChallenge(verifiedToken.nonce, params.ceremony)
+  // zero-row consume (missing, expired, already-used, wrong ceremony, or —
+  // for step-up — minted for a different Agent) is the one case the caller
+  // may surface as `challenge_expired`. The `expectedAgentId` argument makes
+  // the row's own `agent_id` part of that predicate, so the binding holds at
+  // the DB layer too rather than resting solely on the check above (spec
+  // §7's "two independent layers, not duplicated logic"). ---
+  const consumed = await deps.store.consumeChallenge(
+    verifiedToken.nonce,
+    params.ceremony,
+    params.requireAgentId,
+  )
   if (!consumed) return { ok: false, reason: 'challenge_expired' }
 
   // --- Resolve the credential by the assertion's OWN id (spec §4.3 —

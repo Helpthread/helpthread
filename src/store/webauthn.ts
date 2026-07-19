@@ -157,8 +157,18 @@ export interface WebAuthnStore {
    * ceremony" uniformly (spec §7: the database-level half of the ceremony
    * discriminator, and the actual single-use enforcement for
    * `authentication`).
+   *
+   * `expectedAgentId`, when given, adds `AND agent_id = $3` to that
+   * predicate — the database-level half of step-up's Agent binding, so a
+   * challenge minted for one Agent can never be consumed by another (Codex
+   * review, PR #94). Omitted for the login ceremony, whose rows are minted
+   * with `agent_id IS NULL` by design (discoverable credential, spec §4.3).
    */
-  consumeChallenge(nonce: string, ceremony: WebAuthnCeremony): Promise<boolean>
+  consumeChallenge(
+    nonce: string,
+    ceremony: WebAuthnCeremony,
+    expectedAgentId?: string,
+  ): Promise<boolean>
 
   /** Mint a `webauthn_stepup_tokens` row, same opportunistic-purge discipline as {@link mintChallenge} (spec §2.2). */
   mintStepUpToken(input: MintStepUpTokenInput): Promise<void>
@@ -388,13 +398,18 @@ export function createWebAuthnStore(db: Db): WebAuthnStore {
       })
     },
 
-    async consumeChallenge(nonce, ceremony) {
+    async consumeChallenge(nonce, ceremony, expectedAgentId) {
+      // `agent_id = $3` is appended only when the caller supplies an expected
+      // Agent (step-up). Login rows carry `agent_id IS NULL`, and `= NULL`
+      // matches nothing in SQL, so binding unconditionally would break every
+      // login consume — hence the branch rather than a coalesce.
       const rows = await db.query<{ nonce: string }>(
         `UPDATE webauthn_challenges
          SET consumed_at = now()
          WHERE nonce = $1 AND ceremony = $2 AND consumed_at IS NULL AND expires_at > now()
+           ${expectedAgentId === undefined ? '' : 'AND agent_id = $3'}
          RETURNING nonce`,
-        [nonce, ceremony],
+        expectedAgentId === undefined ? [nonce, ceremony] : [nonce, ceremony, expectedAgentId],
       )
       return rows.length > 0
     },
