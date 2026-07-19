@@ -524,7 +524,7 @@ no exception (charter amendment text, quoted in full in CHARTER.md).
 
 **Conflict found and resolved here, named per house style**: `specs/ui/admin-ia.md`
 §2 describes the target "Manage → Modules" surface as "Installed (activate/deactivate,
-license key, in-place update with visible ops log) + Directory (browse/install)." That
+license-key entry, in-place update with a visible ops log) + Directory (browse/install)." That
 description predates both the module substrate (which has no in-process module API,
 `substrate-v1.md` §1) and this spec's v1 install flow (§5: manual tarball download,
 manual Vercel redeploy). **"In-place update with visible ops log" is not deliverable
