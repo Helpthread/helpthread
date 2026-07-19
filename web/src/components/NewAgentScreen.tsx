@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * `/settings/team/new` — invite or directly create an Agent (HT-54;
+ * `/manage/agents/new` — invite or directly create an Agent (HT-54;
  * specs/auth/agents-and-auth.md §7, §8). Admin-only UI; the engine enforces
  * the mutation itself. FreeScout-modelled: Role, First/Last name (joined
  * into `name` with a single space), Email, and a provisioning choice —
@@ -9,6 +9,9 @@
  * appears only when it's off. No password field when inviting (spec: the
  * two provisioning paths are exclusive). **NEW designed surface — requires
  * TJ fidelity sign-off.**
+ *
+ * Moved off `/settings/team/new` per TJ's 2026-07-18 admin-IA fidelity
+ * review (HT-54) — see `TeamListScreen`'s doc comment.
  *
  * The role picker is a segmented two-button control, the same
  * non-`ds`-component pattern `SettingsScreen`'s Appearance picker already
@@ -141,7 +144,7 @@ export function NewAgentScreen() {
         })
       }
       router.push(
-        result.agent !== undefined ? `/settings/team/${result.agent.id}` : '/settings/team',
+        result.agent !== undefined ? `/manage/agents/${result.agent.id}` : '/manage/agents',
       )
     })
   }
@@ -151,7 +154,7 @@ export function NewAgentScreen() {
       <div style={{ maxWidth: 420, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <button
           type="button"
-          onClick={() => router.push('/settings/team')}
+          onClick={() => router.push('/manage/agents')}
           style={{
             alignSelf: 'flex-start',
             border: 'none',

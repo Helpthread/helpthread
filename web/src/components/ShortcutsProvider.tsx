@@ -4,8 +4,11 @@
  * Global keyboard-shortcut wiring, mounted once in `app/layout.tsx`.
  *
  * `?` toggles the shortcuts overlay, `Escape` closes it. The overlay can
- * also be opened imperatively — `useShortcutsOverlay().open()` — for the
- * top bar's "Keyboard shortcuts" menu item.
+ * also be opened imperatively — `useShortcutsOverlay().open()` — for
+ * `SettingsScreen`'s "Keyboard shortcuts" card (HT-54 fidelity correction,
+ * TJ's 2026-07-18 admin-IA review: moved here from the top bar's Manage/
+ * avatar menus — a personal preference, not a Manage- or avatar-scoped
+ * affordance).
  *
  * `isOpen` is exposed too: the inbox and conversation screens run their OWN
  * key handling (j/k, r/n, ⌘+↵, a cascading Escape — see `InboxScreen` and

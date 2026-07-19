@@ -63,6 +63,24 @@ export interface AuthProviderDescriptor {
   kind: 'credentials'
 }
 
+/**
+ * Mirrors the engine's `MailboxStatus` (`src/store/mailboxes.ts`) — kept in
+ * sync by hand, same posture as `api.ts`'s `ACTING_AGENT_HEADER` constant
+ * (web and engine are separate packages, API-first only).
+ */
+export type MailboxStatus = 'active' | 'paused' | 'needs_reconnect' | 'disconnected'
+
+/**
+ * `GET /api/v1/mailboxes`'s roster entry (HT-54; specs/auth/agents-and-
+ * auth.md §6 "Mailbox access") — the Permissions screen's checkbox roster,
+ * the address is its label.
+ */
+export interface MailboxSummary {
+  id: string
+  address: string
+  status: MailboxStatus
+}
+
 /** v1.1 (HT-46) — one inbound attachment's metadata plus a time-limited
  *  signed `BlobStore` URL (never a stable/public path; it expires). */
 export interface AttachmentView {

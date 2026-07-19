@@ -27,7 +27,10 @@
  * `/auth/me`, and `putAssignee` — NOT attached on `/setup`, `/auth/verify`,
  * `/auth/invite/accept`, `/auth/providers` (all pre-session), nor the other
  * existing conversation calls (unchanged this increment, spec §8's own
- * scoping note).
+ * scoping note). Also attached on the mailbox-access endpoints added for
+ * the Permissions screen (`/mailboxes`, `/agents/{id}/mailboxes`) — spec §6
+ * pins these admin-only with the acting-Agent header required, same as the
+ * rest of `/agents/*`.
  */
 
 import 'server-only'
@@ -41,6 +44,7 @@ import type {
   ConversationListResponse,
   ConversationStatus,
   ConversationSummary,
+  MailboxSummary,
   SelfAgent,
   ThreadView,
 } from './api-types'
@@ -337,4 +341,33 @@ export function resendInvite(id: string): Promise<void> {
 /** `POST /api/v1/auth/invite/accept` — validates the token, sets the password, activates. No acting-Agent header (pre-session — no session exists yet). */
 export function acceptInvite(token: string, password: string): Promise<{ agent: Agent }> {
   return request('/api/v1/auth/invite/accept', { method: 'POST', body: { token, password } })
+}
+
+// --- Mailbox access (HT-54; specs/auth/agents-and-auth.md §6 "Mailbox access") ---
+// All admin-only (engine-enforced); the acting-Agent header is required on every call.
+
+/** `GET /api/v1/mailboxes` — the roster the Permissions screen renders checkboxes from. */
+export async function listMailboxes(): Promise<MailboxSummary[]> {
+  const { mailboxes } = await request<{ mailboxes: MailboxSummary[] }>('/api/v1/mailboxes', {
+    actingAgent: true,
+  })
+  return mailboxes
+}
+
+/** `GET /api/v1/agents/{id}/mailboxes` — the target Agent's raw grants, returned as stored even for an admin target (the UI shows the implicit-access note instead of checkboxes for those — spec §3.4). */
+export async function getAgentMailboxes(id: string): Promise<string[]> {
+  const { mailboxIds } = await request<{ mailboxIds: string[] }>(`/api/v1/agents/${id}/mailboxes`, {
+    actingAgent: true,
+  })
+  return mailboxIds
+}
+
+/** `PUT /api/v1/agents/{id}/mailboxes` — replace-set in one transaction. Returns the replaced grants as stored (`handlePutAgentMailboxes`, `src/api/agents.ts`). */
+export async function putAgentMailboxes(id: string, mailboxIds: string[]): Promise<string[]> {
+  const result = await request<{ mailboxIds: string[] }>(`/api/v1/agents/${id}/mailboxes`, {
+    method: 'PUT',
+    body: { mailboxIds },
+    actingAgent: true,
+  })
+  return result.mailboxIds
 }

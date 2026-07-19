@@ -2,7 +2,8 @@
 
 /**
  * Agent-management server actions (HT-54) — the write path for
- * `/settings/team/**`. Unlike `actions.ts`'s conversation mutations (which
+ * `/manage/agents/**` (moved off `/settings/team/**` per TJ's 2026-07-18
+ * admin-IA fidelity review). Unlike `actions.ts`'s conversation mutations (which
  * call bearer-only engine endpoints, so each action re-verifies the session
  * cookie itself before ever touching the API — see that file's module doc),
  * every call here goes through `lib/api.ts`'s acting-Agent path
@@ -21,6 +22,7 @@ import {
   createAgent,
   deleteAgent,
   patchAgent,
+  putAgentMailboxes,
   resendInvite,
   setAgentPassword,
 } from './api'
@@ -56,7 +58,7 @@ export async function createAgentAction(
 ): Promise<CreateAgentActionResult> {
   try {
     const result = await createAgent(input)
-    revalidatePath('/settings/team')
+    revalidatePath('/manage/agents')
     return { ok: true, agent: result.agent, inviteSent: result.inviteSent }
   } catch (error) {
     return toActionResult(error)
@@ -76,8 +78,8 @@ export async function patchAgentAction(
 ): Promise<AgentActionResult> {
   try {
     await patchAgent(id, input)
-    revalidatePath('/settings/team')
-    revalidatePath(`/settings/team/${id}`)
+    revalidatePath('/manage/agents')
+    revalidatePath(`/manage/agents/${id}`)
     return { ok: true }
   } catch (error) {
     return toActionResult(error)
@@ -87,7 +89,7 @@ export async function patchAgentAction(
 export async function deleteAgentAction(id: string): Promise<AgentActionResult> {
   try {
     await deleteAgent(id)
-    revalidatePath('/settings/team')
+    revalidatePath('/manage/agents')
     return { ok: true }
   } catch (error) {
     return toActionResult(error)
@@ -109,8 +111,22 @@ export async function setAgentPasswordAction(
 export async function resendInviteAction(id: string): Promise<AgentActionResult> {
   try {
     await resendInvite(id)
-    revalidatePath('/settings/team')
-    revalidatePath(`/settings/team/${id}`)
+    revalidatePath('/manage/agents')
+    revalidatePath(`/manage/agents/${id}`)
+    return { ok: true }
+  } catch (error) {
+    return toActionResult(error)
+  }
+}
+
+/** `/manage/agents/{id}/permissions` Save — replaces the Agent's mailbox-access grants in one transaction (spec §6). */
+export async function putAgentMailboxesAction(
+  id: string,
+  mailboxIds: string[],
+): Promise<AgentActionResult> {
+  try {
+    await putAgentMailboxes(id, mailboxIds)
+    revalidatePath(`/manage/agents/${id}/permissions`)
     return { ok: true }
   } catch (error) {
     return toActionResult(error)

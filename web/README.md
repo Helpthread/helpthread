@@ -93,11 +93,15 @@ Escape; global `?` overlay).
 
 Agents & Authentication (HT-54; `specs/auth/agents-and-auth.md`): real
 per-Agent accounts — `/setup` (first admin), `/login` (email+password),
-`/settings/team` (roster, admin-only UI), `/settings/team/new` (invite or
-admin-set password), `/settings/team/{id}` (profile: name/timezone/role,
-disable, change/reset password, delete), `/invite/{token}` (accept), and the
-real-Agent assignee control (`ConversationScreen`'s roster picker, the
-Unassigned/Mine/Assigned folders split by `assigneeAgentId`).
+`/manage/agents` (roster, admin-only UI, reached via the top bar's `Manage ▾`
+— admin-only scope), `/manage/agents/new` (invite or admin-set password),
+`/manage/agents/{id}` (profile: name/timezone/role, disable, change/reset
+password, delete) with a `/manage/agents/{id}/permissions` sidebar section
+(admin-only mailbox-access grants — admins have implicit access to all
+mailboxes), `/invite/{token}` (accept), and the real-Agent assignee control
+(`ConversationScreen`'s roster picker, the Unassigned/Mine/Assigned folders
+split by `assigneeAgentId`). The avatar menu is personal-scope only (Your
+Profile, Log out); keyboard shortcuts live under Settings.
 
 Still not wired: Forward, Merge, and composing a NEW conversation from
 scratch ("New message") — all spec'd for v1 but not yet implemented. See the

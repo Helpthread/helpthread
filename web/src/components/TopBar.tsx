@@ -9,6 +9,17 @@
  * Notifications are read-only display: the 6 most recent OPEN conversations,
  * fetched server-side in `app/layout.tsx` and handed down as props (no
  * client-side polling, no unread state — that's not in the API yet).
+ *
+ * ## The three-scope rule (HT-54 fidelity correction, TJ's 2026-07-18
+ * admin-IA review)
+ *
+ * `Manage ▾` is the **global-admin scope's** entry point — admins only, the
+ * whole trigger, not just its entries (a non-admin reaches Settings via the
+ * folder rail's gear icon instead). It carries Settings and Team (Agents);
+ * Keyboard shortcuts lives under Settings now (`SettingsScreen`), not here.
+ * The avatar menu is **personal scope, and personal scope only** — Your
+ * Profile and Log out, nothing else, ever (the first draft wrongly hung
+ * Team management off it; that was the defect this correction fixes).
  */
 
 import Link from 'next/link'
@@ -21,9 +32,7 @@ import { Avatar } from './ds/core/Avatar'
 import { DropdownMenu } from './ds/core/DropdownMenu'
 import { EmptyState } from './ds/core/EmptyState'
 import { IconButton } from './ds/core/IconButton'
-import { Kbd } from './ds/core/Kbd'
 import { MenuItem } from './ds/core/MenuItem'
-import { useShortcutsOverlay } from './ShortcutsProvider'
 import { useToast } from './Toaster'
 
 type MenuKey = 'manage' | 'notifications' | 'avatar'
@@ -121,7 +130,6 @@ export function TopBar({
   const pathname = usePathname()
   const router = useRouter()
   const showToast = useToast()
-  const { open: openShortcuts } = useShortcutsOverlay()
   const [openMenu, setOpenMenu] = useState<MenuKey | null>(null)
   const [, startLogoutTransition] = useTransition()
 
@@ -201,50 +209,51 @@ export function TopBar({
         Mailbox
       </button>
 
-      <div style={{ position: 'relative' }}>
-        <button
-          type="button"
-          onClick={() => toggle('manage')}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            border: 'none',
-            cursor: 'pointer',
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'inherit',
-            padding: '6px 10px',
-            borderRadius: 'var(--ht-radius-md)',
-            background:
-              openMenu === 'manage'
-                ? 'color-mix(in oklab, var(--ht-header-fg) 16%, transparent)'
-                : 'none',
-          }}
-        >
-          Manage
-          <ChevronDownIcon />
-        </button>
-        <DropdownMenu open={openMenu === 'manage'} onClose={() => setOpenMenu(null)}>
-          <MenuItem
-            onClick={() => {
-              setOpenMenu(null)
-              router.push('/settings')
+      {me?.role === 'admin' && (
+        <div style={{ position: 'relative' }}>
+          <button
+            type="button"
+            onClick={() => toggle('manage')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              border: 'none',
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+              color: 'inherit',
+              padding: '6px 10px',
+              borderRadius: 'var(--ht-radius-md)',
+              background:
+                openMenu === 'manage'
+                  ? 'color-mix(in oklab, var(--ht-header-fg) 16%, transparent)'
+                  : 'none',
             }}
           >
-            Settings
-          </MenuItem>
-          <MenuItem
-            shortcut={<Kbd>?</Kbd>}
-            onClick={() => {
-              setOpenMenu(null)
-              openShortcuts()
-            }}
-          >
-            Keyboard shortcuts
-          </MenuItem>
-        </DropdownMenu>
-      </div>
+            Manage
+            <ChevronDownIcon />
+          </button>
+          <DropdownMenu open={openMenu === 'manage'} onClose={() => setOpenMenu(null)}>
+            <MenuItem
+              onClick={() => {
+                setOpenMenu(null)
+                router.push('/settings')
+              }}
+            >
+              Settings
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setOpenMenu(null)
+                router.push('/manage/agents')
+              }}
+            >
+              Team
+            </MenuItem>
+          </DropdownMenu>
+        </div>
+      )}
 
       <span style={{ flex: 1 }} />
 
@@ -333,30 +342,13 @@ export function TopBar({
             onClick={() => {
               setOpenMenu(null)
               if (me !== null) {
-                router.push(`/settings/team/${me.id}`)
+                router.push(`/manage/agents/${me.id}`)
               } else {
                 stubToast('Your profile')
               }
             }}
           >
             Your profile
-          </MenuItem>
-          <MenuItem
-            onClick={() => {
-              setOpenMenu(null)
-              router.push('/settings')
-            }}
-          >
-            Settings
-          </MenuItem>
-          <MenuItem
-            shortcut={<Kbd>?</Kbd>}
-            onClick={() => {
-              setOpenMenu(null)
-              openShortcuts()
-            }}
-          >
-            Keyboard shortcuts
           </MenuItem>
           <div style={{ height: 1, background: 'var(--ht-divider)', margin: '4px 2px' }} />
           <MenuItem

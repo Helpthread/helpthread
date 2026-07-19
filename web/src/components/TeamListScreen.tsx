@@ -1,13 +1,18 @@
 'use client'
 
 /**
- * `/settings/team` — the Agent roster (HT-54; specs/auth/agents-and-auth.md
+ * `/manage/agents` — the Agent roster (HT-54; specs/auth/agents-and-auth.md
  * §7): FreeScout-modelled cards (avatar-or-initials, name, email, a role
  * chip), a "New Agent" action, and a client-side search filter. Admin-only
  * UI (the engine enforces the actual mutations anyway); a non-admin never
- * reaches this screen — `app/settings/team/page.tsx` sends them to their own
+ * reaches this screen — `app/manage/agents/page.tsx` sends them to their own
  * profile instead (the simpler of the brief's two options). **NEW designed
  * surface — requires TJ fidelity sign-off.**
+ *
+ * Moved off `/settings/team` per TJ's 2026-07-18 admin-IA fidelity review
+ * (HT-54): Team is `Manage ▾`-scoped, not a Settings subpage, so the back
+ * link now returns to the Inbox rather than to Settings — the same
+ * top-level-peer back affordance `SettingsScreen` itself uses.
  */
 
 import Link from 'next/link'
@@ -45,10 +50,10 @@ export function TeamListScreen({ agents }: { agents: Agent[] }) {
     <main style={{ flex: 1, minWidth: 0, padding: 24 }}>
       <div style={{ maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <Link
-          href="/settings"
+          href="/inbox/open"
           style={{ fontSize: 13, color: 'var(--ht-ink-muted)', textDecoration: 'none' }}
         >
-          ← Settings
+          ← Inbox
         </Link>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -61,7 +66,7 @@ export function TeamListScreen({ agents }: { agents: Agent[] }) {
               placeholder="Search Agents…"
             />
           </div>
-          <Button variant="primary" onClick={() => router.push('/settings/team/new')}>
+          <Button variant="primary" onClick={() => router.push('/manage/agents/new')}>
             New Agent
           </Button>
         </div>
@@ -81,7 +86,7 @@ export function TeamListScreen({ agents }: { agents: Agent[] }) {
               <button
                 key={agent.id}
                 type="button"
-                onClick={() => router.push(`/settings/team/${agent.id}`)}
+                onClick={() => router.push(`/manage/agents/${agent.id}`)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',

@@ -1,15 +1,23 @@
 'use client'
 
 /**
- * /settings — three cards on the paper background, deliberately outside the
+ * /settings — four cards on the paper background, deliberately outside the
  * `(shell)` group (no folder rail). The Deployment card is plain read-only
- * data handed down from the server page; Appearance is the one interactive
- * bit here, wired to `useTheme`.
+ * data handed down from the server page; Appearance is wired to `useTheme`.
+ *
+ * Keyboard shortcuts (HT-54 fidelity correction, TJ's 2026-07-18 admin-IA
+ * review): moved here from the top bar's Manage/avatar menus — a personal
+ * preference, not a Manage-scoped or avatar-scoped affordance. The global
+ * `?` shortcut (`ShortcutsProvider`) is unchanged; this card is just an
+ * explicit way to reach the same `ShortcutsOverlay` without knowing the key.
  */
 
 import Link from 'next/link'
 import type { ReactNode } from 'react'
 import type { Theme } from '../lib/theme'
+import { Button } from './ds/core/Button'
+import { Kbd } from './ds/core/Kbd'
+import { useShortcutsOverlay } from './ShortcutsProvider'
 import { useTheme } from './ThemeProvider'
 
 export interface DeploymentInfo {
@@ -42,6 +50,7 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
 
 export function SettingsScreen({ deployment }: { deployment: DeploymentInfo }) {
   const { theme, setTheme } = useTheme()
+  const { open: openShortcuts } = useShortcutsOverlay()
 
   return (
     <main style={{ flex: 1, minWidth: 0, padding: 24 }}>
@@ -104,6 +113,17 @@ export function SettingsScreen({ deployment }: { deployment: DeploymentInfo }) {
                 </button>
               )
             })}
+          </div>
+        </Card>
+
+        <Card title="Keyboard shortcuts">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <p style={{ margin: 0, flex: 1, fontSize: 13, color: 'var(--ht-ink-muted)' }}>
+              Press <Kbd>?</Kbd> anywhere in the app to bring up the full list.
+            </p>
+            <Button variant="outline" onClick={openShortcuts}>
+              View shortcuts
+            </Button>
           </div>
         </Card>
 
