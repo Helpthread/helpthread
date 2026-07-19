@@ -8,6 +8,7 @@
  * directly.
  */
 
+import { randomBytes } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { mintInviteToken } from '../auth/invite-token.js'
 import { hashPassword } from '../auth/password-hash.js'
@@ -19,7 +20,12 @@ import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import { type AgentRecord, type AgentStore, createAgentStore } from '../store/agents.js'
 import { createConversationStore } from '../store/conversations.js'
 import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
+import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
+import { createWebhookEndpointStore } from '../store/webhook-endpoints.js'
 import { createInboxApi } from './index.js'
+
+/** None of this suite's tests exercise `/webhooks/*` — a real PGlite-backed store plus a no-op queue is just enough for `createInboxApi` to construct (HT-69's `webhooks` deps are now REQUIRED, mirroring `agents`). */
+const WEBHOOKS_ENC_KEY = randomBytes(ENCRYPTION_KEY_BYTES)
 
 const TOKEN = 'test-token-for-the-agents-and-auth-suite'
 const MAIL_DOMAIN = 'mail.example.test'
@@ -85,6 +91,10 @@ describe('Agents & Authentication API', () => {
         providers: [createPasswordAuthProvider({ agentStore })],
         mailboxStore,
         ...(overrides.uiBaseUrl !== undefined ? { uiBaseUrl: overrides.uiBaseUrl } : {}),
+      },
+      webhooks: {
+        store: createWebhookEndpointStore(db, WEBHOOKS_ENC_KEY),
+        queue: { async enqueue() {} },
       },
     })
     return { db, agentStore, mailboxStore, api, sent }

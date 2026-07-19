@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { createPgliteDb, type Db } from '../db/client.js'
+import { createPgliteDb, type Db, type Queryable } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import {
   createConversationStore,
@@ -7,6 +7,49 @@ import {
   type NewThread,
   type SendEnvelope,
 } from './conversations.js'
+
+/** Raw `event_outbox` row shape, for the event-emission assertions below (HT-69). */
+interface OutboxEventRow {
+  event_id: string
+  type: string
+  conversation_id: string
+  data: Record<string, unknown>
+}
+
+/** Every `event_outbox` row for `conversationId`, oldest first — a direct read, bypassing `EventOutboxStore`, since these tests assert on WHAT was written, not on the claim/drain machinery (covered by `event-outbox.test.ts`). */
+async function outboxEventsFor(db: Db, conversationId: string): Promise<OutboxEventRow[]> {
+  return db.query<OutboxEventRow>(
+    'SELECT event_id, type, conversation_id, data FROM event_outbox WHERE conversation_id = $1 ORDER BY occurred_at, event_id',
+    [conversationId],
+  )
+}
+
+/**
+ * Wrap `real` so that any `INSERT INTO event_outbox` issued INSIDE a
+ * transaction throws — used to prove the state write and the outbox event
+ * genuinely share one transaction (spec §4: "an event never fires for a
+ * change that rolled back"), by forcing the event write to fail AFTER the
+ * state write already ran and confirming BOTH are rolled back, not just the
+ * event.
+ */
+function dbFailingOutboxInsert(real: Db): Db {
+  return {
+    query: (sql, params) => real.query(sql, params),
+    close: () => real.close(),
+    transaction: async <T>(fn: (tx: Queryable) => Promise<T>): Promise<T> =>
+      real.transaction(async (tx) => {
+        const guarded: Queryable = {
+          query: async (sql, params) => {
+            if (sql.includes('INSERT INTO event_outbox')) {
+              throw new Error('simulated event_outbox insert failure')
+            }
+            return tx.query(sql, params)
+          },
+        }
+        return fn(guarded)
+      }),
+  }
+}
 
 // --- fixtures ----------------------------------------------------------------
 
@@ -1610,6 +1653,146 @@ describe('createConversationStore', () => {
         const claimed = await store.claimThreadForDelivery(draft.threadId, 60_000)
         expect(claimed?.id).toBe(draft.threadId)
       })
+    })
+  })
+
+  describe('event emission (HT-69, spec §4)', () => {
+    /** Insert a real `agents` row directly — setConversationAssignee's assignee_agent_id FKs to it. Same shape as the `tags & assignee`/`drafts` describe blocks' own local helpers (this file's convention: a small per-block helper rather than a shared one). */
+    async function createTestAgent(db: Db, email = 'agent@example.test'): Promise<string> {
+      const [row] = await db.query<{ id: string }>(
+        `INSERT INTO agents (email, name, role, status) VALUES ($1, 'Agent', 'agent', 'active') RETURNING id`,
+        [email],
+      )
+      return row.id
+    }
+
+    it('setConversationStatus emits conversation.status_changed with a thin {from,to} payload, in the SAME transaction — a rollback fires NOTHING', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const updated = await store.setConversationStatus(conversationId, 'closed')
+      expect(updated).not.toBeNull()
+
+      const events = await outboxEventsFor(db, conversationId)
+      expect(events).toHaveLength(1)
+      expect(events[0].type).toBe('conversation.status_changed')
+      // Thin payload: exactly {from, to} — never subject/customerEmail/etc.
+      expect(Object.keys(events[0].data).sort()).toEqual(['from', 'to'])
+      expect(events[0].data).toEqual({ from: 'active', to: 'closed' })
+
+      // Rollback: force the event write itself to fail, and prove the STATUS
+      // change rolled back with it (not just that no event landed).
+      const failingStore = createConversationStore(dbFailingOutboxInsert(db))
+      await expect(failingStore.setConversationStatus(conversationId, 'spam')).rejects.toThrow()
+      const afterRollback = await store.getConversation(conversationId)
+      expect(afterRollback?.status).toBe('closed') // unchanged — the failed attempt never committed
+      expect(await outboxEventsFor(db, conversationId)).toHaveLength(1) // still just the first
+    })
+
+    it('re-asserting the SAME status is not a "transition" — fires nothing', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      await store.setConversationStatus(conversationId, 'active') // conversations start 'active'
+
+      expect(await outboxEventsFor(db, conversationId)).toHaveLength(0)
+    })
+
+    it('setConversationTags emits conversation.tags_changed with a thin {tags} payload on every replace, even a no-op one', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      await store.setConversationTags(conversationId, ['billing', 'urgent'])
+      await store.setConversationTags(conversationId, ['billing', 'urgent']) // same set again
+
+      const events = await outboxEventsFor(db, conversationId)
+      expect(events).toHaveLength(2)
+      for (const event of events) {
+        expect(event.type).toBe('conversation.tags_changed')
+        expect(Object.keys(event.data)).toEqual(['tags'])
+      }
+      expect(events[0].data).toEqual({ tags: ['billing', 'urgent'] })
+
+      const failingStore = createConversationStore(dbFailingOutboxInsert(db))
+      await expect(
+        failingStore.setConversationTags(conversationId, ['rolled-back']),
+      ).rejects.toThrow()
+      const afterRollback = await store.getConversation(conversationId)
+      expect(afterRollback?.tags).toEqual(['billing', 'urgent']) // unchanged
+      expect(await outboxEventsFor(db, conversationId)).toHaveLength(2) // still just the first two
+    })
+
+    it('setConversationAssignee emits conversation.assignee_changed with a thin {assigneeAgentId} payload, set or cleared', async () => {
+      const { db, store } = await freshStore()
+      const agentId = await createTestAgent(db)
+      const { conversationId } = await store.createConversation(newConversation())
+
+      await store.setConversationAssignee(conversationId, agentId)
+      await store.setConversationAssignee(conversationId, null)
+
+      const events = await outboxEventsFor(db, conversationId)
+      expect(events).toHaveLength(2)
+      for (const event of events) {
+        expect(event.type).toBe('conversation.assignee_changed')
+        expect(Object.keys(event.data)).toEqual(['assigneeAgentId'])
+      }
+      expect(events[0].data).toEqual({ assigneeAgentId: agentId })
+      expect(events[1].data).toEqual({ assigneeAgentId: null })
+    })
+
+    it('setConversationAssignee: an invalid_agent FK failure fires no event (the UPDATE itself never committed)', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const result = await store.setConversationAssignee(conversationId, RANDOM_UUID)
+
+      expect(result).toBe('invalid_agent')
+      expect(await outboxEventsFor(db, conversationId)).toHaveLength(0)
+    })
+
+    it("releaseThreadLease('sent') emits conversation.reply_sent with a thin {threadId,authorKind} payload; 'failed' fires nothing", async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      const sentThread = await store.appendThread(conversationId, newThread())
+      if (!sentThread.ok) throw new Error('unreachable')
+      const failedThread = await store.appendThread(
+        conversationId,
+        newThread({ messageId: '<outbound-2@mail.example.test>' }),
+      )
+      if (!failedThread.ok) throw new Error('unreachable')
+
+      await store.claimThreadForDelivery(sentThread.threadId, 30_000)
+      await store.releaseThreadLease(sentThread.threadId, 'sent')
+      await store.claimThreadForDelivery(failedThread.threadId, 30_000)
+      await store.releaseThreadLease(failedThread.threadId, 'failed')
+
+      const events = await outboxEventsFor(db, conversationId)
+      expect(events).toHaveLength(1) // only the 'sent' one
+      expect(events[0].type).toBe('conversation.reply_sent')
+      expect(Object.keys(events[0].data).sort()).toEqual(['authorKind', 'threadId'])
+      expect(events[0].data).toEqual({ threadId: sentThread.threadId, authorKind: 'agent' })
+    })
+
+    it('soft delete fires NOTHING, ever — deleting a conversation with prior events adds no new row for the deletion', async () => {
+      const { db, store } = await freshStore()
+      const { conversationId } = await store.createConversation(newConversation())
+      await store.setConversationStatus(conversationId, 'closed') // one event, for the baseline
+      const before = await outboxEventsFor(db, conversationId)
+      expect(before).toHaveLength(1)
+
+      const deleted = await store.deleteConversation(conversationId)
+      expect(deleted).toBe(true)
+
+      const after = await outboxEventsFor(db, conversationId)
+      expect(after).toHaveLength(1) // unchanged — the delete itself added nothing
+      expect(after).toEqual(before)
+
+      // And every write path on a now-deleted conversation is a no-op that
+      // also fires nothing (the null/invalid-agent returns are already
+      // covered elsewhere; this just confirms zero NEW event rows).
+      await store.setConversationStatus(conversationId, 'active')
+      await store.setConversationTags(conversationId, ['x'])
+      expect(await outboxEventsFor(db, conversationId)).toHaveLength(1)
     })
   })
 })

@@ -59,6 +59,7 @@ import type { Db, Queryable } from '../db/client.js'
 import type { BlobStore, RawInboundMessage, RawMessageContent } from '../providers/index.js'
 import { insertThreadAttachmentsInTx, type NewThreadAttachment } from '../store/attachments.js'
 import { appendThreadInTx, createConversationInTx, type NewThread } from '../store/conversations.js'
+import { appendOutboxEventInTx } from '../store/event-outbox.js'
 import {
   type InboundDeliveryStore,
   LeaseLostError,
@@ -665,6 +666,26 @@ async function storeAndMarkDelivered(
  * `appendFallback` names why (spec §6's append-fallback reason, HT-44) —
  * the decision itself is left untouched, so the caller can log both what
  * `decideThreading` decided AND what the store made of it.
+ *
+ * ## Event emission (HT-69; specs/modules/substrate-v1.md §4)
+ *
+ * This is "the ingestion append path" spec §4's vocabulary table means by
+ * `conversation.created`/`conversation.message_received`: both are fired
+ * HERE, inside the SAME `tx` this function already writes the conversation/
+ * thread rows in (spec §4's transactional-outbox rule) — never inside
+ * `appendThreadInTx`/`createConversationInTx` themselves, which are shared
+ * by callers that must NOT fire these events (`src/mail/send.ts`'s outbound
+ * `sendReply`, and the notes handler in `src/api/conversations.ts`, both go
+ * through `appendThread` too, but neither is "an inbound thread stored").
+ *
+ * A brand-new conversation's first message fires BOTH events
+ * (`conversation.created` with no data, then `conversation.message_
+ * received` with `reopened: false` — a fresh conversation is never a
+ * reopen) — this covers a genuinely fresh `decision.kind === 'new'` AND the
+ * deleted/not-found fallback below, which also creates a fresh
+ * conversation. A successful `append` fires only `conversation.message_
+ * received`, with `reopened` taken verbatim from `AppendResult.reopened`
+ * (`src/store/conversations.ts`) rather than re-derived here.
  */
 async function writeParsedEmail(
   tx: Queryable,
@@ -681,15 +702,22 @@ async function writeParsedEmail(
   }
 
   if (decision.kind === 'new') {
-    return createConversationInTx(tx, {
+    const created = await createConversationInTx(tx, {
       subject: parsed.subject,
       customerEmail: fromAddressOf(parsed),
       firstMessage,
     })
+    await emitNewConversationEvents(tx, created.conversationId, created.threadId)
+    return created
   }
 
   const appended = await appendThreadInTx(tx, decision.conversationId, firstMessage)
   if (appended.ok) {
+    await appendOutboxEventInTx(tx, {
+      type: 'conversation.message_received',
+      conversationId: decision.conversationId,
+      data: { threadId: appended.threadId, reopened: appended.reopened },
+    })
     return { conversationId: decision.conversationId, threadId: appended.threadId }
   }
 
@@ -701,7 +729,26 @@ async function writeParsedEmail(
     customerEmail: fromAddressOf(parsed),
     firstMessage,
   })
+  await emitNewConversationEvents(tx, created.conversationId, created.threadId)
   return { ...created, appendFallback: appended.reason }
+}
+
+/** Fire `conversation.created` + `conversation.message_received` (`reopened: false`) for a freshly-created conversation's first thread — the one pair {@link writeParsedEmail} emits from two call sites (a genuine `new` decision, and the deleted/not-found fallback), factored out so both stay byte-identical. */
+async function emitNewConversationEvents(
+  tx: Queryable,
+  conversationId: string,
+  threadId: string,
+): Promise<void> {
+  await appendOutboxEventInTx(tx, {
+    type: 'conversation.created',
+    conversationId,
+    data: {},
+  })
+  await appendOutboxEventInTx(tx, {
+    type: 'conversation.message_received',
+    conversationId,
+    data: { threadId, reopened: false },
+  })
 }
 
 /**

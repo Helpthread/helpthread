@@ -41,6 +41,9 @@ export const QUEUE_DRAIN_PATH = '/api/v1/internal/queue/drain'
 /** `GET` (Vercel Cron) → daily Gmail `watch()` re-arm + reconciliation sweep (runbook Part C: daily at 06:00 UTC). */
 export const WATCH_MAINTENANCE_PATH = '/api/v1/internal/cron/watch-maintenance'
 
+/** `GET` (Vercel Cron) → drain one bounded batch of `event_outbox` into `queue_jobs` webhook-delivery fan-out (HT-69; `src/webhooks/outbox-drain.ts`; runbook Part C: every minute, same cadence as {@link QUEUE_DRAIN_PATH}). A SEPARATE endpoint from the queue drain — this one turns outbox rows into queue jobs; the queue drain is what then delivers them. */
+export const OUTBOX_DRAIN_PATH = '/api/v1/internal/outbox/drain'
+
 /**
  * `GET` (an HTTP monitor, or an operator's curl) → the point-in-time
  * {@link HealthReport} (`./health.ts`; HT-44, runbook Part G). Same
@@ -58,6 +61,8 @@ export interface AppHandlerDeps {
   cronSecret: string
   /** Drain one bounded batch of the job queue; returns a JSON-serializable report for the response body + logs. */
   drainQueue: () => Promise<unknown>
+  /** Drain one bounded batch of `event_outbox` into webhook-delivery queue jobs (HT-69, {@link OUTBOX_DRAIN_PATH}); returns a JSON-serializable report for the response body + logs. */
+  drainOutbox: () => Promise<unknown>
   /** Run one daily watch-renewal + reconciliation-sweep pass; returns a JSON-serializable report. */
   runWatchMaintenance: () => Promise<unknown>
   /** Assemble the health report (`./health.ts`) — the {@link HEALTH_PATH} endpoint's work. */
@@ -76,6 +81,9 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
 
     if (pathname === QUEUE_DRAIN_PATH) {
       return handleCronEndpoint(request, deps.cronSecret, 'queue-drain', deps.drainQueue)
+    }
+    if (pathname === OUTBOX_DRAIN_PATH) {
+      return handleCronEndpoint(request, deps.cronSecret, 'outbox-drain', deps.drainOutbox)
     }
     if (pathname === WATCH_MAINTENANCE_PATH) {
       return handleCronEndpoint(

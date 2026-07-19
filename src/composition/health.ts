@@ -40,6 +40,21 @@
  *   72h means renewal has been failing for days — caught while there is
  *   still runway). `disconnected` mailboxes are deliberately silent: that
  *   state is an operator's own explicit action (HT-47).
+ * - **Webhooks** (HT-69; specs/modules/substrate-v1.md §5: "surfaced by
+ *   `/api/v1/internal/health` (runbook Part G gains a section)"):
+ *   `webhook-endpoint-auto-disabled` for every `webhook_endpoints` row
+ *   `WebhookEndpointStore.recordDeliveryFailure` flipped past the
+ *   consecutive-failure threshold (spec §9 decision 2: 20) — spec's own
+ *   rationale for alerting here ("conservative because a disabled endpoint
+ *   silently stops a paid module"). `webhook-delivery-dead-letter-growth`
+ *   for any `queue_jobs` row on `WEBHOOK_DELIVERY_TOPIC` dead-lettered in
+ *   the last 24h — the SAME growth-not-backlog reasoning as `queue-dead-
+ *   letter-growth`/`ingest-dead-letter-growth` above (a dead-lettered
+ *   delivery's `webhook_endpoints.recordDeliveryFailure` write already
+ *   happened by the time it reaches this state — `src/webhooks/
+ *   delivery.ts`'s module doc — so this is a SEPARATE signal from the
+ *   auto-disable alert: an endpoint can shed individual failed deliveries
+ *   for a while before crossing 20 consecutive and auto-disabling).
  *
  * ## What it deliberately does NOT check
  *
@@ -63,6 +78,7 @@
 import type { Db } from '../db/client.js'
 import type { QueueStats } from '../providers/adapters/postgres-queue/index.js'
 import type { InboundDeliveryStatus } from '../store/inbound-deliveries.js'
+import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
 
 /** Oldest-ready-job age (seconds) past which the every-minute drain is presumed stalled. */
 export const QUEUE_OLDEST_READY_ALERT_SECONDS = 300
@@ -88,6 +104,13 @@ export interface MailboxHealth {
   watchExpiresAt: string | null
 }
 
+/** One auto-disabled webhook endpoint — see the module doc's Webhooks section (HT-69). */
+export interface WebhookHealth {
+  id: string
+  url: string
+  consecutiveFailures: number
+}
+
 /** The report `GET /api/v1/internal/health` serves — see the module doc for each section and the alert it can trip. */
 export interface HealthReport {
   /** `alerts.length === 0` — the endpoint's 200-vs-503 pivot. */
@@ -110,6 +133,13 @@ export interface HealthReport {
     alertThreshold: number
   }
   mailboxes: MailboxHealth[]
+  /** HT-69 (spec §5's "surfaced by /api/v1/internal/health") — see the module doc's Webhooks section. */
+  webhooks: {
+    /** Endpoints currently `auto_disabled` — the standing set, not a 24h window (mirrors `ingest.deadLetterTotal`'s "inspect, don't page on the backlog itself" framing; the ALERT is what pages, on `.length > 0`). */
+    autoDisabled: WebhookHealth[]
+    /** `queue_jobs` rows on `WEBHOOK_DELIVERY_TOPIC` dead-lettered in the last 24h. */
+    deliveryFailuresLast24h: number
+  }
 }
 
 /** Every ledger status, for zero-filling {@link HealthReport.ingest}'s per-status map (a status with no 24h rows must still appear, as `0`). */
@@ -235,6 +265,42 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
     }
   }
 
+  // --- Webhooks (HT-69; module doc's Webhooks section). ----------------------
+  const autoDisabledRows = await deps.db.query<{
+    id: string
+    url: string
+    consecutive_failures: number
+  }>(
+    `SELECT id, url, consecutive_failures FROM webhook_endpoints
+     WHERE status = 'auto_disabled'
+     ORDER BY updated_at DESC`,
+  )
+  const autoDisabled: WebhookHealth[] = autoDisabledRows.map((row) => ({
+    id: row.id,
+    url: row.url,
+    consecutiveFailures: row.consecutive_failures,
+  }))
+  if (autoDisabled.length > 0) {
+    alerts.push(
+      `webhook-endpoint-auto-disabled: ${autoDisabled.length} webhook endpoint(s) auto-disabled ` +
+        `after reaching the consecutive-failure threshold — inspect and re-enable via PATCH ` +
+        '/api/v1/webhooks/{id} once fixed (runbook Part G)',
+    )
+  }
+  const deliveryFailuresRows = await deps.db.query<{ count: number }>(
+    `SELECT count(*)::int AS count FROM queue_jobs
+     WHERE topic = $1 AND dead_lettered_at > now() - interval '24 hours'`,
+    [WEBHOOK_DELIVERY_TOPIC],
+  )
+  const deliveryFailuresLast24h = deliveryFailuresRows[0]?.count ?? 0
+  if (deliveryFailuresLast24h > 0) {
+    alerts.push(
+      `webhook-delivery-dead-letter-growth: ${deliveryFailuresLast24h} webhook delivery(ies) ` +
+        'dead-lettered in the last 24h — inspect queue_jobs.last_error for topic ' +
+        `'${WEBHOOK_DELIVERY_TOPIC}'`,
+    )
+  }
+
   return {
     ok: alerts.length === 0,
     alerts,
@@ -247,6 +313,7 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
       alertThreshold: FORGED_TOKEN_ALERT_THRESHOLD,
     },
     mailboxes,
+    webhooks: { autoDisabled, deliveryFailuresLast24h },
   }
 }
 

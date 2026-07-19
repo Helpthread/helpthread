@@ -81,6 +81,14 @@ import {
   matchOpenTrackingPixel,
   matchRoute,
 } from './router.js'
+import {
+  handleCreateWebhook,
+  handleDeleteWebhook,
+  handleListWebhooks,
+  handlePatchWebhook,
+  handleTestWebhook,
+  type WebhooksApiDeps,
+} from './webhooks.js'
 
 /**
  * Minimum length for the service Bearer token. A short/empty token is a
@@ -195,6 +203,14 @@ export interface InboxApiDeps {
    * for the conceded race.
    */
   selfEchoGuard?: SelfEchoGuardDeps
+  /**
+   * The webhooks admin API (HT-69; specs/modules/substrate-v1.md §5) —
+   * REQUIRED, like `agents`: this is core substrate ("free forever", spec
+   * §1), not a deployment-specific optional feature like `openTracking`/
+   * `gmailPush`. See `src/api/webhooks.ts`'s module doc for the full
+   * `POST`/`GET`/`PATCH`/`DELETE`/`.../test` surface this wires up.
+   */
+  webhooks: WebhooksApiDeps
 }
 
 /**
@@ -493,6 +509,43 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             await resolveActingAgent(request, deps.agents.store),
             request,
             deps.agents,
+          )
+
+        // --- Webhooks admin API (HT-69; specs/modules/substrate-v1.md §5) ---
+
+        case 'webhooks-list':
+          return await handleListWebhooks(
+            await resolveActingAgent(request, deps.agents.store),
+            deps.webhooks,
+          )
+
+        case 'webhooks-create':
+          return await handleCreateWebhook(
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.webhooks,
+          )
+
+        case 'webhook-patch':
+          return await handlePatchWebhook(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.webhooks,
+          )
+
+        case 'webhook-delete':
+          return await handleDeleteWebhook(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            deps.webhooks,
+          )
+
+        case 'webhook-test':
+          return await handleTestWebhook(
+            route.id,
+            await resolveActingAgent(request, deps.agents.store),
+            deps.webhooks,
           )
       }
     } catch (err) {

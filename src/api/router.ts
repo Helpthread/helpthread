@@ -164,6 +164,30 @@ const AGENT_MAILBOXES: RouteDef = {
   methods: ['GET', 'PUT'],
 }
 
+// --- Webhooks admin API (HT-69; specs/modules/substrate-v1.md §5) -----------
+//
+// Admin-only, acting-Agent header REQUIRED on every route (`src/api/
+// webhooks.ts`'s module doc) — same Bearer-gated-ordinary-route shape as
+// Agents & Authentication above, no pre-auth carve-out.
+
+/** `/api/v1/webhooks` — list (GET) and register (POST), both admin only — spec §5. */
+const WEBHOOKS_LIST: RouteDef = {
+  pattern: /^\/api\/v1\/webhooks$/,
+  methods: ['GET', 'POST'],
+}
+
+/** `/api/v1/webhooks/{id}` — patch/delete (admin only) — spec §5. Anchored `[^/]+$` so it never matches a `.../test` suffix, mirroring `AGENT_ITEM`'s own anchoring against `.../password`/`.../invite`/`.../mailboxes`. */
+const WEBHOOK_ITEM: RouteDef = {
+  pattern: /^\/api\/v1\/webhooks\/(?<id>[^/]+)$/,
+  methods: ['PATCH', 'DELETE'],
+}
+
+/** `/api/v1/webhooks/{id}/test` — fire a synthetic `test.ping` through the real delivery path (admin only) — spec §5, POST only. */
+const WEBHOOK_TEST: RouteDef = {
+  pattern: /^\/api\/v1\/webhooks\/(?<id>[^/]+)\/test$/,
+  methods: ['POST'],
+}
+
 /** Every route this API recognizes, checked in order. */
 const ROUTES: readonly RouteDef[] = [
   CONVERSATIONS_LIST,
@@ -185,6 +209,9 @@ const ROUTES: readonly RouteDef[] = [
   MAILBOXES_LIST,
   AGENT_MAILBOXES,
   AGENT_ITEM,
+  WEBHOOKS_LIST,
+  WEBHOOK_TEST,
+  WEBHOOK_ITEM,
 ]
 
 /** The outcome of matching a `(method, pathname)` pair against {@link ROUTES}. */
@@ -214,6 +241,11 @@ export type RouteMatch =
   | { kind: 'mailboxes-list' }
   | { kind: 'agent-mailboxes-get'; id: string }
   | { kind: 'agent-mailboxes-put'; id: string }
+  | { kind: 'webhooks-list' }
+  | { kind: 'webhooks-create' }
+  | { kind: 'webhook-patch'; id: string }
+  | { kind: 'webhook-delete'; id: string }
+  | { kind: 'webhook-test'; id: string }
   | { kind: 'method-not-allowed'; allow: string[] }
   | { kind: 'not-found' }
 
@@ -339,6 +371,9 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     if (route === MAILBOXES_LIST) {
       return { kind: 'mailboxes-list' }
     }
+    if (route === WEBHOOKS_LIST) {
+      return method === 'GET' ? { kind: 'webhooks-list' } : { kind: 'webhooks-create' }
+    }
 
     // Every remaining route guarantees a present, non-empty `id` group (per
     // its `[^/]+` pattern) whenever it matched.
@@ -365,6 +400,13 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     if (route === AGENT_MAILBOXES) {
       if (method === 'GET') return { kind: 'agent-mailboxes-get', id }
       return { kind: 'agent-mailboxes-put', id }
+    }
+    if (route === WEBHOOK_TEST) {
+      return { kind: 'webhook-test', id }
+    }
+    if (route === WEBHOOK_ITEM) {
+      if (method === 'DELETE') return { kind: 'webhook-delete', id }
+      return { kind: 'webhook-patch', id }
     }
     if (route === AGENT_ITEM) {
       if (method === 'GET') return { kind: 'agent-item', id }

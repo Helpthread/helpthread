@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createAppHandler, HEALTH_PATH, QUEUE_DRAIN_PATH, WATCH_MAINTENANCE_PATH } from './app.js'
+import {
+  createAppHandler,
+  HEALTH_PATH,
+  OUTBOX_DRAIN_PATH,
+  QUEUE_DRAIN_PATH,
+  WATCH_MAINTENANCE_PATH,
+} from './app.js'
 import type { HealthReport } from './health.js'
 
 const CRON_SECRET = 'test-cron-secret-0123456789'
@@ -17,22 +23,25 @@ const HEALTHY_REPORT: HealthReport = {
   },
   forgedTokens: { deliveriesLast24h: 0, tokensLast24h: 0, alertThreshold: 5 },
   mailboxes: [],
+  webhooks: { autoDisabled: [], deliveryFailuresLast24h: 0 },
 }
 
 /** Build a handler over spy deps; the inbox API spy returns a recognizable 299 so delegation is observable. */
 function makeHandler(cronSecret: string = CRON_SECRET) {
   const inboxApi = vi.fn(async () => new Response('inbox', { status: 299 }))
   const drainQueue = vi.fn(async () => ({ claimed: 3, acked: 3 }))
+  const drainOutbox = vi.fn(async () => ({ claimed: 2, enqueued: 2, dispatched: 2 }))
   const runWatchMaintenance = vi.fn(async () => ({ total: 1, renewed: 1 }))
   const runHealthCheck = vi.fn(async (): Promise<HealthReport> => HEALTHY_REPORT)
   const handler = createAppHandler({
     inboxApi,
     cronSecret,
     drainQueue,
+    drainOutbox,
     runWatchMaintenance,
     runHealthCheck,
   })
-  return { handler, inboxApi, drainQueue, runWatchMaintenance, runHealthCheck }
+  return { handler, inboxApi, drainQueue, drainOutbox, runWatchMaintenance, runHealthCheck }
 }
 
 /** A request to `path`; attaches `Authorization: Bearer <secret>` unless `secret` is null. */
@@ -121,11 +130,67 @@ describe('createAppHandler — queue drain endpoint', () => {
       inboxApi,
       cronSecret: CRON_SECRET,
       drainQueue,
+      drainOutbox: vi.fn(async () => ({})),
       runWatchMaintenance,
       runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
     })
 
     const res = await handler(req(QUEUE_DRAIN_PATH))
+    const bodyText = await res.text()
+
+    expect(res.status).toBe(500)
+    expect(bodyText).not.toContain('secret-internal-detail-should-not-leak')
+    expect(JSON.parse(bodyText)).toEqual({
+      error: { code: 'server_error', message: 'Internal server error.' },
+    })
+  })
+})
+
+describe('createAppHandler — outbox drain endpoint (HT-69)', () => {
+  it('runs the outbox drain and returns its report on a GET with the correct cron secret — a SEPARATE endpoint from the queue drain', async () => {
+    const { handler, drainOutbox, drainQueue, inboxApi } = makeHandler()
+
+    const res = await handler(req(OUTBOX_DRAIN_PATH))
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      ok: true,
+      report: { claimed: 2, enqueued: 2, dispatched: 2 },
+    })
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(drainOutbox).toHaveBeenCalledOnce()
+    expect(drainQueue).not.toHaveBeenCalled()
+    expect(inboxApi).not.toHaveBeenCalled()
+  })
+
+  it('rejects a wrong cron secret with 401 and never runs the work', async () => {
+    const { handler, drainOutbox } = makeHandler()
+    const res = await handler(req(OUTBOX_DRAIN_PATH, { secret: 'wrong-secret-9999999999' }))
+    expect(res.status).toBe(401)
+    expect(drainOutbox).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-GET method (authenticated) with 405', async () => {
+    const { handler, drainOutbox } = makeHandler()
+    const res = await handler(req(OUTBOX_DRAIN_PATH, { method: 'POST' }))
+    expect(res.status).toBe(405)
+    expect(drainOutbox).not.toHaveBeenCalled()
+  })
+
+  it('answers a generic 500 (never the error text) when the work throws', async () => {
+    const inboxApi = vi.fn(async () => new Response(null, { status: 299 }))
+    const handler = createAppHandler({
+      inboxApi,
+      cronSecret: CRON_SECRET,
+      drainQueue: vi.fn(async () => ({})),
+      drainOutbox: vi.fn(async () => {
+        throw new Error('secret-internal-detail-should-not-leak')
+      }),
+      runWatchMaintenance: vi.fn(async () => ({})),
+      runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
+    })
+
+    const res = await handler(req(OUTBOX_DRAIN_PATH))
     const bodyText = await res.text()
 
     expect(res.status).toBe(500)
