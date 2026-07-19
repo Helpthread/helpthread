@@ -122,8 +122,11 @@ delivered as a non-test event:
 **Events are thin by design.** `data` carries only identifiers and small
 typed facts — never a message body, subject line, or address. Fetch full
 content through the read API (`GET /api/v1/conversations/{id}`) with your
-own credentials once an event tells you something changed. This keeps every
-webhook payload free of customer content and PII by construction.
+own credentials once an event tells you something changed. Message content
+therefore never transits a webhook — but treat payloads as sensitive
+anyway: some fields are operator-authored free text (`conversation.tags_changed`
+carries the tag strings themselves), and identifiers still reveal that a
+given conversation exists and is active.
 
 **Soft-deleted conversations fire nothing.** Deletion is invisible on every
 other endpoint (a `404`, indistinguishable from never having existed) and
