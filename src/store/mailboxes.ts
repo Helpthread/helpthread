@@ -46,6 +46,12 @@
  *   `watch()` re-armed (a `paused` mailbox isn't being ingested; a
  *   `needs_reconnect` one has a dead grant `watch()` can't fix) nor a
  *   reconcile job enqueued, for the same reason.
+ * - {@link MailboxStore.listMailboxes} (HT-54; specs/auth/agents-and-auth.md
+ *   §3.4/§6): list EVERY mailbox regardless of status — the roster
+ *   `GET /api/v1/mailboxes` renders as the Permissions screen's checkbox
+ *   list. Deliberately unfiltered, unlike {@link listActiveMailboxes}: the
+ *   Permissions UI shows disconnected/paused mailboxes too, so an admin can
+ *   see a grant that exists on a mailbox no longer ingesting.
  * - {@link MailboxStore.markDisconnected} (HT-47; specs/mail/gmail-connect.md's
  *   disconnect section): mark a mailbox `disconnected` — the terminal,
  *   operator-initiated state the disconnect admin action puts a mailbox into
@@ -192,6 +198,17 @@ export interface MailboxStore {
    * `[]` when no mailbox is currently active.
    */
   listActiveMailboxes(): Promise<MailboxRecord[]>
+
+  /**
+   * List EVERY mailbox regardless of status, ordered by `created_at` — the
+   * roster `GET /api/v1/mailboxes` (HT-54, specs/auth/agents-and-auth.md
+   * §3.4/§6) serves to the Permissions screen. Unlike
+   * {@link listActiveMailboxes}, deliberately UNFILTERED: the Permissions UI
+   * must render checkboxes for `paused`/`needs_reconnect`/`disconnected`
+   * mailboxes too, so an admin can see (and later fix) a grant on a mailbox
+   * that isn't currently ingesting. Returns `[]` when no mailbox exists.
+   */
+  listMailboxes(): Promise<MailboxRecord[]>
 }
 
 /** Raw `mailboxes` row shape, before mapping to {@link MailboxRecord}. */
@@ -272,6 +289,13 @@ export function createMailboxStore(db: Db): MailboxStore {
     async listActiveMailboxes() {
       const rows = await db.query<MailboxRow>(
         "SELECT id, address, provider, status FROM mailboxes WHERE status = 'active' ORDER BY created_at",
+      )
+      return rows.map(toMailboxRecord)
+    },
+
+    async listMailboxes() {
+      const rows = await db.query<MailboxRow>(
+        'SELECT id, address, provider, status FROM mailboxes ORDER BY created_at',
       )
       return rows.map(toMailboxRecord)
     },

@@ -516,4 +516,58 @@ describe('createMailboxStore', () => {
       expect(await store.listActiveMailboxes()).toEqual([])
     })
   })
+
+  // --- listMailboxes (HT-54 follow-up; spec §3.4/§6) -----------------------
+
+  describe('listMailboxes', () => {
+    it('returns EVERY mailbox regardless of status — unlike listActiveMailboxes, nothing is excluded', async () => {
+      const { db, store } = await freshStore()
+      const activeId = await insertMailbox(db, {
+        address: 'active2@example.test',
+        status: 'active',
+      })
+      const pausedId = await insertMailbox(db, {
+        address: 'paused2@example.test',
+        status: 'paused',
+      })
+      const disconnectedId = await insertMailbox(db, {
+        address: 'disconnected2@example.test',
+        status: 'disconnected',
+      })
+      const needsReconnectId = await insertMailbox(db, {
+        address: 'needs-reconnect2@example.test',
+        status: 'needs_reconnect',
+      })
+
+      const mailboxes = await store.listMailboxes()
+
+      expect(mailboxes.map((m) => m.id).sort()).toEqual(
+        [activeId, pausedId, disconnectedId, needsReconnectId].sort(),
+      )
+    })
+
+    it('orders by created_at', async () => {
+      const { db, store } = await freshStore()
+      const first = await insertMailbox(db, { address: 'first2@example.test' })
+      const second = await insertMailbox(db, { address: 'second2@example.test' })
+      await db.query('UPDATE mailboxes SET created_at = $1 WHERE id = $2', [
+        new Date('2026-01-02T00:00:00Z'),
+        first,
+      ])
+      await db.query('UPDATE mailboxes SET created_at = $1 WHERE id = $2', [
+        new Date('2026-01-01T00:00:00Z'),
+        second,
+      ])
+
+      const mailboxes = await store.listMailboxes()
+
+      expect(mailboxes.map((m) => m.id)).toEqual([second, first])
+    })
+
+    it('returns [] when there are no mailboxes at all', async () => {
+      const { store } = await freshStore()
+
+      expect(await store.listMailboxes()).toEqual([])
+    })
+  })
 })

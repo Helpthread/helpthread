@@ -180,6 +180,38 @@ describe('matchRoute', () => {
       id: 'abc-123/password',
     })
   })
+
+  // --- Mailbox access (HT-54 follow-up; spec §3.4/§6) -------------------------
+
+  it('matches GET /api/v1/mailboxes', () => {
+    expect(matchRoute('GET', '/api/v1/mailboxes')).toEqual({ kind: 'mailboxes-list' })
+    expect(matchRoute('POST', '/api/v1/mailboxes')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET'],
+    })
+  })
+
+  it('matches GET/PUT /api/v1/agents/{id}/mailboxes, extracting the id', () => {
+    expect(matchRoute('GET', '/api/v1/agents/abc-123/mailboxes')).toEqual({
+      kind: 'agent-mailboxes-get',
+      id: 'abc-123',
+    })
+    expect(matchRoute('PUT', '/api/v1/agents/abc-123/mailboxes')).toEqual({
+      kind: 'agent-mailboxes-put',
+      id: 'abc-123',
+    })
+    expect(matchRoute('DELETE', '/api/v1/agents/abc-123/mailboxes')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET', 'PUT'],
+    })
+  })
+
+  it('agent item route never matches a /mailboxes suffix (anchored, same as /password and /invite)', () => {
+    expect(matchRoute('GET', '/api/v1/agents/abc-123/mailboxes')).not.toEqual({
+      kind: 'agent-item',
+      id: 'abc-123/mailboxes',
+    })
+  })
 })
 
 describe('matchGmailPushWebhook', () => {

@@ -245,10 +245,13 @@ export async function buildApp(
     // Agents & Authentication (HT-54) — CORE, required (unlike the
     // absent-by-default fields above). uiBaseUrl is spread in only when
     // configured (config.ts's own optional-field convention) so the invite
-    // path stays genuinely absent, not present-with-undefined.
+    // path stays genuinely absent, not present-with-undefined. mailboxStore
+    // reuses the SAME MailboxStore instance built above (HT-54 follow-up,
+    // spec §3.4/§6's mailbox-access endpoints) — no second store needed.
     agents: {
       store: agentStore,
       providers: authProviders,
+      mailboxStore,
       ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),
     },
     // HT-49 review fix: Gmail delivers a sent reply's own copy back into the

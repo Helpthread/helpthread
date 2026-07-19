@@ -18,6 +18,7 @@ import type { Keyring } from '../mail/reply-token.js'
 import type { EmailSender, OutboundEmail } from '../providers/index.js'
 import { type AgentRecord, type AgentStore, createAgentStore } from '../store/agents.js'
 import { createConversationStore } from '../store/conversations.js'
+import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
 import { createInboxApi } from './index.js'
 
 const TOKEN = 'test-token-for-the-agents-and-auth-suite'
@@ -63,12 +64,14 @@ describe('Agents & Authentication API', () => {
   async function freshApi(overrides: { uiBaseUrl?: string; sender?: EmailSender } = {}): Promise<{
     db: Db
     agentStore: AgentStore
+    mailboxStore: MailboxStore
     api: (request: Request) => Promise<Response>
     sent: OutboundEmail[]
   }> {
     db = await createPgliteDb()
     await migrate(db)
     const agentStore = createAgentStore(db)
+    const mailboxStore = createMailboxStore(db)
     const { sender: defaultSender, sent } = createFakeSender()
     const api = createInboxApi({
       store: createConversationStore(db),
@@ -80,10 +83,11 @@ describe('Agents & Authentication API', () => {
       agents: {
         store: agentStore,
         providers: [createPasswordAuthProvider({ agentStore })],
+        mailboxStore,
         ...(overrides.uiBaseUrl !== undefined ? { uiBaseUrl: overrides.uiBaseUrl } : {}),
       },
     })
-    return { db, agentStore, api, sent }
+    return { db, agentStore, mailboxStore, api, sent }
   }
 
   /** Build a `Request`, always Bearer-authenticated, optionally with an acting-Agent header and/or a JSON body. */
@@ -1039,6 +1043,328 @@ describe('Agents & Authentication API', () => {
         }),
       )
       expect(res.status).toBe(200)
+    })
+  })
+
+  // --- Mailbox access (HT-54 follow-up; spec §3.4/§6) -------------------------
+
+  describe('GET /mailboxes', () => {
+    it('admin gets 200 with the full roster, id/address/status ONLY (never provider or a token)', async () => {
+      const { api, agentStore, mailboxStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin1@example.test',
+        role: 'admin',
+      })
+      const mailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'support@example.test',
+        provider: 'gmail',
+      })
+
+      const res = await api(req('GET', '/api/v1/mailboxes', { agentId: admin.id }))
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body).toEqual({
+        mailboxes: [{ id: mailbox.id, address: 'support@example.test', status: 'active' }],
+      })
+      // Response shape exactness — no provider, no token, no other field.
+      expect(Object.keys(body.mailboxes[0]).sort()).toEqual(['address', 'id', 'status'])
+    })
+
+    it('includes disconnected/paused mailboxes too — the Permissions roster is unfiltered', async () => {
+      const { api, agentStore, mailboxStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin2@example.test',
+        role: 'admin',
+      })
+      await mailboxStore.upsertConnectedMailbox({ address: 'a@example.test', provider: 'gmail' })
+      const paused = await mailboxStore.upsertConnectedMailbox({
+        address: 'b@example.test',
+        provider: 'gmail',
+      })
+      await mailboxStore.markPaused(paused.id)
+      const disconnected = await mailboxStore.upsertConnectedMailbox({
+        address: 'c@example.test',
+        provider: 'gmail',
+      })
+      await mailboxStore.markDisconnected(disconnected.id)
+
+      const res = await api(req('GET', '/api/v1/mailboxes', { agentId: admin.id }))
+      const body = (await res.json()) as { mailboxes: Array<{ status: string }> }
+      expect(body.mailboxes.map((m) => m.status).sort()).toEqual([
+        'active',
+        'disconnected',
+        'paused',
+      ])
+    })
+
+    it('403s for a non-admin', async () => {
+      const { api, agentStore } = await freshApi()
+      const nonAdmin = await createActiveAgent(agentStore, { email: 'mbnonadmin1@example.test' })
+
+      const res = await api(req('GET', '/api/v1/mailboxes', { agentId: nonAdmin.id }))
+      expect(res.status).toBe(403)
+    })
+
+    it('401s without the acting-Agent header', async () => {
+      const { api } = await freshApi()
+      const res = await api(req('GET', '/api/v1/mailboxes'))
+      expect(res.status).toBe(401)
+    })
+  })
+
+  describe('GET /agents/{id}/mailboxes', () => {
+    it("admin gets 200 with the target's grants (auto-granted at creation)", async () => {
+      const { api, agentStore, mailboxStore } = await freshApi()
+      const mailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'support2@example.test',
+        provider: 'gmail',
+      })
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin3@example.test',
+        role: 'admin',
+      })
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget1@example.test' })
+
+      const res = await api(
+        req('GET', `/api/v1/agents/${target.id}/mailboxes`, { agentId: admin.id }),
+      )
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ mailboxIds: [mailbox.id] })
+    })
+
+    it('403s for a non-admin (even viewing their own grants)', async () => {
+      const { api, agentStore } = await freshApi()
+      const nonAdmin = await createActiveAgent(agentStore, { email: 'mbnonadmin2@example.test' })
+
+      const res = await api(
+        req('GET', `/api/v1/agents/${nonAdmin.id}/mailboxes`, { agentId: nonAdmin.id }),
+      )
+      expect(res.status).toBe(403)
+    })
+
+    it('401s without the acting-Agent header', async () => {
+      const { api, agentStore } = await freshApi()
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget2@example.test' })
+      const res = await api(req('GET', `/api/v1/agents/${target.id}/mailboxes`))
+      expect(res.status).toBe(401)
+    })
+
+    it('404s for an unknown agent id', async () => {
+      const { api, agentStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin4@example.test',
+        role: 'admin',
+      })
+      const res = await api(
+        req('GET', '/api/v1/agents/00000000-0000-0000-0000-000000000000/mailboxes', {
+          agentId: admin.id,
+        }),
+      )
+      expect(res.status).toBe(404)
+    })
+  })
+
+  describe('PUT /agents/{id}/mailboxes', () => {
+    it('admin replaces the grant set — 200 with the stored set', async () => {
+      const { api, agentStore, mailboxStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin5@example.test',
+        role: 'admin',
+      })
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget3@example.test' })
+      const mailboxA = await mailboxStore.upsertConnectedMailbox({
+        address: 'a2@example.test',
+        provider: 'gmail',
+      })
+      const mailboxB = await mailboxStore.upsertConnectedMailbox({
+        address: 'b2@example.test',
+        provider: 'gmail',
+      })
+
+      const res = await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: admin.id,
+          body: { mailboxIds: [mailboxA.id, mailboxB.id] },
+        }),
+      )
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { mailboxIds: string[] }
+      expect(body.mailboxIds.sort()).toEqual([mailboxA.id, mailboxB.id].sort())
+
+      const getRes = await api(
+        req('GET', `/api/v1/agents/${target.id}/mailboxes`, { agentId: admin.id }),
+      )
+      const getBody = (await getRes.json()) as { mailboxIds: string[] }
+      expect(getBody.mailboxIds.sort()).toEqual([mailboxA.id, mailboxB.id].sort())
+    })
+
+    it('dedupes input ids before storing', async () => {
+      const { api, agentStore, mailboxStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin6@example.test',
+        role: 'admin',
+      })
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget4@example.test' })
+      const mailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'dup@example.test',
+        provider: 'gmail',
+      })
+
+      const res = await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: admin.id,
+          body: { mailboxIds: [mailbox.id, mailbox.id] },
+        }),
+      )
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ mailboxIds: [mailbox.id] })
+    })
+
+    it('an empty array clears every grant — 200', async () => {
+      const { api, agentStore, mailboxStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin7@example.test',
+        role: 'admin',
+      })
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget5@example.test' })
+      const mailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'c@example.test',
+        provider: 'gmail',
+      })
+      await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: admin.id,
+          body: { mailboxIds: [mailbox.id] },
+        }),
+      )
+
+      const res = await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: admin.id,
+          body: { mailboxIds: [] },
+        }),
+      )
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ mailboxIds: [] })
+
+      // The response merely echoes the submitted set — re-read through the
+      // GET endpoint to prove the clear actually PERSISTED.
+      const readBack = await api(
+        req('GET', `/api/v1/agents/${target.id}/mailboxes`, { agentId: admin.id }),
+      )
+      expect(await readBack.json()).toEqual({ mailboxIds: [] })
+    })
+
+    it('400s when mailboxIds is not an array', async () => {
+      const { api, agentStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin8@example.test',
+        role: 'admin',
+      })
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget6@example.test' })
+
+      const res = await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: admin.id,
+          body: { mailboxIds: 'not-an-array' },
+        }),
+      )
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+    })
+
+    it('400s when an entry is not a uuid', async () => {
+      const { api, agentStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin9@example.test',
+        role: 'admin',
+      })
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget7@example.test' })
+
+      const res = await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: admin.id,
+          body: { mailboxIds: ['not-a-uuid'] },
+        }),
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it("400s (invalid_mailbox) when an id names no mailbox — the target's PRIOR grants are untouched", async () => {
+      const { api, agentStore, mailboxStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin10@example.test',
+        role: 'admin',
+      })
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget8@example.test' })
+      const mailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'd@example.test',
+        provider: 'gmail',
+      })
+      await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: admin.id,
+          body: { mailboxIds: [mailbox.id] },
+        }),
+      )
+
+      const bogusId = '99999999-9999-4999-8999-999999999999'
+      const res = await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: admin.id,
+          body: { mailboxIds: [bogusId] },
+        }),
+      )
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({
+        error: { code: 'validation_failed', message: expect.any(String) },
+      })
+
+      const getRes = await api(
+        req('GET', `/api/v1/agents/${target.id}/mailboxes`, { agentId: admin.id }),
+      )
+      expect(await getRes.json()).toEqual({ mailboxIds: [mailbox.id] })
+    })
+
+    it('404s for an unknown agent id', async () => {
+      const { api, agentStore } = await freshApi()
+      const admin = await createActiveAgent(agentStore, {
+        email: 'mbadmin11@example.test',
+        role: 'admin',
+      })
+      const res = await api(
+        req('PUT', '/api/v1/agents/00000000-0000-0000-0000-000000000000/mailboxes', {
+          agentId: admin.id,
+          body: { mailboxIds: [] },
+        }),
+      )
+      expect(res.status).toBe(404)
+    })
+
+    it('403s for a non-admin', async () => {
+      const { api, agentStore } = await freshApi()
+      const nonAdmin = await createActiveAgent(agentStore, { email: 'mbnonadmin3@example.test' })
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget9@example.test' })
+
+      const res = await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, {
+          agentId: nonAdmin.id,
+          body: { mailboxIds: [] },
+        }),
+      )
+      expect(res.status).toBe(403)
+    })
+
+    it('401s without the acting-Agent header', async () => {
+      const { api, agentStore } = await freshApi()
+      const target = await createActiveAgent(agentStore, { email: 'mbtarget10@example.test' })
+
+      const res = await api(
+        req('PUT', `/api/v1/agents/${target.id}/mailboxes`, { body: { mailboxIds: [] } }),
+      )
+      expect(res.status).toBe(401)
     })
   })
 })

@@ -132,7 +132,7 @@ const AGENTS_LIST: RouteDef = {
   methods: ['GET', 'POST'],
 }
 
-/** `/api/v1/agents/{id}` — get (admin or self), patch (admin for anyone, self for own name/timezone), hard delete (admin) — spec §6. Anchored `[^/]+$` so it never matches a `.../password` or `.../invite` suffix, mirroring `CONVERSATION_ITEM`'s own anchoring. */
+/** `/api/v1/agents/{id}` — get (admin or self), patch (admin for anyone, self for own name/timezone), hard delete (admin) — spec §6. Anchored `[^/]+$` so it never matches a `.../password`, `.../invite`, or `.../mailboxes` suffix, mirroring `CONVERSATION_ITEM`'s own anchoring. */
 const AGENT_ITEM: RouteDef = {
   pattern: /^\/api\/v1\/agents\/(?<id>[^/]+)$/,
   methods: ['GET', 'PATCH', 'DELETE'],
@@ -148,6 +148,20 @@ const AGENT_PASSWORD: RouteDef = {
 const AGENT_INVITE: RouteDef = {
   pattern: /^\/api\/v1\/agents\/(?<id>[^/]+)\/invite$/,
   methods: ['POST'],
+}
+
+// --- Mailbox access (HT-54 follow-up; spec §3.4/§6) -------------------------
+
+/** `/api/v1/mailboxes` — the full mailbox roster (admin only) — spec §3.4/§6, GET only. */
+const MAILBOXES_LIST: RouteDef = {
+  pattern: /^\/api\/v1\/mailboxes$/,
+  methods: ['GET'],
+}
+
+/** `/api/v1/agents/{id}/mailboxes` — read (GET) or replace (PUT) an Agent's mailbox grants (admin only) — spec §3.4/§6. Anchored `[^/]+` between `agents/` and `/mailboxes` so it never collides with `AGENT_ITEM`'s bare `{id}` pattern. */
+const AGENT_MAILBOXES: RouteDef = {
+  pattern: /^\/api\/v1\/agents\/(?<id>[^/]+)\/mailboxes$/,
+  methods: ['GET', 'PUT'],
 }
 
 /** Every route this API recognizes, checked in order. */
@@ -168,6 +182,8 @@ const ROUTES: readonly RouteDef[] = [
   AGENTS_LIST,
   AGENT_PASSWORD,
   AGENT_INVITE,
+  MAILBOXES_LIST,
+  AGENT_MAILBOXES,
   AGENT_ITEM,
 ]
 
@@ -195,6 +211,9 @@ export type RouteMatch =
   | { kind: 'agent-delete'; id: string }
   | { kind: 'agent-password'; id: string }
   | { kind: 'agent-invite'; id: string }
+  | { kind: 'mailboxes-list' }
+  | { kind: 'agent-mailboxes-get'; id: string }
+  | { kind: 'agent-mailboxes-put'; id: string }
   | { kind: 'method-not-allowed'; allow: string[] }
   | { kind: 'not-found' }
 
@@ -317,6 +336,9 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     if (route === AGENTS_LIST) {
       return method === 'GET' ? { kind: 'agents-list' } : { kind: 'agents-create' }
     }
+    if (route === MAILBOXES_LIST) {
+      return { kind: 'mailboxes-list' }
+    }
 
     // Every remaining route guarantees a present, non-empty `id` group (per
     // its `[^/]+` pattern) whenever it matched.
@@ -339,6 +361,10 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     }
     if (route === AGENT_INVITE) {
       return { kind: 'agent-invite', id }
+    }
+    if (route === AGENT_MAILBOXES) {
+      if (method === 'GET') return { kind: 'agent-mailboxes-get', id }
+      return { kind: 'agent-mailboxes-put', id }
     }
     if (route === AGENT_ITEM) {
       if (method === 'GET') return { kind: 'agent-item', id }
