@@ -7,10 +7,10 @@ component of Phase 3, built now and proven first as the project's own dogfood in
 path — not deferred to "once demand justifies it") and `specs/modules/catalog.md` §5,
 the additive contract this spec is built to satisfy exactly.
 
-**Sequencing note.** The HT-79 charter amendment (`docs/ht-79-marketplace-timing`,
-commit `d8bd2d4`) is pushed but not yet merged to `main` as of this draft. This spec
-cites the amended §3/§4/§5 text throughout; if that PR's wording changes before merge,
-re-check the citations below against the merged text before this spec is accepted.
+**Citation basis.** The HT-79 charter amendment merged to `main` as PR #86, commit
+`b528971`. Every CHARTER.md citation below was re-verified against that merged text
+on 2026-07-19; the draft's earlier provisional citations no longer stand on an
+unmerged branch.
 
 ## 1. Purpose & scope
 
@@ -607,11 +607,14 @@ dependencies" quietly become a catch-all label for anything pre-launch.
 | Privacy policy for the store | Counsel-drafted | Same gate (real customer PII starts flowing at first live charge) | Same |
 | **Stripe Tax enabled** (automated EU VAT / US sales-tax calculation and remittance on Checkout Sessions) | Compliance/finance configuration, not counsel-drafted | Same gate — charging real customers across jurisdictions without correct tax handling is its own launch blocker | Not pre-dogfood — Stripe test mode carries no real tax obligation. Which jurisdictions to register in first is decision point §10.9 |
 
-CHARTER.md §7's plugin exception counsel deadline (referenced above in this spec's
-§3, unchanged by the HT-79 amendment) stays separate and earlier: before the first
-external code contribution — unaffected by this spec, since every v1 marketplace
-Module is out-of-process and needs no exception (charter amendment text, quoted in
-full in CHARTER.md).
+The plugin exception's counsel deadline — set in CHARTER.md §3's module boundary,
+where "§7" names the *AGPL-3.0* §7 additional permission, not a CHARTER.md section —
+stays separate and earlier: before the first external contribution is accepted. The
+HT-79 amendment left it unchanged, and this spec does not touch it, since every v1
+marketplace Module is out-of-process and needs no exception. The merged amendment
+says so directly: *"The §7 plugin exception's counsel deadline is unchanged (before
+first external contribution): every v1 marketplace module is out-of-process and needs
+no exception."*
 
 ## 9. Non-goals v1
 
@@ -682,8 +685,9 @@ spec's honest deliverable on that front, not a silent scope-down.
      *payment and entitlement* but not its Release/tarball/Vercel-deploy mechanics
      for *delivery*. Consequence: this spec's pipeline is scoped to
      running-service-shaped modules only, and the **actual launch catalog becomes
-     draft-assistant-led**, not the KB-plus-AI-modules lineup CHARTER.md's Phase 3
-     text currently implies — a real narrowing of that text, not a wording nuance.
+     draft-assistant-led**, not the KB-plus-AI-modules lineup CHARTER.md's amended
+     Phase 3 text now names outright — a real narrowing of that text, not a wording
+     nuance.
    - **(b) Generalize this pipeline to carry content-as-code artifacts too** — e.g. a
      Release's `tarball_storage_path` can point at a static-build output or a docs
      source bundle instead of a deployable service, consumed by a different (not yet
@@ -804,3 +808,22 @@ spec's honest deliverable on that front, not a silent scope-down.
   verified by running `markdownlint-cli2` locally with only MD040 enabled (the
   vanilla default ruleset's other findings, e.g. MD013 line-length, do not reflect
   what this repo's CI/CodeRabbit actually enforces and were left alone).
+- **2026-07-19** (HT-79, post-merge citation reconciliation — docs-only, no
+  substantive change): the HT-79 charter amendment merged as PR #86 (`b528971`), so
+  the draft's sequencing note — which flagged the amendment as pushed-but-unmerged
+  and asked for a re-check before acceptance — was discharged and replaced with a
+  citation basis recording the merged commit. All CHARTER.md citations re-verified
+  against the merged §3/§4/§5 text: the launch-day Phase 3 claim (§1), the
+  marks-and-marketplace asset list (§1), the amendment's verbatim counsel-items
+  sentence (§8), the Phase 3 launch lineup and content-as-code KB description
+  (§10.4) all check out as written. **One mis-citation corrected** (§8): the plugin
+  exception's counsel deadline was attributed to "CHARTER.md §7," but CHARTER.md §7
+  is Governance — the deadline is set in CHARTER.md §3's module boundary, and "§7"
+  there names the AGPL-3.0 §7 additional permission. The parenthetical pointing at
+  "this spec's §3" was dangling for the same reason (this spec's §3 is Service
+  architecture and never mentions the exception); both replaced with a direct quote
+  of the merged amendment. **One wording tightening** (§10.4): the KB-plus-AI-modules
+  lineup was described as what Phase 3 "currently implies" — the amended text names
+  those modules outright, which strengthens rather than weakens the conflict that
+  decision point raises. Status deliberately left at **draft for TJ review**;
+  accepting the spec remains TJ's call.
