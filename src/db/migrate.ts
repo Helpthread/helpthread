@@ -1261,6 +1261,97 @@ CREATE INDEX event_outbox_ready_idx ON event_outbox (occurred_at) WHERE dispatch
 `
 
 /**
+ * Migration 024 — `saved_replies` (HT-76; specs/api/agent-inbox-v1.md's
+ * saved-replies-and-macros amendment). A saved reply is a per-mailbox
+ * reusable message an Agent can post as a reply body; a "macro" is the same
+ * row with `actions` attached (a set of state changes to also apply once
+ * the reply is sent). The engine's whole job here is DEFINITION storage —
+ * applying a macro's `actions` is the client composing this ticket's other
+ * two features (`PATCH .../status`, `PUT .../tags`, `PUT .../assignee`) and
+ * `POST .../replies`; this table and its API add zero new mail or status
+ * semantics of their own.
+ *
+ * `mailbox_id` is `NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE` —
+ * every saved reply belongs to exactly one mailbox (this deployment's
+ * single-mailbox dogfood still models it this way, matching
+ * `agent_mailbox_access`'s per-mailbox shape, migration 018): a saved reply
+ * has no purpose once its owning mailbox is gone, the same "storage row
+ * lifetime tracks its parent" policy `thread_attachments` (migration 015)
+ * already uses.
+ *
+ * `body_text` is `NOT NULL` (a saved reply always has plain-text content to
+ * post, mirroring `POST .../replies`' own `text` requirement, spec §4a);
+ * `body_html` is nullable, matching `threads.body_html`'s own optionality.
+ *
+ * `actions` is `jsonb NOT NULL DEFAULT '{}'::jsonb` — the SAME
+ * caller-serialized-JSON convention `conversations.tags` (migration 006)
+ * and `webhook_endpoints.events` (migration 022) already use. Its shape
+ * (`{ setStatus?: 'closed'|'pending'; addTags?: string[]; assignToSelf?:
+ * bool }`) is validated at the API layer (`src/api/saved-replies.ts`), not
+ * by a schema CHECK — the same "this store does not validate against that
+ * list; the caller is the only writer" posture `event-types.ts`'s own doc
+ * comment states for `event_outbox.type`, chosen here because a CHECK
+ * expressive enough to validate nested jsonb shape would be unreadable SQL
+ * for a shape that is still likely to grow.
+ *
+ * `sort_order` is a plain `integer DEFAULT 0` — the display order within a
+ * mailbox's list; no uniqueness or gap-free invariant is enforced (an
+ * operator/API reorder is free to leave gaps or ties, same "policy lives in
+ * the consuming code" posture migration 013's `queue_jobs.max_attempts`
+ * doc comment uses).
+ */
+const MIGRATION_024_SAVED_REPLIES = `
+CREATE TABLE saved_replies (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  mailbox_id uuid NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  body_text text NOT NULL,
+  body_html text,
+  actions jsonb NOT NULL DEFAULT '{}'::jsonb,
+  sort_order integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX saved_replies_mailbox_id_idx ON saved_replies (mailbox_id);
+`
+
+/**
+ * Migration 025 — `conversations.snoozed_until` (HT-77;
+ * specs/api/agent-inbox-v1.md's snooze amendment to HT-26's status model).
+ * A snooze is a TIMED `pending`: an Agent statement that a conversation
+ * should come back to `active` on its own at a future moment, layered onto
+ * the existing `pending` state rather than adding a fifth
+ * `ConversationStatus` value (HT-26's four-state model, migration 004,
+ * stays exactly as spec'd — nothing here widens it).
+ *
+ * `conversations_snoozed_until_pending_only` is the load-bearing invariant:
+ * `snoozed_until IS NULL OR status = 'pending'` — a snooze timestamp can
+ * only ever be set on a `pending` conversation, never `active`/`closed`/
+ * `spam`/`deleted`. This is what makes "plain pending stays manual, timed
+ * pending wakes itself" representable at the database level, not merely
+ * discouraged in application code — the same CHECK-constrained-invariant
+ * discipline this file uses throughout (migration 002's direction-tied
+ * delivery_status, migration 021's draft/delivery predicate, etc.). Every
+ * write path that changes `status` away from `pending` — `setConversationStatus`
+ * (`src/store/conversations.ts`), the inbound-wake reopen branch
+ * (`appendThreadInTx`), AND `deleteConversation` (soft delete can target a
+ * snoozed `pending` row) — must clear `snoozed_until` to `NULL` in the SAME
+ * statement, or this CHECK rejects the write; see those methods' own doc
+ * comments for where each does so.
+ *
+ * No backfill: this is a brand-new nullable column with no existing value
+ * that could violate the CHECK — every pre-existing row gets `NULL`, which
+ * trivially satisfies `snoozed_until IS NULL OR ...` regardless of its
+ * `status`.
+ */
+const MIGRATION_025_CONVERSATION_SNOOZE = `
+ALTER TABLE conversations ADD COLUMN snoozed_until timestamptz;
+ALTER TABLE conversations ADD CONSTRAINT conversations_snoozed_until_pending_only CHECK (
+  snoozed_until IS NULL OR status = 'pending'
+);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1376,6 +1467,16 @@ const MIGRATIONS: Migration[] = [
     id: 23,
     name: 'event_outbox',
     sql: MIGRATION_023_EVENT_OUTBOX,
+  },
+  {
+    id: 24,
+    name: 'saved_replies',
+    sql: MIGRATION_024_SAVED_REPLIES,
+  },
+  {
+    id: 25,
+    name: 'conversation_snooze',
+    sql: MIGRATION_025_CONVERSATION_SNOOZE,
   },
 ]
 

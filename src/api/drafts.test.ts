@@ -22,6 +22,7 @@ import {
 } from '../store/assistants.js'
 import { type ConversationStore, createConversationStore } from '../store/conversations.js'
 import { createMailboxStore } from '../store/mailboxes.js'
+import { createSavedReplyStore } from '../store/saved-replies.js'
 import { createInboxApi } from './index.js'
 import type { WebhooksApiDeps } from './webhooks.js'
 
@@ -76,6 +77,7 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
     const agentStore = createAgentStore(db)
     const assistantStore = createAssistantStore(db)
     const { sender: defaultSender, sent } = createFakeSender()
+    const mailboxStore = createMailboxStore(db)
     const api = createInboxApi({
       store,
       apiToken: TOKEN,
@@ -86,13 +88,14 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
       agents: {
         store: agentStore,
         providers: [createPasswordAuthProvider({ agentStore })],
-        mailboxStore: createMailboxStore(db),
+        mailboxStore,
       },
       assistants: { store: assistantStore },
       webhooks: {
         store: {} as unknown as WebhooksApiDeps['store'],
         queue: { async enqueue() {} },
       } satisfies WebhooksApiDeps,
+      savedReplies: { store: createSavedReplyStore(db), mailboxStore },
     })
     return { db, store, agentStore, assistantStore, api, sent }
   }
@@ -689,6 +692,7 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
             store: {} as unknown as WebhooksApiDeps['store'],
             queue: { async enqueue() {} },
           } satisfies WebhooksApiDeps,
+          savedReplies: { store: createSavedReplyStore(db), mailboxStore: createMailboxStore(db) },
         })
       }
 

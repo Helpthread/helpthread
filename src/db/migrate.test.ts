@@ -63,6 +63,8 @@ describe('migrate', () => {
       { id: 21, name: 'threads_actor_model' },
       { id: 22, name: 'webhook_endpoints' },
       { id: 23, name: 'event_outbox' },
+      { id: 24, name: 'saved_replies' },
+      { id: 25, name: 'conversation_snooze' },
     ])
   })
 
@@ -96,6 +98,8 @@ describe('migrate', () => {
       { id: 21 },
       { id: 22 },
       { id: 23 },
+      { id: 24 },
+      { id: 25 },
     ])
   })
 

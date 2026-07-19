@@ -339,6 +339,16 @@ export interface StoredConversation {
    * `PUT /api/v1/conversations/{id}/assignee`'s new body shape).
    */
   assigneeAgentId: string | null
+  /**
+   * A timed `pending` (HT-77; specs/api/agent-inbox-v1.md's snooze
+   * amendment): when set, the wake pass (`src/mail/snooze-wake.ts`) flips
+   * this conversation `pending` → `active` and clears this field once
+   * `now() >= snoozedUntil`. Legal only alongside `status: 'pending'`
+   * (migration 025's CHECK) — always `null` for every other status. `null`
+   * is also the correct state for "plain pending" (an Agent statement with
+   * no timer, spec §2's original semantics, unchanged).
+   */
+  snoozedUntil: Date | null
   createdAt: Date
   updatedAt: Date
 }
@@ -510,8 +520,30 @@ export interface ConversationStore {
    * HT-16: a plain insert, `created` is always `true`. This is the "no key ⇒
    * no dedup protection" contract `src/mail/send.ts`'s module doc names
    * explicitly — deliberate, and covered by a permanent regression test.
+   *
+   * ## `options.thenSetStatus` (HT-78 — "Send & Close")
+   *
+   * When present, and ONLY when this call's insert was genuinely NEW
+   * (`created: true` — never on an idempotency-key replay, matching every
+   * other "replay touches the conversation not at all" rule in this
+   * module), the conversation's status is ALSO set to `options.thenSetStatus`
+   * — in the SAME transaction as the thread insert, applied AFTER it (so it
+   * runs after, and can override, the ordinary reopen-on-closed/spam policy
+   * above). This never touches the thread row itself (no mail content, no
+   * envelope) — it is purely the conversation-status side effect a
+   * `POST .../replies` caller can request via its own `thenSetStatus` field
+   * (specs/api/agent-inbox-v1.md's send-and-close amendment). Fires
+   * `conversation.status_changed` (spec §4) transactionally, exactly like
+   * {@link ConversationStore.setConversationStatus} — reusing the SAME
+   * status-transition code path, not a second copy. `snoozed_until` is
+   * always cleared to `NULL` by this path (this endpoint never accepts a
+   * `snoozedUntil` — only `PATCH .../status`, §4b, does).
    */
-  appendThread(conversationId: string, thread: NewThread): Promise<AppendResult>
+  appendThread(
+    conversationId: string,
+    thread: NewThread,
+    options?: { thenSetStatus?: ConversationStatus },
+  ): Promise<AppendResult>
 
   /**
    * Claim `threadId` for delivery: an atomic `UPDATE ... SET claimed_until =
@@ -644,11 +676,53 @@ export interface ConversationStore {
    * {@link getConversation}'s `includeDeleted: false` uses, so the HTTP
    * layer can map both to a single generic `404` without an extra existence
    * check.
+   *
+   * ## `options.snoozedUntil` (HT-77)
+   *
+   * Legal (and meaningful) only alongside `status: 'pending'` — the HTTP
+   * layer (`src/api/conversations.ts`'s PATCH handler) refuses a body that
+   * carries `snoozedUntil` with any other status before this method is ever
+   * called (spec: "snoozedUntil legal ONLY with pending"). When
+   * `status === 'pending'`: `options.snoozedUntil` (a `Date`, or `null`/
+   * omitted to clear/leave "plain pending" — no timer) becomes the new
+   * `snoozed_until`. For every OTHER status, `snoozed_until` is
+   * UNCONDITIONALLY forced to `NULL` regardless of what `options.snoozedUntil`
+   * holds — migration 025's CHECK requires it, and this method enforces the
+   * invariant itself rather than trusting every caller to pass `undefined`.
+   *
+   * ## `options.requireStatus` (HT-77's wake pass)
+   *
+   * When present, the write is refused (returns `null`, same shape as a
+   * missing/deleted conversation) unless the conversation's CURRENT status
+   * — re-read under this method's own `FOR UPDATE` lock, never a caller's
+   * stale snapshot — equals `options.requireStatus`. This is what makes it
+   * safe for the snooze wake pass (`src/mail/snooze-wake.ts`) to call
+   * `setConversationStatus(id, 'active', { requireStatus: 'pending' })` for
+   * a batch of ids it read moments earlier: if an Agent has, in that
+   * window, manually moved the conversation OFF `pending` (closed it, for
+   * instance), the wake pass's write is a no-op rather than forcibly
+   * reopening a conversation an Agent just acted on. Omitted (every other
+   * caller — the PATCH endpoint), the write proceeds unconditionally, exactly
+   * as before this option existed.
    */
   setConversationStatus(
     conversationId: string,
     status: ConversationStatus,
+    options?: { snoozedUntil?: Date | null; requireStatus?: ConversationStatus },
   ): Promise<ConversationSummary | null>
+
+  /**
+   * List ids of `pending` conversations whose timed snooze is due —
+   * `snoozed_until IS NOT NULL AND snoozed_until <= now()` — oldest-due
+   * first, capped at `options.limit` (HT-77's wake pass,
+   * `src/mail/snooze-wake.ts`). Returns bare ids, not full records: the
+   * caller's very next step for each id is a `setConversationStatus(id,
+   * 'active', { requireStatus: 'pending' })` call, which re-reads and
+   * re-locks the row itself — fetching more here would be a stale snapshot
+   * the wake pass cannot safely use anyway (see that option's own doc
+   * comment).
+   */
+  listDueSnoozed(options: { limit: number }): Promise<string[]>
 
   /**
    * Soft-delete a conversation — the write path behind `DELETE
@@ -841,7 +915,7 @@ const PREVIEW_MAX_LENGTH = 120
  * caller data.
  */
 function summaryReturningSql(idParam: string): string {
-  return `RETURNING id, number, subject, customer_email, status, tags, assignee_agent_id, created_at, updated_at,
+  return `RETURNING id, number, subject, customer_email, status, tags, assignee_agent_id, snoozed_until, created_at, updated_at,
            (SELECT count(*)::int FROM threads WHERE conversation_id = ${idParam}) AS thread_count,
            (SELECT t.body_text FROM threads t WHERE t.conversation_id = ${idParam} AND t.body_text IS NOT NULL ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text`
 }
@@ -896,6 +970,8 @@ export interface ConversationSummary {
   tags: string[]
   /** The assigned Agent's id, or `null` for Anyone — see {@link StoredConversation.assigneeAgentId}. */
   assigneeAgentId: string | null
+  /** A timed `pending`, or `null` — see {@link StoredConversation.snoozedUntil}. */
+  snoozedUntil: Date | null
   createdAt: Date
   updatedAt: Date
 }
@@ -940,6 +1016,7 @@ interface ConversationRow {
   /** jsonb — arrives already-decoded (same driver behavior as `send_envelope`); this codebase only ever writes string arrays. */
   tags: unknown
   assignee_agent_id: string | null
+  snoozed_until: Date | string | null
   created_at: Date | string
   updated_at: Date | string
 }
@@ -1048,8 +1125,8 @@ export async function appendThreadInTx(
   // interleave into an inconsistent status). This same lock is what
   // makes the idempotency-key get-or-insert below safe under
   // concurrency — see the interface doc comment above.
-  const rows = await tx.query<{ status: string }>(
-    'SELECT status FROM conversations WHERE id = $1 FOR UPDATE',
+  const rows = await tx.query<{ status: string; snoozed_until: Date | string | null }>(
+    'SELECT status, snoozed_until FROM conversations WHERE id = $1 FOR UPDATE',
     [conversationId],
   )
   const row = rows[0]
@@ -1061,6 +1138,22 @@ export async function appendThreadInTx(
   }
 
   const { threadId, created, row: threadRow } = await insertThread(tx, conversationId, thread)
+
+  // HT-77 (specs/api/agent-inbox-v1.md's snooze amendment): genuinely NEW
+  // INBOUND mail on a SNOOZED (`status: 'pending'`, `snoozed_until` set)
+  // conversation wakes it — clears snoozed_until and reopens to active, the
+  // same "customer came back, so the conversation should surface again"
+  // reasoning the closed/spam branch below already applies, just gated on a
+  // different pre-append condition. Scoped to `thread.direction ===
+  // 'inbound'` ONLY — never an Agent's own outbound reply, and never a note
+  // (both already excluded by this check alone, so the closed/spam branch's
+  // separate `direction !== 'note'` guard has no equivalent needed here) —
+  // spec: "Inbound wake". A plain (non-snoozed) pending conversation is
+  // UNCHANGED by this: `row.snoozed_until !== null` is false, so it falls
+  // through to the existing updated_at-only bump below exactly as before
+  // this feature existed.
+  const isSnoozedPendingInboundWake =
+    thread.direction === 'inbound' && row.status === 'pending' && row.snoozed_until !== null
 
   // A REPLAY (an existing row was found, nothing new inserted) touches
   // the conversation not at all — no reopen, no updated_at bump. Only
@@ -1089,6 +1182,12 @@ export async function appendThreadInTx(
         "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1",
         [conversationId],
       )
+    } else if (isSnoozedPendingInboundWake) {
+      reopened = true
+      await tx.query(
+        "UPDATE conversations SET status = 'active', snoozed_until = NULL, updated_at = now() WHERE id = $1",
+        [conversationId],
+      )
     } else {
       await tx.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [conversationId])
     }
@@ -1097,14 +1196,98 @@ export async function appendThreadInTx(
   return { ok: true, threadId, created, thread: toStoredThread(threadRow), reopened }
 }
 
+/**
+ * Transaction-scoped conversation status transition — shared by
+ * {@link ConversationStore.setConversationStatus} and
+ * {@link ConversationStore.appendThread}'s `options.thenSetStatus` (HT-77/
+ * HT-78). Must run inside a transaction that ALREADY holds `conversationId`'s
+ * row lock (a prior `SELECT ... FOR UPDATE` in the SAME transaction, done by
+ * each caller at the point that suits its own flow) — this function does not
+ * take the lock itself, and does not re-check `deleted`/`requireStatus`
+ * refusal (both callers do that BEFORE calling this, using the same locked
+ * read).
+ *
+ * `snoozedUntil` becomes the new `snoozed_until` ONLY when `status ===
+ * 'pending'`; every other target status forces `NULL` regardless of what is
+ * passed — migration 025's CHECK requires it, and this is the ONE place that
+ * invariant is enforced in code, so neither caller has to re-derive it.
+ *
+ * Fires `conversation.status_changed` (spec §4) exactly when `priorStatus !==
+ * status` — "transition," not "every write" — matching
+ * `setConversationStatus`'s pre-existing semantics byte-for-byte.
+ */
+async function applyStatusTransitionInTx(
+  tx: Queryable,
+  conversationId: string,
+  priorStatus: string,
+  status: ConversationStatus,
+  snoozedUntil?: Date | null,
+): Promise<ConversationSummaryRow> {
+  const snoozedUntilValue = status === 'pending' ? (snoozedUntil ?? null) : null
+  const rows = await tx.query<ConversationSummaryRow>(
+    `UPDATE conversations
+     SET status = $1, snoozed_until = $3, updated_at = now()
+     WHERE id = $2 AND status <> 'deleted'
+     ${summaryReturningSql('$2')}`,
+    [status, conversationId, snoozedUntilValue],
+  )
+  const row = rows[0]
+  if (priorStatus !== status) {
+    await appendOutboxEventInTx(tx, {
+      type: 'conversation.status_changed',
+      conversationId,
+      data: { from: priorStatus, to: status },
+    })
+  }
+  return row
+}
+
 export function createConversationStore(db: Db): ConversationStore {
   return {
     async createConversation(input) {
       return db.transaction((tx) => createConversationInTx(tx, input))
     },
 
-    async appendThread(conversationId, thread) {
-      return db.transaction((tx) => appendThreadInTx(tx, conversationId, thread))
+    async appendThread(conversationId, thread, options) {
+      return db.transaction(async (tx) => {
+        // HT-78 ("Send & Close"): only when a status transition was
+        // actually requested does this pay for the extra locked read — the
+        // overwhelmingly common caller (no options) is untouched. Read
+        // BEFORE the insert so `priorStatus` reflects the conversation's
+        // state going into this whole operation, for the event's `from`
+        // field — see applyStatusTransitionInTx's doc comment.
+        const priorStatus =
+          options?.thenSetStatus === undefined
+            ? undefined
+            : (
+                await tx.query<{ status: string }>(
+                  'SELECT status FROM conversations WHERE id = $1 FOR UPDATE',
+                  [conversationId],
+                )
+              )[0]?.status
+
+        const result = await appendThreadInTx(tx, conversationId, thread)
+
+        // Applied in the SAME transaction as the thread persist, AFTER it
+        // (module doc) — and ONLY for a genuinely NEW insert (`result.ok &&
+        // result.created`): an idempotency-key replay must never re-apply a
+        // status change any more than it reopens or bumps updated_at (the
+        // module's standing replay rule). `priorStatus === undefined` covers
+        // both "no thenSetStatus was requested" and the structurally
+        // unreachable case where the conversation vanished between the read
+        // above and here (appendThreadInTx would already have returned
+        // ok:false for that, so `result.ok` already guards it too).
+        if (
+          result.ok &&
+          result.created &&
+          options?.thenSetStatus !== undefined &&
+          priorStatus !== undefined
+        ) {
+          await applyStatusTransitionInTx(tx, conversationId, priorStatus, options.thenSetStatus)
+        }
+
+        return result
+      })
     },
 
     async getConversation(conversationId, options) {
@@ -1114,8 +1297,8 @@ export function createConversationStore(db: Db): ConversationStore {
       // work is done proportional to a deleted conversation's size.
       const conversationRows = await db.query<ConversationRow>(
         includeDeleted
-          ? 'SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, created_at, updated_at FROM conversations WHERE id = $1'
-          : "SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
+          ? 'SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, snoozed_until, created_at, updated_at FROM conversations WHERE id = $1'
+          : "SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, snoozed_until, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
         [conversationId],
       )
       const conversationRow = conversationRows[0]
@@ -1306,7 +1489,7 @@ export function createConversationStore(db: Db): ConversationStore {
       const limitParam = params.length
 
       const rows = await db.query<ConversationSummaryRow>(
-        `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}, ${LATEST_BODY_TEXT_SUBQUERY}
+        `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.snoozed_until, c.created_at, c.updated_at, ${THREAD_COUNT_SUBQUERY}, ${LATEST_BODY_TEXT_SUBQUERY}
          FROM conversations c
          WHERE ${conditions.join(' AND ')}
          ORDER BY c.updated_at DESC, c.id DESC
@@ -1317,7 +1500,7 @@ export function createConversationStore(db: Db): ConversationStore {
       return rows.map(toConversationSummary)
     },
 
-    async setConversationStatus(conversationId, status) {
+    async setConversationStatus(conversationId, status, options) {
       // HT-69 (spec §4's `conversation.status_changed`, "status transition
       // among the four API states"): the `from`/`to` payload needs the
       // PRIOR status, which a plain UPDATE...RETURNING never exposes (only
@@ -1337,30 +1520,33 @@ export function createConversationStore(db: Db): ConversationStore {
         )
         const prior = priorRows[0]
         if (prior === undefined || prior.status === 'deleted') return null
-
-        const rows = await tx.query<ConversationSummaryRow>(
-          `UPDATE conversations
-           SET status = $1, updated_at = now()
-           WHERE id = $2 AND status <> 'deleted'
-           ${summaryReturningSql('$2')}`,
-          [status, conversationId],
-        )
-        const row = rows[0]
-        if (row === undefined) return null
-
-        // "Transition" (spec §4) — a PATCH that re-asserts the SAME status
-        // touches nothing new, so it fires no event (mirrors updated_at
-        // still bumping either way — a no-op transition is idempotent
-        // storage-wise but not event-worthy).
-        if (prior.status !== status) {
-          await appendOutboxEventInTx(tx, {
-            type: 'conversation.status_changed',
-            conversationId,
-            data: { from: prior.status, to: status },
-          })
+        // HT-77's wake-pass guard (options.requireStatus's doc comment):
+        // refuse the write if the CURRENT, just-locked status isn't what the
+        // caller expected — never a caller's stale pre-lock snapshot.
+        if (options?.requireStatus !== undefined && prior.status !== options.requireStatus) {
+          return null
         }
-        return toConversationSummary(row)
+
+        const row = await applyStatusTransitionInTx(
+          tx,
+          conversationId,
+          prior.status,
+          status,
+          options?.snoozedUntil,
+        )
+        return row === undefined ? null : toConversationSummary(row)
       })
+    },
+
+    async listDueSnoozed(options) {
+      const rows = await db.query<{ id: string }>(
+        `SELECT id FROM conversations
+         WHERE status = 'pending' AND snoozed_until IS NOT NULL AND snoozed_until <= now()
+         ORDER BY snoozed_until
+         LIMIT $1`,
+        [options.limit],
+      )
+      return rows.map((r) => r.id)
     },
 
     async setConversationTags(conversationId, tags) {
@@ -1619,10 +1805,10 @@ export function createConversationStore(db: Db): ConversationStore {
       const includeDeleted = options?.includeDeleted ?? true
       const conversationRows = await db.query<ConversationRow>(
         includeDeleted
-          ? `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.created_at, c.updated_at
+          ? `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.snoozed_until, c.created_at, c.updated_at
              FROM conversations c JOIN threads t ON t.conversation_id = c.id
              WHERE t.id = $1`
-          : `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.created_at, c.updated_at
+          : `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.snoozed_until, c.created_at, c.updated_at
              FROM conversations c JOIN threads t ON t.conversation_id = c.id
              WHERE t.id = $1 AND c.status <> 'deleted'`,
         [threadId],
@@ -1648,8 +1834,15 @@ export function createConversationStore(db: Db): ConversationStore {
       // so its sort key is meaningless — and leaving it untouched keeps the
       // row an exact record of its last LIVE activity (charter invariant #1:
       // storage keeps the mail; only visibility changes).
+      //
+      // snoozed_until = NULL (HT-77): migration 025's CHECK requires
+      // `snoozed_until IS NULL OR status = 'pending'` — a snoozed `pending`
+      // conversation being soft-deleted would otherwise flip `status` to
+      // `'deleted'` while leaving a non-NULL `snoozed_until` behind,
+      // violating that CHECK outright. Cleared unconditionally; a harmless
+      // no-op write for every non-snoozed row (already NULL).
       const rows = await db.query<{ id: string }>(
-        `UPDATE conversations SET status = 'deleted' WHERE id = $1 AND status <> 'deleted' RETURNING id`,
+        `UPDATE conversations SET status = 'deleted', snoozed_until = NULL WHERE id = $1 AND status <> 'deleted' RETURNING id`,
         [conversationId],
       )
       return rows.length === 1
@@ -1825,6 +2018,7 @@ function toStoredConversation(row: ConversationRow): StoredConversation {
     // jsonb arrives already decoded.
     tags: row.tags as string[],
     assigneeAgentId: row.assignee_agent_id,
+    snoozedUntil: row.snoozed_until === null ? null : toDate(row.snoozed_until),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
   }
@@ -1849,6 +2043,7 @@ function toConversationSummary(row: ConversationSummaryRow): ConversationSummary
     preview: derivePreview(row.latest_body_text),
     tags: row.tags as string[],
     assigneeAgentId: row.assignee_agent_id,
+    snoozedUntil: row.snoozed_until === null ? null : toDate(row.snoozed_until),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
   }

@@ -26,12 +26,14 @@ import {
 import { createGmailWatchStateStore } from '../store/gmail-watch-state.js'
 import { createMailboxTokenStore } from '../store/mailbox-tokens.js'
 import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
+import { createSavedReplyStore, type SavedReplyStore } from '../store/saved-replies.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
 import { createWebhookEndpointStore } from '../store/webhook-endpoints.js'
 import type { AgentsApiDeps } from './agents.js'
 import type { AssistantsApiDeps } from './assistants.js'
 import type { GmailReconcileJob } from './gmail-webhook.js'
 import { createInboxApi, type InboxApiDeps } from './index.js'
+import type { SavedRepliesApiDeps } from './saved-replies.js'
 import type { WebhooksApiDeps } from './webhooks.js'
 
 const TOKEN_ENC_KEY = randomBytes(ENCRYPTION_KEY_BYTES)
@@ -78,6 +80,11 @@ function testWebhooksDeps(db: Db): WebhooksApiDeps {
 /** Build the REQUIRED `assistants` deps (HT-70) for a `createInboxApi` call wired to `db` — a real PGlite-backed `AssistantStore`, matching how `src/composition/root.ts` wires it. */
 function testAssistantsDeps(db: Db): AssistantsApiDeps {
   return { store: createAssistantStore(db) }
+}
+
+/** Build the REQUIRED `savedReplies` deps (HT-76) for a `createInboxApi` call wired to `db` — a real PGlite-backed `SavedReplyStore` + `MailboxStore`, matching how `src/composition/root.ts` wires them. None of these tests exercise the saved-replies routes directly (that surface has its own describe block below), so this is just enough for `createInboxApi` to construct. */
+function testSavedRepliesDeps(db: Db): SavedRepliesApiDeps {
+  return { store: createSavedReplyStore(db), mailboxStore: createMailboxStore(db) }
 }
 
 /** A fake `EmailSender` that records every `OutboundEmail` it's asked to send, never fails. */
@@ -281,6 +288,7 @@ describe('createInboxApi', () => {
       agents: agentsDeps,
       webhooks: testWebhooksDeps(db),
       assistants: assistantsDeps,
+      savedReplies: testSavedRepliesDeps(db),
       ...(overrides.openTracking !== undefined ? { openTracking: overrides.openTracking } : {}),
       ...(overrides.gmailPush !== undefined ? { gmailPush: overrides.gmailPush } : {}),
       ...(overrides.gmailConnect !== undefined ? { gmailConnect: overrides.gmailConnect } : {}),
@@ -739,6 +747,7 @@ describe('createInboxApi', () => {
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
         assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
       })
 
       const res = await api(
@@ -848,6 +857,7 @@ describe('createInboxApi', () => {
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
         assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
       })
 
       const res = await api(
@@ -1073,6 +1083,7 @@ describe('createInboxApi', () => {
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
         assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
       })
 
       const res = await api(
@@ -1116,6 +1127,109 @@ describe('createInboxApi', () => {
       )
       expect(res.status).toBe(401)
       expect(sent).toHaveLength(0)
+    })
+
+    // --- thenSetStatus ("Send & Close", HT-78) ---------------------------------
+
+    describe('thenSetStatus (HT-78)', () => {
+      it('closes the conversation in the same call, firing conversation.status_changed', async () => {
+        const { db, store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const res = await api(
+          replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+            text: 'Resolved!',
+            thenSetStatus: 'closed',
+          }),
+        )
+        expect(res.status).toBe(201)
+
+        const updated = await store.getConversation(conversationId, { includeDeleted: false })
+        expect(updated?.status).toBe('closed')
+
+        const events = await db.query<{ type: string; data: unknown }>(
+          'SELECT type, data FROM event_outbox WHERE conversation_id = $1 AND type = $2',
+          [conversationId, 'conversation.status_changed'],
+        )
+        expect(events).toEqual([
+          { type: 'conversation.status_changed', data: { from: 'active', to: 'closed' } },
+        ])
+      })
+
+      it('sends byte-identical mail with and without thenSetStatus', async () => {
+        const { store: storeA, api: apiA, sent: sentA } = await freshApi()
+        const { conversationId: idA } = await storeA.createConversation(newConversation())
+        await apiA(
+          replyPost(
+            `/api/v1/conversations/${idA}/replies`,
+            { text: 'Same body' },
+            {
+              idempotencyKey: 'key-a',
+            },
+          ),
+        )
+
+        const { store: storeB, api: apiB, sent: sentB } = await freshApi()
+        const { conversationId: idB } = await storeB.createConversation(newConversation())
+        await apiB(
+          replyPost(
+            `/api/v1/conversations/${idB}/replies`,
+            { text: 'Same body', thenSetStatus: 'closed' },
+            { idempotencyKey: 'key-a' },
+          ),
+        )
+
+        expect(sentA).toHaveLength(1)
+        expect(sentB).toHaveLength(1)
+        // Every mail-facing field is identical except the minted Message-ID/
+        // References (which embed the conversation id, necessarily distinct
+        // per conversation) — the shape and every OTHER field never differ.
+        expect({ ...sentA[0], messageId: undefined, references: undefined }).toEqual({
+          ...sentB[0],
+          messageId: undefined,
+          references: undefined,
+        })
+      })
+
+      it('does not re-apply on an idempotency-key replay', async () => {
+        const { db, store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+
+        await api(
+          replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+            text: 'First.',
+            thenSetStatus: 'closed',
+          }),
+        )
+        // Manually reopen — a replay must NOT re-close it (thenSetStatus only
+        // applies on the genuinely new send, per the module doc).
+        await setStatus(db, conversationId, 'active')
+
+        const res = await api(
+          replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+            text: 'First.',
+            thenSetStatus: 'closed',
+          }),
+        )
+        expect(res.status).toBe(201)
+
+        const updated = await store.getConversation(conversationId, { includeDeleted: false })
+        expect(updated?.status).toBe('active')
+      })
+
+      it('400s on an invalid thenSetStatus value', async () => {
+        const { store, api, sent } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const res = await api(
+          replyPost(`/api/v1/conversations/${conversationId}/replies`, {
+            text: 'Hi',
+            thenSetStatus: 'spam',
+          }),
+        )
+        expect(res.status).toBe(400)
+        expect(sent).toHaveLength(0)
+      })
     })
   })
 
@@ -1219,6 +1333,102 @@ describe('createInboxApi', () => {
       )
       expect(res.status).toBe(401)
     })
+
+    // --- snooze (HT-77) ---------------------------------------------------------
+
+    describe('snooze (HT-77)', () => {
+      it('sets a snooze: status pending + snoozedUntil echoed back', async () => {
+        const { store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+        const snoozedUntil = '2026-08-01T00:00:00.000Z'
+
+        const res = await api(
+          patch(`/api/v1/conversations/${conversationId}`, { status: 'pending', snoozedUntil }),
+        )
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { status: string; snoozedUntil: string | null }
+        expect(body.status).toBe('pending')
+        expect(body.snoozedUntil).toBe(snoozedUntil)
+      })
+
+      it('400s when snoozedUntil accompanies a non-pending status', async () => {
+        const { store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const res = await api(
+          patch(`/api/v1/conversations/${conversationId}`, {
+            status: 'closed',
+            snoozedUntil: '2026-08-01T00:00:00.000Z',
+          }),
+        )
+        expect(res.status).toBe(400)
+      })
+
+      it('400s on an unparseable snoozedUntil', async () => {
+        const { store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const res = await api(
+          patch(`/api/v1/conversations/${conversationId}`, {
+            status: 'pending',
+            snoozedUntil: 'not-a-date',
+          }),
+        )
+        expect(res.status).toBe(400)
+      })
+
+      it('plain {status: "pending"} (no snoozedUntil) clears a prior snooze — un-snoozing', async () => {
+        const { store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+        await api(
+          patch(`/api/v1/conversations/${conversationId}`, {
+            status: 'pending',
+            snoozedUntil: '2026-08-01T00:00:00.000Z',
+          }),
+        )
+
+        const res = await api(
+          patch(`/api/v1/conversations/${conversationId}`, { status: 'pending' }),
+        )
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { status: string; snoozedUntil: string | null }
+        expect(body.status).toBe('pending')
+        expect(body.snoozedUntil).toBeNull()
+      })
+
+      it('snoozedUntil is always null for a non-pending conversation summary', async () => {
+        const { store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+
+        const res = await api(
+          patch(`/api/v1/conversations/${conversationId}`, { status: 'active' }),
+        )
+        const body = (await res.json()) as { snoozedUntil: string | null }
+        expect(body.snoozedUntil).toBeNull()
+      })
+
+      it('setting a snooze then moving off pending clears snoozedUntil (schema CHECK: snoozed_until IS NULL OR status = pending)', async () => {
+        const { store, api } = await freshApi()
+        const { conversationId } = await store.createConversation(newConversation())
+        await api(
+          patch(`/api/v1/conversations/${conversationId}`, {
+            status: 'pending',
+            snoozedUntil: '2026-08-01T00:00:00.000Z',
+          }),
+        )
+
+        const res = await api(
+          patch(`/api/v1/conversations/${conversationId}`, { status: 'closed' }),
+        )
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { status: string; snoozedUntil: string | null }
+        expect(body.status).toBe('closed')
+        expect(body.snoozedUntil).toBeNull()
+
+        const updated = await store.getConversation(conversationId, { includeDeleted: false })
+        expect(updated?.snoozedUntil).toBeNull()
+      })
+    })
   })
 
   // --- delete (HT-30, spec §4d v1.1) ----------------------------------------------
@@ -1317,6 +1527,26 @@ describe('createInboxApi', () => {
 
       // And nothing was deleted by the unauthenticated call.
       expect((await api(get(`/api/v1/conversations/${conversationId}`))).status).toBe(200)
+    })
+
+    it('deleting a SNOOZED (pending + snoozedUntil) conversation succeeds and clears snoozed_until (HT-77 — migration 025 requires snoozed_until IS NULL OR status = pending)', async () => {
+      const { db, store, api } = await freshApi()
+      const { conversationId } = await store.createConversation(newConversation())
+      await api(
+        patch(`/api/v1/conversations/${conversationId}`, {
+          status: 'pending',
+          snoozedUntil: '2026-08-01T00:00:00.000Z',
+        }),
+      )
+
+      const res = await api(del(`/api/v1/conversations/${conversationId}`))
+      expect(res.status).toBe(204)
+
+      const raw = await db.query<{ status: string; snoozed_until: unknown }>(
+        'SELECT status, snoozed_until FROM conversations WHERE id = $1',
+        [conversationId],
+      )
+      expect(raw[0]).toEqual({ status: 'deleted', snoozed_until: null })
     })
   })
 
@@ -1987,6 +2217,7 @@ describe('createInboxApi', () => {
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
         assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
         gmailPush: {
           verifySignature: async () => true,
           subscription: SUBSCRIPTION,
@@ -2020,6 +2251,7 @@ describe('createInboxApi', () => {
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
         assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
         gmailPush: {
           verifySignature: async () => true,
           subscription: SUBSCRIPTION,
@@ -2157,6 +2389,7 @@ describe('createInboxApi', () => {
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
         assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
         ...(gmailConnect !== undefined ? { gmailConnect } : {}),
       })
     }
@@ -2392,6 +2625,7 @@ describe('createInboxApi', () => {
         agents: testAgentsDeps(db),
         webhooks: testWebhooksDeps(db),
         assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
         ...(gmailDisconnect !== undefined ? { gmailDisconnect } : {}),
       })
     }
@@ -2503,6 +2737,12 @@ describe('createInboxApi — hardening (Codex review)', () => {
     // none of these tests exercise an /assistants/* route or the assistant-
     // token auth path.
     assistants: { store: {} as unknown as AssistantStore } satisfies AssistantsApiDeps,
+    // Same "never invoked, dummy is fine" posture — none of these tests
+    // exercise a /mailboxes/*/saved-replies route.
+    savedReplies: {
+      store: {} as unknown as SavedReplyStore,
+      mailboxStore: {} as unknown as MailboxStore,
+    } satisfies SavedRepliesApiDeps,
   }
 
   it('throws at construction on an empty apiToken (fail closed — an empty token would authenticate every request)', () => {

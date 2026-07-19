@@ -213,6 +213,46 @@ describe('matchRoute', () => {
     })
   })
 
+  // --- Saved replies & macros (HT-76) -------------------------------------
+
+  it('matches GET/POST /api/v1/mailboxes/{id}/saved-replies, extracting mailboxId', () => {
+    expect(matchRoute('GET', '/api/v1/mailboxes/mb-1/saved-replies')).toEqual({
+      kind: 'saved-replies-list',
+      mailboxId: 'mb-1',
+    })
+    expect(matchRoute('POST', '/api/v1/mailboxes/mb-1/saved-replies')).toEqual({
+      kind: 'saved-replies-create',
+      mailboxId: 'mb-1',
+    })
+    expect(matchRoute('DELETE', '/api/v1/mailboxes/mb-1/saved-replies')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET', 'POST'],
+    })
+  })
+
+  it('matches PATCH/DELETE /api/v1/mailboxes/{id}/saved-replies/{replyId}, extracting both ids', () => {
+    expect(matchRoute('PATCH', '/api/v1/mailboxes/mb-1/saved-replies/sr-1')).toEqual({
+      kind: 'saved-reply-patch',
+      mailboxId: 'mb-1',
+      replyId: 'sr-1',
+    })
+    expect(matchRoute('DELETE', '/api/v1/mailboxes/mb-1/saved-replies/sr-1')).toEqual({
+      kind: 'saved-reply-delete',
+      mailboxId: 'mb-1',
+      replyId: 'sr-1',
+    })
+    expect(matchRoute('GET', '/api/v1/mailboxes/mb-1/saved-replies/sr-1')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['PATCH', 'DELETE'],
+    })
+  })
+
+  it('MAILBOXES_LIST never matches a /saved-replies suffix', () => {
+    expect(matchRoute('GET', '/api/v1/mailboxes/mb-1/saved-replies')).not.toEqual({
+      kind: 'mailboxes-list',
+    })
+  })
+
   // --- Assistants (HT-70) -----------------------------------------------
 
   it('matches GET/POST /api/v1/assistants', () => {

@@ -99,6 +99,13 @@ import {
   type RouteMatch,
 } from './router.js'
 import {
+  handleCreateSavedReply,
+  handleDeleteSavedReply,
+  handleListSavedReplies,
+  handlePatchSavedReply,
+  type SavedRepliesApiDeps,
+} from './saved-replies.js'
+import {
   handleCreateWebhook,
   handleDeleteWebhook,
   handleListWebhooks,
@@ -256,6 +263,16 @@ export interface InboxApiDeps {
    * `POST`/`GET`/`PATCH`/`DELETE`/`.../test` surface this wires up.
    */
   webhooks: WebhooksApiDeps
+  /**
+   * Saved replies & macros (HT-76; specs/api/agent-inbox-v1.md's
+   * saved-replies amendment) — REQUIRED, like `agents`/`webhooks`: this is
+   * core, free-forever product surface (the "inbox basics" wave), not a
+   * deployment-specific optional feature like `openTracking`/`gmailPush`.
+   * `mailboxStore` may be (and, in practice, is) the SAME `MailboxStore`
+   * instance `deps.agents.mailboxStore` already carries — no second store
+   * is required.
+   */
+  savedReplies: SavedRepliesApiDeps
 }
 
 /**
@@ -613,6 +630,40 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
             await resolveActingAgent(request, deps.agents.store),
             request,
             deps.agents,
+          )
+
+        // --- Saved replies & macros (HT-76) ---------------------------------
+
+        case 'saved-replies-list':
+          return await handleListSavedReplies(
+            route.mailboxId,
+            await resolveActingAgent(request, deps.agents.store),
+            deps.savedReplies,
+          )
+
+        case 'saved-replies-create':
+          return await handleCreateSavedReply(
+            route.mailboxId,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.savedReplies,
+          )
+
+        case 'saved-reply-patch':
+          return await handlePatchSavedReply(
+            route.mailboxId,
+            route.replyId,
+            await resolveActingAgent(request, deps.agents.store),
+            request,
+            deps.savedReplies,
+          )
+
+        case 'saved-reply-delete':
+          return await handleDeleteSavedReply(
+            route.mailboxId,
+            route.replyId,
+            await resolveActingAgent(request, deps.agents.store),
+            deps.savedReplies,
           )
 
         // --- Webhooks admin API (HT-69; specs/modules/substrate-v1.md §5) ---

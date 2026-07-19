@@ -21,6 +21,7 @@ import { type AgentRecord, type AgentStore, createAgentStore } from '../store/ag
 import { createAssistantStore } from '../store/assistants.js'
 import { createConversationStore } from '../store/conversations.js'
 import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
+import { createSavedReplyStore } from '../store/saved-replies.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
 import { createWebhookEndpointStore } from '../store/webhook-endpoints.js'
 import { createInboxApi } from './index.js'
@@ -98,6 +99,7 @@ describe('Agents & Authentication API', () => {
         queue: { async enqueue() {} },
       },
       assistants: { store: createAssistantStore(db) },
+      savedReplies: { store: createSavedReplyStore(db), mailboxStore },
     })
     return { db, agentStore, mailboxStore, api, sent }
   }

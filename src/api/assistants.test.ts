@@ -18,6 +18,7 @@ import { type AgentRecord, type AgentStore, createAgentStore } from '../store/ag
 import { type AssistantStore, createAssistantStore } from '../store/assistants.js'
 import { createConversationStore } from '../store/conversations.js'
 import { createMailboxStore } from '../store/mailboxes.js'
+import { createSavedReplyStore } from '../store/saved-replies.js'
 import { createInboxApi } from './index.js'
 import type { WebhooksApiDeps } from './webhooks.js'
 
@@ -59,6 +60,7 @@ describe('Assistants admin API (HT-70)', () => {
     await migrate(db)
     const agentStore = createAgentStore(db)
     const assistantStore = createAssistantStore(db)
+    const mailboxStore = createMailboxStore(db)
     const { sender } = createFakeSender()
     const api = createInboxApi({
       store: createConversationStore(db),
@@ -70,13 +72,14 @@ describe('Assistants admin API (HT-70)', () => {
       agents: {
         store: agentStore,
         providers: [createPasswordAuthProvider({ agentStore })],
-        mailboxStore: createMailboxStore(db),
+        mailboxStore,
       },
       assistants: { store: assistantStore },
       webhooks: {
         store: {} as unknown as WebhooksApiDeps['store'],
         queue: { async enqueue() {} },
       } satisfies WebhooksApiDeps,
+      savedReplies: { store: createSavedReplyStore(db), mailboxStore },
     })
     return { db, agentStore, assistantStore, api }
   }
@@ -236,7 +239,7 @@ describe('Assistants admin API (HT-70)', () => {
 
   describe('POST /api/v1/assistants/{id}/rotate-token', () => {
     it('mints a fresh token for the SAME assistant id; the old token stops verifying', async () => {
-      const { api, agentStore, assistantStore, db: freshDb } = await freshApi()
+      const { api, agentStore, assistantStore } = await freshApi()
       const admin = await createActiveAgent(agentStore)
       const created = await api(
         req('POST', '/api/v1/assistants', {
@@ -311,6 +314,10 @@ describe('Assistants admin API (HT-70)', () => {
           store: {} as unknown as WebhooksApiDeps['store'],
           queue: { async enqueue() {} },
         } satisfies WebhooksApiDeps,
+        savedReplies: {
+          store: createSavedReplyStore(freshDb),
+          mailboxStore: createMailboxStore(freshDb),
+        },
       })
 
       const res = await failingApi(

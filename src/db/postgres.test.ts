@@ -307,6 +307,7 @@ describe('createPostgresDb with a schema option', () => {
       'mailbox_oauth_tokens',
       'mailboxes',
       'queue_jobs',
+      'saved_replies',
       'thread_attachments',
       'threads',
       'webhook_endpoints',
