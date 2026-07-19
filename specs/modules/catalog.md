@@ -190,6 +190,6 @@ now so the marketplace design inherits it:
   portal reclassified free-with-branding → paid module in full** (§3.4); the
   embeddable widget keeps the unchanged free/branding-paid pattern. Live chat's
   free-core status (§2.2, charter §4) reaffirmed as a deliberate divergence from
-  FreeScout's paid Live Chat module. Paid catalog now 21 line items across four
-  clusters (Intelligence 3, Channels & integrations 8, Enterprise & ops 8,
+  FreeScout's paid Live Chat module. Paid catalog now 22 line items across four
+  clusters (Intelligence 3, Channels & integrations 9, Enterprise & ops 8,
   Self-service surfaces 2 paid + 1 free-with-branding).
