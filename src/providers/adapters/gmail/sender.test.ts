@@ -120,25 +120,26 @@ describe('createGmailEmailSender', () => {
     expect(getAccessToken).toHaveBeenCalledTimes(2)
   })
 
-  it.each([
-    401, 500,
-  ])('throws on a non-2xx (%d) response, and never leaks the access token in the error', async (status) => {
-    const { fetchImpl } = fakeFetch(status, { error: { message: 'nope, rejected' } })
-    const secretToken = 'super-secret-access-token-do-not-leak'
-    const getAccessToken = vi.fn(async () => secretToken)
-    const sender = createGmailEmailSender({ getAccessToken, fetchImpl })
+  it.each([401, 500])(
+    'throws on a non-2xx (%d) response, and never leaks the access token in the error',
+    async (status) => {
+      const { fetchImpl } = fakeFetch(status, { error: { message: 'nope, rejected' } })
+      const secretToken = 'super-secret-access-token-do-not-leak'
+      const getAccessToken = vi.fn(async () => secretToken)
+      const sender = createGmailEmailSender({ getAccessToken, fetchImpl })
 
-    let caught: unknown
-    try {
-      await sender.send(email)
-    } catch (err) {
-      caught = err
-    }
+      let caught: unknown
+      try {
+        await sender.send(email)
+      } catch (err) {
+        caught = err
+      }
 
-    expect(caught).toBeInstanceOf(Error)
-    expect((caught as Error).message).toContain(String(status))
-    expect(String(caught)).not.toContain(secretToken)
-  })
+      expect(caught).toBeInstanceOf(Error)
+      expect((caught as Error).message).toContain(String(status))
+      expect(String(caught)).not.toContain(secretToken)
+    },
+  )
 
   it('a rejection is a real thrown Error, never mistaken for a resolved send', async () => {
     const { fetchImpl } = fakeFetch(500, {})
