@@ -33,9 +33,16 @@ exists in the ecosystem.) Everything else observed — Users, Mailboxes, Modules
 Settings, Translate, Logs, System, notifications, search, dashboard — is core there.
 
 What this classification means for Helpthread (charter §3 governs):
-- **Already core-committed here, paid there** — the public API (+ MCP server) and the
-  knowledge base are charter-core AGPL, free forever; **Tags shipped core in v1.1**.
-  These are honest positioning differentiators: FreeScout charges for them, we don't.
+- **Already core-committed here, paid there** — the public API (+ MCP server) is
+  charter-core AGPL, free forever; **Tags shipped core in v1.1**. These are honest
+  positioning differentiators: FreeScout charges for them, we don't.
+- **Knowledge Base — reclassified 2026-07-19 (HT-75).** Originally counted alongside
+  the public API above as an "already core-committed, paid there" differentiator; TJ
+  reversed that call on review. Unlike Custom Folders/Saved Replies/Send & Close/
+  Satisfaction Ratings below (where the market signal was noted but overridden in
+  favor of free), for the Knowledge Base the market signal was followed: it is now a
+  paid module (`specs/modules/catalog.md` §3.4), amending CHARTER.md's original
+  day-one free-forever commitment.
 - **Their paid list is market signal for OUR marketplace candidates** — Custom Folders,
   Saved Replies, Send & Close, Satisfaction Ratings are proven willingness-to-pay
   features. Core-vs-module is now decided: `specs/modules/catalog.md` (HT-66) is the
