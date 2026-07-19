@@ -1,6 +1,6 @@
 # Agents & Authentication
 
-Status: **draft** (2026-07-18, amended 2026-07-19 — see Changelog draft.6) — the contract for
+Status: **draft** (2026-07-18, amended 2026-07-19 — see Changelog draft.6–.7) — the contract for
 real per-Agent identity, login, and user management, replacing the single shared operator
 password that HT-51 shipped as a deliberate placeholder. Authored native (Helpthread's own
 domain model); the *experience* is modelled on the Help Scout / FreeScout user-management UX
@@ -94,7 +94,8 @@ CREATE TABLE agent_auth_identities (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   agent_id     uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   provider     text NOT NULL,          -- 'password' (core, v1); 'google','saml',... (marketplace);
-                                       -- 'passkey' is core too but not yet built (§1, §11)
+                                       -- 'passkey' is core too (§1) but stores its credentials in
+                                       -- webauthn_credentials (passkeys.md §2.1), never here
   subject      text NOT NULL,          -- provider's stable identifier for this Agent
   secret_hash  text,                   -- scrypt hash for 'password'; NULL for OAuth-style providers
   created_at   timestamptz NOT NULL DEFAULT now(),
@@ -118,13 +119,20 @@ CREATE UNIQUE INDEX agent_auth_identities_one_password_per_agent
   guarding a freed old email against later collision — deferred rather than half-built. An
   Agent record is re-created if the email must change.
 - A marketplace `google` module inserts `provider='google', subject=<google sub>,
-  secret_hash=NULL` — **no core migration**. A `saml` module inserts its own rows. The
-  seam (§4) is the only code that reads this table by provider.
-- Deleting an Agent cascades their identities. An Agent may have several rows (password +
-  google + saml) — all resolving to the same `agents.id`. Linking a *marketplace* method to
-  an existing Agent is a marketplace-module concern; in this increment core only ever writes
-  `password` (passkey is core too, per §1, but is not yet built — it lands as a second
-  core-written provider, not a marketplace one).
+  secret_hash=NULL` — **no core migration**. The seam (§4) is the only code that reads this
+  table by provider. **Amended (HT-75):** a `passkey` (WebAuthn) module does **not** use this
+  table, despite an earlier draft of this section anticipating it would. WebAuthn's
+  per-credential mutable state (a signature counter, transports, backup flags) and an Agent
+  potentially holding many independent credentials don't fit this table's shape (one row, one
+  optional secret hash, per identity) — it gets its own table instead (`webauthn_credentials`;
+  `specs/auth/passkeys.md` §2.1), the same move `mailbox_oauth_tokens` (HT-38) already made
+  for Gmail's OAuth material. This table remains the right shape for single-secret,
+  single-subject providers like `google`.
+- Deleting an Agent cascades their identities. An Agent may have several rows (`password` plus
+  any OAuth-style provider such as `google`) — all resolving to the same `agents.id`. Linking
+  additional methods to an existing Agent is a marketplace-module concern; core only ever
+  writes `password` today — passkey is core too (§1) and lands as a second core-written
+  provider, storing its credentials in `webauthn_credentials`, never in this table.
 
 ### 3.3 `assignee` graduates from a flag to an identity — **breaking**
 
@@ -549,6 +557,12 @@ is retired (§8).
   and SAML/enterprise SSO remain marketplace, unchanged. The provider-abstraction
   architecture (§3.2, §4) is unaffected — it already supports multiple core providers, not
   just marketplace ones.
+- **draft.7 (2026-07-19, HT-75 passkey spec review):** §3.2 corrected — a `passkey`/WebAuthn
+  provider does **not** use `agent_auth_identities` (an earlier draft of this section said it
+  would); it gets its own table, `webauthn_credentials`, specified in `specs/auth/passkeys.md`
+  §2.1. No schema or behavior change to anything in THIS spec — a same-day correction of a
+  forward-reference this section made before the passkey spec existed to contradict it,
+  caught by that spec's own review.
 - **draft.5 (2026-07-18, TJ fidelity review):** mailbox-access semantics pinned and the
   Permissions UI pulled forward (§3.4): admins implicit-all, auto-grant-on-create,
   admin-only grant endpoints (§6: `GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes`);
