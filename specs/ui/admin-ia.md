@@ -23,8 +23,24 @@ Top-bar utilities (scope-neutral): notifications bell (event feed), global searc
 ## 2. Surface index (observed reference, target shape)
 
 Observed 2026-07-18. **Caveat (TJ):** the reference instance runs PAID MODULES — nothing
-observed is assumed FreeScout-core, and nothing absent is assumed nonexistent. The
-core-vs-module column is filled in as TJ supplies the purchased-module list (pending).
+observed is assumed FreeScout-core, and nothing absent is assumed nonexistent.
+
+**Purchased-module list (TJ, 2026-07-18)** — these observed surfaces are PAID modules in
+the reference, not FreeScout core: **API & Webhooks, Custom Folders, Knowledge Base
+(installed, inactive), Satisfaction Ratings, Saved Replies, Send & Close, Tags.**
+(Keyboard shortcuts is a further paid module NOT purchased — absent from the reference,
+exists in the ecosystem.) Everything else observed — Users, Mailboxes, Modules manager,
+Settings, Translate, Logs, System, notifications, search, dashboard — is core there.
+
+What this classification means for Helpthread (charter §3 governs):
+- **Already core-committed here, paid there** — the public API (+ MCP server) and the
+  knowledge base are charter-core AGPL, free forever; **Tags shipped core in v1.1**.
+  These are honest positioning differentiators: FreeScout charges for them, we don't.
+- **Their paid list is market signal for OUR marketplace candidates** — Custom Folders,
+  Saved Replies, Send & Close, Satisfaction Ratings are proven willingness-to-pay
+  features. Core-vs-module for each is decided at ticket grooming; the charter's floor
+  ("nothing free today gets paywalled retroactively; monetization adds, never subtracts")
+  applies, and AI-powered modules remain the leading paid candidates.
 
 - **Dashboard (home)** — multi-mailbox card grid: one card per mailbox with folder counts
   (Unassigned/Mine/Starred/Drafts/Assigned + last-activity dates) and quick actions
