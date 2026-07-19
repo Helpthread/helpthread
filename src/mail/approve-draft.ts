@@ -108,13 +108,21 @@ export interface ApproveDraftInput {
  * The outcome of {@link approveDraft} — mirrors `SendReplyResult`'s shape
  * (`./send.ts`) for the outcomes this function shares with it (a claimed
  * row's delivery attempt can fail or race exactly the same way a keyed
- * reply retry's can), plus `not-a-draft` for a resolution that resolved no
- * row (unknown id, already resolved, or a genuine race between the API
- * layer's snapshot and this call).
+ * reply retry's can), plus:
+ * - `not-a-draft` — no matching `awaiting_review` row (unknown id, already
+ *   resolved, or a genuine race between the API layer's snapshot and this
+ *   call landing between the lock and the thread UPDATE).
+ * - `conversation-deleted` / `conversation-spam` (HT-70 review fix, Codex)
+ *   — `ConversationStore.resolveDraft`'s locked, authoritative re-check
+ *   found the conversation deleted or marked spam AT WRITE TIME, regardless
+ *   of what `input.conversation` (the API layer's own, possibly-stale
+ *   snapshot) said. The draft row is left completely untouched.
  */
 export type ApproveDraftResult =
   | { ok: true; threadId: string; messageId: string; delivery: 'sent' }
   | { ok: false; reason: 'not-a-draft' }
+  | { ok: false; reason: 'conversation-deleted' }
+  | { ok: false; reason: 'conversation-spam' }
   | { ok: false; reason: 'retry-in-progress' }
   | {
       ok: false
@@ -200,6 +208,12 @@ export async function approveDraft(
     edit: editForResolve,
     edited: input.edit !== undefined,
   })
+  if (resolved === 'conversation-deleted') {
+    return { ok: false, reason: 'conversation-deleted' }
+  }
+  if (resolved === 'conversation-spam') {
+    return { ok: false, reason: 'conversation-spam' }
+  }
   if (resolved === null) {
     // A race: resolved by someone else (or was never a draft) between the
     // API layer's snapshot and this write. Nothing was persisted that needs

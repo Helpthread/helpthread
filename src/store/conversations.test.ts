@@ -1452,6 +1452,7 @@ describe('createConversationStore', () => {
           edited: false,
         })
 
+        if (resolved === null || typeof resolved === 'string') throw new Error('unreachable')
         expect(resolved).toMatchObject({
           id: draft.threadId,
           direction: 'outbound',
@@ -1463,7 +1464,7 @@ describe('createConversationStore', () => {
           draftEdited: false,
           bodyText: 'Original draft body.',
         })
-        expect(resolved?.draftResolvedAt).toBeInstanceOf(Date)
+        expect(resolved.draftResolvedAt).toBeInstanceOf(Date)
       })
 
       it('approve on a CLOSED conversation reopens it to active (HT-70 review fix — the normal reply-reopen rule applies at approval time)', async () => {
@@ -1488,7 +1489,8 @@ describe('createConversationStore', () => {
           inReplyTo: null,
           edited: false,
         })
-        expect(resolved?.draftStatus).toBe('approved')
+        if (resolved === null || typeof resolved === 'string') throw new Error('unreachable')
+        expect(resolved.draftStatus).toBe('approved')
 
         const conversation = await store.getConversation(conversationId)
         expect(conversation?.status).toBe('active')
@@ -1546,6 +1548,100 @@ describe('createConversationStore', () => {
         expect((await store.getConversation(conversationId))?.status).toBe('pending')
       })
 
+      it('approve on a DELETED conversation is refused (conversation-deleted), leaving the draft row completely untouched (HT-70 review fix, Codex — the TOCTOU close)', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Reply to a deleted conversation.',
+          idempotencyKey: 'approve-deleted-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+        await store.deleteConversation(conversationId)
+
+        const resolved = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
+        })
+        expect(resolved).toBe('conversation-deleted')
+
+        const conversation = await store.getConversation(conversationId, { includeDeleted: true })
+        const thread = conversation?.threads.find((t) => t.id === draft.threadId)
+        expect(thread).toMatchObject({
+          draftStatus: 'awaiting_review',
+          deliveryStatus: null,
+          messageId: null,
+          sendEnvelope: null,
+          approvedByAgentId: null,
+        })
+      })
+
+      it('approve on a SPAM conversation is refused (conversation-spam), leaving the draft row completely untouched (HT-70 review fix, Codex — the TOCTOU close)', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Reply to a spam conversation.',
+          idempotencyKey: 'approve-spam-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+        await setStatus(db, conversationId, 'spam')
+
+        const resolved = await store.resolveDraft({
+          action: 'approve',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+          messageId: '<ht.k1.c1.t2.sig@mail.example.test>',
+          sendEnvelope: testEnvelope,
+          inReplyTo: null,
+          edited: false,
+        })
+        expect(resolved).toBe('conversation-spam')
+
+        const conversation = await store.getConversation(conversationId, { includeDeleted: false })
+        const thread = conversation?.threads.find((t) => t.id === draft.threadId)
+        expect(thread).toMatchObject({
+          draftStatus: 'awaiting_review',
+          deliveryStatus: null,
+          messageId: null,
+          sendEnvelope: null,
+          approvedByAgentId: null,
+        })
+        // The conversation itself is untouched too — still spam, not reopened.
+        expect(conversation?.status).toBe('spam')
+      })
+
+      it('discard is unaffected by conversation status — no deleted/spam refusal (only approve has that restriction)', async () => {
+        const { store, db } = await freshStore()
+        const assistantId = await createTestAssistant(db)
+        const agentId = await createTestAgent(db)
+        const { conversationId } = await store.createConversation(newConversation())
+        const draft = await store.appendDraft(conversationId, {
+          assistantId,
+          bodyText: 'Discard on a spam conversation is harmless.',
+          idempotencyKey: 'discard-spam-1',
+        })
+        if (!draft.ok) throw new Error('unreachable')
+        await setStatus(db, conversationId, 'spam')
+
+        const resolved = await store.resolveDraft({
+          action: 'discard',
+          threadId: draft.threadId,
+          resolvedByAgentId: agentId,
+        })
+        if (resolved === null || typeof resolved === 'string') throw new Error('unreachable')
+        expect(resolved.draftStatus).toBe('discarded')
+      })
+
       it('approve (HT-70) also persists in_reply_to, derived by the caller at approval time — StoredThread.inReplyTo is what attemptDeliveryOfClaimedThread reads, never sendEnvelope', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)
@@ -1568,7 +1664,8 @@ describe('createConversationStore', () => {
           edited: false,
         })
 
-        expect(resolved?.inReplyTo).toBe('<inbound-1@customer.example.test>')
+        if (resolved === null || typeof resolved === 'string') throw new Error('unreachable')
+        expect(resolved.inReplyTo).toBe('<inbound-1@customer.example.test>')
       })
 
       it('approve with edits: replaces the body and records draft_edited = true', async () => {
@@ -1618,12 +1715,13 @@ describe('createConversationStore', () => {
           resolvedByAgentId: agentId,
         })
 
+        if (resolved === null || typeof resolved === 'string') throw new Error('unreachable')
         expect(resolved).toMatchObject({
           draftStatus: 'discarded',
           deliveryStatus: null,
           approvedByAgentId: agentId,
         })
-        expect(resolved?.draftResolvedAt).toBeInstanceOf(Date)
+        expect(resolved.draftResolvedAt).toBeInstanceOf(Date)
       })
 
       it('returns null for an unknown threadId, a non-draft thread, or a draft already resolved', async () => {
@@ -1693,7 +1791,8 @@ describe('createConversationStore', () => {
           inReplyTo: null,
           edited: false,
         })
-        expect(approved?.draftStatus).toBe('approved')
+        if (approved === null || typeof approved === 'string') throw new Error('unreachable')
+        expect(approved.draftStatus).toBe('approved')
 
         // approve-then-discard: the row is no longer awaiting_review, so
         // discard is a no-op — it must NOT flip an already-approved,

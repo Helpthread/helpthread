@@ -221,13 +221,33 @@ export async function handleListDrafts(
 
 // --- POST /api/v1/drafts/{threadId}/approve ---------------------------------
 
-/** Validated shape of the OPTIONAL "approve with edits" body (spec §6) — parsed leniently: an absent or empty body means "no edit", never a `400`. */
+/**
+ * Validated shape of the OPTIONAL "approve with edits" body (spec §6) —
+ * parsed leniently: an absent or empty body means "no edit", never a `400`.
+ *
+ * HT-70 review fix (Codex): a PRESENT `bodyText` gets the SAME length bound
+ * (`[MIN_BODY_LENGTH, MAX_BODY_LENGTH]`) `parseDraftBody` (draft-create,
+ * above) and `parseReplyBody` (`src/api/conversations.ts`) already enforce
+ * on their own required `bodyText`/`text` — without this, an Agent's edit
+ * could push a payload past the reply path's own limit into the send path,
+ * where nothing else re-checks it. `bodyHtml`, if present, is type-checked
+ * only (no length bound) — matching those SAME two sibling paths exactly:
+ * neither enforces a length bound on `bodyHtml`/`html` either.
+ */
 function parseApproveEditBody(
   raw: unknown,
 ): { ok: true; edit: { bodyText?: string; bodyHtml?: string } | undefined } | { ok: false } {
   if (typeof raw !== 'object' || raw === null) return { ok: false }
   const { bodyText, bodyHtml } = raw as Record<string, unknown>
-  if (bodyText !== undefined && typeof bodyText !== 'string') return { ok: false }
+  if (bodyText !== undefined) {
+    if (
+      typeof bodyText !== 'string' ||
+      bodyText.length < MIN_BODY_LENGTH ||
+      bodyText.length > MAX_BODY_LENGTH
+    ) {
+      return { ok: false }
+    }
+  }
   if (bodyHtml !== undefined && typeof bodyHtml !== 'string') return { ok: false }
   if (bodyText === undefined && bodyHtml === undefined) return { ok: true, edit: undefined }
   return {
@@ -275,6 +295,17 @@ async function readApproveEditBody(
  * On send failure, `502 send_failed`; on a delivery-lease race,
  * `409 retry_in_progress` — same shapes `handleReply` uses for the
  * equivalent outcomes.
+ *
+ * **HT-70 review fix (Codex): the checks below are a FAST PATH, not the
+ * authoritative gate.** This preflight read (`getConversationByThreadId`)
+ * can go stale the instant a concurrent delete or spam-mark lands between
+ * it and the write — the AUTHORITATIVE check is `approveDraft` →
+ * `ConversationStore.resolveDraft`'s own locked, in-transaction re-read
+ * (`src/store/conversations.ts`), whose `conversation-deleted`/
+ * `conversation-spam` outcomes are handled in the `!result.ok` branch below
+ * with the SAME response shapes this preflight already uses — so a race
+ * that slips past this stale read still resolves correctly, just one layer
+ * deeper.
  */
 export async function handleApproveDraft(
   threadId: string,
@@ -303,7 +334,7 @@ export async function handleApproveDraft(
     return apiError(
       400,
       'validation_failed',
-      'Request body, if present, must be a JSON object with optional bodyText/bodyHtml strings.',
+      `Request body, if present, must be a JSON object with optional bodyText (${MIN_BODY_LENGTH}-${MAX_BODY_LENGTH} characters) and bodyHtml (string) fields.`,
     )
   }
 
@@ -334,6 +365,17 @@ export async function handleApproveDraft(
         'retry_in_progress',
         'A delivery attempt for this draft is already in progress.',
       )
+    }
+    if (result.reason === 'conversation-deleted') {
+      // The AUTHORITATIVE catch (HT-70 review fix, Codex): the preflight
+      // above said "not deleted", but resolveDraft's locked re-check found
+      // otherwise at write time — same 404-shape as the preflight's own
+      // (indistinguishable-from-nonexistent, §4d).
+      return NOT_FOUND()
+    }
+    if (result.reason === 'conversation-spam') {
+      // Same authoritative catch, for a concurrent spam-mark.
+      return apiError(409, 'conflict', 'Cannot approve a draft on a spam conversation.')
     }
     // 'not-a-draft' — a race between the snapshot above and the write.
     return NOT_FOUND()
@@ -387,7 +429,13 @@ export async function handleDiscardDraft(
     threadId,
     resolvedByAgentId: actingAgent.id,
   })
-  if (resolved === null) {
+  // `resolveDraft`'s return type is shared with the approve branch
+  // (`StoredThread | null | 'conversation-deleted' | 'conversation-spam'`),
+  // but the discard branch itself never produces either sentinel string —
+  // discard has no conversation-status restriction (this handler's own doc
+  // comment). The `typeof ... === 'string'` arm is therefore unreachable at
+  // runtime; it exists only to satisfy the shared return type.
+  if (resolved === null || typeof resolved === 'string') {
     // A race between the snapshot above and the write.
     return NOT_FOUND()
   }

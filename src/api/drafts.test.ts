@@ -502,6 +502,62 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
       expect(sent[0].text).toBe('Edited before sending.')
     })
 
+    describe('approve-with-edits body validation (HT-70 review fix, Codex — same bound as draft-create/reply)', () => {
+      it('an empty-string bodyText override is 400 validation_failed; nothing is delivered', async () => {
+        const { api, store, agentStore, assistantStore, sent } = await freshApi()
+        const agent = await createActiveAgent(agentStore)
+        const { token } = await createActiveAssistant(assistantStore)
+        const { threadId } = await seedDraft(api, store, token)
+
+        const res = await api(
+          req('POST', `/api/v1/drafts/${threadId}/approve`, {
+            agentId: agent.id,
+            body: { bodyText: '' },
+          }),
+        )
+        expect(res.status).toBe(400)
+        expect(await res.json()).toEqual({
+          error: { code: 'validation_failed', message: expect.any(String) },
+        })
+        expect(sent).toHaveLength(0)
+      })
+
+      it('a bodyText override over 5000 characters is 400 validation_failed; nothing is delivered', async () => {
+        const { api, store, agentStore, assistantStore, sent } = await freshApi()
+        const agent = await createActiveAgent(agentStore)
+        const { token } = await createActiveAssistant(assistantStore)
+        const { threadId } = await seedDraft(api, store, token)
+
+        const res = await api(
+          req('POST', `/api/v1/drafts/${threadId}/approve`, {
+            agentId: agent.id,
+            body: { bodyText: 'a'.repeat(5001) },
+          }),
+        )
+        expect(res.status).toBe(400)
+        expect(sent).toHaveLength(0)
+      })
+
+      it('a bodyText override of exactly 5000 characters (the boundary) is accepted and delivered', async () => {
+        const { api, store, agentStore, assistantStore, sent } = await freshApi()
+        const agent = await createActiveAgent(agentStore)
+        const { token } = await createActiveAssistant(assistantStore)
+        const { threadId } = await seedDraft(api, store, token)
+        const boundaryText = 'a'.repeat(5000)
+
+        const res = await api(
+          req('POST', `/api/v1/drafts/${threadId}/approve`, {
+            agentId: agent.id,
+            body: { bodyText: boundaryText },
+          }),
+        )
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { bodyText: string }
+        expect(body.bodyText).toBe(boundaryText)
+        expect(sent[0].text).toBe(boundaryText)
+      })
+    })
+
     it('401s with no acting-Agent header', async () => {
       const { api, store, assistantStore } = await freshApi()
       const { token } = await createActiveAssistant(assistantStore)
@@ -584,6 +640,163 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
 
       const conversation = await store.getConversation(conversationId, { includeDeleted: false })
       expect(conversation?.status).toBe('active')
+    })
+
+    describe('TOCTOU: the preflight is a stale read, resolveDraft is the authoritative gate (HT-70 review fix, Codex)', () => {
+      /**
+       * Build a SECOND `createInboxApi` instance sharing the same
+       * `db`/`agentStore`/`assistantStore`/`sent`, but whose
+       * `getConversationByThreadId` ALWAYS returns `staleSnapshot` —
+       * simulating a preflight read taken before a concurrent delete/
+       * spam-mark commits. Every OTHER store method (crucially
+       * `resolveDraft`, which does its own fresh, locked read) passes
+       * through to the real store, so this exercises exactly the race: a
+       * stale preflight racing a fresh, authoritative write.
+       */
+      function racyApi(
+        db: Db,
+        realStore: ConversationStore,
+        staleSnapshot: Awaited<ReturnType<ConversationStore['getConversationByThreadId']>>,
+        agentStore: AgentStore,
+        assistantStore: AssistantStore,
+        sender: EmailSender,
+      ): (request: Request) => Promise<Response> {
+        const racedStore: ConversationStore = {
+          ...realStore,
+          async getConversationByThreadId() {
+            return staleSnapshot
+          },
+        }
+        return createInboxApi({
+          store: racedStore,
+          apiToken: TOKEN,
+          sender,
+          keyring: KEYRING,
+          mailDomain: MAIL_DOMAIN,
+          supportAddress: SUPPORT_ADDRESS,
+          agents: {
+            store: agentStore,
+            providers: [createPasswordAuthProvider({ agentStore })],
+            mailboxStore: createMailboxStore(db),
+          },
+          assistants: { store: assistantStore },
+        })
+      }
+
+      it('conversation DELETED between the stale preflight and the write: refused (404-shape), no approval, no delivery_status change', async () => {
+        const { api, store, agentStore, assistantStore, sent } = await freshApi()
+        const agent = await createActiveAgent(agentStore)
+        const { token } = await createActiveAssistant(assistantStore)
+        const { conversationId, threadId } = await seedDraft(api, store, token)
+
+        // The snapshot the "preflight" would have seen — taken BEFORE the
+        // concurrent delete below.
+        const staleSnapshot = await store.getConversationByThreadId(threadId, {
+          includeDeleted: false,
+        })
+        expect(staleSnapshot?.status).not.toBe('deleted')
+
+        // The "concurrent" delete — committed AFTER the stale snapshot, but
+        // BEFORE the approve write below runs.
+        await store.deleteConversation(conversationId)
+
+        const raced = racyApi(db as Db, store, staleSnapshot, agentStore, assistantStore, {
+          maxSendMs: 30_000,
+          async send(email) {
+            sent.push(email)
+            return {}
+          },
+        })
+        const res = await raced(
+          req('POST', `/api/v1/drafts/${threadId}/approve`, { agentId: agent.id }),
+        )
+        expect(res.status).toBe(404)
+        expect(sent).toHaveLength(0)
+
+        const conversation = await store.getConversation(conversationId, {
+          includeDeleted: true,
+        })
+        const thread = conversation?.threads.find((t) => t.id === threadId)
+        expect(thread?.draftStatus).toBe('awaiting_review')
+        expect(thread?.deliveryStatus).toBeNull()
+        expect(thread?.messageId).toBeNull()
+      })
+
+      it('conversation marked SPAM between the stale preflight and the write: refused (409-shape), no approval, no delivery_status change', async () => {
+        const { api, store, agentStore, assistantStore, sent } = await freshApi()
+        const agent = await createActiveAgent(agentStore)
+        const { token } = await createActiveAssistant(assistantStore)
+        const { conversationId, threadId } = await seedDraft(api, store, token)
+
+        const staleSnapshot = await store.getConversationByThreadId(threadId, {
+          includeDeleted: false,
+        })
+        expect(staleSnapshot?.status).not.toBe('spam')
+
+        await api(
+          req('PATCH', `/api/v1/conversations/${conversationId}`, {
+            agentId: agent.id,
+            body: { status: 'spam' },
+          }),
+        )
+
+        const raced = racyApi(db as Db, store, staleSnapshot, agentStore, assistantStore, {
+          maxSendMs: 30_000,
+          async send(email) {
+            sent.push(email)
+            return {}
+          },
+        })
+        const res = await raced(
+          req('POST', `/api/v1/drafts/${threadId}/approve`, { agentId: agent.id }),
+        )
+        expect(res.status).toBe(409)
+        expect(sent).toHaveLength(0)
+
+        const conversation = await store.getConversation(conversationId, {
+          includeDeleted: false,
+        })
+        const thread = conversation?.threads.find((t) => t.id === threadId)
+        expect(thread?.draftStatus).toBe('awaiting_review')
+        expect(thread?.deliveryStatus).toBeNull()
+      })
+
+      it('conversation CLOSED between the stale preflight and the write: still reopens to active (the locked read-then-write folds the reopen in)', async () => {
+        const { api, store, agentStore, assistantStore, sent } = await freshApi()
+        const agent = await createActiveAgent(agentStore)
+        const { token } = await createActiveAssistant(assistantStore)
+        const { conversationId, threadId } = await seedDraft(api, store, token)
+
+        const staleSnapshot = await store.getConversationByThreadId(threadId, {
+          includeDeleted: false,
+        })
+        expect(staleSnapshot?.status).not.toBe('closed')
+
+        await api(
+          req('PATCH', `/api/v1/conversations/${conversationId}`, {
+            agentId: agent.id,
+            body: { status: 'closed' },
+          }),
+        )
+
+        const raced = racyApi(db as Db, store, staleSnapshot, agentStore, assistantStore, {
+          maxSendMs: 30_000,
+          async send(email) {
+            sent.push(email)
+            return {}
+          },
+        })
+        const res = await raced(
+          req('POST', `/api/v1/drafts/${threadId}/approve`, { agentId: agent.id }),
+        )
+        expect(res.status).toBe(200)
+        expect(sent).toHaveLength(1)
+
+        const conversation = await store.getConversation(conversationId, {
+          includeDeleted: false,
+        })
+        expect(conversation?.status).toBe('active')
+      })
     })
 
     it('502s when the provider rejects the send; the draft stays approved but delivery fails', async () => {

@@ -750,11 +750,28 @@ export interface ConversationStore {
    * a non-outbound thread, or a draft that was already resolved (or was
    * never a draft) — the same "no such row in the state this method
    * requires" shape {@link setConversationStatus} uses for a missing/deleted
-   * conversation. This method does not check conversation status (spam,
-   * soft-deleted) — spec §6 assigns those refusals to the API layer, which
-   * has the conversation already loaded.
+   * conversation.
+   *
+   * **HT-70 review fix (Codex): the `action: 'approve'` branch IS the
+   * authoritative conversation-status check, not the API layer.** The API's
+   * own preflight read (`src/api/drafts.ts`'s `handleApproveDraft`, via
+   * `getConversationByThreadId`) is a stale snapshot the instant a
+   * concurrent delete or spam-mark lands between that read and this write —
+   * a TOCTOU that would otherwise let mail be armed from a conversation an
+   * Agent already pulled out of the deliverable set. So the approve branch
+   * itself locks the PARENT conversation row (`FOR UPDATE OF`) inside the
+   * same transaction as the thread UPDATE, and returns the sentinel string
+   * `'conversation-deleted'` or `'conversation-spam'` — leaving the draft
+   * row completely untouched — when the LOCKED, re-read status is `deleted`
+   * or `spam` at write time, regardless of what the caller's own snapshot
+   * said. A `'closed'` conversation reopens to `active` in this same locked
+   * read-then-write (spec §6's reply-reopen invariant); every other status
+   * proceeds unchanged. The `action: 'discard'` branch never returns either
+   * sentinel — discard has no conversation-status restriction.
    */
-  resolveDraft(input: ResolveDraftInput): Promise<StoredThread | null>
+  resolveDraft(
+    input: ResolveDraftInput,
+  ): Promise<StoredThread | null | 'conversation-deleted' | 'conversation-spam'>
 
   /**
    * Read one conversation (with all of its threads) by the id of ANY thread
@@ -1503,14 +1520,61 @@ export function createConversationStore(db: Db): ConversationStore {
           return toStoredThread(row)
         }
 
-        // approve (spec §6 step 4): writes the caller-derived envelope
-        // snapshot + message id, flips draft_status → 'approved' and
-        // delivery_status → 'pending' in the SAME statement (so the row is
-        // NEVER observably in a state where draft_status is 'approved' but
-        // delivery_status is still NULL, or vice versa), and records the
-        // approve-with-edits audit fields. `input.edited` (HT-70) is the
-        // ONLY signal for draft_edited — see ResolveDraftInput's doc comment
-        // for why it is no longer inferred from `edit`'s presence.
+        // approve (spec §6 step 4 + HT-70 review fix, Codex — the TOCTOU
+        // close): lock the PARENT conversation row FIRST, inside this same
+        // transaction, before touching the thread at all. The API's own
+        // preflight read (src/api/drafts.ts's handleApproveDraft) is a
+        // snapshot that can go stale the instant a concurrent delete or
+        // spam-mark commits between that read and this write — an ordinary
+        // Postgres UPDATE on the conversations row (deleteConversation,
+        // setConversationStatus) already holds an exclusive row lock for its
+        // transaction's duration, so `FOR UPDATE OF c` here waits for any
+        // such in-flight transaction to finish, then re-reads the
+        // COMMITTED status — never the caller's stale one.
+        const parentRows = await tx.query<{ conversation_id: string; status: string }>(
+          `SELECT c.id AS conversation_id, c.status
+           FROM conversations c
+           JOIN threads t ON t.conversation_id = c.id
+           WHERE t.id = $1
+           FOR UPDATE OF c`,
+          [input.threadId],
+        )
+        const parent = parentRows[0]
+        if (parent === undefined) {
+          // No such thread at all — same "nothing to resolve" outcome as a
+          // draft the thread UPDATE below would also find zero rows for.
+          return null
+        }
+        // 'deleted'/'spam' refuse OUTRIGHT — the draft row is left
+        // completely untouched (never approved, never armed for delivery).
+        // This is the authoritative check; the API's own preflight is
+        // advisory only (see this method's interface doc comment).
+        if (parent.status === 'deleted') {
+          return 'conversation-deleted'
+        }
+        if (parent.status === 'spam') {
+          return 'conversation-spam'
+        }
+        // 'closed' reopens to active in this SAME locked read-then-write
+        // (spec §6's reply-reopen invariant, folded in here from the prior
+        // review round) — 'pending' deliberately stays pending either way
+        // (never auto-set — see the module doc), and every other status
+        // (active) proceeds unchanged.
+        if (parent.status === 'closed') {
+          await tx.query(
+            "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1",
+            [parent.conversation_id],
+          )
+        }
+
+        // Writes the caller-derived envelope snapshot + message id, flips
+        // draft_status → 'approved' and delivery_status → 'pending' in the
+        // SAME statement (so the row is NEVER observably in a state where
+        // draft_status is 'approved' but delivery_status is still NULL, or
+        // vice versa), and records the approve-with-edits audit fields.
+        // `input.edited` (HT-70) is the ONLY signal for draft_edited — see
+        // ResolveDraftInput's doc comment for why it is no longer inferred
+        // from `edit`'s presence.
         const rows = await tx.query<ThreadRow>(
           `UPDATE threads
            SET message_id = $2,
@@ -1538,21 +1602,6 @@ export function createConversationStore(db: Db): ConversationStore {
         )
         const row = rows[0]
         if (row === undefined) return null
-        // Review fix (Opus, HT-70): "approval on a closed conversation
-        // follows the normal reply-reopen rule at send time" (spec §6's
-        // invariants) — the same closed→active reopen appendThreadInTx
-        // applies to an ordinary reply. Scoped to 'closed' only: 'spam' is
-        // already refused with 409 at the API layer before resolveDraft is
-        // ever called for approve (src/api/drafts.ts's handleApproveDraft),
-        // so it is not a reachable case here; 'pending' deliberately stays
-        // pending either way (never auto-set — see the module doc). Without
-        // this, approving a draft on a closed conversation would send mail
-        // while the conversation stayed closed, diverging from what a
-        // normal reply does.
-        await tx.query(
-          "UPDATE conversations SET status = 'active', updated_at = now() WHERE id = $1 AND status = 'closed'",
-          [row.conversation_id],
-        )
         await appendOutboxEventInTx(tx, {
           type: 'draft.resolved',
           conversationId: row.conversation_id,

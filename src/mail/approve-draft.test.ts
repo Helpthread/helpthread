@@ -266,6 +266,59 @@ describe('approveDraft', () => {
     expect(sender.sent).toHaveLength(0)
   })
 
+  it('conversation-deleted: a STALE conversation snapshot (pre-delete) is still refused — resolveDraft re-checks fresh, under lock (HT-70 TOCTOU fix, Codex)', async () => {
+    const { store, db: testDb } = await freshStore()
+    const assistantId = await createTestAssistant(testDb)
+    const agentId = await createTestAgent(testDb)
+    const { conversation, draftThreadId } = await seedConversationWithDraft(store, assistantId)
+
+    // The STALE snapshot — captured BEFORE the "concurrent" delete below,
+    // exactly what a caller's own preflight read would have seen.
+    const staleConversation = conversation
+
+    // The "concurrent" delete: committed AFTER the snapshot was taken.
+    await store.deleteConversation(conversation.id)
+
+    const sender = fakeSender()
+    const result = await approveDraft(
+      { conversation: staleConversation, draftThreadId, resolvedByAgentId: agentId },
+      { store, sender, keyring, mailDomain },
+    )
+
+    expect(result).toEqual({ ok: false, reason: 'conversation-deleted' })
+    expect(sender.sent).toHaveLength(0)
+
+    const stored = await store.getConversation(conversation.id, { includeDeleted: true })
+    const draftThread = stored?.threads.find((t) => t.id === draftThreadId)
+    expect(draftThread?.draftStatus).toBe('awaiting_review')
+    expect(draftThread?.deliveryStatus).toBeNull()
+    expect(draftThread?.messageId).toBeNull()
+  })
+
+  it('conversation-spam: a STALE conversation snapshot (pre-spam-mark) is still refused — resolveDraft re-checks fresh, under lock (HT-70 TOCTOU fix, Codex)', async () => {
+    const { store, db: testDb } = await freshStore()
+    const assistantId = await createTestAssistant(testDb)
+    const agentId = await createTestAgent(testDb)
+    const { conversation, draftThreadId } = await seedConversationWithDraft(store, assistantId)
+
+    const staleConversation = conversation
+    await testDb.query("UPDATE conversations SET status = 'spam' WHERE id = $1", [conversation.id])
+
+    const sender = fakeSender()
+    const result = await approveDraft(
+      { conversation: staleConversation, draftThreadId, resolvedByAgentId: agentId },
+      { store, sender, keyring, mailDomain },
+    )
+
+    expect(result).toEqual({ ok: false, reason: 'conversation-spam' })
+    expect(sender.sent).toHaveLength(0)
+
+    const stored = await store.getConversation(conversation.id, { includeDeleted: false })
+    const draftThread = stored?.threads.find((t) => t.id === draftThreadId)
+    expect(draftThread?.draftStatus).toBe('awaiting_review')
+    expect(draftThread?.deliveryStatus).toBeNull()
+  })
+
   it('send-failed: the provider rejects the message — the row is left approved/failed, not resent, and the failure is reported', async () => {
     const { store, db: testDb } = await freshStore()
     const assistantId = await createTestAssistant(testDb)
