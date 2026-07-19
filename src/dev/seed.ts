@@ -64,6 +64,18 @@ export async function seedDevData(deps: SeedDevDataDeps): Promise<SeedDevDataRes
   const { db, store, sender, keyring, mailDomain, supportAddress } = deps
   let conversationCount = 0
 
+  // --- 0. A demo mailbox row (HT-54): production mailboxes are created by
+  // the Gmail connect flow, which the dev harness doesn't run — without one,
+  // the mailbox roster (`GET /api/v1/mailboxes`) is empty, auto-grant-on-
+  // create grants nothing, and the Permissions screen has no checkboxes to
+  // render. One plain row (no OAuth sidecars) makes those surfaces demoable;
+  // nothing in the harness sends through it.
+  await db.query(
+    `INSERT INTO mailboxes (address, provider, status) VALUES ($1, 'gmail', 'active')
+     ON CONFLICT (address) DO NOTHING`,
+    [supportAddress],
+  )
+
   // --- 1. Inbound-only: a customer message with no reply yet. ---------------
   await store.createConversation({
     subject: "Can't log into my account",
