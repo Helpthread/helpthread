@@ -145,7 +145,10 @@ conversation engine; an integration consumes events and the public API.
    UI-fidelity rule; the schema has been AI-ready since day one).
 4. **First module: draft-reply assistant** in a closed repo, dogfooded on the live
    Resonant IQ desk. Dogfood installs are a private npm package in the Vercel build —
-   no marketplace plumbing required to use our own modules.
+   no marketplace plumbing required to use our own modules. *(Superseded 2026-07-19 —
+   see `specs/modules/marketplace-v1.md` §7 / HT-82: once the marketplace ships,
+   Resonant IQ's own install moves onto the real marketplace flow, not this
+   shortcut.)*
 5. Marketplace plumbing (license keys, registry, update channel) stays deferred to its
    charter phase.
 
@@ -194,3 +197,9 @@ now so the marketplace design inherits it:
   FreeScout's paid Live Chat module. Paid catalog now 22 line items across four
   clusters (Intelligence 3, Channels & integrations 9, Enterprise & ops 8,
   Self-service surfaces 2 paid + 1 free-with-branding).
+- **2026-07-19** (HT-79): §4 step 4's npm-package dogfood-install sentence marked
+  superseded by `specs/modules/marketplace-v1.md` §7 / HT-82 — the HT-79 charter
+  amendment now requires the marketplace itself to be Resonant IQ's proven install
+  path, so the shortcut this step describes stops being current once that spec
+  ships. Sentence left in place for history; the supersession note is the current
+  instruction.

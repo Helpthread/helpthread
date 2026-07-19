@@ -63,16 +63,33 @@ substrate's own `assistants.module` / `webhook_endpoints.module` attribution,
 | **Release** | `id`, `module_id`, `semver`, `tarball_storage_path`, `checksum_sha256`, `changelog_md`, `published_at` | One row per published version. Immutable once published — a bad release ships a new version, never edits an old one. |
 | **Customer** | `id`, `stripe_customer_id`, `email`, `created_at` | The marketplace's own account, 1:1 with a Stripe Customer. Unrelated to the engine's `agents`/`assistants` tables — a store customer and a Helpthread Agent are different systems' users, even when the same human. |
 | **Subscription** | `id`, `customer_id`, `module_id`, `stripe_subscription_id`, `interval` (`year`, per TJ's annual decision), `stripe_status` (mirrors Stripe's own status string), `current_period_end`, `created_at` | One subscription per (customer, module, deployment) — see License key below for why "per deployment" lands here, not as a separate column. |
-| **License key** | `id`, `subscription_id` (1:1), `module_id`, `key` (`ht_lic_<id>_<secret>`, house token format — see `substrate-v1.md` §3's `ht_asst_<id>_<secret>` and the engine's own `HELPTHREAD_API_TOKEN`/webhook-secret precedent), `state` (`active`\|`lapsed`\|`revoked`), `entitled_up_to_version` (semver, meaningful only while lapsed), `created_at`, `rotated_at` | **Scoped to one helpdesk deployment**, per TJ's "annual subscription per helpdesk deployment" decision: an operator running two helpdeses buys two subscriptions and holds two keys, one per deployment, even for the same module. A subscription and its license key are 1:1 — the subscription is the billing object, the key is what the operator's tooling actually holds. |
+| **License key** | `id`, `subscription_id` (1:1), `module_id`, `secret_hash` (SHA-256 digest of the token's secret half — the plaintext `ht_lic_<id>_<secret>` is never persisted), `state` (`active`\|`lapsed`\|`frozen`\|`refunded`\|`revoked`), `entitled_up_to_version` (semver, meaningful only while `lapsed`), `created_at`, `rotated_at`, `revealed_at` (null until the customer has viewed the plaintext once, §3) | **Mint/verify mechanism inherited verbatim from Assistant tokens** (`src/auth/assistant-token.ts`, `src/api/assistants.ts`, `src/store/assistants.ts`) — the id is generated first, `ht_lic_<id>_<secret>` minted against it, and only `secret_hash` is ever stored; verification looks the row up by the id embedded in the presented token, then does a constant-time digest compare, exactly as `getForAuth`'s single-snapshot read does for Assistants. The plaintext is returned to the caller exactly once — at first reveal or at rotation (§3, §9) — never logged, never persisted, no reveal endpoint. **"Scoped to one helpdesk deployment" is a licensing TERM, not a technical control.** Per TJ's "annual subscription per helpdesk deployment" decision, an operator running two helpdesks is expected to buy two subscriptions and hold two keys — but nothing in this schema records which deployment a key is actually used against, and nothing can: the no-phone-home posture (§1) means the marketplace never learns a deployment's identity at all, so per-deployment scoping is enforced by the terms of sale (§8) an operator agrees to, never by a technical check. A subscription and its license key stay 1:1 — the subscription is the billing object, the key is what the operator's tooling holds. |
 | **Download grant** | `id`, `license_key_id`, `release_id`, `issued_at`, `expires_at`, `redeemed_at`, `requester_ip` | Minted per download/update-check call (§3's download endpoint) as a short-lived, single-purpose authorization for one Supabase Storage object — never a standing credential. Exists so the download endpoint has an audit trail distinct from the long-lived license key itself, and so a leaked signed URL has a bounded blast radius (default expiry: 5 minutes). |
 
+**Implementation note — uniqueness invariants must exclude terminal states.** Should
+implementation add any uniqueness constraint touching Subscription or License key rows
+(webhook-idempotency dedup on `stripe_subscription_id`, a future bundle-pricing
+constraint, etc.), it must be scoped to exclude `revoked`/`refunded` rows — e.g. a
+partial index `WHERE state NOT IN ('revoked', 'refunded')` rather than a bare
+`UNIQUE`. Otherwise a legitimate re-purchase after a refund or a lost dispute would
+collide with its own terminal predecessor row and fail at the database level, which
+would be a self-inflicted way to lock out exactly the customer §2 and §7 are careful
+to say never gets locked out of buying again.
+
 ### License key states — pinned, with justification
+
+All five states below are enforced only inside the marketplace's own download and
+update-check endpoints (§3) — never inside a deployed engine or a deployed module,
+per §1's governing constraint. That is true of `frozen` and `refunded` exactly as
+much as it was already true of `lapsed` and `revoked`; nothing below is an exception.
 
 | State | Meaning | Downloads | Update-check |
 |---|---|---|---|
 | `active` | Subscription in good standing | Any published release, unrestricted | Reports true latest, entitled |
 | `lapsed` | Payment missed or subscription non-renewed — **not** a fraud finding | Releases published **up to `entitled_up_to_version`** remain downloadable indefinitely; a release newer than that requires resubscribing | Reports `entitledVersion` (frozen at lapse) **and** `latestAvailableVersion` (informational, so the operator sees what they're missing) |
-| `revoked` | Fraud only — chargeback, stolen payment method, confirmed ToS violation | Hard-refused, including releases previously downloaded fine | Hard-refused |
+| `frozen` | A dispute has been **filed** (Stripe `charge.dispute.created`) and is under investigation — automatic, protective, and explicitly **not** a fraud finding: a filed dispute proves nothing about who's right yet | Fully paused — zero access, including versions already downloaded fine before the freeze — until the dispute resolves (§3) | Fully paused |
+| `refunded` | Entitlement ended with **no fraud finding**: a voluntary refund, or a dispute the merchant lost (the chargeback stands, funds are gone either way) — terminal for entitlement | Hard-refused | Hard-refused |
+| `revoked` | **Confirmed** fraud only — a manual admin action following an actual investigation (a stolen payment method, a confirmed ToS violation). **Never** set automatically by a dispute merely being filed — "filed" and "confirmed" are different claims, and only `frozen` reacts to "filed" | Hard-refused | Hard-refused |
 
 **Decision, justified** (task item 1's explicit "pick and justify" — also decision
 point §10.3): **lapsed keeps downloading already-entitled versions.** Reasoning:
@@ -90,8 +107,29 @@ point §10.3): **lapsed keeps downloading already-entitled versions.** Reasoning
   you already own; only *new* releases require staying current. That is the actual
   commercial lever — pay to keep getting updates — without holding paid-for bits
   hostage.
-- `revoked` stays the hard stop, reserved for fraud exactly as the task specifies,
-  which keeps a real enforcement tool without making ordinary non-renewal punitive.
+- `revoked` stays the hard stop, reserved for **confirmed** fraud, which keeps a real
+  enforcement tool without making ordinary non-renewal — or a merely-filed dispute —
+  punitive.
+
+**Refunds and disputes, reconciled** (this draft's original table mapped
+`charge.dispute.created` straight to `revoked`, which conflated a dispute being
+*filed* with fraud being *confirmed* — wrong, fixed here):
+
+- **Refund** (`charge.refunded`/`refund.created`, or a *lost* dispute) → `refunded`.
+  Terminal for entitlement, explicitly not a fraud label — the buy→download→refund
+  path must not let the customer keep both the money and the bits, but it also must
+  not brand an ordinary refund request as fraud. Running software already deployed is
+  untouched either way, per §1's governing constraint.
+- **Dispute filed** (`charge.dispute.created`) → `frozen`, automatically, the moment
+  Stripe reports it — a precaution, not a verdict, because at filing time nobody yet
+  knows whether the dispute is legitimate.
+- **Dispute resolved** (`charge.dispute.closed`): outcome `won` (the charge was
+  legitimate) → restore to whatever state the subscription would otherwise be in
+  (normally `active`); outcome `lost` (the chargeback stands) → `refunded`, by the same
+  reasoning as a voluntary refund above — a lost dispute is not proof of fraud on the
+  cardholder's part, it only means the funds are gone.
+- `revoked` is reachable **only** by deliberate admin action after an actual
+  investigation — never by any automatic webhook mapping, disputes included.
 
 **Reactivation.** A lapsed subscription that resumes paying (Stripe
 `customer.subscription.updated` back to `active`) restores the license to `active`
@@ -110,23 +148,59 @@ itself, not only for the helpdesk product built on it.
 
 - **Store site** (public, unauthenticated) — per-module catalog pages: description,
   pricing, changelog, "Subscribe" → Stripe Checkout.
-- **Account area** (customer-authenticated) — purchase history; per-subscription
-  license key (shown once at issuance, mirroring the substrate's own `ht_asst_`/
-  webhook-secret show-once pattern — a lost key is rotated, never re-revealed);
-  download links; a link into the Stripe Customer Portal for self-serve
-  cancel/payment-method updates.
+- **Account area** (customer-authenticated — see Authentication below) — purchase
+  history; per-subscription license key reveal and rotation; download links; a link
+  into the Stripe Customer Portal for self-serve cancel/payment-method updates.
 - **Stripe integration** — Checkout Sessions (`mode: subscription`, one annual Price
   per module) for purchase; Customer Portal for self-serve subscription management;
   a webhook endpoint (Stripe-signature-verified) driving all state transitions below.
+
+**Authentication — magic link, no passwords** (decision point §10.7). The account
+area is not the engine's own Agent auth (HT-54's passkeys/OAuth/passwords) — it is a
+different system serving a different population (occasional purchasers, not daily
+Agent users), so a lighter mechanism is the deliberate, not accidental, choice:
+
+- The customer enters their email at `/account/login`, or follows the "Manage your
+  subscription" link the marketplace emails automatically right after
+  `checkout.session.completed`.
+- The marketplace emails a single-use magic link, **15-minute TTL**. No password is
+  ever set, stored, or asked for anywhere in this system.
+- Clicking the link establishes an authenticated session (httpOnly, `Secure` cookie;
+  30-day idle session TTL, after which a fresh magic link is required).
+- **The account area is the only reveal surface, full stop** — there is no
+  checkout-session-keyed reveal page and no plaintext key in any webhook payload,
+  email, or redirect URL. A License key row is created at `checkout.session.completed`
+  time with `secret_hash` left `NULL` — the secret is not minted yet. The first time
+  the authenticated customer opens the account area and views that subscription's
+  key, the marketplace mints it at that moment (same id-then-secret ordering as
+  Assistant tokens, just deferred to first authenticated view instead of row-creation
+  time), stores only `secret_hash`, sets `revealed_at`, and returns the plaintext in
+  that one response. Nothing about this flow ever routes a plaintext key through a
+  webhook handler, an email, or an unauthenticated redirect.
+
+**Key rotation** (task item 9). An account-area action, mirroring
+`POST /api/v1/assistants/{id}/rotate-token` exactly: the authenticated customer
+session (never the license key itself) triggers
+`POST /api/v1/licenses/{id}/rotate`, which mints a fresh secret for the *same*
+license id, overwrites `secret_hash` in place (no new row, no overlap window — the
+old secret stops verifying the instant the new one is stored), and returns the new
+plaintext once, in the account area, same as first reveal. **The operator must update
+their own tooling's stored key** (wherever their update-check/download workflow
+holds it, §5) — rotation is not detectable by that tooling on its own; a rotated key
+simply starts rejecting the old secret on its next call.
 
 **Stripe webhook → state mapping:**
 
 | Stripe event | Effect |
 |---|---|
-| `checkout.session.completed` | Create/find Customer; create Subscription; mint License key (`active`), shown once via a one-time reveal page keyed to the checkout session |
-| `customer.subscription.updated` → `active` | License → `active` |
+| `checkout.session.completed` | Create/find Customer; create Subscription; create License key row (`active`, `secret_hash NULL` — not yet minted, see Authentication above) |
+| `customer.subscription.updated` → `active` | License → `active` (from `lapsed`, or restoring after a `frozen` dispute resolves `won`) |
 | `customer.subscription.updated` → `past_due`/`unpaid`, or `customer.subscription.deleted` (ordinary cancellation) | License → `lapsed`, snapshot `entitled_up_to_version` = that module's latest published release at the moment of lapse |
-| `charge.dispute.created`, or manual admin action on confirmed fraud | License → `revoked` (terminal — a legitimate re-purchase creates a new Subscription and License key, never an un-revoke) |
+| `charge.refunded` / `refund.created` | License → `refunded` (terminal, not a fraud finding) |
+| `charge.dispute.created` | License → `frozen` (automatic, protective, not a fraud finding — a dispute has been filed, nothing more) |
+| `charge.dispute.closed`, outcome `won` | License restores to its pre-dispute state (normally `active`) |
+| `charge.dispute.closed`, outcome `lost` | License → `refunded` (the chargeback stands; not a fraud finding on the cardholder) |
+| Manual admin action, following a confirmed-fraud investigation | License → `revoked` (terminal — never automatic, never triggered by a dispute merely being filed; a legitimate re-purchase creates a new Subscription and License key, never an un-revoke) |
 
 **APIs** (all under the marketplace's own base URL, distinct from any Helpthread
 deployment's `/api/v1`):
@@ -150,7 +224,11 @@ GET /api/v1/modules
       "changelogUrl": "https://store.example/modules/draft-assistant/changelog",
       "priceUsd": 199,
       "billingInterval": "year",
-      "docsUrl": "https://helpthread.dev/docs/modules/draft-assistant"
+      "docsUrl": "https://helpthread.dev/docs/modules/draft-assistant",
+      "versions": [
+        { "version": "1.2.0", "checksumSha256": "9f2c...", "publishedAt": "2026-07-01T00:00:00.000Z" },
+        { "version": "1.1.0", "checksumSha256": "3ab1...", "publishedAt": "2026-05-14T00:00:00.000Z" }
+      ]
     }
   ]
 }
@@ -159,6 +237,22 @@ GET /api/v1/modules
 No auth, no PII, no per-deployment data of any kind — this is marketing/catalog data
 the in-product directory consumes (§6). Cacheable aggressively (CDN + long
 `Cache-Control`); safe to serve from a public CDN edge.
+
+**`versions` carries every published Release's checksum, unconditionally** — not
+gated by any customer's entitlement, because it's the same public catalog metadata
+as `latestVersion`/`changelogUrl` and reveals nothing sensitive (the tarball itself
+stays behind the download endpoint's license-key gate; a checksum alone downloads
+nothing). This is what makes §4's "verify against an independently-obtained
+checksum" claim literal rather than circular: without this, the only checksum an
+operator ever sees is the one handed back in the *same* download response that
+handed them the file — a compromised or lying download endpoint could misreport
+both consistently and the operator would have no way to notice. With `versions`
+published separately, on a different (unauthenticated, publicly cacheable,
+third-party-mirrorable) endpoint, an operator — or anyone auditing the marketplace —
+can compare the two independently. *Shape considered*: a separate per-module
+versions endpoint (`GET /api/v1/modules/{slug}/versions`) instead of embedding the
+array. Rejected for v1 — one extra round-trip for no benefit at this catalog's size;
+revisit if per-module version history grows large enough to bloat the main feed.
 
 **b. Authenticated download endpoint.**
 
@@ -233,10 +327,12 @@ module repo CI (e.g. Helpthread/module-draft-assistant, on tag/release)
   → public feed's latestVersion for that module updates
 ```
 
-**Signing.** Checksum (sha256) published in both the public feed and every download
-response, at minimum — a download can already be verified against an
-independently-obtained, API-reported checksum without any additional machinery.
-Sigstore/minisign detached signing is **optional-later**, not v1: v1's threat model
+**Signing.** Checksum (sha256) published in both the public feed's `versions` array
+(§3a) and every download response, at minimum — a download can be verified against a
+checksum obtained from a genuinely separate call, not merely echoed back by the same
+authenticated response that handed over the file (§3a spells out why that separation
+is what makes "independent" true rather than circular). Sigstore/minisign detached
+signing is **optional-later**, not v1: v1's threat model
 (tampering in transit, a compromised storage object) is covered by HTTPS + a checksum
 sourced from an authenticated API call; a detached signature adds defense against a
 compromised checksum-serving API itself, which matters more once third-party modules
@@ -248,8 +344,9 @@ when either changes.
 Extends `docs/modules/README.md` and mirrors `module-draft-assistant`'s own README
 exactly (the reference artifact already documents this flow one system early):
 
-1. **Buy** — Stripe Checkout on the store site (annual). Account area shows the
-   license key once.
+1. **Buy** — Stripe Checkout on the store site (annual). The marketplace emails a
+   magic link into the account area (§3's Authentication); the operator authenticates
+   there and reveals the license key exactly once (§3 — never anywhere before that).
 2. **Download** — account area "Download" button (browser-session-authenticated;
    under the hood, the same Download grant mechanism as the API path in §3b) fetches
    the tarball.
@@ -283,11 +380,18 @@ consistent with §1.
 
 **How "installed" is known.** There is no `module_installs` table yet — one is
 explicitly deferred (`substrate-v1.md` §1's non-goals, `catalog.md` §5's forward
-note). v1 infers installed-ness purely from existing local attribution: an `active`
-row in `assistants` or `webhook_endpoints` carrying a given `module` slug means that
-module is (at least partially) installed. The directory lists each distinct `module`
-slug seen locally, matches it against the public feed by slug for display name/
-summary/changelog, and shows health from data the engine already has:
+note). v1 infers installed-ness purely from existing local attribution: **the
+presence of any row — any status, including `disabled`/`auto_disabled`, not only
+`active`** — in `assistants` or `webhook_endpoints` carrying a given `module` slug
+means that module is (at least partially) installed; status drives the health badge
+shown next to it, never whether it appears in the list at all. This matters
+concretely: a webhook endpoint that has tripped `auto_disabled` (HT-44) is exactly
+the case an operator most needs to see in Manage → Modules — inferring
+installed-ness only from `active` rows would make a module silently vanish from the
+Installed list at precisely the moment its failure needs surfacing, which would
+defeat the whole point of showing health here. The directory lists each distinct
+`module` slug seen locally, matches it against the public feed by slug for display
+name/summary/changelog, and shows health from data the engine already has:
 `assistants.status`, and `webhook_endpoints.status`/`consecutiveFailures` (surfaced
 today at `/api/v1/internal/health`, HT-44). This is an honest inference, not a
 tracked install record — a module that never registered a webhook or never got an
@@ -351,24 +455,41 @@ current on this point without also reading this section.
      of catalog §5's central promise, exercised for real rather than argued abstractly.
    - Resubscribe after lapse → license flips back to `active`, full latest access
      restored, no back-charge (§2).
-4. Simulate a `revoked` state via manual admin action (standing in for a confirmed
-   fraud finding) → verify both download and update-check hard-fail immediately.
-5. **Exit criteria**: all of the above green in test mode, using Resonant IQ's own
-   store account as customer #1, before Stripe is flipped to live mode for public
-   launch (Phase 3).
+4. **Refund**: trigger a test-mode refund (`charge.refunded`) → verify license flips
+   to `refunded`, downloads/update-check hard-refuse immediately, and — again — the
+   already-deployed module keeps running untouched.
+5. **Dispute lifecycle**, via Stripe test mode's dispute-simulation test cards:
+   - `charge.dispute.created` → verify license flips to `frozen` automatically,
+     downloads/update-check fully paused.
+   - Resolve `won` → verify the license restores to its pre-dispute state (`active`).
+   - Repeat and resolve `lost` → verify the license flips to `refunded`, not
+     `revoked` — confirming the fix that a filed-then-lost dispute is never treated
+     as a fraud finding.
+6. **Revoke**: simulate a `revoked` state via *manual* admin action only (standing in
+   for a confirmed-fraud investigation, never triggered by the dispute flow above) →
+   verify both download and update-check hard-fail immediately.
+7. **Exit criteria**: all of the above — active, lapsed, frozen, refunded, and
+   revoked, plus every transition between them exercised at least once — green in
+   test mode, using Resonant IQ's own store account as customer #1, before Stripe is
+   flipped to live mode for public launch (Phase 3).
 
-## 8. Counsel dependencies
+## 8. Counsel & compliance dependencies
 
 Per the HT-79 charter amendment's own text: *"New counsel items before the
 marketplace takes real money: the commercial module license text and terms of
-sale."* This spec adds the store's privacy policy to that same gate (Stripe checkout
-collects real customer PII the moment a real card is charged).
+sale."* This spec adds the store's privacy policy, the refund/dispute policy, and
+Stripe Tax enablement to that same gate — the last of which is a **compliance
+configuration**, not a counsel-drafted document; it's grouped with the others here
+only because it shares their gate (pre-revenue, not pre-dogfood), not because it's
+legal work. Worth keeping that distinction precise rather than letting "counsel
+dependencies" quietly become a catch-all label for anything pre-launch.
 
-| Item | Gate | Not gating |
-|---|---|---|
-| Commercial module license text (replaces the current placeholder) | Before Stripe flips to live mode / before the marketplace takes real money | Does **not** gate HT-82's test-mode dogfood — Resonant IQ as its own test-mode customer needs no finished license text, only a placeholder |
-| Terms of sale | Same gate | Same — pre-revenue, not pre-dogfood |
-| Privacy policy for the store | Same gate (real customer PII starts flowing at first live charge) | Same |
+| Item | Nature | Gate | Not gating |
+|---|---|---|---|
+| Commercial module license text (replaces the current placeholder) | Counsel-drafted | Before Stripe flips to live mode / before the marketplace takes real money | Does **not** gate HT-82's test-mode dogfood — Resonant IQ as its own test-mode customer needs no finished license text, only a placeholder |
+| Terms of sale — including the refund policy (§2's `refunded` state) and the dispute-handling policy (§2's `frozen` state): this spec pins the entitlement *mechanics*, but the customer-facing policy language itself is counsel's call | Counsel-drafted | Same gate | Same — pre-revenue, not pre-dogfood |
+| Privacy policy for the store | Counsel-drafted | Same gate (real customer PII starts flowing at first live charge) | Same |
+| **Stripe Tax enabled** (automated EU VAT / US sales-tax calculation and remittance on Checkout Sessions) | Compliance/finance configuration, not counsel-drafted | Same gate — charging real customers across jurisdictions without correct tax handling is its own launch blocker | Not pre-dogfood — Stripe test mode carries no real tax obligation. Which jurisdictions to register in first is decision point §10.9 |
 
 The §7 plugin-exception counsel deadline (CHARTER.md §3, unchanged by the HT-79
 amendment) stays separate and earlier: before the first external code contribution —
@@ -388,6 +509,11 @@ no exception (charter amendment text, quoted in full in CHARTER.md).
 - **Usage metering.** No conversation counts, no per-seat metering, no usage-based
   billing — flat annual per-deployment (§2), matching the update-check endpoint's
   explicit "not telemetry" posture (§3c).
+- **Bundle / multi-module pricing.** Every Subscription and License key is scoped to
+  exactly one module (§2); there is no "all-modules suite" Price v1. See decision
+  point §10.8 for the schema consequence if this is added later — it isn't a free
+  addition, since today's 1:1 subscription↔license-key design would need to become
+  one-subscription-to-many-license-keys or similar.
 - **Automated in-place update / a build-time module API.** `admin-ia.md`'s Manage →
   Modules description includes "in-place update with visible ops log" as an aspirational
   future surface; v1 delivers none of that (see the conflict called out below) — updates
@@ -423,15 +549,35 @@ spec's honest deliverable on that front, not a silent scope-down.
    justified in §2; needs explicit sign-off since it is the one place this spec
    resolves an open "pick and justify" call rather than merely recording a TJ decision
    already made.
-4. **Launch module lineup.** `draft-assistant` is the only module that exists today.
+4. **Launch module lineup — elevated: this is a charter-affecting conflict, not an
+   ordinary open question, and this spec deliberately does not resolve it.**
    CHARTER.md's Phase 3 text names "the knowledge base and AI-powered modules" as the
-   catalog that leads launch — but the knowledge base ships as **content-as-code**
-   (`catalog.md` §3.4, CHARTER.md §4: docs in git, static build, build-time search
-   index), which does not obviously fit this spec's tarball-plus-Vercel-deploy shape
-   built for a running service like `draft-assistant`. **This spec does not resolve
-   how (or whether) the knowledge base sells through this same marketplace pipeline —
-   flagged here rather than silently assumed.** Needs a decision before the KB module
-   itself is specced, not before this spec ships.
+   catalog that leads launch. The knowledge base ships as **content-as-code**
+   (`catalog.md` §3.4, CHARTER.md §4: docs live in git, build to static output,
+   search index generated at build time) — categorically different from
+   `draft-assistant`'s shape (a long-running Vercel Functions service). This spec's
+   entire pipeline (§4: tarball → Vercel deploy → env vars → running process) is
+   built for the second shape. It is not obvious the first shape sells through it at
+   all. Two resolutions, presented crisply, TJ decides:
+   - **(a) KB gets its own, separate distribution mechanism** — e.g. a licensed git
+     template or content package the operator merges/builds into their own docs
+     site, using this spec's Customer/Subscription/License-key entities for
+     *payment and entitlement* but not its Release/tarball/Vercel-deploy mechanics
+     for *delivery*. Consequence: this spec's pipeline is scoped to
+     running-service-shaped modules only, and the **actual launch catalog becomes
+     draft-assistant-led**, not the KB-plus-AI-modules lineup CHARTER.md's Phase 3
+     text currently implies — a real narrowing of that text, not a wording nuance.
+   - **(b) Generalize this pipeline to carry content-as-code artifacts too** — e.g. a
+     Release's `tarball_storage_path` can point at a static-build output or a docs
+     source bundle instead of a deployable service, consumed by a different (not yet
+     specced) operator-side build step rather than a Vercel Functions deploy.
+     Consequence: one pipeline, two artifact shapes, more spec surface before KB can
+     ship, but the charter's stated launch lineup stays intact as written.
+   **This spec takes no position between (a) and (b)** — flagging the conflict
+   precisely is the deliverable here; resolving it is a decision that affects what
+   CHARTER.md's Phase 3 text is understood to promise, and belongs to TJ, not to this
+   draft. Needs resolution before the KB module itself is specced, not before this
+   spec ships.
 5. **§6's "update available" simplification** (feed's latest version + changelog
    link only, no version-diff badge) — confirm this is an acceptable v1 scope-down
    given the substrate has no module self-reporting convention, rather than treating
@@ -439,6 +585,17 @@ spec's honest deliverable on that front, not a silent scope-down.
 6. **Reactivation-after-lapse restores full latest access with no back-charge** (§2)
    — confirm acceptable; the alternative (pro-rated back-charge for skipped releases)
    was considered and rejected for v1 complexity reasons, not on principle.
+7. **Magic-link account-area authentication** (§3) — no passwords, 15-minute link
+   TTL, 30-day session — confirm this lighter mechanism is acceptable for the store's
+   different (lower-frequency, non-Agent) user population rather than reusing HT-54's
+   heavier Agent auth machinery.
+8. **Bundle / multi-module pricing v1: none** (§9) — confirm; recommendation is no
+   bundles at launch, with a possible later "all-modules suite" Price noted as a
+   real schema consequence (today's 1:1 subscription↔license-key design does not
+   accommodate it for free) rather than a trivial pricing-page addition.
+9. **Which tax jurisdictions to register Stripe Tax for** before flipping to live
+   mode (§8) — not an engineering decision, but needed before that gate closes;
+   flagged here so it isn't discovered late.
 
 ## 11. Changelog
 
@@ -453,3 +610,40 @@ spec's honest deliverable on that front, not a silent scope-down.
   the marketplace itself to be the proven dogfood path (§7). One scope question left
   open rather than assumed: whether the content-as-code knowledge base module fits
   this same distribution pipeline (§10.4).
+- **2026-07-19** (HT-79, Opus review round — 1 blocker, 6 major, 6 minor, all
+  applied): **blocker** — License key entity was storing the plaintext key,
+  contradicting show-once; fixed to `secret_hash` (SHA-256 of the secret half),
+  mint/verify mechanism inherited verbatim from Assistant tokens (§2). **Major** —
+  added a fourth-then-fifth license state: `refunded` (terminal, non-fraud) and
+  `frozen` (automatic protective pause on a filed-not-yet-confirmed dispute); the
+  original `charge.dispute.created → revoked` mapping conflated "filed" with
+  "confirmed" and is replaced by a full dispute lifecycle (`frozen` →
+  `won`-restores / `lost`-refunds), with `revoked` now reachable only by deliberate
+  admin action after a confirmed investigation (§2, §3). **Major** — account-area
+  authentication specified: magic link to the Customer's email, no passwords,
+  15-minute link TTL, 30-day session; the plaintext key's only reveal surface is now
+  that authenticated area, minted lazily on first view rather than shown via a
+  checkout-session-keyed page (§3, §5, §10.7). **Major** — per-deployment license
+  scoping stated plainly as a licensing *term*, not a technical control — no
+  deployment identifier exists by design, so it cannot be enforced mechanically (§2).
+  **Major** — public feed gained a per-module `versions` array carrying every
+  release's checksum unconditionally, making §4's "independently verifiable
+  checksum" claim real instead of circular (§3a, §4). **Major** — §10.4's
+  knowledge-base-vs-pipeline question elevated from an ordinary open item to a named
+  charter-affecting conflict, with two resolutions stated crisply and explicitly
+  left to TJ rather than resolved here. **Minor** — `catalog.md` §4 step 4 patched
+  with a one-line supersession note pointing at this spec's §7 (see that file's own
+  changelog). **Minor** — key rotation specified as an account-area action mirroring
+  `POST /api/v1/assistants/{id}/rotate-token` (§3). **Minor** — §6's
+  installed-module inference broadened from "`active` rows only" to "any non-deleted
+  row of any status," so an `auto_disabled` module no longer vanishes from Manage →
+  Modules at exactly the moment its health needs surfacing. **Minor** — added an
+  explicit uniqueness-invariant note (§2) so a future constraint on
+  Subscription/License-key rows can't accidentally block re-purchase after a refund
+  or revocation. Also folded in: refund/dispute policy and Stripe Tax added as
+  explicit pre-revenue gates in §8 (Stripe Tax flagged as a compliance-configuration
+  gate, distinct in kind from the counsel-drafted items it's grouped with); "no
+  bundles v1" made an explicit non-goal and decision point (§9, §10.8); the
+  dogfood-through-marketplace test plan (§7) extended to exercise `refunded` and the
+  full `frozen` dispute lifecycle, not just `lapsed`/`revoked`, so HT-82 actually
+  proves the state machine this revision introduces.
