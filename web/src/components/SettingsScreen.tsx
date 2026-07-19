@@ -7,7 +7,10 @@
  * into sections down a left rail, and Settings sections are the injection
  * points future increments (HT-56: Mail Settings, Alerts) and modules
  * extend. Sections today: **General** (deployment identity + the branding
- * note), **Appearance**, **Keyboard shortcuts**.
+ * note) and **Keyboard shortcuts**. Appearance moved to the Agent's own
+ * profile (TJ, 2026-07-18): a theme is a PERSONAL preference, and the
+ * three-scope rule puts personal things in the personal scope — device-local
+ * persistence for now, account-synced with HT-61.
  *
  * Sections are client-side state within the one /settings route for now —
  * three shallow sections don't justify three routes; HT-56 graduates
@@ -21,12 +24,10 @@
 import Link from 'next/link'
 import type { ReactNode } from 'react'
 import { useState } from 'react'
-import type { Theme } from '../lib/theme'
 import { Button } from './ds/core/Button'
 import { Kbd } from './ds/core/Kbd'
 import { FolderItem } from './ds/inbox/FolderItem'
 import { useShortcutsOverlay } from './ShortcutsProvider'
-import { useTheme } from './ThemeProvider'
 
 export interface DeploymentInfo {
   productName: string
@@ -34,13 +35,7 @@ export interface DeploymentInfo {
   mailDomain: string
 }
 
-type SettingsSection = 'general' | 'appearance' | 'shortcuts'
-
-const THEME_OPTIONS: Array<{ value: Theme; label: string }> = [
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
-  { value: 'system', label: 'System' },
-]
+type SettingsSection = 'general' | 'shortcuts'
 
 function GeneralIcon() {
   return (
@@ -48,17 +43,6 @@ function GeneralIcon() {
       <path
         fill="currentColor"
         d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6a.5.5 0 0 0 .1-.7l-2-3.4a.5.5 0 0 0-.6-.2l-2.5 1a7.7 7.7 0 0 0-1.7-1L14.4 2.4a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4L9 5.1a7.7 7.7 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.4a.5.5 0 0 0 .1.7L4.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6a.5.5 0 0 0-.1.7l2 3.4c.1.2.4.3.6.2l2.5-1a7.7 7.7 0 0 0 1.7 1l.4 2.7c0 .2.3.4.5.4h4c.2 0 .5-.2.5-.4l.4-2.7a7.7 7.7 0 0 0 1.7-1l2.5 1c.2.1.5 0 .6-.2l2-3.4a.5.5 0 0 0-.1-.7L19.4 13zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"
-      />
-    </svg>
-  )
-}
-
-function AppearanceIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        fill="currentColor"
-        d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18V4a8 8 0 0 1 0 16z"
       />
     </svg>
   )
@@ -92,7 +76,6 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
 }
 
 export function SettingsScreen({ deployment }: { deployment: DeploymentInfo }) {
-  const { theme, setTheme } = useTheme()
   const { open: openShortcuts } = useShortcutsOverlay()
   const [section, setSection] = useState<SettingsSection>('general')
 
@@ -118,13 +101,6 @@ export function SettingsScreen({ deployment }: { deployment: DeploymentInfo }) {
             active={section === 'general'}
             hasItems
             onClick={() => setSection('general')}
-          />
-          <FolderItem
-            icon={<AppearanceIcon />}
-            label="Appearance"
-            active={section === 'appearance'}
-            hasItems
-            onClick={() => setSection('appearance')}
           />
           <FolderItem
             icon={<ShortcutsIcon />}
@@ -172,42 +148,6 @@ export function SettingsScreen({ deployment }: { deployment: DeploymentInfo }) {
               </p>
             </Card>
           </div>
-        )}
-
-        {section === 'appearance' && (
-          <Card title="Appearance">
-            <div
-              style={{
-                display: 'inline-flex',
-                border: '1px solid var(--ht-border)',
-                borderRadius: 'var(--ht-radius-md)',
-                overflow: 'hidden',
-              }}
-            >
-              {THEME_OPTIONS.map((option) => {
-                const selected = theme === option.value
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => setTheme(option.value)}
-                    style={{
-                      border: 'none',
-                      padding: '7px 16px',
-                      fontSize: 13,
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      color: selected ? 'var(--ht-on-accent)' : 'var(--ht-ink-muted)',
-                      background: selected ? 'var(--ht-accent)' : 'transparent',
-                    }}
-                  >
-                    {option.label}
-                  </button>
-                )
-              })}
-            </div>
-          </Card>
         )}
 
         {section === 'shortcuts' && (

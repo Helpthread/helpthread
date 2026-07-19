@@ -31,13 +31,22 @@ import {
 } from '../lib/agent-actions'
 import type { Agent, AgentRole, SelfAgent } from '../lib/api-types'
 import { initialsFromName } from '../lib/format'
+import type { Theme } from '../lib/theme'
 import { Avatar } from './ds/core/Avatar'
 import { Button } from './ds/core/Button'
 import { StatusPill } from './ds/core/StatusPill'
+import { useTheme } from './ThemeProvider'
 import { useToast } from './Toaster'
 
 const DELETE_DISARM_MS = 3500
 const MIN_PASSWORD_LENGTH = 8
+
+/** Theme choices for the self-profile Appearance section (TJ, 2026-07-18: a personal preference lives in the personal scope, not Manage → Settings). Device-local persistence via `useTheme`; account-synced with HT-61. */
+const THEME_OPTIONS: Array<{ value: Theme; label: string }> = [
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'system', label: 'System' },
+]
 
 /**
  * Await a server-action invocation, normalizing a REJECTED invocation (the
@@ -106,6 +115,7 @@ export function AgentProfileScreen({
 }) {
   const router = useRouter()
   const showToast = useToast()
+  const { theme, setTheme } = useTheme()
   const [isPending, startTransition] = useTransition()
 
   const isSelf = viewer.id === agent.id
@@ -367,6 +377,55 @@ export function AgentProfileScreen({
             Save
           </Button>
         </div>
+      )}
+
+      {isSelf && (
+        <section
+          style={{
+            borderTop: '1px solid var(--ht-divider)',
+            paddingTop: 16,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Appearance</div>
+          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--ht-ink-dim)' }}>
+            Applies on this device.
+          </p>
+          <div
+            style={{
+              display: 'inline-flex',
+              alignSelf: 'flex-start',
+              border: '1px solid var(--ht-border)',
+              borderRadius: 'var(--ht-radius-md)',
+              overflow: 'hidden',
+            }}
+          >
+            {THEME_OPTIONS.map((option) => {
+              const selected = theme === option.value
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => setTheme(option.value)}
+                  style={{
+                    border: 'none',
+                    padding: '7px 16px',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    color: selected ? 'var(--ht-on-accent)' : 'var(--ht-ink-muted)',
+                    background: selected ? 'var(--ht-accent)' : 'transparent',
+                  }}
+                >
+                  {option.label}
+                </button>
+              )
+            })}
+          </div>
+        </section>
       )}
 
       {canChangePassword && (
