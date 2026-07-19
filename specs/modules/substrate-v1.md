@@ -1,8 +1,13 @@
-# Plugin Substrate v1 — typed events, webhook delivery, assistant actors
+# Module Substrate v1 — typed events, webhook delivery, assistant actors
+
+Vocabulary (fixed, like Agents/Assistants): the extension artifacts are **modules** —
+in schema, code, docs, UI, and prose. The word "plugin" survives only inside the legal
+phrase *plugin exception* (the AGPL §7 additional permission, named in the
+Classpath-exception tradition) and in charter quotations.
 
 Status: **draft for TJ review** (HT-67). Governed by CHARTER.md §3/§4 (module boundary,
 out-of-process preference, zero privileged first-party access) and
-`specs/plugins/catalog.md` (HT-66) §4's build sequence. This spec is also raw material
+`specs/modules/catalog.md` (HT-66) §4's build sequence. This spec is also raw material
 for the §7 plugin-exception text (HT-5): the exception gets drafted against this real,
 shipped API — before the first external contribution merges.
 
@@ -20,7 +25,7 @@ The first consumer is the draft-reply assistant (catalog §3.1), which needs all
 and nothing more: it hears about inbound mail (events → webhook), reads the conversation
 (API), and posts a draft (assistant API) that an Agent approves in core UI.
 
-**Non-goals for v1**: the in-process/build-time plugin API, UI injection points, a
+**Non-goals for v1**: the in-process/build-time module API, UI injection points, a
 general scopes/permissions system, marketplace plumbing (license keys, registry,
 metering), webhook redelivery tooling. Each waits for a real module to need it.
 
