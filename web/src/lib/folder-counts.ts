@@ -7,6 +7,10 @@
  * checklist); Closed/Spam show "50+" once their first page's `nextCursor`
  * is non-null. Starred/Drafts are localStorage-only and merged in
  * client-side — see `mergeFolderCounts`.
+ *
+ * `selfId` (the caller's own Agent id, from `getMe()`) is required post
+ * HT-54: "Mine" is real-Agent `assigneeAgentId === selfId` now, not the old
+ * single-operator `'me'` sentinel.
  */
 
 import { listConversations } from './api'
@@ -19,16 +23,16 @@ function pageLabel(count: number, hasMore: boolean): string {
   return hasMore ? `${COUNT_LIMIT}+` : String(count)
 }
 
-export async function loadFolderCounts(): Promise<ServerFolderCounts> {
+export async function loadFolderCounts(selfId: string): Promise<ServerFolderCounts> {
   const [openPage, closedPage, spamPage] = await Promise.all([
     listConversations({ folder: 'open', limit: COUNT_LIMIT }),
     listConversations({ folder: 'closed', limit: COUNT_LIMIT }),
     listConversations({ folder: 'spam', limit: COUNT_LIMIT }),
   ])
 
-  const unassigned = openPage.conversations.filter((c) => c.assignee === null).length
-  const mine = openPage.conversations.filter((c) => c.assignee === 'me').length
-  const assigned = openPage.conversations.filter((c) => c.assignee !== null).length
+  const unassigned = openPage.conversations.filter((c) => c.assigneeAgentId === null).length
+  const mine = openPage.conversations.filter((c) => c.assigneeAgentId === selfId).length
+  const assigned = openPage.conversations.filter((c) => c.assigneeAgentId !== null).length
 
   return {
     unassigned: unassigned > 0 ? String(unassigned) : '',

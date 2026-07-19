@@ -1,6 +1,6 @@
 import { notFound, redirect } from 'next/navigation'
 import { InboxScreen } from '../../../../components/InboxScreen'
-import { listConversations } from '../../../../lib/api'
+import { getMe, listConversations } from '../../../../lib/api'
 import { isAppFolder } from '../../../../lib/folders'
 
 /**
@@ -9,8 +9,11 @@ import { isAppFolder } from '../../../../lib/folders'
  * legacy alias that redirects to `unassigned` (its default view). `?cursor=`
  * pages older conversations via the API's opaque keyset cursor (spec §3a),
  * for the Closed and Spam folders only — the other five derive their view
- * from a flat `open` fetch (Unassigned/Mine/Assigned split by `assignee`;
- * Starred/Drafts filter an `open`+`closed` fetch against localStorage).
+ * from a flat `open` fetch (Unassigned/Mine/Assigned split by
+ * `assigneeAgentId`; Starred/Drafts filter an `open`+`closed` fetch against
+ * localStorage). `getMe()` resolves "Mine" against the viewing Agent's own
+ * id (HT-54) — Next's fetch memoization means this and the shell layout's
+ * own `getMe()` call collapse to one request per render pass.
  */
 export default async function InboxPage({
   params,
@@ -23,12 +26,21 @@ export default async function InboxPage({
   if (folder === 'open') redirect('/inbox/unassigned')
   if (!isAppFolder(folder)) notFound()
 
+  const me = await getMe()
+
   switch (folder) {
     case 'unassigned':
     case 'mine':
     case 'assigned': {
       const page = await listConversations({ folder: 'open', limit: 50 })
-      return <InboxScreen folder={folder} conversations={page.conversations} nextCursor={null} />
+      return (
+        <InboxScreen
+          folder={folder}
+          conversations={page.conversations}
+          nextCursor={null}
+          selfId={me.id}
+        />
+      )
     }
 
     case 'starred':
@@ -40,7 +52,14 @@ export default async function InboxPage({
       const conversations = [...openPage.conversations, ...closedPage.conversations].sort(
         (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
       )
-      return <InboxScreen folder={folder} conversations={conversations} nextCursor={null} />
+      return (
+        <InboxScreen
+          folder={folder}
+          conversations={conversations}
+          nextCursor={null}
+          selfId={me.id}
+        />
+      )
     }
 
     case 'closed':
@@ -55,6 +74,7 @@ export default async function InboxPage({
           folder={folder}
           conversations={page.conversations}
           nextCursor={page.nextCursor}
+          selfId={me.id}
         />
       )
     }

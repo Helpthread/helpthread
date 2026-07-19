@@ -140,14 +140,14 @@ export async function putTagsAction(conversationId: string, tags: string[]): Pro
   }
 }
 
-/** Claim or release the single-Agent assignee flag (spec §4f). */
+/** Assign a conversation to an Agent, or release it (`null`) — spec §4f, HT-54 real-Agent shape. */
 export async function putAssigneeAction(
   conversationId: string,
-  assignee: 'me' | null,
+  assigneeAgentId: string | null,
 ): Promise<ActionResult> {
   if (!(await hasValidSession())) return UNAUTHORIZED_RESULT
   try {
-    await putAssignee(conversationId, assignee)
+    await putAssignee(conversationId, assigneeAgentId)
     revalidatePath(`/conversations/${conversationId}`)
     revalidatePath('/inbox/[folder]', 'page')
     return { ok: true }

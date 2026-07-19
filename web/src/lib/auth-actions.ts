@@ -1,42 +1,28 @@
 'use server'
 
 /**
- * Login/logout server actions (HT-51) — the only two places the operator
- * password is ever compared, and the only two places the session cookie is
- * ever written. Both run on the Node runtime (server actions default to
- * Node, unlike `middleware.ts`), so the password comparison uses
- * `node:crypto`'s `timingSafeEqual` directly rather than the Web Crypto
- * path `lib/session.ts` uses for the cookie MAC (that module's comment
- * explains why the cookie side needs Web Crypto and this side doesn't).
+ * Login/setup/invite-accept/logout server actions (HT-51, extended HT-54) —
+ * the only places the session cookie is ever written. Password verification
+ * is no longer this module's job at all: the engine is the sole verification
+ * authority now (spec §4/§9 — scrypt hash-at-rest, constant-time compare, no
+ * account enumeration), reached through `postVerify`/`postSetup`/
+ * `acceptInvite` (`lib/api.ts`). This module's whole job is: call the right
+ * engine endpoint, and on success mint a cookie carrying the returned
+ * Agent's id as `sub` (`lib/session.ts`).
  *
- * `timingSafeEqual` throws if its two buffers differ in length, which a
- * naive `timingSafeEqual(Buffer.from(candidate), Buffer.from(expected))`
- * would do for almost every wrong guess (most wrong passwords aren't the
- * same length as the real one) — turning "wrong password" into a thrown
- * error and, worse, leaking the correct length through which path failed.
- * We derive a fixed-length key from each side with `scrypt` (a slow KDF)
- * first, then `timingSafeEqual` always sees two equal-length digests, length
- * is never data, and the comparison is byte-for-byte time-independent — see
- * `passwordMatches` for why a *slow* KDF specifically (online-guess cost, and
- * what static analysis expects of any password comparison).
+ * The HT-51 ~500ms failure delay is DELETED, not carried over: it existed to
+ * blunt a scripted guesser hitting a web-side plaintext-env compare. That
+ * compare is gone — the engine now does the verification, with its own
+ * timing posture (spec §9: comparable timing across unknown-email/
+ * wrong-password/invited/disabled, scrypt work against a dummy hash on a
+ * missing Agent). A web-side sleep on top of that adds nothing but latency.
  */
 
-import { scryptSync, timingSafeEqual } from 'node:crypto'
 import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
+import { ApiError, acceptInvite, postSetup, postVerify } from './api'
 import { sanitizeNextPath } from './next-path'
-import {
-  mintSessionCookie,
-  SESSION_COOKIE_NAME,
-  sessionCookieOptions,
-  uiAuthConfig,
-} from './session'
-
-/** scrypt output length; 32 bytes matches a SHA-256-sized digest. */
-const SCRYPT_KEYLEN = 32
-
-/** Per-instance-only throttle (see the module comment on `loginAction`). */
-const LOGIN_FAILURE_DELAY_MS = 500
+import { mintSessionCookie, SESSION_COOKIE_NAME, sessionCookieOptions } from './session'
 
 export interface LoginActionResult {
   ok: boolean
@@ -44,59 +30,115 @@ export interface LoginActionResult {
 }
 
 /**
- * Checks the submitted password against `HELPTHREAD_UI_PASSWORD` and, on a
- * match, signs in and redirects to `nextPathRaw` (sanitized — see
- * `lib/next-path.ts`; falls back to the inbox default when absent or
- * unsafe). On a mismatch, waits ~500ms before returning the failure so a
- * scripted guesser can't fire requests back-to-back — this is a per-process
- * delay, not a rate limit: it does nothing against many parallel requests or
- * multiple deployment instances. v1 is a single operator behind one
- * password; a real rate limiter is out of scope until that stops being true.
+ * Verifies `email`/`password` against the named provider (`providerKey`,
+ * from the `AuthProviderDescriptor` the login screen rendered this form
+ * for — v1 has exactly one, `'password'`) and, on success, signs in and
+ * redirects to `nextPathRaw` (sanitized — see `lib/next-path.ts`; falls back
+ * to the inbox default when absent or unsafe). Every failure mode the
+ * engine reports as `401` (unknown email, wrong password, an
+ * `invited`/`disabled` Agent) becomes the SAME generic copy here — the
+ * engine already refuses to distinguish these (spec §9's no-oracle rule);
+ * repeating that distinction client-side would just be a second place to
+ * leak it.
  */
 export async function loginAction(
+  providerKey: string,
+  email: string,
   password: string,
   nextPathRaw: string,
 ): Promise<LoginActionResult> {
-  const { password: expected, sessionSecret } = uiAuthConfig()
-
-  if (!passwordMatches(password, expected, sessionSecret)) {
-    await sleep(LOGIN_FAILURE_DELAY_MS)
-    return { ok: false, message: "That password didn't match." }
+  let agentId: string
+  try {
+    const { agent } = await postVerify({ providerKey, email, password })
+    agentId = agent.id
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      return { ok: false, message: "That email and password didn't match." }
+    }
+    return { ok: false, message: 'Could not reach the server. Please try again.' }
   }
 
   const cookieStore = await cookies()
-  cookieStore.set(SESSION_COOKIE_NAME, await mintSessionCookie(), sessionCookieOptions())
+  cookieStore.set(SESSION_COOKIE_NAME, await mintSessionCookie(agentId), sessionCookieOptions())
 
   // Throws internally (Next's redirect signal) — this call never returns.
   redirect(sanitizeNextPath(nextPathRaw))
 }
 
-/** Clears the session cookie and sends the operator back to `/login`. */
+/** Clears the session cookie and sends the Agent back to `/login`. */
 export async function logoutAction(): Promise<void> {
   const cookieStore = await cookies()
   cookieStore.delete(SESSION_COOKIE_NAME)
   redirect('/login')
 }
 
-function passwordMatches(candidate: string, expected: string, salt: string): boolean {
-  // Derive a fixed-length key from each side with scrypt (a deliberately slow
-  // KDF) before the constant-time compare. Two things fall out of this:
-  //  1. Length-blinding: both digests are SCRYPT_KEYLEN bytes, so
-  //     `timingSafeEqual` never sees unequal lengths and length is never data.
-  //  2. Online-guess cost: scrypt's work factor makes each comparison cost
-  //     ~tens of ms, so an attacker who reaches this endpoint can't cheaply
-  //     brute-force the password. (There is no password hash *at rest* to
-  //     protect — the expected value is the plaintext HELPTHREAD_UI_PASSWORD
-  //     env — but a slow KDF still raises the cost of online guessing, and it
-  //     is what static analysis expects of any password comparison.)
-  // The salt is the deployment session secret; both sides use the same salt so
-  // their derived keys are comparable.
-  const saltBuf = Buffer.from(salt)
-  const candidateKey = scryptSync(candidate, saltBuf, SCRYPT_KEYLEN)
-  const expectedKey = scryptSync(expected, saltBuf, SCRYPT_KEYLEN)
-  return timingSafeEqual(candidateKey, expectedKey)
+export interface SetupActionResult {
+  ok: boolean
+  message?: string
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+/**
+ * First-run bootstrap (`/setup`, spec §6): creates the first admin, signs
+ * them in, and redirects to the inbox. The engine's own `409` ("setup has
+ * already been completed") is safe to show verbatim — it tells whoever
+ * lands here late to go to `/login` instead.
+ */
+export async function setupAction(
+  name: string,
+  email: string,
+  password: string,
+): Promise<SetupActionResult> {
+  let agentId: string
+  try {
+    const { agent } = await postSetup({ name, email, password })
+    agentId = agent.id
+  } catch (error) {
+    if (error instanceof ApiError) {
+      // Only the 409 (someone else completed setup first / a concurrent
+      // submit) carries engine copy that is meaningful to show; any other
+      // ApiError (a bearer-token 401's internal prefix, a 500) surfaces as
+      // generic copy — raw internal messages never reach this screen.
+      if (error.status === 409) {
+        return { ok: false, message: 'Setup has already been completed. Sign in instead.' }
+      }
+      return { ok: false, message: 'Could not create the account. Please try again.' }
+    }
+    return { ok: false, message: 'Could not reach the server. Please try again.' }
+  }
+
+  const cookieStore = await cookies()
+  cookieStore.set(SESSION_COOKIE_NAME, await mintSessionCookie(agentId), sessionCookieOptions())
+  redirect('/inbox/unassigned')
+}
+
+export interface AcceptInviteActionResult {
+  ok: boolean
+  message?: string
+  /** True when the TOKEN itself was rejected (expired/consumed/forged) — a terminal state the screen replaces the form for; a transient failure (network, 500) keeps the form so the Agent can simply retry. */
+  invalidInvite?: boolean
+}
+
+/** `/invite/{token}` (spec §6): validates the token, sets the password, activates, signs in. */
+export async function acceptInviteAction(
+  token: string,
+  password: string,
+): Promise<AcceptInviteActionResult> {
+  let agentId: string
+  try {
+    const { agent } = await acceptInvite(token, password)
+    agentId = agent.id
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      return {
+        ok: false,
+        invalidInvite: true,
+        message: "That invite link isn't valid or has expired.",
+      }
+    }
+    return { ok: false, message: 'Could not reach the server. Please try again.' }
+  }
+
+  const cookieStore = await cookies()
+  cookieStore.set(SESSION_COOKIE_NAME, await mintSessionCookie(agentId), sessionCookieOptions())
+  redirect('/inbox/unassigned')
 }

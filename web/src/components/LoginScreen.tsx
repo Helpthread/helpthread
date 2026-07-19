@@ -1,15 +1,18 @@
 'use client'
 
 /**
- * The operator login screen (HT-51). The frozen Claude Design prototype has
- * no login screen at all — the pre-HT-51 API posture was "no login, just a
- * deployment-held Bearer token" (see the `agent-inbox-v1.md` §3/§5 amendment
- * landing in the same commit as this file). This is therefore a NEW designed
- * surface with no prototype to match pixel-for-pixel; it borrows `AuthFailure`'s
- * fixed-full-screen, calm, no-blame register as the closest sibling, but it
- * has NOT been through TJ's design sign-off. **Flagging prominently per
- * CLAUDE.md's UI-fidelity mandate — treat these pixels as a placeholder until
- * reviewed.**
+ * The per-Agent login screen (HT-51, extended HT-54). The frozen Claude
+ * Design prototype has no login screen at all — this is a NEW designed
+ * surface with no prototype to match pixel-for-pixel; it borrows
+ * `AuthFailure`'s fixed-full-screen, calm, no-blame register as the closest
+ * sibling, but it has NOT been through TJ's design sign-off. **Flagging
+ * prominently per CLAUDE.md's UI-fidelity mandate — treat these pixels as a
+ * placeholder until reviewed.**
+ *
+ * Renders whatever `GET /auth/providers` reports (spec §6/§7): one
+ * email+password form per `kind: 'credentials'` descriptor. v1 has exactly
+ * one (`password`) — a marketplace module would add a `kind` this seam
+ * doesn't render yet ("Sign in with …"), not built here (spec §11).
  *
  * Two deliberate departures from "compose only from `ds/**`", both because
  * the frozen design system genuinely lacks the piece needed, not because it
@@ -26,16 +29,26 @@
  *   `type="button"` — there's no `type="submit"` escape hatch — so clicking
  *   it calls `formRef.current?.requestSubmit()` to submit the surrounding
  *   `<form>` via JS instead of relying on native submit-button semantics.
- *   Pressing Enter in the password field still submits the form natively,
- *   no JS trick needed for that path.
+ *   Pressing Enter in either field still submits the form natively, no JS
+ *   trick needed for that path.
+ *
+ * A third, milder instance of the same HT-52 gap: the EMAIL field does use
+ * `ds/core/TextInput`, which means it cannot carry `type="email"`,
+ * `name="email"`, or `autoComplete="username"` — weakening password managers'
+ * username↔password pairing on this form. Same expiry path (HT-52's `type`
+ * prop, plus pass-through `name`/`autoComplete`), noted so the limitation is
+ * a tracked trade-off, not an oversight.
  */
 
 import { useRef, useState, useTransition } from 'react'
+import type { AuthProviderDescriptor } from '../lib/api-types'
 import { loginAction } from '../lib/auth-actions'
 import { Button } from './ds/core/Button'
+import { TextInput } from './ds/core/TextInput'
 
-export function LoginScreen({ next }: { next: string }) {
+function CredentialsForm({ provider, next }: { provider: AuthProviderDescriptor; next: string }) {
   const formRef = useRef<HTMLFormElement>(null)
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
@@ -44,14 +57,122 @@ export function LoginScreen({ next }: { next: string }) {
     if (isPending) return
     setError(null)
     startTransition(async () => {
-      const result = await loginAction(password, next)
+      const result = await loginAction(provider.key, email, password, next)
       // A successful login redirects server-side and never returns here —
-      // reaching this line means the password didn't match.
+      // reaching this line means the email/password didn't match.
       if (!result.ok) {
-        setError(result.message ?? "That password didn't match.")
+        setError(result.message ?? "That email and password didn't match.")
       }
     })
   }
+
+  return (
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault()
+        submit()
+      }}
+      style={{ marginTop: 24, width: '100%', maxWidth: 280, textAlign: 'left' }}
+    >
+      <label
+        htmlFor="ht-login-email"
+        style={{
+          display: 'block',
+          fontSize: 12,
+          fontWeight: 600,
+          color: 'var(--ht-ink-dim)',
+          marginBottom: 6,
+        }}
+      >
+        Email
+      </label>
+      <TextInput
+        id="ht-login-email"
+        value={email}
+        onChange={(event: { target: { value: string } }) => {
+          setEmail(event.target.value)
+          if (error !== null) setError(null)
+        }}
+        style={{ padding: '8px 10px', fontSize: 12.5 }}
+      />
+
+      <label
+        htmlFor="ht-login-password"
+        style={{
+          display: 'block',
+          fontSize: 12,
+          fontWeight: 600,
+          color: 'var(--ht-ink-dim)',
+          margin: '14px 0 6px',
+        }}
+      >
+        Password
+      </label>
+      {/* Native input, not ds/core/TextInput — see the module comment above. */}
+      <input
+        id="ht-login-password"
+        name="password"
+        type="password"
+        autoComplete="current-password"
+        required
+        disabled={isPending}
+        value={password}
+        onChange={(event) => {
+          setPassword(event.target.value)
+          if (error !== null) setError(null)
+        }}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          fontFamily: 'var(--ht-sans)',
+          fontSize: 12.5,
+          color: 'var(--ht-ink)',
+          background: 'var(--ht-bg)',
+          border: '1px solid var(--ht-divider)',
+          borderRadius: 'var(--ht-radius-sm)',
+          padding: '8px 10px',
+          outline: 'none',
+        }}
+      />
+
+      {error !== null && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          style={{
+            marginTop: 8,
+            fontSize: 12.5,
+            fontWeight: 600,
+            color: 'var(--ht-critical)',
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      <div style={{ marginTop: 16 }}>
+        <Button
+          variant="primary"
+          disabled={isPending || email.length === 0 || password.length === 0}
+          onClick={() => formRef.current?.requestSubmit()}
+          style={{ width: '100%', justifyContent: 'center' }}
+        >
+          {isPending ? 'Signing in…' : 'Sign in'}
+        </Button>
+      </div>
+    </form>
+  )
+}
+
+export function LoginScreen({
+  next,
+  providers,
+}: {
+  next: string
+  providers: AuthProviderDescriptor[]
+}) {
+  const credentialsProviders = providers.filter((provider) => provider.kind === 'credentials')
 
   return (
     <div
@@ -100,84 +221,12 @@ export function LoginScreen({ next }: { next: string }) {
           color: 'var(--ht-ink-muted)',
         }}
       >
-        This deployment has one operator password — there's no separate account to create.
+        Sign in with your Agent email and password.
       </p>
 
-      <form
-        ref={formRef}
-        onSubmit={(event) => {
-          event.preventDefault()
-          submit()
-        }}
-        style={{ marginTop: 24, width: '100%', maxWidth: 280, textAlign: 'left' }}
-      >
-        <label
-          htmlFor="ht-login-password"
-          style={{
-            display: 'block',
-            fontSize: 12,
-            fontWeight: 600,
-            color: 'var(--ht-ink-dim)',
-            marginBottom: 6,
-          }}
-        >
-          Password
-        </label>
-        {/* Native input, not ds/core/TextInput — see the module comment above. */}
-        <input
-          id="ht-login-password"
-          name="password"
-          type="password"
-          autoComplete="current-password"
-          // biome-ignore lint/a11y/noAutofocus: the one interactive element on a dedicated login screen.
-          autoFocus
-          required
-          disabled={isPending}
-          value={password}
-          onChange={(event) => {
-            setPassword(event.target.value)
-            if (error !== null) setError(null)
-          }}
-          style={{
-            width: '100%',
-            boxSizing: 'border-box',
-            fontFamily: 'var(--ht-sans)',
-            fontSize: 12.5,
-            color: 'var(--ht-ink)',
-            background: 'var(--ht-bg)',
-            border: '1px solid var(--ht-divider)',
-            borderRadius: 'var(--ht-radius-sm)',
-            padding: '8px 10px',
-            outline: 'none',
-          }}
-        />
-
-        {error !== null && (
-          <div
-            role="alert"
-            aria-live="assertive"
-            style={{
-              marginTop: 8,
-              fontSize: 12.5,
-              fontWeight: 600,
-              color: 'var(--ht-critical)',
-            }}
-          >
-            {error}
-          </div>
-        )}
-
-        <div style={{ marginTop: 16 }}>
-          <Button
-            variant="primary"
-            disabled={isPending || password.length === 0}
-            onClick={() => formRef.current?.requestSubmit()}
-            style={{ width: '100%', justifyContent: 'center' }}
-          >
-            {isPending ? 'Signing in…' : 'Sign in'}
-          </Button>
-        </div>
-      </form>
+      {credentialsProviders.map((provider) => (
+        <CredentialsForm key={provider.key} provider={provider} next={next} />
+      ))}
     </div>
   )
 }

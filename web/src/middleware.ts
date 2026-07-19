@@ -7,12 +7,14 @@ import {
 } from './lib/session'
 
 /**
- * The operator login gate (HT-51). Every route in the app requires a valid
- * session cookie except the handful listed in `PUBLIC_PATHS` below — most
- * importantly `/login` itself, which would otherwise redirect to itself
- * forever. (The login form's submit is a Next.js Server Action, which POSTs
- * back to the SAME `/login` URL rather than a separate endpoint, so no extra
- * path needs listing for it.)
+ * The Agent login gate (HT-51; carries identity per HT-54, spec §8). Every
+ * route in the app requires a valid session cookie except the handful
+ * listed in `PUBLIC_PATHS`/`PUBLIC_PREFIXES` below — most importantly
+ * `/login` itself, which would otherwise redirect to itself forever.
+ * (`/login` and `/setup`'s form submits are Next.js Server Actions, which
+ * POST back to the SAME URL rather than a separate endpoint, so no extra
+ * path needs listing for either.) `/invite/{token}` is a PREFIX rule, not an
+ * exact match — the token rides the path.
  *
  * This runs on Next's Edge runtime (see `lib/session.ts`'s module comment for
  * why that means Web Crypto, not `node:crypto`), so it stays deliberately
@@ -25,14 +27,18 @@ import {
 
 const PUBLIC_PATHS = new Set<string>([
   '/login',
+  '/setup',
   '/favicon.ico',
   '/robots.txt',
   '/sitemap.xml',
   '/manifest.webmanifest',
 ])
 
+/** Path PREFIXES that are public regardless of what follows — currently just the invite-accept token route. */
+const PUBLIC_PREFIXES: readonly string[] = ['/invite/']
+
 export function isPublicPath(pathname: string): boolean {
-  return PUBLIC_PATHS.has(pathname)
+  return PUBLIC_PATHS.has(pathname) || PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))
 }
 
 export async function middleware(request: NextRequest): Promise<NextResponse> {
@@ -54,7 +60,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   const response = NextResponse.next()
   if (session.shouldRefresh) {
-    response.cookies.set(SESSION_COOKIE_NAME, await mintSessionCookie(), sessionCookieOptions())
+    // Thread `sub` through the re-stamp — spec §8's called-out trap: a
+    // refresh that re-minted the cookie WITHOUT the just-verified identity
+    // would silently drop the signed-in Agent mid-session. `sub` being a
+    // required `mintSessionCookie` parameter makes the identity-less call
+    // a compile error; this is the one call site that could have made it.
+    response.cookies.set(
+      SESSION_COOKIE_NAME,
+      await mintSessionCookie(session.payload.sub),
+      sessionCookieOptions(),
+    )
   }
   return response
 }

@@ -68,10 +68,13 @@ export function InboxScreen({
   folder,
   conversations,
   nextCursor,
+  selfId,
 }: {
   folder: AppFolder
   conversations: ConversationSummary[]
   nextCursor: string | null
+  /** The viewing Agent's own id (`getMe()`, HT-54) — resolves the "Mine" folder against real `assigneeAgentId` values. */
+  selfId: string
 }) {
   const router = useRouter()
   const showToast = useToast()
@@ -119,9 +122,9 @@ export function InboxScreen({
   const showCheckboxColumn = folder !== 'starred' && folder !== 'drafts'
 
   const visible = [...conversations, ...extraPages].filter((c) => {
-    if (folder === 'unassigned') return c.assignee === null
-    if (folder === 'mine') return c.assignee === 'me'
-    if (folder === 'assigned') return c.assignee !== null
+    if (folder === 'unassigned') return c.assigneeAgentId === null
+    if (folder === 'mine') return c.assigneeAgentId === selfId
+    if (folder === 'assigned') return c.assigneeAgentId !== null
     if (folder === 'starred') return isStarred(c.id)
     if (folder === 'drafts') return c.id in drafts
     return true // closed | spam: shown as fetched

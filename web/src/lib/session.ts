@@ -1,12 +1,11 @@
 /**
- * Operator session model (HT-51) — the v1 "log in" story is deliberately
- * thin: there is one operator per deployment (the Agent Inbox API's own
- * posture, `specs/api/agent-inbox-v1.md` §1/§5 — single-Agent, no per-user
- * identity), so there is exactly one password (`HELPTHREAD_UI_PASSWORD`) and
- * exactly one session shape. This module is the whole of that shape: mint a
- * signed cookie value, verify one back, nothing else. It holds no I/O beyond
- * reading two env vars, so it is safe to import from both a Node server
- * action (the login/logout actions) and `middleware.ts`.
+ * Per-Agent session model (HT-54; specs/auth/agents-and-auth.md §8) —
+ * supersedes HT-51's single-operator posture. Real Agents now exist (the
+ * engine's `agents` table), so the session must carry WHICH Agent this is,
+ * not just "someone is logged in." This module is the whole of that shape:
+ * mint a signed cookie value, verify one back, nothing else. It holds no I/O
+ * beyond reading one env var, so it is safe to import from both a Node
+ * server action (the login/logout actions) and `middleware.ts`.
  *
  * ## Why Web Crypto, not `node:crypto`
  *
@@ -18,21 +17,34 @@
  * runtime branch. It also gives constant-time MAC comparison for free:
  * `crypto.subtle.verify` never decodes a MAC to a string and `===`s it —
  * that comparison happens inside the WebCrypto implementation itself, which
- * is the actual constant-time primitive, not a hand-rolled one. (The
- * operator PASSWORD comparison is a separate concern, handled in
- * `auth-actions.ts` with `node:crypto`'s `timingSafeEqual` — that comparison
- * only ever needs to run in the login server action, which is Node-only, so
- * there's no Edge constraint pushing it toward Web Crypto too.)
+ * is the actual constant-time primitive, not a hand-rolled one. (Password
+ * verification is a SEPARATE concern now owned entirely by the engine —
+ * spec §4/§9 — the web never compares a password to anything; this module
+ * only ever signs/verifies the cookie's identity claim.)
  *
  * ## Cookie format
  *
  * `<payload>.<mac>`, both base64url. `payload` is the JSON string
- * `{"v":1,"iat":<unix-ms>}` and `mac = HMAC-SHA256(secret, payload)` — signed
- * over the base64url TEXT of the payload (not the raw JSON bytes), so
- * verification never has to re-derive the exact encoding that was signed.
- * `v` exists so a future session shape can change the payload without a
- * previous cookie verifying as something it isn't; a `v` this module doesn't
- * recognize fails closed (verifies to `null`), same as a bad MAC.
+ * `{"v":2,"iat":<unix-ms>,"sub":<agentId>}` and
+ * `mac = HMAC-SHA256(secret, payload)` — signed over the base64url TEXT of
+ * the payload (not the raw JSON bytes), so verification never has to
+ * re-derive the exact encoding that was signed. `v` exists so a session
+ * shape change never verifies as something it isn't: this is the SECOND
+ * shape (`v:1` carried no identity at all, HT-51's single-operator
+ * placeholder) — a `v` this module doesn't recognize fails closed (verifies
+ * to `null`), so an old v1 cookie simply forces one re-login, same as any
+ * other invalid cookie.
+ *
+ * ## Cookie carries identity — `sub` is required, not optional
+ *
+ * `sub` is the Agent id this cookie asserts. `mintSessionCookie` takes it as
+ * a REQUIRED first parameter (spec §8: "make `sub` required ... so the
+ * compiler rejects any call that would silently re-mint an identity-less
+ * cookie mid-session") — the sliding-refresh re-stamp in `middleware.ts` is
+ * exactly the call site that trap guards against; see that file's comment.
+ * `verifySessionCookie` mirrors this on the read side: a payload whose `sub`
+ * isn't a non-empty string fails closed, same as a bad MAC or an
+ * unrecognized `v`.
  *
  * ## Expiry model — sliding, simplest-correct option
  *
@@ -40,20 +52,20 @@
  * Two ways to make that "slide" with activity: re-sign on literally every
  * request (correct, but a wasted HMAC on every single navigation), or never
  * slide at all (simple, but forces a re-login every 7 days regardless of how
- * active the operator is — a worse experience for zero extra safety). This
+ * active the Agent is — a worse experience for zero extra safety). This
  * module picks the middle option: `verifySessionCookie` reports
  * `shouldRefresh: true` once the cookie is more than a day old, and the
  * caller (middleware, on any authenticated request) re-stamps a fresh cookie
- * at that point. An active operator's session then rolls forward roughly a
- * day at a time; an idle one still lapses within a week of their last
- * request. This is the one sliding-window shape simple enough to hold in
- * your head during review — no configurable policy, no separate "absolute
- * max" cap to reason about.
+ * at that point, threading the SAME `sub` through. An active Agent's session
+ * then rolls forward roughly a day at a time; an idle one still lapses
+ * within a week of their last request. This is the one sliding-window shape
+ * simple enough to hold in your head during review — no configurable
+ * policy, no separate "absolute max" cap to reason about.
  */
 
 export const SESSION_COOKIE_NAME = 'ht_session'
 
-const SESSION_VERSION = 1
+const SESSION_VERSION = 2
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 const SESSION_REFRESH_AGE_MS = 24 * 60 * 60 * 1000
 
@@ -61,6 +73,8 @@ export interface SessionPayload {
   v: typeof SESSION_VERSION
   /** Unix ms this session was minted (or last re-stamped). */
   iat: number
+  /** The Agent id this cookie asserts (spec §8) — becomes `X-Helpthread-Agent-Id` on engine calls that need it (`lib/api.ts`). */
+  sub: string
 }
 
 export interface VerifiedSession {
@@ -71,49 +85,37 @@ export interface VerifiedSession {
 
 export interface UiAuthConfig {
   sessionSecret: string
-  password: string
 }
 
 /**
- * Reads and validates the two env vars the login flow needs, the same guard
- * shape as `lib/api.ts`'s `config()`: required (with a minimum length) in
- * production, with harmless dev defaults everywhere else, skipped during
- * `next build` (`NEXT_PHASE=phase-production-build`) where prerendering runs
- * in production mode without the runtime env available yet.
+ * Reads and validates the one env var the session flow needs, the same
+ * guard shape as `lib/api.ts`'s `config()`: required (with a minimum
+ * length) in production, with a harmless dev default everywhere else,
+ * skipped during `next build` (`NEXT_PHASE=phase-production-build`) where
+ * prerendering runs in production mode without the runtime env available
+ * yet. `HELPTHREAD_UI_PASSWORD` is GONE (spec §8 — retired, replaced by real
+ * per-Agent accounts): there is no longer a single deployment-wide secret to
+ * check a password against.
  */
 export function uiAuthConfig(): UiAuthConfig {
   const sessionSecret = process.env.HELPTHREAD_UI_SESSION_SECRET
-  const password = process.env.HELPTHREAD_UI_PASSWORD
   const isBuild = process.env.NEXT_PHASE === 'phase-production-build'
 
   if (
     process.env.NODE_ENV === 'production' &&
     !isBuild &&
-    (sessionSecret === undefined ||
-      sessionSecret.length < 32 ||
-      password === undefined ||
-      password.length < 12)
+    (sessionSecret === undefined || sessionSecret.length < 32)
   ) {
     throw new Error(
-      'HELPTHREAD_UI_SESSION_SECRET (>=32 chars) and HELPTHREAD_UI_PASSWORD (>=12 chars) ' +
-        'must both be set in production — refusing to fall back to dev defaults.',
+      'HELPTHREAD_UI_SESSION_SECRET (>=32 chars) must be set in production — refusing to fall back to dev defaults.',
     )
   }
 
-  // Dev defaults are obviously-dev values, matching the HT-24 harness's
+  // Dev default is an obviously-dev value, matching the HT-24 harness's
   // `helpthread-dev-token` convention — never valid in a real deployment
-  // because the production guard above refuses to start without real ones.
+  // because the production guard above refuses to start without a real one.
   return {
     sessionSecret: sessionSecret ?? 'helpthread-dev-session-secret-do-not-use-in-production-00',
-    // Trim the STORED password only. Dashboard/CLI env editors routinely append
-    // a trailing newline (or a copy-paste leaves surrounding whitespace), and the
-    // operator typing the password at the login form never includes it — so an
-    // untrimmed exact-match comparison rejects the correct password with no
-    // recoverable signal. We never trim the *candidate* the operator types
-    // (leading/trailing spaces there are a deliberate part of their secret).
-    // The length guard above runs on the raw value, so whitespace can't be used
-    // to sneak under the 12-char minimum.
-    password: (password ?? 'helpthread-dev-password').trim(),
   }
 }
 
@@ -163,11 +165,16 @@ function importHmacKey(secret: string): Promise<CryptoKey> {
   )
 }
 
-/** Mints a fresh, signed session cookie value. `iat` defaults to now; the
- *  middleware's refresh path passes nothing and gets a re-stamped `now`. */
-export async function mintSessionCookie(iat: number = Date.now()): Promise<string> {
+/**
+ * Mints a fresh, signed session cookie value. `sub` (the Agent id) is
+ * REQUIRED — see the module doc's "cookie carries identity" section for why
+ * this isn't optional. `iat` defaults to now; the middleware's refresh path
+ * passes the just-verified session's own `iat`-less re-stamp (i.e. omits
+ * `iat` to get a fresh `now`) while threading `sub` from that same session.
+ */
+export async function mintSessionCookie(sub: string, iat: number = Date.now()): Promise<string> {
   const { sessionSecret } = uiAuthConfig()
-  const payload: SessionPayload = { v: SESSION_VERSION, iat }
+  const payload: SessionPayload = { v: SESSION_VERSION, iat, sub }
   const payloadB64 = base64UrlEncode(textEncoder.encode(JSON.stringify(payload)))
   const key = await importHmacKey(sessionSecret)
   const mac = await crypto.subtle.sign('HMAC', key, textEncoder.encode(payloadB64))
@@ -177,9 +184,11 @@ export async function mintSessionCookie(iat: number = Date.now()): Promise<strin
 /**
  * Verifies a session cookie value. TOTAL over its input, same discipline as
  * the engine's `verifyReplyMessageId` (`src/mail/reply-token.ts`): any
- * malformed, forged, wrong-version, or expired cookie value returns `null`
- * rather than throwing — an untrusted cookie must never crash the request
- * that carries it, it just fails closed into "not logged in".
+ * malformed, forged, wrong-version, identity-less, or expired cookie value
+ * returns `null` rather than throwing — an untrusted cookie must never crash
+ * the request that carries it, it just fails closed into "not logged in".
+ * A v1 cookie (no `sub`) fails the `v` check the same way a bad MAC would —
+ * the one Agent from before this migration re-logs in once (spec §8, §10).
  */
 export async function verifySessionCookie(
   cookieValue: string | undefined,
@@ -203,16 +212,21 @@ export async function verifySessionCookie(
       typeof payload !== 'object' ||
       payload === null ||
       (payload as { v?: unknown }).v !== SESSION_VERSION ||
-      typeof (payload as { iat?: unknown }).iat !== 'number'
+      typeof (payload as { iat?: unknown }).iat !== 'number' ||
+      typeof (payload as { sub?: unknown }).sub !== 'string' ||
+      (payload as { sub: string }).sub.length === 0
     ) {
       return null
     }
 
-    const { iat } = payload as SessionPayload
+    const { iat, sub } = payload as SessionPayload
     const age = Date.now() - iat
     if (age < 0 || age > SESSION_MAX_AGE_MS) return null
 
-    return { payload: { v: SESSION_VERSION, iat }, shouldRefresh: age > SESSION_REFRESH_AGE_MS }
+    return {
+      payload: { v: SESSION_VERSION, iat, sub },
+      shouldRefresh: age > SESSION_REFRESH_AGE_MS,
+    }
   } catch {
     // Malformed base64, malformed JSON, a WebCrypto error on garbage input —
     // all the same outcome: this is not a valid session.
