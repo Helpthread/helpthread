@@ -58,6 +58,7 @@ describe('migrate', () => {
       { id: 16, name: 'gmail_reconcile_lease' },
       { id: 17, name: 'mailboxes_disconnected_status' },
       { id: 18, name: 'agents_and_auth' },
+      { id: 19, name: 'inbound_delivery_forged_tokens' },
     ])
   })
 
@@ -86,6 +87,7 @@ describe('migrate', () => {
       { id: 16 },
       { id: 17 },
       { id: 18 },
+      { id: 19 },
     ])
   })
 
@@ -1033,5 +1035,41 @@ describe('migrate', () => {
         existing.id,
       ]),
     ).rejects.toThrow()
+  })
+
+  it('migration 019 upgrades a NON-fresh 018 database: preexisting delivery rows read forged_token_count 0, and the column holds real counts', async () => {
+    db = await createPgliteDb()
+
+    // Apply through 018, then write a delivery row the way a pre-019
+    // deployment would have — no forged_token_count column yet.
+    await migrate(db, { throughId: 18 })
+    const [mailbox] = await db.query<{ id: string }>(
+      `INSERT INTO mailboxes (address, provider) VALUES ('help@example.test', 'gmail') RETURNING id`,
+    )
+    const [preexisting] = await db.query<{ id: string }>(
+      `INSERT INTO inbound_deliveries (mailbox_id, provider_message_id, status)
+       VALUES ($1, 'msg-pre-019', 'stored') RETURNING id`,
+      [mailbox.id],
+    )
+
+    await expect(migrate(db)).resolves.toBeUndefined()
+
+    // The preexisting row reads the DEFAULT 0 (migration 019's doc comment:
+    // the signal genuinely begins at this migration — no backfill is
+    // possible), and the column round-trips a real count.
+    const [row] = await db.query<{ forged_token_count: number }>(
+      'SELECT forged_token_count FROM inbound_deliveries WHERE id = $1',
+      [preexisting.id],
+    )
+    expect(row.forged_token_count).toBe(0)
+
+    await db.query('UPDATE inbound_deliveries SET forged_token_count = 3 WHERE id = $1', [
+      preexisting.id,
+    ])
+    const [updated] = await db.query<{ forged_token_count: number }>(
+      'SELECT forged_token_count FROM inbound_deliveries WHERE id = $1',
+      [preexisting.id],
+    )
+    expect(updated.forged_token_count).toBe(3)
   })
 })

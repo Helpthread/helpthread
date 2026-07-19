@@ -250,6 +250,9 @@ With the deploy live and env set:
 - [ ] Send a test email **to** the connected mailbox → within ~1 min (the drain
       tick) a new conversation appears (`GET /api/v1/conversations`).
 - [ ] Pub/Sub subscription **oldest-unacked-message age** stays low (no backlog).
+- [ ] `GET /api/v1/internal/health` with `Authorization: Bearer $CRON_SECRET` →
+      `200` with `"ok": true` (Part G — this one call covers the queue-age and
+      dead-letter checks below, plus watch expiry and mailbox status).
 - [ ] The job-queue table: no *unexpected* dead-letter growth (retained
       `dead_lettered_at IS NOT NULL` rows are by design — inspect them by
       age/count/rate, not as a pass/fail), and oldest `ready` job age stays
@@ -257,6 +260,59 @@ With the deploy live and env set:
 - [ ] Reply from the Agent inbox → the reply arrives at the customer, and a
       reply back **threads** into the same conversation (the sacred outbound-token
       check — HT-44's live proof).
+
+## Part G — Ongoing monitoring & alerting (HT-44)
+
+There is deliberately no Datadog/OTel stack in this deployment: Vercel's log
+viewer is the aggregator for structured events, and the **health endpoint is
+the one alertable surface** — designed so a dumb HTTP monitor is a complete
+alerting stack.
+
+### G1. The health endpoint
+
+```
+GET https://<domain>/api/v1/internal/health
+Authorization: Bearer $CRON_SECRET
+```
+
+Answers **`200` when healthy, `503` when any alert is tripped** (body is the
+full JSON report either way: `ok`, `alerts[]`, and per-section detail —
+queue stats, 24h ledger outcome counts, 24h forged-token aggregate, and
+per-mailbox status + Gmail `watch()` expiry). Read-only and cheap — polling
+every minute is fine.
+
+**Wiring a monitor:** point any status-code poller that can send one custom
+header (UptimeRobot, Checkly, a `curl -fsS` in a cron you already own) at the
+URL with the `Authorization` header, alerting on any non-`200`. This shares
+the `CRON_SECRET` with the monitor — acceptable for the dogfood (the secret
+guards idempotent internal endpoints, not customer data); rotate it via
+Vercel env if the monitor is ever compromised.
+
+### G2. Alert codes → first response
+
+Each `alerts[]` entry is `<code>: <detail>`. The codes are stable:
+
+| Code | Meaning | First response |
+|---|---|---|
+| `queue-drain-stalled` | Oldest ready job has waited past the threshold (default 300s) — the every-minute drain isn't keeping up or isn't running | Vercel → the project's cron runs + function logs for `/internal/queue/drain`; a failed tick self-heals, repeated failures don't |
+| `queue-dead-letter-growth` | A queue job was dead-lettered in the last 24h | `SELECT topic, last_error, attempts FROM queue_jobs WHERE dead_lettered_at IS NOT NULL ORDER BY dead_lettered_at DESC` — parked rows are retained for exactly this review |
+| `ingest-dead-letter-growth` | An inbound delivery exhausted its retry budget in the last 24h — a message an Agent has NOT seen | `SELECT provider_message_id, last_error, attempts FROM inbound_deliveries WHERE status = 'dead-letter' ORDER BY updated_at DESC`; the raw mail is still in Gmail — reprocess after fixing the cause |
+| `forged-token-burst` | ≥ threshold (default 5) stored deliveries in 24h carried reply tokens that FAILED signature verification — someone is guessing/tampering with threading tokens (threading.md §5) | Search Vercel logs for `forged_token_detected` (WARN); review `senderAddress`/`conversationId` across events. The mail itself threaded safely (a forged token never appends) |
+| `mailbox-needs-attention` | A mailbox is `paused` (cursor expired — gmail-push.md §5 rebaseline) or `needs_reconnect` (dead OAuth grant) — **inbound mail is not flowing** | `needs_reconnect`: re-run the Part E consent. `paused`: reconnect to rebaseline the cursor, then check for a gap |
+| `watch-expiring` | An active mailbox's Gmail `watch()` expires in < 72h (or was never armed) — the daily renewal has been failing for days | Function logs for `/internal/cron/watch-maintenance` (`gmail_watch_maintenance` events); a manual `GET` of that endpoint with the cron secret re-arms immediately |
+
+### G3. Structured log events (Vercel log search)
+
+All JSON lines, searchable by `event` name: `inbound_ingest` (one per fresh
+ingest outcome: threading decision, append-fallback reason, forgedTokenCount,
+parse size, attachment count, ledger outcome), `forged_token_detected` (WARN
+— the per-message security event behind `forged-token-burst`), `queue_drain`
+(per drain tick that claimed work or fenced a stale worker: claimed/acked/
+retried/deadLettered/staleSkipped; quiet ticks don't log), `gmail_reconcile`
+(per reconcile job: cursor positions, skip/retry/ack reasons), and
+`gmail_watch_maintenance` (the daily renewal + sweep). Correlate transport
+events to ingest events on `(mailboxId, providerMessageId)`
+(inbound-ingestion.md §6).
 
 ## What this runbook does not cover
 

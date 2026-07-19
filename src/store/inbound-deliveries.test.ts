@@ -212,7 +212,7 @@ describe('createInboundDeliveryStore', () => {
     })
     await expect(
       db.transaction((tx) =>
-        markStoredInTx(tx, first.delivery.id, threadId, first.delivery.attempts),
+        markStoredInTx(tx, first.delivery.id, threadId, first.delivery.attempts, 0),
       ),
     ).rejects.toThrow(LeaseLostError)
 
@@ -344,7 +344,9 @@ describe('createInboundDeliveryStore', () => {
         bodyText: 'Where is my order?',
       },
     })
-    await db.transaction(async (tx) => markStoredInTx(tx, delivery.id, threadId, delivery.attempts))
+    await db.transaction(async (tx) =>
+      markStoredInTx(tx, delivery.id, threadId, delivery.attempts, 0),
+    )
     await expireLease(db, delivery.id)
 
     const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
@@ -372,23 +374,30 @@ describe('createInboundDeliveryStore', () => {
     // markStoredInTx itself never opens a transaction (see its doc comment) —
     // the caller (src/mail/ingest.ts, in real use) supplies one; here a
     // single-statement transaction is enough to prove the SQL is correct.
+    // forgedTokenCount: 2 proves the migration-019 column round-trips, not
+    // just the DEFAULT 0.
     await db.transaction(async (tx) => {
-      const updated = await markStoredInTx(tx, delivery.id, threadId, delivery.attempts)
-      expect(updated).toMatchObject({ id: delivery.id, status: 'stored', threadId })
+      const updated = await markStoredInTx(tx, delivery.id, threadId, delivery.attempts, 2)
+      expect(updated).toMatchObject({
+        id: delivery.id,
+        status: 'stored',
+        threadId,
+        forgedTokenCount: 2,
+      })
     })
 
     // claim() replay after a commit confirms it persisted.
     const replay = await store.claim(mailboxId, 'provider-msg-1', LEASE_MS)
     expect(replay).toMatchObject({
       claimed: false,
-      delivery: { status: 'stored', threadId },
+      delivery: { status: 'stored', threadId, forgedTokenCount: 2 },
     })
   })
 
   it('markStoredInTx throws for an unknown id', async () => {
     const { db } = await freshStore()
     await expect(
-      db.transaction(async (tx) => markStoredInTx(tx, RANDOM_UUID, RANDOM_UUID, 0)),
+      db.transaction(async (tx) => markStoredInTx(tx, RANDOM_UUID, RANDOM_UUID, 0, 0)),
     ).rejects.toThrow(/no delivery with id/)
   })
 

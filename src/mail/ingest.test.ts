@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db, type Queryable } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { BlobStore, RawInboundMessage } from '../providers/index.js'
@@ -328,6 +328,8 @@ describe('ingestInboundMessage', () => {
     )
 
     expect(second).toMatchObject({ kind: 'stored', conversationId: first.conversationId })
+    // An append that landed on its target carries NO fallback marker (HT-44).
+    expect(second).not.toHaveProperty('appendFallback')
     expect(await countRows(db, 'conversations')).toBe(1)
     expect(await countRows(db, 'threads')).toBe(2)
   })
@@ -811,6 +813,9 @@ describe('ingestInboundMessage', () => {
     expect(second.kind).toBe('stored')
     if (second.kind !== 'stored') throw new Error('unreachable')
     expect(second.conversationId).not.toBe(first.conversationId)
+    // HT-44 (spec §6): the fallback REASON is surfaced, not swallowed —
+    // without it the outcome reads as an ordinary decision.
+    expect(second.appendFallback).toBe('deleted')
     // The original (deleted) conversation plus the fresh fallback one.
     expect(await countRows(db, 'conversations')).toBe(2)
   })
@@ -841,7 +846,88 @@ describe('ingestInboundMessage', () => {
     expect(outcome.kind).toBe('stored')
     if (outcome.kind !== 'stored') throw new Error('unreachable')
     expect(outcome.conversationId).not.toBe(RANDOM_UUID)
+    expect(outcome.appendFallback).toBe('not-found')
     expect(await countRows(db, 'conversations')).toBe(1)
+  })
+
+  // --- threading.md §3 rule 3 / spec §6 (HT-44): the forged-token signal. --
+
+  it('a forged reply token → new conversation, forged_token_count on the ledger row, and a forged_token_detected WARN event', async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+    const first = await ingestInboundMessage(
+      inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+      deps,
+    )
+    if (first.kind !== 'stored') throw new Error('unreachable')
+
+    // Same keyId as the real keyring, WRONG secret: the minted value matches
+    // our Message-ID pattern but fails signature verification — exactly
+    // threading.md §3 rule 3's forged/tampered candidate.
+    const wrongKeyring: Keyring = {
+      current: { keyId: KEY_A.keyId, secret: 'attacker-guessed-wrong-secret-000000' },
+    }
+    const forgedToken = mintReplyMessageId(
+      { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+      wrongKeyring,
+    )
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const outcome = await ingestInboundMessage(
+        inboundDelivery(
+          mailboxId,
+          'provider-msg-2',
+          rawMessage(
+            {
+              From: 'attacker@evil.example.test',
+              To: 'support@example.test',
+              Subject: 'Re: Help with my order',
+              'Message-ID': '<attacker-2@evil.example.test>',
+              'In-Reply-To': forgedToken,
+            },
+            'Trying to thread into your conversation.',
+          ),
+        ),
+        deps,
+      )
+
+      // Rule 3: the forged token does not thread — a fresh conversation.
+      expect(outcome.kind).toBe('stored')
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+      expect(outcome.conversationId).not.toBe(first.conversationId)
+
+      // Migration 019: the count lands on the ledger row, aggregatable by
+      // the health endpoint — not just a log field.
+      const rows = await db.query<{ forged_token_count: number }>(
+        "SELECT forged_token_count FROM inbound_deliveries WHERE provider_message_id = 'provider-msg-2'",
+      )
+      expect(rows[0]?.forged_token_count).toBe(1)
+
+      // And the clean first message recorded the DEFAULT 0.
+      const cleanRows = await db.query<{ forged_token_count: number }>(
+        "SELECT forged_token_count FROM inbound_deliveries WHERE provider_message_id = 'provider-msg-1'",
+      )
+      expect(cleanRows[0]?.forged_token_count).toBe(0)
+
+      // The WARN-level security event (spec §6), with what a triage needs.
+      const events = warnSpy.mock.calls.map((call) => JSON.parse(String(call[0])) as unknown)
+      const forged = events.filter(
+        (event): event is Record<string, unknown> =>
+          typeof event === 'object' &&
+          event !== null &&
+          (event as Record<string, unknown>).event === 'forged_token_detected',
+      )
+      expect(forged).toHaveLength(1)
+      expect(forged[0]).toMatchObject({
+        mailboxId,
+        providerMessageId: 'provider-msg-2',
+        forgedTokenCount: 1,
+        senderAddress: 'attacker@evil.example.test',
+        conversationId: outcome.conversationId,
+      })
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   // --- providers/inbound-email.ts: blobRef content resolution. -------------

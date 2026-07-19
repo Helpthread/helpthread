@@ -1,10 +1,12 @@
 /**
  * The composition root's unified request handler (HT-43): one
  * `(request: Request) => Promise<Response>` that fronts BOTH the Agent Inbox
- * API (`createInboxApi`, `src/api/index.ts`) and the two internal cron
- * endpoints Vercel Cron invokes (specs/deploy/gmail-inbound-runbook.md Part
- * C). A single Vercel function (`api/[...path].ts`) delegates every request
- * here; this module decides internal-cron-vs-inbox by pathname.
+ * API (`createInboxApi`, `src/api/index.ts`) and the internal endpoints —
+ * the two cron jobs Vercel Cron invokes (specs/deploy/gmail-inbound-
+ * runbook.md Part C) plus the pull-based health check an HTTP monitor polls
+ * (HT-44, runbook Part G). A single Vercel function (`api/[...path].ts`)
+ * delegates every request here; this module decides internal-vs-inbox by
+ * pathname.
  *
  * ## Why the cron endpoints live here, not inside `createInboxApi`
  *
@@ -31,6 +33,7 @@
 
 import { authenticateRequest } from '../api/auth.js'
 import { apiError, json } from '../api/responses.js'
+import type { HealthReport } from './health.js'
 
 /** `GET` (Vercel Cron) → drain one bounded batch of the durable job queue (runbook Part C: every minute). */
 export const QUEUE_DRAIN_PATH = '/api/v1/internal/queue/drain'
@@ -38,16 +41,27 @@ export const QUEUE_DRAIN_PATH = '/api/v1/internal/queue/drain'
 /** `GET` (Vercel Cron) → daily Gmail `watch()` re-arm + reconciliation sweep (runbook Part C: daily at 06:00 UTC). */
 export const WATCH_MAINTENANCE_PATH = '/api/v1/internal/cron/watch-maintenance'
 
+/**
+ * `GET` (an HTTP monitor, or an operator's curl) → the point-in-time
+ * {@link HealthReport} (`./health.ts`; HT-44, runbook Part G). Same
+ * `CRON_SECRET` guard as the cron endpoints, but a different status
+ * contract: **200 when healthy, 503 when any alert is tripped**, so a
+ * status-code-only poller is a complete alerting stack.
+ */
+export const HEALTH_PATH = '/api/v1/internal/health'
+
 /** Dependencies {@link createAppHandler} closes over. */
 export interface AppHandlerDeps {
   /** The Agent Inbox API handler (`createInboxApi`) — every non-cron request is delegated here unchanged. */
   inboxApi: (request: Request) => Promise<Response>
-  /** The `CRON_SECRET` both internal endpoints require as `Authorization: Bearer <secret>` (constant-time compared). */
+  /** The `CRON_SECRET` every internal endpoint requires as `Authorization: Bearer <secret>` (constant-time compared). */
   cronSecret: string
   /** Drain one bounded batch of the job queue; returns a JSON-serializable report for the response body + logs. */
   drainQueue: () => Promise<unknown>
   /** Run one daily watch-renewal + reconciliation-sweep pass; returns a JSON-serializable report. */
   runWatchMaintenance: () => Promise<unknown>
+  /** Assemble the health report (`./health.ts`) — the {@link HEALTH_PATH} endpoint's work. */
+  runHealthCheck: () => Promise<HealthReport>
 }
 
 /**
@@ -69,6 +83,15 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
         deps.cronSecret,
         'watch-maintenance',
         deps.runWatchMaintenance,
+      )
+    }
+    if (pathname === HEALTH_PATH) {
+      // The report is the body verbatim (it carries its own `ok`/`alerts`),
+      // and the status pivots on it — 503 on any tripped alert so a
+      // status-code-only monitor alerts without parsing JSON (HEALTH_PATH's
+      // doc comment).
+      return handleCronEndpoint(request, deps.cronSecret, 'health', deps.runHealthCheck, (report) =>
+        json(report.ok ? 200 : 503, report),
       )
     }
 
@@ -93,12 +116,19 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
  * generic `500` (never the error's own text — a store/queue/Gmail error could
  * carry internal detail): safe because Vercel Cron retries on the next tick
  * and the work is idempotent + lease-bounded.
+ *
+ * `respond` maps the successful work's report to its `Response` — the two
+ * cron endpoints use the default `200 { ok: true, report }`, while the
+ * health endpoint substitutes its own 200-vs-503 pivot ({@link HEALTH_PATH}).
+ * Auth, the method check, and the generic-500 catch stay identical across
+ * all of them.
  */
-async function handleCronEndpoint(
+async function handleCronEndpoint<T>(
   request: Request,
   cronSecret: string,
   label: string,
-  work: () => Promise<unknown>,
+  work: () => Promise<T>,
+  respond: (report: T) => Response = (report) => json(200, { ok: true, report }),
 ): Promise<Response> {
   if (!authenticateRequest(request, cronSecret)) {
     return apiError(401, 'unauthorized', 'Missing or invalid credentials.')
@@ -109,7 +139,7 @@ async function handleCronEndpoint(
 
   try {
     const report = await work()
-    return json(200, { ok: true, report })
+    return respond(report)
   } catch (err) {
     console.error(`[composition] internal cron endpoint '${label}' failed`, err)
     return apiError(500, 'server_error', 'Internal server error.')
