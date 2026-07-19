@@ -1,16 +1,38 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createAppHandler, QUEUE_DRAIN_PATH, WATCH_MAINTENANCE_PATH } from './app.js'
+import { createAppHandler, HEALTH_PATH, QUEUE_DRAIN_PATH, WATCH_MAINTENANCE_PATH } from './app.js'
+import type { HealthReport } from './health.js'
 
 const CRON_SECRET = 'test-cron-secret-0123456789'
 const ORIGIN = 'https://desk.example.test'
+
+/** A fully-healthy {@link HealthReport} — tests mutate/override from here. */
+const HEALTHY_REPORT: HealthReport = {
+  ok: true,
+  alerts: [],
+  generatedAt: '2026-07-18T00:00:00.000Z',
+  queue: { ready: 0, oldestReadyAgeSeconds: null, deadLettered: 0, deadLetteredLast24h: 0 },
+  ingest: {
+    last24hByStatus: { received: 0, stored: 0, suppressed: 0, failed: 0, 'dead-letter': 0 },
+    deadLetterTotal: 0,
+  },
+  forgedTokens: { deliveriesLast24h: 0, tokensLast24h: 0, alertThreshold: 5 },
+  mailboxes: [],
+}
 
 /** Build a handler over spy deps; the inbox API spy returns a recognizable 299 so delegation is observable. */
 function makeHandler(cronSecret: string = CRON_SECRET) {
   const inboxApi = vi.fn(async () => new Response('inbox', { status: 299 }))
   const drainQueue = vi.fn(async () => ({ claimed: 3, acked: 3 }))
   const runWatchMaintenance = vi.fn(async () => ({ total: 1, renewed: 1 }))
-  const handler = createAppHandler({ inboxApi, cronSecret, drainQueue, runWatchMaintenance })
-  return { handler, inboxApi, drainQueue, runWatchMaintenance }
+  const runHealthCheck = vi.fn(async (): Promise<HealthReport> => HEALTHY_REPORT)
+  const handler = createAppHandler({
+    inboxApi,
+    cronSecret,
+    drainQueue,
+    runWatchMaintenance,
+    runHealthCheck,
+  })
+  return { handler, inboxApi, drainQueue, runWatchMaintenance, runHealthCheck }
 }
 
 /** A request to `path`; attaches `Authorization: Bearer <secret>` unless `secret` is null. */
@@ -100,6 +122,7 @@ describe('createAppHandler — queue drain endpoint', () => {
       cronSecret: CRON_SECRET,
       drainQueue,
       runWatchMaintenance,
+      runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
     })
 
     const res = await handler(req(QUEUE_DRAIN_PATH))
@@ -129,5 +152,48 @@ describe('createAppHandler — watch-maintenance endpoint', () => {
     const res = await handler(req(WATCH_MAINTENANCE_PATH, { secret: 'nope-9999999999999' }))
     expect(res.status).toBe(401)
     expect(runWatchMaintenance).not.toHaveBeenCalled()
+  })
+})
+
+describe('createAppHandler — health endpoint (HT-44)', () => {
+  it('answers 200 with the report VERBATIM (not {ok, report}-wrapped) when healthy', async () => {
+    const { handler, runHealthCheck, inboxApi } = makeHandler()
+
+    const res = await handler(req(HEALTH_PATH))
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual(HEALTHY_REPORT)
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(runHealthCheck).toHaveBeenCalledOnce()
+    expect(inboxApi).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 (still with the full report body) when any alert is tripped — the status-code-only monitor contract', async () => {
+    const { handler, runHealthCheck } = makeHandler()
+    const unhealthy: HealthReport = {
+      ...HEALTHY_REPORT,
+      ok: false,
+      alerts: ['queue-drain-stalled: oldest ready job has waited 900s (threshold 300s)'],
+    }
+    runHealthCheck.mockResolvedValueOnce(unhealthy)
+
+    const res = await handler(req(HEALTH_PATH))
+
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual(unhealthy)
+  })
+
+  it('rejects a wrong secret with 401 and never runs the check', async () => {
+    const { handler, runHealthCheck } = makeHandler()
+    const res = await handler(req(HEALTH_PATH, { secret: 'wrong-secret-9999999999' }))
+    expect(res.status).toBe(401)
+    expect(runHealthCheck).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-GET method (authenticated) with 405', async () => {
+    const { handler, runHealthCheck } = makeHandler()
+    const res = await handler(req(HEALTH_PATH, { method: 'POST' }))
+    expect(res.status).toBe(405)
+    expect(runHealthCheck).not.toHaveBeenCalled()
   })
 })

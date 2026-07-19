@@ -122,13 +122,32 @@ interface IngestOutcomeBase {
 }
 
 /**
+ * Why an `append` threading decision was stored as a FRESH conversation
+ * instead (spec §3 step 5, threading.md §5): the token verified but its
+ * target conversation was `deleted` (never resurrected) or `not-found`
+ * (token valid, no such row). Absent on the ordinary paths — a `new`
+ * decision, or an `append` that landed on its target.
+ */
+export type AppendFallbackReason = 'deleted' | 'not-found'
+
+/**
  * The result of one {@link ingestInboundMessage} call. `'in-progress'` is
  * returned when a concurrent or prior call already owns this delivery and is
  * still working on it (the claim's `received`-conflict case) — nothing was
  * done by THIS call.
+ *
+ * `appendFallback` (HT-44, spec §6) is only ever set on a FRESH `stored`
+ * outcome — a replay of an existing `stored` row reports without it (the
+ * ledger records the resulting `thread_id`, not the decision path that
+ * produced it).
  */
 export type IngestOutcome =
-  | (IngestOutcomeBase & { kind: 'stored'; conversationId: string; threadId: string })
+  | (IngestOutcomeBase & {
+      kind: 'stored'
+      conversationId: string
+      threadId: string
+      appendFallback?: AppendFallbackReason
+    })
   | (IngestOutcomeBase & { kind: 'suppressed'; reason: string })
   | (IngestOutcomeBase & { kind: 'failed'; attempts: number; error: string })
   | (IngestOutcomeBase & { kind: 'dead-letter'; attempts: number; error: string })
@@ -423,17 +442,26 @@ async function processClaimedDelivery(
       ...base,
       outcome: 'stored',
       threading: decision.kind,
+      // Present only when an `append` decision's target was gone (spec §3
+      // step 5) — without it, a fallback's log line would read
+      // `threading: 'append'` while its conversationId names a conversation
+      // this very write CREATED, silently contradicting itself (HT-44).
+      ...(written.appendFallback !== undefined ? { appendFallback: written.appendFallback } : {}),
       forgedTokenCount: decision.forgedTokenCount,
       parseSize,
       attachmentCount: parsed.attachments.length,
       conversationId: written.conversationId,
       threadId: written.threadId,
     })
+    if (decision.forgedTokenCount > 0) {
+      logForgedTokenEvent(base, decision.forgedTokenCount, fromAddressOf(parsed), written)
+    }
     return {
       ...base,
       kind: 'stored',
       conversationId: written.conversationId,
       threadId: written.threadId,
+      ...(written.appendFallback !== undefined ? { appendFallback: written.appendFallback } : {}),
     }
   } catch (err) {
     // A LeaseLostError here means markStoredInTx's fenced write lost the
@@ -612,24 +640,37 @@ async function storeAndMarkDelivered(
   parsed: ParsedEmail,
   attachmentRefs: Omit<NewThreadAttachment, 'threadId'>[],
   claimedAttempts: number,
-): Promise<{ conversationId: string; threadId: string }> {
+): Promise<{ conversationId: string; threadId: string; appendFallback?: AppendFallbackReason }> {
   return db.transaction(async (tx) => {
     const written = await writeParsedEmail(tx, decision, parsed)
     await insertThreadAttachmentsInTx(
       tx,
       attachmentRefs.map((ref) => ({ ...ref, threadId: written.threadId })),
     )
-    await markStoredInTx(tx, deliveryId, written.threadId, claimedAttempts)
+    await markStoredInTx(
+      tx,
+      deliveryId,
+      written.threadId,
+      claimedAttempts,
+      decision.forgedTokenCount,
+    )
     return written
   })
 }
 
-/** The `new`/`append`(+deleted/not-found fallback) store write itself — see {@link storeAndMarkDelivered}'s doc comment for the transaction it runs inside. */
+/**
+ * The `new`/`append`(+deleted/not-found fallback) store write itself — see
+ * {@link storeAndMarkDelivered}'s doc comment for the transaction it runs
+ * inside. When an `append` decision's target is gone, the returned
+ * `appendFallback` names why (spec §6's append-fallback reason, HT-44) —
+ * the decision itself is left untouched, so the caller can log both what
+ * `decideThreading` decided AND what the store made of it.
+ */
 async function writeParsedEmail(
   tx: Queryable,
   decision: ThreadingDecision,
   parsed: ParsedEmail,
-): Promise<{ conversationId: string; threadId: string }> {
+): Promise<{ conversationId: string; threadId: string; appendFallback?: AppendFallbackReason }> {
   const firstMessage: NewThread = {
     direction: 'inbound',
     messageId: parsed.messageId,
@@ -655,11 +696,12 @@ async function writeParsedEmail(
   // 'deleted' or 'not-found' (threading.md §5, spec §3 step 5): the token
   // verified but its target conversation is gone or never existed — never
   // resurrect it, never drop the mail. Fall back to a fresh conversation.
-  return createConversationInTx(tx, {
+  const created = await createConversationInTx(tx, {
     subject: parsed.subject,
     customerEmail: fromAddressOf(parsed),
     firstMessage,
   })
+  return { ...created, appendFallback: appended.reason }
 }
 
 /**
@@ -681,4 +723,36 @@ async function writeParsedEmail(
  */
 function logIngestEvent(record: Record<string, unknown>): void {
   console.log(JSON.stringify({ event: 'inbound_ingest', ...record }))
+}
+
+/**
+ * The forged-token security event (threading.md §5, spec §6; HT-44) — one
+ * WARN-level line per stored delivery whose threading decision counted at
+ * least one candidate that matched our Message-ID pattern but FAILED
+ * signature verification. Deliberately a SEPARATE line from the ordinary
+ * `inbound_ingest` record (which also carries `forgedTokenCount`): a log
+ * viewer can only text-match, not compare fields, so a burst is findable by
+ * searching the event name alone, and `console.warn` gives it a severity
+ * filter (`level:warning`) the info-level ingest line doesn't have. Carries
+ * what an operator triaging a burst needs: who sent it (`senderAddress` —
+ * threading.md §5's "burst against one conversation or sender") and where
+ * the message landed. Emitted only on the `stored` path — the same
+ * narrowing migration 019's doc comment records for the persisted count.
+ */
+function logForgedTokenEvent(
+  base: IngestOutcomeBase,
+  forgedTokenCount: number,
+  senderAddress: string,
+  written: { conversationId: string; threadId: string; appendFallback?: AppendFallbackReason },
+): void {
+  console.warn(
+    JSON.stringify({
+      event: 'forged_token_detected',
+      ...base,
+      forgedTokenCount,
+      senderAddress,
+      conversationId: written.conversationId,
+      threadId: written.threadId,
+    }),
+  )
 }

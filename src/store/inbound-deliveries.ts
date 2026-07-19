@@ -193,6 +193,16 @@ export interface StoredInboundDelivery {
   lastError: string | null
   /** The thread this delivery produced, once `stored` — `null` for every other status. */
   threadId: string | null
+  /**
+   * How many reply-token candidates on this message matched our Message-ID
+   * pattern but FAILED signature verification (`decideThreading`'s
+   * `forgedTokenCount`, threading.md §3 rule 3) — recorded at the `stored`
+   * transition ONLY (migration 019's doc comment for why the other statuses
+   * never write it), `0` otherwise. The queryable half of threading.md §5's
+   * forged-token security signal (HT-44); aggregated by
+   * `src/composition/health.ts`.
+   */
+  forgedTokenCount: number
   /** The lease deadline set by {@link InboundDeliveryStore.claim} (migration 014, HT-45) — see the module doc's "`received` rows are ALSO reclaimed" section. `null` for a row that has never been claimed with a lease (a pre-migration row, or a terminal row past its last claim). */
   claimedUntil: Date | null
   createdAt: Date
@@ -296,7 +306,7 @@ export class LeaseLostError extends Error {
 }
 
 const DELIVERY_COLUMNS =
-  'id, mailbox_id, provider_message_id, status, attempts, last_error, thread_id, claimed_until, created_at, updated_at'
+  'id, mailbox_id, provider_message_id, status, attempts, last_error, thread_id, forged_token_count, claimed_until, created_at, updated_at'
 
 /** Raw `inbound_deliveries` row shape, before mapping to {@link StoredInboundDelivery}. */
 interface InboundDeliveryRow {
@@ -307,6 +317,7 @@ interface InboundDeliveryRow {
   attempts: number
   last_error: string | null
   thread_id: string | null
+  forged_token_count: number
   claimed_until: Date | string | null
   created_at: Date | string
   updated_at: Date | string
@@ -314,26 +325,29 @@ interface InboundDeliveryRow {
 
 /**
  * Transaction-scoped: mark `id` `stored`, recording the resulting
- * `threadId`. Deliberately NOT a method on {@link InboundDeliveryStore} — see
- * the module doc's "The joint store-write + ledger transaction" section.
- * `claimedAttempts` fences the write exactly as `InboundDeliveryStore`'s other
- * mark* methods do (module doc's "The fence" section): throws {@link
- * LeaseLostError} if the row's lease was reclaimed out from under this caller
- * first (the whole transaction — including the conversation/thread just
- * written — rolls back with it, per `Db.transaction`'s contract), or a plain
- * `Error` if no row exists with `id` at all.
+ * `threadId` and the threading decision's `forgedTokenCount` (migration
+ * 019 — see {@link StoredInboundDelivery.forgedTokenCount}). Deliberately
+ * NOT a method on {@link InboundDeliveryStore} — see the module doc's "The
+ * joint store-write + ledger transaction" section. `claimedAttempts` fences
+ * the write exactly as `InboundDeliveryStore`'s other mark* methods do
+ * (module doc's "The fence" section): throws {@link LeaseLostError} if the
+ * row's lease was reclaimed out from under this caller first (the whole
+ * transaction — including the conversation/thread just written — rolls back
+ * with it, per `Db.transaction`'s contract), or a plain `Error` if no row
+ * exists with `id` at all.
  */
 export async function markStoredInTx(
   tx: Queryable,
   id: string,
   threadId: string,
   claimedAttempts: number,
+  forgedTokenCount: number,
 ): Promise<StoredInboundDelivery> {
   const rows = await tx.query<InboundDeliveryRow>(
-    `UPDATE inbound_deliveries SET status = 'stored', thread_id = $2, updated_at = now()
+    `UPDATE inbound_deliveries SET status = 'stored', thread_id = $2, forged_token_count = $4, updated_at = now()
      WHERE id = $1 AND status = 'received' AND attempts = $3
      RETURNING ${DELIVERY_COLUMNS}`,
-    [id, threadId, claimedAttempts],
+    [id, threadId, claimedAttempts, forgedTokenCount],
   )
   return oneOrFenced(tx, rows, 'markStoredInTx', id)
 }
@@ -546,6 +560,7 @@ function toStoredInboundDelivery(row: InboundDeliveryRow): StoredInboundDelivery
     attempts: row.attempts,
     lastError: row.last_error,
     threadId: row.thread_id,
+    forgedTokenCount: row.forged_token_count,
     claimedUntil: toNullableDate(row.claimed_until),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),

@@ -915,6 +915,40 @@ ALTER TABLE conversations DROP COLUMN assignee;
 `
 
 /**
+ * Migration 019 — `inbound_deliveries.forged_token_count` (HT-44,
+ * specs/mail/inbound-ingestion.md §6).
+ *
+ * Persists `decideThreading`'s `forgedTokenCount` — how many reply-token
+ * candidates on this message matched our Message-ID pattern but FAILED
+ * signature verification (threading.md §3 rule 3) — onto the delivery's
+ * ledger row at the `stored` transition. Until this column, the count
+ * existed only as a field on one structured log line, which Vercel's log
+ * viewer can display but nothing can aggregate or alert on; a queryable
+ * column is what lets the internal health endpoint
+ * (`src/composition/health.ts`) compute "forged-token deliveries in the
+ * last 24h" and trip an alert on a burst — threading.md §5's security
+ * signal, made consumable.
+ *
+ * Written ONLY by `markStoredInTx` (the `stored` transition): `suppressed`
+ * rows never reach the threading decision (the loop guard is step 3, the
+ * decision step 4), and the `failed`/`dead-letter` paths abandon the
+ * attempt before any outcome write carries the decision — a retried
+ * message's count lands when its retry finally stores. Rows predating this
+ * migration read the DEFAULT `0` regardless of what their messages
+ * actually carried — the signal genuinely begins at this migration, and a
+ * backfill is impossible (the raw headers were never retained on the
+ * ledger).
+ *
+ * No index: the health endpoint's aggregate scans a 24h `updated_at`
+ * window over a table whose dogfood volume is tens of rows a day, and
+ * migration 012's own convention ("no index beyond the UNIQUE claim key"
+ * until a real read pattern demands one) still holds at that scale.
+ */
+const MIGRATION_019_INBOUND_DELIVERY_FORGED_TOKENS = `
+ALTER TABLE inbound_deliveries ADD COLUMN forged_token_count integer NOT NULL DEFAULT 0;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1005,6 +1039,11 @@ const MIGRATIONS: Migration[] = [
     id: 18,
     name: 'agents_and_auth',
     sql: MIGRATION_018_AGENTS_AND_AUTH,
+  },
+  {
+    id: 19,
+    name: 'inbound_delivery_forged_tokens',
+    sql: MIGRATION_019_INBOUND_DELIVERY_FORGED_TOKENS,
   },
 ]
 

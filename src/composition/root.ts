@@ -83,6 +83,7 @@ import {
 } from '../store/index.js'
 import { createAppHandler } from './app.js'
 import { type AppConfig, loadConfig } from './config.js'
+import { runHealthCheck } from './health.js'
 
 /**
  * The OAuth scopes the connect flow requests (gmail-connect.md §3, least
@@ -295,8 +296,23 @@ export async function buildApp(
   return createAppHandler({
     inboxApi,
     cronSecret: config.cronSecret,
-    drainQueue: () => queue.drainOnce({ handlers: drainHandlers }),
+    drainQueue: async () => {
+      const report = await queue.drainOnce({ handlers: drainHandlers })
+      // The drain's report otherwise exists ONLY in the cron response body,
+      // which Vercel Cron discards — this line is what makes per-tick queue
+      // outcomes (spec §6's retry outcome, and especially staleSkipped —
+      // the drains-are-overlapping signal) visible in the platform logs at
+      // all (HT-44). Quiet ticks (nothing claimed, nothing stale-skipped)
+      // are deliberately not logged: the invocation itself already appears
+      // in the request log, and an every-minute all-zeros line would bury
+      // the signal.
+      if (report.claimed > 0 || report.staleSkipped > 0) {
+        console.info(JSON.stringify({ event: 'queue_drain', ...report }))
+      }
+      return report
+    },
     runWatchMaintenance: () => runGmailWatchMaintenance(watchMaintenanceDeps),
+    runHealthCheck: () => runHealthCheck({ db, queue }),
   })
 }
 

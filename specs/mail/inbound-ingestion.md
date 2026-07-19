@@ -286,15 +286,35 @@ conversation, exactly as it would have been before this guard existed.
 
 ## 6. Observability and the forged-token signal
 
-Each ingest emits a structured record: `mailboxId`, `providerMessageId`, the transport
-cursor position, the threading decision (`new`/`append` + target ids), `forgedTokenCount`,
-suppression reason (if any), parse size, attachment count, and final ledger outcome.
+Each ingest emits a structured `inbound_ingest` record: `mailboxId`, `providerMessageId`,
+the threading decision (`new`/`append` + target ids), the append-fallback reason
+(`deleted`/`not-found`) when an `append` decision's target was gone and a fresh
+conversation was created instead (§3 step 5 — without it the record would claim `append`
+while naming a conversation the write itself created), `forgedTokenCount`, suppression
+reason (if any), parse size, attachment count, and the final ledger outcome (with
+`stage`/`attempts`/`error` on the failure paths).
 
-`decideThreading` already emits `forgedTokenCount` (threading.md §3 rule 3, §5) but nothing
-consumes it today. **This pipeline is where it is consumed:** a single forged token is
-unremarkable; a burst against one conversation or sender is a security signal that must be
-surfaced/alertable (the precise threshold remains threading.md §5's open question — this
-spec provides the consumption point, not the threshold).
+**The transport cursor position deliberately lives on the transport's own events, not
+here** (HT-44): this pipeline is provider-agnostic (§2) and a history cursor is transport
+state, so per-batch cursor positions (`previousCursor`/`newHistoryId`) are emitted by the
+Gmail transport's `gmail_reconcile` records ([gmail-push.md](./gmail-push.md)). The two
+streams correlate on `(mailboxId, providerMessageId)`.
+
+`decideThreading` emits `forgedTokenCount` (threading.md §3 rule 3, §5); **this pipeline
+is where it is consumed** (HT-44), three ways:
+
+1. Persisted onto the delivery's ledger row (`inbound_deliveries.forged_token_count`,
+   migration 019) at the `stored` transition, making the signal queryable/aggregatable —
+   not just a log field.
+2. A WARN-level `forged_token_detected` event per stored delivery carrying ≥1 forged
+   token, with the sender address and target conversation a triage needs.
+3. The internal health endpoint (`GET /api/v1/internal/health`,
+   `src/composition/health.ts`; runbook Part G) aggregates the last 24h and trips a
+   `forged-token-burst` alert at a default threshold — a single forged token is
+   unremarkable; a burst against one conversation or sender is the security signal
+   (threading.md §5). The default lives in code as a constant, deliberately not
+   fixture-derived — threading.md §5's "what threshold is right" question stays open;
+   the alerting mechanism no longer is.
 
 ## 7. Scope and deferrals
 

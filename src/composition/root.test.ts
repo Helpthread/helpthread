@@ -3,8 +3,9 @@
  * an in-memory PGlite `Db` + a fake `BlobStore` (no real Postgres, Supabase,
  * or network) and drive real `Request`s through the unified handler. This is
  * the end-to-end proof that every adapter is wired correctly — the inbox API,
- * the two CRON_SECRET-guarded cron endpoints, and the Gmail connect/webhook
- * surfaces all respond as expected through one `buildApp` call.
+ * the CRON_SECRET-guarded internal endpoints (two cron jobs + the HT-44
+ * health check), and the Gmail connect/webhook surfaces all respond as
+ * expected through one `buildApp` call.
  *
  * buildApp is network-free at construction: `createPostgresDb` is skipped (a
  * PGlite `Db` is injected), and `createGooglePushKeySource` only fetches
@@ -126,6 +127,25 @@ describe('buildApp — end-to-end wiring over PGlite', () => {
     const body = (await res.json()) as { ok: boolean; report: { total: number } }
     expect(body.ok).toBe(true)
     expect(body.report.total).toBe(0)
+  })
+
+  it('drives the health endpoint: authenticated GET over the empty database → 200 ok report (HT-44)', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/health`, {
+        headers: { Authorization: `Bearer ${CRON_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      ok: boolean
+      alerts: string[]
+      queue: { ready: number }
+      mailboxes: unknown[]
+    }
+    expect(body.ok).toBe(true)
+    expect(body.alerts).toEqual([])
+    expect(body.queue.ready).toBe(0)
+    expect(body.mailboxes).toEqual([])
   })
 
   it('guards the cron endpoints with CRON_SECRET, not the service token → 401 on the wrong secret', async () => {
