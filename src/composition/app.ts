@@ -122,13 +122,17 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
     // falls through to the inbox API's standard 404 envelope like every
     // other unknown path.
     if (pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) {
-      if (deps.uiBaseUrl !== undefined) {
-        return new Response(null, {
-          status: 302,
-          headers: { Location: deps.uiBaseUrl, 'Cache-Control': 'no-store' },
-        })
-      }
-      return json(200, { service: 'helpthread-engine', docs: '/api/v1' })
+      const res =
+        deps.uiBaseUrl !== undefined
+          ? new Response(null, {
+              status: 302,
+              headers: { Location: deps.uiBaseUrl, 'Cache-Control': 'no-store' },
+            })
+          : json(200, { service: 'helpthread-engine', docs: '/api/v1' })
+      // §9.3.2's "MUST NOT send content" is honored HERE, not left to the
+      // transport: this handler's contract is a finished `Response`, whatever
+      // serves it.
+      return request.method === 'HEAD' ? new Response(null, res) : res
     }
 
     return deps.inboxApi(request)

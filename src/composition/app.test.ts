@@ -230,6 +230,15 @@ describe('createAppHandler — bare root path (friendly response for GET /)', ()
     expect(res.headers.get('Location')).toBe('https://inbox.example.test')
   })
 
+  it("answers HEAD / with GET's status and headers but NO body (§9.3.2's MUST NOT, at the handler layer)", async () => {
+    const { handler } = makeHandler()
+    const res = await handler(req('/', { method: 'HEAD', secret: null }))
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Content-Type')).toBe('application/json')
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(await res.text()).toBe('')
+  })
+
   it('delegates a non-GET / to the inbox API (its standard 404 envelope), not the friendly response', async () => {
     const { handler, inboxApi } = makeHandler({ uiBaseUrl: 'https://inbox.example.test' })
     const request = req('/', { method: 'POST', secret: null })
