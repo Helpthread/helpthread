@@ -1,12 +1,12 @@
 /**
  * The composition root's unified request handler (HT-43): one
- * `(request: Request) => Promise<Response>` that fronts BOTH the Agent Inbox
- * API (`createInboxApi`, `src/api/index.ts`) and the internal endpoints —
+ * `(request: Request) => Promise<Response>` that fronts the Agent Inbox
+ * API (`createInboxApi`, `src/api/index.ts`), the internal endpoints —
  * the two cron jobs Vercel Cron invokes (specs/deploy/gmail-inbound-
  * runbook.md Part C) plus the pull-based health check an HTTP monitor polls
- * (HT-44, runbook Part G). A single Vercel function (`api/[...path].ts`)
- * delegates every request here; this module decides internal-vs-inbox by
- * pathname.
+ * (HT-44, runbook Part G) — and the bare root's friendly response (its own
+ * section below). A single Vercel function (`api/index.ts`) delegates every
+ * request here; this module decides the route by pathname.
  *
  * ## Why the cron endpoints live here, not inside `createInboxApi`
  *
@@ -29,6 +29,18 @@
  * the drain (lease-based `FOR UPDATE SKIP LOCKED`, `createPostgresQueue`) and
  * the maintenance sweep (re-reads each mailbox's stored cursor; ingest dedups)
  * both already are. A failed run simply retries on the next tick.
+ *
+ * ## The bare root path (`/`)
+ *
+ * `vercel.json` also rewrites `/` — exactly `/`, no other non-API path — to
+ * this function: without it, an operator who types the engine host into a
+ * browser gets Vercel's raw `NOT_FOUND` page, which reads as "the deployment
+ * is dead" while the engine is in fact healthy. `GET /` (and `HEAD`, which
+ * RFC 9110 §9.3.2 defines as identical to GET minus the response body)
+ * answers with a 302 to the operator UI when
+ * {@link AppHandlerDeps.uiBaseUrl} is configured, else a tiny
+ * service-identifying JSON. Deliberately unauthenticated: the response
+ * reveals only the service's name / the UI's public origin.
  */
 
 import { authenticateRequest } from '../api/auth.js'
@@ -62,13 +74,22 @@ export interface AppHandlerDeps {
   runWatchMaintenance: () => Promise<unknown>
   /** Assemble the health report (`./health.ts`) — the {@link HEALTH_PATH} endpoint's work. */
   runHealthCheck: () => Promise<HealthReport>
+  /**
+   * The operator UI's bare origin (`AppConfig.uiBaseUrl`,
+   * `HELPTHREAD_UI_BASE_URL`) — when configured, `GET /` 302-redirects
+   * there; absent, `GET /` answers a tiny service-identifying JSON instead.
+   * Optional exactly like the config field: spread in only when configured,
+   * never present-with-undefined (root.ts's optional-field convention).
+   */
+  uiBaseUrl?: string
 }
 
 /**
  * Build the unified handler. Routes the two internal cron paths to their
- * `CRON_SECRET`-guarded handlers and delegates everything else — the whole
- * Agent Inbox API surface, including the Gmail webhook, connect, and callback
- * — to `deps.inboxApi` unchanged.
+ * `CRON_SECRET`-guarded handlers, answers `GET`/`HEAD` on the bare root with
+ * the friendly response (module doc above), and delegates everything else —
+ * the whole Agent Inbox API surface, including the Gmail webhook, connect,
+ * and callback — to `deps.inboxApi` unchanged.
  */
 export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Promise<Response> {
   return async (request: Request): Promise<Response> => {
@@ -93,6 +114,21 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
       return handleCronEndpoint(request, deps.cronSecret, 'health', deps.runHealthCheck, (report) =>
         json(report.ok ? 200 : 503, report),
       )
+    }
+
+    // The bare root — a human checking "is this thing up?" in a browser
+    // (module doc's "The bare root path" section). GET plus HEAD (RFC 9110
+    // §9.3.2: identical to GET minus the response body); any other method
+    // falls through to the inbox API's standard 404 envelope like every
+    // other unknown path.
+    if (pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) {
+      if (deps.uiBaseUrl !== undefined) {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: deps.uiBaseUrl, 'Cache-Control': 'no-store' },
+        })
+      }
+      return json(200, { service: 'helpthread-engine', docs: '/api/v1' })
     }
 
     return deps.inboxApi(request)

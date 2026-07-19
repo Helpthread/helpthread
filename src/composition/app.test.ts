@@ -20,14 +20,15 @@ const HEALTHY_REPORT: HealthReport = {
 }
 
 /** Build a handler over spy deps; the inbox API spy returns a recognizable 299 so delegation is observable. */
-function makeHandler(cronSecret: string = CRON_SECRET) {
+function makeHandler(opts: { cronSecret?: string; uiBaseUrl?: string } = {}) {
   const inboxApi = vi.fn(async () => new Response('inbox', { status: 299 }))
   const drainQueue = vi.fn(async () => ({ claimed: 3, acked: 3 }))
   const runWatchMaintenance = vi.fn(async () => ({ total: 1, renewed: 1 }))
   const runHealthCheck = vi.fn(async (): Promise<HealthReport> => HEALTHY_REPORT)
   const handler = createAppHandler({
     inboxApi,
-    cronSecret,
+    cronSecret: opts.cronSecret ?? CRON_SECRET,
+    ...(opts.uiBaseUrl !== undefined ? { uiBaseUrl: opts.uiBaseUrl } : {}),
     drainQueue,
     runWatchMaintenance,
     runHealthCheck,
@@ -195,5 +196,48 @@ describe('createAppHandler — health endpoint (HT-44)', () => {
     const res = await handler(req(HEALTH_PATH, { method: 'POST' }))
     expect(res.status).toBe(405)
     expect(runHealthCheck).not.toHaveBeenCalled()
+  })
+})
+
+describe('createAppHandler — bare root path (friendly response for GET /)', () => {
+  it('302-redirects GET / to the UI origin when uiBaseUrl is configured, without touching the inbox API', async () => {
+    const { handler, inboxApi } = makeHandler({ uiBaseUrl: 'https://inbox.example.test' })
+
+    const res = await handler(req('/', { secret: null }))
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('Location')).toBe('https://inbox.example.test')
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(inboxApi).not.toHaveBeenCalled()
+  })
+
+  it('answers GET / with the tiny service JSON when uiBaseUrl is not configured (no auth required)', async () => {
+    const { handler, inboxApi } = makeHandler()
+
+    const res = await handler(req('/', { secret: null }))
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Content-Type')).toBe('application/json')
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(await res.json()).toEqual({ service: 'helpthread-engine', docs: '/api/v1' })
+    expect(inboxApi).not.toHaveBeenCalled()
+  })
+
+  it('answers HEAD / like GET / (RFC 9110 §9.3.2)', async () => {
+    const { handler } = makeHandler({ uiBaseUrl: 'https://inbox.example.test' })
+    const res = await handler(req('/', { method: 'HEAD', secret: null }))
+    expect(res.status).toBe(302)
+    expect(res.headers.get('Location')).toBe('https://inbox.example.test')
+  })
+
+  it('delegates a non-GET / to the inbox API (its standard 404 envelope), not the friendly response', async () => {
+    const { handler, inboxApi } = makeHandler({ uiBaseUrl: 'https://inbox.example.test' })
+    const request = req('/', { method: 'POST', secret: null })
+
+    const res = await handler(request)
+
+    expect(res.status).toBe(299)
+    expect(inboxApi).toHaveBeenCalledOnce()
+    expect(inboxApi).toHaveBeenCalledWith(request)
   })
 })

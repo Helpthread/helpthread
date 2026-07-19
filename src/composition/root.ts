@@ -296,6 +296,9 @@ export async function buildApp(
   return createAppHandler({
     inboxApi,
     cronSecret: config.cronSecret,
+    // `GET /`'s redirect target (app.ts's bare-root response) — spread in
+    // only when configured, like agents.uiBaseUrl above.
+    ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),
     drainQueue: async () => {
       const report = await queue.drainOnce({ handlers: drainHandlers })
       // The drain's report otherwise exists ONLY in the cron response body,
