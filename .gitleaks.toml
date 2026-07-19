@@ -9,4 +9,11 @@ useDefault = true
 description = "Test files use fake fixture secrets, not real credentials."
 paths = [
   '''.*\.test\.ts$''',
+  # Spec and operator docs are prose: worked token-FORMAT examples
+  # (ht_lic_<id>_<secret>, htw./htsu. challenges) and quoted UI copy
+  # ("license key, ...") false-positive the generic rules — the first CI
+  # hit was a quoted sentence from admin-ia.md. Scanning stays fully
+  # active for all code, config, and workflows.
+  '''^specs/.*\.md$''',
+  '''^docs/.*\.md$''',
 ]
