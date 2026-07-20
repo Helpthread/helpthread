@@ -70,7 +70,9 @@ Consequence: **push only makes the same job run sooner.** Making scheduled fetch
 
 Worth recording: HT-49 exists because Gmail's `users.messages.send` **API** rewrites the `Message-ID` we set, which is why the reply token had to move into `References` (`src/mail/send.ts`). SMTP submission did not rewrite it. One observation is not proof of a general rule, and the `References` mechanism works on both transports — so this is a point in SMTP's favour, not a reason to change the threading model.
 
-**Outbound needs no DNS.** Because replies go through the operator's own mail server, they are signed by that server's DKIM, from its IPs, on a domain whose SPF already authorises it. Every provider-webhook alternative considered (Postmark, Resend, SES, Cloudflare) would reintroduce SPF/DKIM/DMARC setup. This transport does not.
+**Outbound needs no NEW DNS.** Replies go through the operator's own mail server, so they are signed by whatever DKIM that server already uses, from its IPs, under its existing SPF record. Every provider-webhook alternative considered (Postmark, Resend, SES, Cloudflare) requires the operator to add records for a *new* sending identity; this transport requires none.
+
+Stated precisely, because the earlier wording overclaimed: this does **not** guarantee deliverability. It inherits whatever the operator's domain already has. A domain with no SPF, a broken DKIM selector, or a `p=reject` DMARC record misaligned with its own sender will deliver just as badly through Helpthread as it does through the operator's normal mail client — the point is that we add no new DNS burden, not that we fix an existing one. Where deliverability is already broken, that is the operator's pre-existing mail configuration and should be diagnosed as such rather than as a Helpthread fault.
 
 ## 3. Provider support
 
@@ -105,7 +107,25 @@ Behavioural contract:
 - **Method availability is provider-dependent.** For an M365 business domain the app-password option is disabled *with an explanation*, never silently absent.
 - **`Check connection`** performs a real IMAP login + `SELECT INBOX` and a real SMTP handshake + `AUTH`, reporting each leg independently. It must never report success from a config-shape check alone.
 - **`Send test email`** sends an actual message through the operator's SMTP and confirms it is observed back through the fetch path. This round trip is the single most valuable element on the screen, and it is what today's setup path has no equivalent of — which is why silent misconfiguration currently survives to production.
-- **Errors surface verbatim** — the provider's actual IMAP/SMTP rejection text, plus a mapped hint for the common cases (2SV not enabled, app passwords blocked by admin policy, wrong port, mailbox not found). Never a bare "connection failed."
+
+  It must not be able to manufacture a customer conversation. Requirements:
+  - **Addressed to the connected mailbox itself**, never to an operator-typed
+    recipient — a setup screen must not become a way to send mail to arbitrary
+    third parties.
+  - **Carries a unique correlation marker** (a nonce in a custom header and in
+    the minted `Message-ID`) that the screen polls for.
+  - **The ingestion pipeline recognises and drops it** on that marker, at the
+    same point it suppresses our own outbound echo. A test message must never
+    create a conversation, and must not be re-processed on later ticks.
+  - **Rate-limited**, so the button cannot be used as a send amplifier.
+- **Errors are mapped, never echoed raw.** The user sees a sanitized, escaped
+  message plus a diagnostic code for the common cases (2SV not enabled, app
+  passwords blocked by admin policy, wrong port, mailbox not found, auth
+  rejected). The provider's raw IMAP/SMTP text goes to server-side logs only,
+  redacted — it routinely carries hostnames, account addresses, and
+  authentication detail that must not reach a browser. Never a bare
+  "connection failed" either: an unmapped failure shows its diagnostic code so
+  a support conversation can start from something specific.
 
 ## 5. Transport behaviour
 
@@ -114,8 +134,9 @@ Behavioural contract:
 A cron entry alongside the existing four in `vercel.json`. Each invocation: connect, `SELECT INBOX`, fetch messages above the stored UID cursor, hand raw bytes to the pipeline, persist the new cursor, disconnect.
 
 - **No IDLE, no held connections, no resident process.** The connection opens and closes within the invocation. This is the charter constraint, and it must not be optimised away for latency later.
-- **Track `UIDVALIDITY` alongside the UID cursor.** If the server changes `UIDVALIDITY`, every stored UID is meaningless and the cursor must be rebuilt. Skipping this silently drops or re-ingests mail.
-- **Bound the batch.** `maxDuration` is 50 s (`vercel.json`). Cap messages per invocation and continue on the next tick rather than risk a timeout mid-fetch.
+- **Track `UIDVALIDITY` alongside the UID cursor.** If the server changes `UIDVALIDITY`, every stored UID is meaningless and the cursor must be rebuilt. Skipping this silently drops or re-ingests mail. Rebuilding safely depends on the unresolved `providerMessageId` question at the top of this document — a UID-keyed ledger cannot survive the reset it is supposed to recover from.
+- **The cursor advances on COMMIT, not on fetch.** A UID may only move the stored cursor once that message has been durably committed by the ingestion pipeline. On a partial failure the cursor stays at the last committed UID and the batch is retried — re-fetching an already-committed message is harmless (ingest is idempotent), whereas advancing past an uncommitted one loses mail silently, which the mail-semantics invariant does not permit.
+- **Bound the batch, and bound the clock.** `maxDuration` is 50 s (`vercel.json`). Cap messages per invocation and continue on the next tick rather than risk a timeout mid-fetch. Separately, every network operation — IMAP connect, login, `SELECT`, each `FETCH`, and every SMTP step — carries its own timeout derived from the remaining invocation budget, and the worker stops *starting* new work once too little budget remains to finish it. Connections are closed on success, timeout, and failure alike. Without this a single hung `FETCH` consumes the whole invocation and the tick accomplishes nothing, every minute, indefinitely.
 - **Fetch raw.** `FETCH BODY.PEEK[]` — full RFC822, `.PEEK` so `\Seen` is not set. This satisfies `src/providers/inbound-email.ts` natively: raw bytes in, parsed exactly once by `parseInboundEmail`. No IMAP library's convenience parser may touch the message.
 
 ### Outbound — the operator's own SMTP
@@ -125,6 +146,26 @@ Stated explicitly in the operator docs, because it is the quiet advantage: repli
 ### Credentials
 
 App passwords are long-lived secrets granting full mailbox access. They must be encrypted at rest via the existing `HELPTHREAD_TOKEN_ENC_KEY` path (`src/store/token-crypto.ts`, AES-256-GCM) already used for OAuth tokens, never logged, never returned by any API read, and write-only in the UI — show a "configured" state, never the value.
+
+**Encryption is not sufficient on its own.** The credential table needs
+deny-by-default server-only authorization, not merely ciphertext at rest — the
+same gap already open on `mailbox_oauth_tokens` (see §8: RLS is disabled on
+every table today). Whatever answer that gets must cover this table from the
+day it exists, rather than inheriting the same debt.
+
+**Lifecycle — app passwords die quietly.** Unlike an OAuth grant, there is no
+revocation signal and no refresh failure to classify. They stop working when
+the account owner changes their password, when a Workspace admin disables app
+passwords or enforces security-key-only 2SV, or when the account enrols in
+Advanced Protection. The connection simply starts failing authentication. So:
+- Auth failure on a scheduled fetch marks the mailbox `needs_reconnect`, the
+  same state a dead OAuth grant produces, so one operator-facing concept covers
+  both.
+- The reconnect path is re-entering a credential, not a consent redirect — the
+  screen must say which, per provider, rather than offering an OAuth button to
+  a Fastmail user.
+- This asymmetry is worth stating in the operator docs: OAuth is revocable and
+  observable; an app password is neither, and its failure mode is silence.
 
 Note the asymmetry worth telling operators about: an app password cannot be scoped and does not expire; an OAuth token is scoped to `gmail.readonly` + `gmail.send` and is revocable from the account.
 
