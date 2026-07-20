@@ -29,7 +29,7 @@ describe('loadConfig — happy path', () => {
     const config = loadConfig(validEnv())
 
     expect(config.databaseUrl).toBe('postgres://user:pass@db.pooler.supabase.com:6543/postgres')
-    expect(config.gmailPubsubTopic).toBe('projects/resonantiq-helpthread/topics/gmail-push')
+    expect(config.gmailPush?.topic).toBe('projects/resonantiq-helpthread/topics/gmail-push')
     expect(config.supportAddress).toBe('support@resonantiq.app')
     expect(config.mailDomain).toBe('mail.resonantiq.app')
   })
