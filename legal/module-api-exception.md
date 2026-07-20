@@ -140,7 +140,8 @@ this note.
    instead. Note that §7(c) independently permits terms "[p]rohibiting
    misrepresentation of the origin of that material, or requiring that modified
    versions of such material be marked in reasonable ways as different from the
-   original version," so an in-license route plausibly exists on that basis too. Which
+   original version," so an in-license route plausibly exists on that basis too.
+
    A second review pass (2026-07-20, multi-model) caught that the first attempt at this
    fix still carried a sentence — "it is not available in name to a modified version
    that does not carry it in substance" — which reads as a prohibition on *labelling*

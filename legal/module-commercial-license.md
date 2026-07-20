@@ -17,7 +17,7 @@
 This Helpthread Commercial Module License (the **"License"**) is a legal agreement
 between **Resonant IQ, Inc.**, a Delaware corporation (**"Resonant IQ"**, **"we"**, or
 **"us"**, the licensor), and the individual or entity that purchases a subscription to a
-Helpthread commercial module (**"you,"** the **"Licensee"**).
+Helpthread commercial Module (**"you,"** the **"Licensee"**).
 
 A **"Module"** is a first-party Helpthread extension that Resonant IQ distributes for a
 fee through the official Helpthread marketplace, delivered to you as **Source** — a
@@ -165,8 +165,10 @@ update channel**, never software already in your hands:
 - A **termination** — whether by full refund or by revocation for fraud (section 8) —
   ends **all** future marketplace download access, including to versions you were
   previously entitled to, and any instance Resonant IQ hosts on your behalf is
-  decommissioned in accordance with the published managed-hosting policy (a
-  configuration-export grace window applies; section 8). Termination never reaches any
+  decommissioned in accordance with the published managed-hosting policy. The
+  configuration-export grace window applies to termination by **full refund**;
+  revocation for confirmed fraud decommissions immediately, with no grace window
+  (section 8). Termination never reaches any
   copy of the Module, original or modified, that you already hold and run on your own
   infrastructure: those copies continue under the Surviving Held-Copies License above,
   because there is nothing in them to switch off.

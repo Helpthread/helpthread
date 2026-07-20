@@ -1113,6 +1113,11 @@ stays informational.
 > domain), §10.4 (KB-vs-pipeline charter conflict — product/architecture, not
 > licensing), §10.5 and §10.7 (product confirmations).
 
+**Reading this list.** Items whose title carries a dated disposition — SIGNED OFF,
+CONFIRMED, DECIDED, DIRECTION APPROVED — are **closed**; their original text is retained
+below the disposition for the reasoning only, and any "confirm"/"needs sign-off" wording
+inside them is historical. Only §10.1, §10.2, §10.4, §10.5, and §10.7 are still open.
+
 1. **Price points per module.** Not decided; blocks store page content, not the
    architecture above (Stripe Price objects are created per module regardless of the
    number).
@@ -1121,9 +1126,9 @@ stays informational.
    and DNS/cert setup — needed before §3's implementation starts, not before this spec
    is accepted.
 3. **Lapsed keys keep downloading already-entitled versions — SIGNED OFF 2026-07-19 (see the Resolved block above).** Original reasoning retained: recommended and
-   justified in §2; needs explicit sign-off since it is the one place this spec
-   resolves an open "pick and justify" call rather than merely recording a TJ decision
-   already made.
+   justified in §2; it was the one place this spec resolved an open "pick and justify"
+   call rather than merely recording a TJ decision already made, which is why it was
+   listed for explicit sign-off — since given.
 4. **Launch module lineup — elevated: this is a charter-affecting conflict, not an
    ordinary open question, and this spec deliberately does not resolve it.**
    CHARTER.md's Phase 3 text names "the knowledge base and AI-powered modules" as the
