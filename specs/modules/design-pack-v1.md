@@ -86,15 +86,35 @@ not a blocker to design around.
 
 Sourced from the design project (§5), in three layers:
 
-1. **Tokens** — `tokens/{colors,shape,typography}.css` plus `theme/helpthread.css` and
-   `fonts/fonts.css`, published as CSS and as a typed export. This is the layer that
-   makes §4 work.
-2. **Core components** — the 16 primitives in `components/core/` (Button, Avatar, DropdownMenu,
+1. **Tokens** — `tokens/{colors,shape,typography}.css` plus `theme/helpthread.css`,
+   published as CSS and as a typed export. This is the layer that makes §4 work.
+   `fonts/fonts.css` is **excluded pending HT-99** — see §3.1.
+2. **Core components** — `components/core/`. **12 at v1**: Button, Avatar, DropdownMenu,
    StatusPill, TagChip, Toast, TextInput, MenuItem, IconButton, EmptyState, Skeleton,
-   Kbd, plus HT-93's SplitButton, CommandMenu, SnoozePicker, CredentialRow/PasskeyList).
+   Kbd. **16 after HT-94 part B** promotes SplitButton, CommandMenu, SnoozePicker, and
+   CredentialRow/PasskeyList out of `templates/new-primitives/`.
 3. **Inbox components** — `components/inbox/` (ConversationRow, MessageBand, ToolbarBand,
    FolderItem). Included because a module rendering conversation-shaped data should
    render it the same way the desk does.
+
+**Totals, stated once to stop the drift:** v1 ships **16** (12 core + 4 inbox); after
+HT-94 part B it is **20** (16 core + 4 inbox). Every count elsewhere in this spec refers
+to the post-HT-94 figure unless it says "at v1".
+
+### 3.1 Fonts are excluded from v1 — HT-99
+
+`fonts/fonts.css` is a single `@import` of Source Serif 4 and Source Code Pro from
+`fonts.googleapis.com`. The fonts are OFL and no binaries are vendored, so §2.1's
+*licensing* question is settled — but shipping that line in the pack would make every
+module page issue a runtime request to Google, carrying the visitor's IP with it.
+
+That is a poor fit for a product that ships **open-tracking privacy default OFF** as a
+free-core feature, and it raises CSP and offline-availability problems for self-hosters
+besides. The same `@import` is already live in the desk (`web/src/theme/fonts/fonts.css`),
+so this is not a pack-only question — filed as **HT-99** against core. The pack takes
+whatever core decides (vendor the OFL files, or document the dependency and its fallback);
+until then it ships tokens without the font layer, falling back to the native stack the
+UI sans already uses.
 
 ## 4. Theming resolves against the installed desk
 
@@ -120,6 +140,15 @@ public like everything else. Building it before that pair of conditions is met i
 speculative, and substrate-v1's rule applies: each surface waits for a real module to
 need it.
 
+**Consequence: cross-origin white-label parity is explicitly OUT of §6's MUST for v1.**
+Deciding to ship no token transport means a cross-origin module *cannot* match a
+re-skinned desk — so requiring it would be requiring the impossible. The v1 requirement
+therefore binds as: match the desk's design, resolving tokens from the desk wherever the
+render context allows it (embedded), and from the pack's Helpthread defaults where it
+does not (cross-origin). When the token endpoint ships, this exemption is removed and the
+MUST applies everywhere. Named here rather than left implicit, because a conformance rule
+nobody can satisfy is worse than no rule.
+
 ## 5. Sourced from the design project, as a sibling of `ds/`
 
 CLAUDE.md: `ds/` files are **verbatim copies** of the Claude Design project, and
@@ -128,7 +157,7 @@ improvements go upstream. HT-94 exists because Biome silently broke that byte-eq
 The pack inherits that discipline, but **not by chaining off `ds/`**. Both are
 independent verbatim consumers of the same upstream:
 
-```
+```text
 Claude Design project ("Helpthread", 40b953cc)
    ├── web/src/components/ds/     (the desk)
    └── @helpthread/design-pack    (modules)
@@ -139,27 +168,31 @@ module — reintroducing one layer down the exact failure §1 exists to prevent.
 siblings, the desk and its modules cannot drift *from each other* without both drifting
 from a single source that byte-comparison catches.
 
-The upstream already carries everything the pack needs: `components/core/` (12),
-`components/inbox/` (4), `tokens/{colors,shape,typography}.css`, `theme/helpthread.css`,
-and `fonts/fonts.css`. The four new primitives are still staged at
-`templates/new-primitives/Primitives.jsx` and enter the pack when HT-94 part B promotes
-them to `components/core/`.
+The upstream already carries everything the pack needs at v1: `components/core/` (12),
+`components/inbox/` (4), `tokens/{colors,shape,typography}.css`, and
+`theme/helpthread.css`. (`fonts/fonts.css` is excluded — §3.1.) The four new primitives
+are still staged at `templates/new-primitives/Primitives.jsx` and enter the pack when
+HT-94 part B promotes them to `components/core/`, taking core to 16.
 
-### Sync is a process, not a pipe
+### Sync is never unattended past the PR boundary
 
-There is **no unattended sync**, and this spec does not assume one. DesignSync
-authenticates through the operator's claude.ai login and its write path requires an
-interactive plan approval, so it cannot hold a service credential or run in CI.
+DesignSync authenticates through the operator's claude.ai login and its write path
+requires an interactive plan approval, so it cannot hold a service credential or run
+unattended in CI. The *fetch* side can be scheduled; nothing past the PR can.
 
 What is real:
 
-- **The `/design-sync` skill** — an agent session that pulls changed components
+- **The `/design-sync` skill** — an **Assistant** session that pulls changed components
   incrementally, the same mechanism `ds/` already uses. Repeatable, human-initiated.
-- **Optionally, a scheduled agent** that runs that sync on a cadence and opens a PR
-  against the pack repo. Automation of the *cadence*, not a live connection.
+- **Optionally, a scheduled Assistant** that runs the fetch on a cadence and **opens a
+  PR** against the pack repo. It may prepare and open; it may never merge or release.
+  Automation of the *cadence*, not of the decision.
 
 Either way the merge is a reviewed PR, which is what keeps §6's conformance claim
 honest.
+
+(Vocabulary, per CLAUDE.md: **Agents** are human support staff, **Assistants** are AI
+actors. The automation here is an Assistant.)
 
 ### The drift gate needs a content hash, not a revision pin
 
@@ -170,16 +203,30 @@ differ."
 The obvious answer, pinning an upstream revision, **is not available**: the design
 project is not a git repo and DesignSync exposes no commit or version identifier
 (`list_files`/`get_file` return paths and content, nothing more). So the baseline is a
-**content-hash manifest** committed to the pack repo — per-file SHA-256 of every sourced
-file, recorded at generation time.
+**content-hash manifest** committed to the pack repo.
 
-CI then re-fetches, re-hashes, and compares against the manifest, which distinguishes the
-two cases the byte-compare alone conflates:
+It must cover **two path sets, not one** — hashing only the sourced files cannot tell
+expected generation from a hand edit, because the pack also contains derived output the
+manifest never saw:
 
-| Manifest vs. fetched | Manifest vs. published pack | Means |
+- **`sources`** — per-file SHA-256 of every file fetched from the design project, plus
+  its exact path set. Detects upstream movement.
+- **`generated`** — per-file SHA-256 of every artifact the build emits (typed token
+  exports, entry points, type declarations), plus its exact path set. Detects hand edits
+  *and* files that appear or vanish, which a hash-only check would miss.
+
+Both sets are exhaustive and closed: a path present in the package but absent from the
+manifest fails the gate, same as a mismatched hash.
+
+CI then re-fetches, rebuilds, re-hashes, and compares, which distinguishes the two cases
+the byte-compare alone conflates:
+
+| `sources` vs. re-fetched | `generated` vs. rebuilt | Means |
 | --- | --- | --- |
 | differs | matches | **upstream moved** — regenerate, review, release |
 | matches | differs | **pack was hand-edited** — reject, this is the fork §5 forbids |
+| differs | differs | upstream moved *and* someone edited — reject, resolve separately |
+| matches | matches | clean |
 
 HT-93's Biome override is what makes the hashes stable; without it, formatting-on-arrival
 would churn them on every sync.
@@ -192,7 +239,9 @@ distribution-credential-only rule, none ever will.
 
 So conformance is a **marketplace listing requirement**, checked at review:
 
-- a listed module **MUST** match the desk's design on every operator-visible surface.
+- a listed module **MUST** match the desk's design on every operator-visible surface,
+  **subject to §4's cross-origin exemption** — a module that cannot inherit the desk's
+  token scope conforms by matching the pack's defaults, until the token endpoint ships.
   The pack is the supported way to satisfy this and the only one that stays correct as
   the design moves; an independent implementation is permitted but carries the whole
   burden of proving parity, including after upstream changes.
