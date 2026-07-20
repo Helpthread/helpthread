@@ -4,4 +4,4 @@ export interface EmptyStateProps {
   /** italic celebration ("Inbox zero.") */
   celebrate?: boolean;
 }
-export declare function EmptyState(props: EmptyStateProps): JSX.Element;
+export declare function EmptyState(props: EmptyStateProps): React.JSX.Element;

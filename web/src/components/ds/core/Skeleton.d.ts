@@ -4,4 +4,4 @@ export interface SkeletonProps {
   radius?: number | string;
   style?: React.CSSProperties;
 }
-export declare function Skeleton(props: SkeletonProps): JSX.Element;
+export declare function Skeleton(props: SkeletonProps): React.JSX.Element;
