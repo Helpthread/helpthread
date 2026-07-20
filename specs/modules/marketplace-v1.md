@@ -7,11 +7,14 @@
 > pervades this document — the §3d hosting control plane, the §3e control-plane vault,
 > per-desk hosted instances, "no operator DevOps" — **was never a decision TJ made.**
 >
-> It was inferred by an assistant on 2026-07-20 (asked "who hosts the module runtime?",
-> received no human input, and four minutes later recorded "Pivot locked in"), then
-> described back to TJ as the provision "you chose earlier." TJ's actual requirement was
-> only that install not be manual. PR #98 merged 26 minutes after opening with zero human
-> review comments. **No code was ever written against it.**
+> TJ selected it on 2026-07-20 — asked "Who hosts the module runtime for the v1 in-app
+> install experience?" at 00:12:17Z, he chose "Managed: RIQ hosts (Recommended)" at
+> 00:13:15Z. Two qualifiers: the assistant that wrote the question labelled that option
+> "(Recommended)", and the alternative in the same picker — "Deploy-button: operator's
+> Vercel" — is the design he later said he had wanted all along. On reviewing the
+> consequences he rejected the model: "i never ever intended that we would be hosting
+> running module code, that makes no sense at all." PR #98 merged 26 minutes after
+> opening with zero human review comments. **No code was ever written against it.**
 >
 > **What holds instead:** §5's original install flow, plus the one-click path §5 already
 > named as additive — a Vercel deploy button provisioning into the **operator's own**
