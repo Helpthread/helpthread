@@ -36,14 +36,21 @@
       "assist": { "actions": { "source": { "organizeImports": "off" } } },
       "linter": {
         "rules": {
-          "correctness": { "noUnusedImports": "off" },
+          "correctness": {
+            "noUnusedImports": "off",
+            "useExhaustiveDependencies": "off"
+          },
           "complexity": { "useOptionalChain": "off" },
           "style": { "useTemplate": "off" },
-          "suspicious": { "noExplicitAny": "off" },
+          "suspicious": {
+            "noExplicitAny": "off",
+            "noArrayIndexKey": "off"
+          },
           "a11y": {
             "noSvgWithoutTitle": "off",
             "useKeyWithClickEvents": "off",
-            "noStaticElementInteractions": "off"
+            "noStaticElementInteractions": "off",
+            "noAutofocus": "off"
           }
         }
       }

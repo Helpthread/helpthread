@@ -1,17 +1,23 @@
 export interface SplitButtonOption {
-  label: string
-  icon?: React.ReactNode
+  label: string;
+  icon?: React.ReactNode;
 }
+
+/** A primary action with an attached caret. */
 export interface SplitButtonProps {
-  label?: string
-  options?: SplitButtonOption[]
-  variant?: 'primary' | 'outline'
-  loading?: boolean
-  disabled?: boolean
-  /** Forces a visual state for specimen rendering. */
-  demo?: 'hover' | 'focus' | 'active'
-  onAction?: (option: SplitButtonOption & { primary?: boolean }) => void
-  /** Skip the click-outside overlay (for inline/specimen rendering). */
-  inline?: boolean
+  label?: string;
+  /** dropdown options shown when the caret is opened */
+  options?: SplitButtonOption[];
+  /** "primary" gets the accent fill; anything else renders the bordered treatment */
+  variant?: "primary" | "outline";
+  /** shows a spinner and "Sending…" in place of the label */
+  loading?: boolean;
+  disabled?: boolean;
+  /** forces a visual state for specimen rendering: hover | focus | active */
+  demo?: "hover" | "focus" | "active";
+  /** fires for the main button ({ label, primary: true }) and for a chosen option */
+  onAction?: (action: SplitButtonOption & { primary?: boolean }) => void;
+  /** drops the fixed-position click-away scrim, for embedding inline */
+  inline?: boolean;
 }
-export declare function SplitButton(props: SplitButtonProps): JSX.Element
+export declare function SplitButton(props: SplitButtonProps): JSX.Element;
