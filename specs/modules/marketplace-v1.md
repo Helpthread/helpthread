@@ -99,10 +99,10 @@ substrate's own `assistants.module` / `webhook_endpoints.module` attribution,
 | Entity | Key fields | Notes |
 |---|---|---|
 | **Module** | `id`, `slug` (matches substrate `module` attribution, e.g. `draft-assistant`), `name`, `summary`, `cluster` (catalog.md §3's cluster name, informational), `status` (`active`/`deprecated`) | One row per sellable module. Third-party modules are a non-goal v1 (§9) — every row here is first-party. |
-| **Release** | `id`, `module_id`, `semver`, `tarball_storage_path`, `checksum_sha256`, `changelog_md`, `published_at` | One row per published version. Immutable once published — a bad release ships a new version, never edits an old one. |
+| **Release** | `id`, `module_id`, `semver`, `tarball_storage_path`, `checksum_sha256`, `changelog_md`, `published_at` | One row per published version. Immutable once published — a bad release ships a new version, never edits an old one. **"Latest" is defined normatively here, once:** the module's release with the highest `published_at` — equivalently, publish order — **not** the highest semver (per §10's resolution; back-porting is not current practice). Every other use of "latest" / "latest version" in this spec (§3a `latestVersion`, §3b/§3c defaults, §5, §6) refers to this definition. |
 | **Customer** | `id`, `stripe_customer_id`, `email`, `created_at` | The marketplace's own account, 1:1 with a Stripe Customer. Unrelated to the engine's `agents`/`assistants` tables — a store customer and a Helpthread Agent are different systems' users, even when the same human. |
 | **Subscription** | `id`, `customer_id`, `module_id`, `stripe_subscription_id`, `stripe_latest_payment_intent_id` (nullable; updated on each successful `invoice.paid` for this subscription), `interval` (`year`, per TJ's annual decision), `stripe_status` (mirrors Stripe's own status string), `current_period_end`, `created_at` | One subscription per (customer, module, deployment) — see License key below for why "per deployment" lands here, not as a separate column. **`stripe_latest_payment_intent_id` is the join key refund/dispute webhooks resolve against**: those events arrive on Stripe charge/payment-intent/dispute objects, not Subscription objects, and `stripe_customer_id` alone can't disambiguate which subscription a given charge belongs to when one customer holds multiple module subscriptions — see §3's webhook table. |
-| **License key** | `id`, `subscription_id` (1:1), `module_id`, `secret_hash` (SHA-256 digest of the token's secret half — the plaintext `ht_lic_<id>_<secret>` is never persisted), `state` (`active`\|`lapsed`\|`frozen`\|`refunded`\|`revoked`), `entitled_up_to_version` (semver, meaningful only while `lapsed`), `pre_freeze_state` and `stripe_dispute_id` (both nullable; set together on entering `frozen`, cleared together on leaving it), `created_at`, `rotated_at`, `revealed_at` (null until the customer has viewed the plaintext once, §3) | **Mint/verify mechanism inherited verbatim from Assistant tokens** (`src/auth/assistant-token.ts`, `src/api/assistants.ts`, `src/store/assistants.ts`) — the id is generated first, `ht_lic_<id>_<secret>` minted against it, and only `secret_hash` is ever stored; verification looks the row up by the id embedded in the presented token, then does a constant-time digest compare, exactly as `getForAuth`'s single-snapshot read does for Assistants. The plaintext is returned to the caller exactly once — at first reveal or at rotation (§3, §9) — never logged, never persisted, no reveal endpoint. **"Scoped to one helpdesk deployment" is a licensing TERM, not a technical control.** Per TJ's "annual subscription per helpdesk deployment" decision, an operator running two helpdesks is expected to buy two subscriptions and hold two keys — but nothing in this schema records which deployment a key is actually used against, and nothing can: the no-phone-home posture (§1) means the marketplace never learns a deployment's identity at all, so per-deployment scoping is enforced by the terms of sale (§8) an operator agrees to, never by a technical check. A subscription and its license key stay 1:1 — the subscription is the billing object, the key is what the operator's tooling holds. **Pre-freeze state is preserved, not assumed**: entering `frozen` snapshots the license's current `state` into `pre_freeze_state` and the triggering dispute's Stripe id into `stripe_dispute_id`; a `won` outcome restores exactly that saved state — a license that was `lapsed` before the dispute comes back `lapsed`, never promoted to `active` — see §2's states table and §3. |
+| **License key** | `id`, `subscription_id` (1:1), `module_id`, `secret_hash` (SHA-256 digest of the token's secret half — the plaintext `ht_lic_<id>_<secret>` is never persisted), `state` (`active`\|`lapsed`\|`frozen`\|`refunded`\|`revoked`), `entitled_up_to_version` (semver, meaningful only while `lapsed`), `pre_freeze_state` and `stripe_dispute_id` (both nullable; set together on entering `frozen`, cleared together on leaving it), `created_at`, `rotated_at`, `revealed_at` (null until the customer has viewed the plaintext once, §3) | **Mint/verify mechanism inherited verbatim from Assistant tokens** (`src/auth/assistant-token.ts`, `src/api/assistants.ts`, `src/store/assistants.ts`) — the id is generated first, `ht_lic_<id>_<secret>` minted against it, and only `secret_hash` is ever stored; verification looks the row up by the id embedded in the presented token, then does a constant-time digest compare, exactly as `getForAuth`'s single-snapshot read does for Assistants. The plaintext is returned to the caller exactly once — at first reveal or at rotation (§3, §9) — never logged, never persisted, no reveal endpoint. **"Scoped to one helpdesk deployment serving one domain" is a licensing TERM, not a technical control.** Per TJ's "annual subscription per helpdesk deployment" decision, refined 2026-07-19 to **one license = one domain** (§10 resolutions): an operator running two helpdesks — or one helpdesk serving two domains — is expected to buy two subscriptions and hold two keys. A **licensed domain is recorded** against the subscription at purchase — collected at checkout or first download (exact collection point per HT-89) — as a **contractual designation** used for the terms of sale (§8) and for provenance stamping (§10 resolutions, HT-89/HT-90). That record is for attribution, **never for verification**: nothing in this schema checks which deployment a key is actually used against, and nothing ever does at runtime. The no-phone-home posture (§1) is unchanged — the marketplace never learns a *running* deployment's identity, no deployed module reports one, and per-deployment scoping is enforced by the terms of sale (§8) an operator agrees to, never by a technical check. Record-for-attribution and never-verify coexist deliberately: the recorded domain is a designation on the contract and a signature in a provenance file (§10), not a value any running software phones home to confirm. A subscription and its license key stay 1:1 — the subscription is the billing object, the key is what the operator's tooling holds. **Pre-freeze state is preserved, not assumed**: entering `frozen` snapshots the license's current `state` into `pre_freeze_state` and the triggering dispute's Stripe id into `stripe_dispute_id`; a `won` outcome restores exactly that saved state — a license that was `lapsed` before the dispute comes back `lapsed`, never promoted to `active` — see §2's states table and §3. |
 | **Download grant** | `id`, `license_key_id`, `release_id`, `issued_at`, `expires_at`, `redeemed_at`, `requester_ip` | Minted per download/update-check call (§3's download endpoint) as a short-lived, single-purpose authorization for one Supabase Storage object — never a standing credential. Exists so the download endpoint has an audit trail distinct from the long-lived license key itself, and so a leaked signed URL has a bounded blast radius (default expiry: 5 minutes). |
 | **Webhook event log** | `id` (Stripe `event.id`), `type`, `received_at`, `processed_at` | The idempotency/replay-protection ledger every incoming Stripe webhook is checked against before applying a state transition — keyed by Stripe's own event id, **never** by `stripe_subscription_id` (see the Implementation note below for why that would be wrong). |
 
@@ -142,7 +142,7 @@ much as it was already true of `lapsed` and `revoked`; nothing below is an excep
 | `active` | Subscription in good standing | Any published release, unrestricted | Reports true latest, entitled |
 | `lapsed` | Payment missed or subscription non-renewed — **not** a fraud finding | Releases published **up to `entitled_up_to_version`** remain downloadable indefinitely; a release newer than that requires resubscribing | Reports `entitledVersion` (frozen at lapse) **and** `latestAvailableVersion` (informational, so the operator sees what they're missing) |
 | `frozen` | A dispute has been **filed** (Stripe `charge.dispute.created`) and is under investigation — automatic, protective, and explicitly **not** a fraud finding: a filed dispute proves nothing about who's right yet. The prior `state` is snapshotted (`pre_freeze_state`) so resolution can restore it exactly, not assume `active` | Fully paused — zero access, including versions already downloaded fine before the freeze — until the dispute resolves (§3) | Fully paused |
-| `refunded` | Entitlement ended with **no fraud finding**: a voluntary refund, or a dispute the merchant lost (the chargeback stands, funds are gone either way) — terminal for entitlement | Hard-refused | Hard-refused |
+| `refunded` | Entitlement ended with **no fraud finding**: a **full** refund of the purchase (cumulative refunded amount equal to the amount captured), or a dispute the merchant lost (the chargeback stands, funds are gone either way) — terminal for entitlement. A **partial or goodwill refund causes no state change** (HT-86) | Hard-refused | Hard-refused |
 | `revoked` | **Confirmed** fraud only — a manual admin action following an actual investigation (a stolen payment method, a confirmed ToS violation). **Never** set automatically by a dispute merely being filed — "filed" and "confirmed" are different claims, and only `frozen` reacts to "filed" | Hard-refused | Hard-refused |
 
 **Decision, justified** (task item 1's explicit "pick and justify" — also decision
@@ -169,11 +169,13 @@ point §10.3): **lapsed keeps downloading already-entitled versions.** Reasoning
 `charge.dispute.created` straight to `revoked`, which conflated a dispute being
 *filed* with fraud being *confirmed* — wrong, fixed here):
 
-- **Refund** (`charge.refunded`/`refund.created`, or a *lost* dispute) → `refunded`.
+- **Refund** (a **full** `charge.refunded`/`refund.created` — cumulative refunded
+  amount equal to the amount captured — or a *lost* dispute) → `refunded`.
   Terminal for entitlement, explicitly not a fraud label — the buy→download→refund
   path must not let the customer keep both the money and the bits, but it also must
-  not brand an ordinary refund request as fraud. Running software already deployed is
-  untouched either way, per §1's governing constraint.
+  not brand an ordinary refund request as fraud. A **partial or goodwill refund leaves
+  entitlement untouched** (HT-86) — no state change. Running software already deployed
+  is untouched either way, per §1's governing constraint.
 - **Dispute filed** (`charge.dispute.created`) → `frozen`, automatically, the moment
   Stripe reports it, **snapshotting the license's current `state` into
   `pre_freeze_state`** (and the dispute's Stripe id into `stripe_dispute_id`) before
@@ -308,7 +310,7 @@ never needs it.
 | `checkout.session.completed` | Create/find Customer; create Subscription (storing `stripe_latest_payment_intent_id`); create License key row (`active`, `secret_hash NULL` — not yet minted, see Authentication above) |
 | `customer.subscription.updated` → `active` | License → `active` — **only** when transitioning from `lapsed` on resumed payment; this is the sole automatic path to `active` and never fires the dispute-restore logic below |
 | `customer.subscription.updated` → `past_due`/`unpaid`, or `customer.subscription.deleted` (ordinary cancellation) | License → `lapsed`, snapshot `entitled_up_to_version` = that module's latest published release at the moment of lapse |
-| `charge.refunded` / `refund.created` | Resolve the Subscription via `stripe_latest_payment_intent_id` (§2 — a customer may hold multiple module subscriptions, so `customer_id` alone can't disambiguate); License → `refunded` (terminal, not a fraud finding) |
+| `charge.refunded` / `refund.created` | Resolve the Subscription via `stripe_latest_payment_intent_id` (§2 — a customer may hold multiple module subscriptions, so `customer_id` alone can't disambiguate); License → `refunded` **only when the charge is fully refunded** (cumulative refunded amount equals the amount captured); a partial/goodwill refund is a no-op for entitlement (HT-86) — terminal, not a fraud finding |
 | `charge.dispute.created` | Resolve the Subscription via `stripe_latest_payment_intent_id`; License → `frozen`, snapshotting `pre_freeze_state`/`stripe_dispute_id` (§2) — automatic, protective, not a fraud finding |
 | `charge.dispute.closed`, outcome `won` | License restores to the saved `pre_freeze_state` exactly (§2) — **not** unconditionally `active` |
 | `charge.dispute.closed`, outcome `lost` | License → `refunded` regardless of `pre_freeze_state` (the chargeback stands; not a fraud finding on the cardholder) |
@@ -390,7 +392,7 @@ With the module confirmed, license state governs what happens next:
 
 | State | Download behavior |
 |---|---|
-| `active` | Any published release, unrestricted; `version` omitted defaults to latest |
+| `active` | Any published release, unrestricted; `version` omitted defaults to latest (highest `published_at`, per §2's normative definition) |
 | `lapsed` | `version` omitted defaults to `entitled_up_to_version`; an explicitly-requested `version` newer than that → `402 Payment Required` pointing at the resubscribe flow (an honest, explicit refusal rather than a silent downgrade to an older tarball than requested) |
 | `frozen` | `403 { "error": { "code": "license_frozen" } }` — a dispute is under review; fully paused per §2, including versions already downloaded fine before the freeze |
 | `refunded` | `403 { "error": { "code": "license_refunded" } }` — terminal, not a fraud label |
@@ -526,7 +528,7 @@ software" floor deliberately:
 | `active` | Runs latest entitled version | Available (one-click) | — |
 | `lapsed` | **Keeps running, pinned at `entitled_up_to_version`** | Stop (nudge shown) | The central promise, now literally enforced by the control plane *not acting*: a lapse is non-payment, not a verdict, and hosting continues **indefinitely**. Refund is a different thing (below). |
 | `frozen` (dispute filed) | **Keeps running** | Paused | A filed dispute is protective, not a verdict; stopping a customer's running support automation mid-dispute would punish them for exercising a chargeback right. Downloads/update-check pause per §2; the running instance does not. |
-| `refunded` (voluntary refund, or dispute lost) | **Decommissioned after a config-export grace window** (working figure 7 days — exact number OPEN, §10.11) | Hard-refused immediately (unchanged, §3b/§3c) | Refund unwinds the transaction and returns the money; unlike a lapse, entitlement has *ended*, and — because Resonant IQ is the host and bears the ongoing cost — continuing to run a fully-refunded instance forever is not owed. This is **not** a contradiction of "lapse never stops running software": refund is not lapse. A dispute resolved `lost` (§2) routes here. |
+| `refunded` (voluntary refund, or dispute lost) | **Decommissioned after a config-export grace window** (7 days, confirmed §10.11) | Hard-refused immediately (unchanged, §3b/§3c) | Refund unwinds the transaction and returns the money; unlike a lapse, entitlement has *ended*, and — because Resonant IQ is the host and bears the ongoing cost — continuing to run a fully-refunded instance forever is not owed. This is **not** a contradiction of "lapse never stops running software": refund is not lapse. A dispute resolved `lost` (§2) routes here. |
 | `revoked` (confirmed fraud, manual) | **Decommissioned immediately** | Hard-refused (unchanged) | The one case where an immediate stop is warranted — a manual admin action following an actual confirmed-fraud investigation (stolen card, ToS violation), never automatic. *Chosen default; §10.11.* |
 
 **Self-host residual exposure is accepted, consciously and permanently.** A refunded or
@@ -707,12 +709,11 @@ export the instance's configuration before it is destroyed:
 - **Operator-initiated uninstall** — immediate stop of new work, instance torn down
   after the grace window; the operator keeps their exported config.
 - **Refund** (voluntary, or dispute `lost`) — the hosted instance is decommissioned
-  after the grace window (working figure **7 days** — exact number OPEN, §10.11);
+  after the grace window (**7 days**, confirmed §10.11);
   downloads/update-check hard-refuse immediately (`refunded`, unchanged §3b/§3c). Refund
   ends hosting; a **lapse does not** (§3d) — the two are deliberately different, and
   "lapse never stops running software" stays literally true. A short B2B refund window
-  gates eligibility for this at all (working figure **14 days** — exact number OPEN,
-  §10.11).
+  (**14 days**, confirmed §10.11) gates eligibility for this at all.
 - **Revoke** (confirmed fraud, manual) — immediate decommission, no grace window owed
   (§3d).
 - **Dispute open** (`frozen`) — **no decommission**; the instance keeps running while
@@ -909,9 +910,9 @@ dependencies" quietly become a catch-all label for anything pre-launch.
 | Item | Nature | Gate | Not gating |
 |---|---|---|---|
 | Commercial module license text (replaces the current placeholder) | Counsel-drafted | Before Stripe flips to live mode / before the marketplace takes real money | Does **not** gate HT-82's test-mode dogfood — Resonant IQ as its own test-mode customer needs no finished license text, only a placeholder |
-| Terms of sale — including the refund policy (§2's `refunded` state, §5.3's decommission-after-refund), the refund window and config-export grace period (§5.3; the *exact* day figures are the business/counsel call, §10.11), and the dispute-handling policy (§2's `frozen` state): this spec pins the entitlement and hosting-lifecycle *mechanics*, but the customer-facing policy language and the exact windows are counsel's/TJ's call | Counsel-drafted (+ TJ business call on the windows) | Before Stripe flips to live mode / before the marketplace takes real money | Same — pre-revenue, not pre-dogfood (test-mode dogfood can use the working figures) |
+| Terms of sale — including the refund policy (§2's `refunded` state, §5.3's decommission-after-refund), the refund window (**14 days**) and config-export grace period (**7 days**) (§5.3; the day figures are confirmed, §10.11 — only the customer-facing policy *wording* remains on this gate), and the dispute-handling policy (§2's `frozen` state): this spec pins the entitlement and hosting-lifecycle *mechanics* and the exact windows; the customer-facing policy language is counsel's/TJ's call | Counsel-drafted (the window figures are decided; policy wording remains) | Before Stripe flips to live mode / before the marketplace takes real money | Same — pre-revenue, not pre-dogfood (test-mode dogfood uses the confirmed figures) |
 | Privacy policy for the store | Counsel-drafted | Same gate (real customer PII starts flowing at first live charge) | Same |
-| **Managed-hosting terms & data-handling disclosure** (new in v1.1) — because a Resonant IQ-hosted module reads the operator's conversation data on Resonant IQ infrastructure to do its job, managed hosting is the charter's "hosted convenience services" (§3) made real, and it needs its own disclosure/DPA-style terms the operator consents to at enrollment (§3e). This is distinct from the store privacy policy, which covers *purchaser* PII; this covers the *operator's end-customers'* conversation data flowing through a hosted module | Counsel-drafted | Same gate — real operator data starts flowing through a hosted module at first live managed install | Not pre-dogfood — Resonant IQ hosting its own module for its own desk raises no third-party data question. **See §10.13: the reconciliation with charter §2's "conversation data never proxies through Helpthread's infrastructure" wording is a TJ call, flagged there, not settled here** |
+| **Managed-hosting terms & data-handling disclosure** (new in v1.1) — because a Resonant IQ-hosted module reads the operator's conversation data on Resonant IQ infrastructure to do its job, managed hosting is the charter's "hosted convenience services" (§3) made real, and it needs its own disclosure/DPA-style terms the operator consents to at enrollment (§3e). This is distinct from the store privacy policy, which covers *purchaser* PII; this covers the *operator's end-customers'* conversation data flowing through a hosted module | Counsel-drafted | Same gate — real operator data starts flowing through a hosted module at first live managed install | Not pre-dogfood — Resonant IQ hosting its own module for its own desk raises no third-party data question. **The charter §2 own-your-data reconciliation flagged at §10.13 is now RESOLVED — charter §2 was amended the same day (HT-5/HT-82); the managed-hosting data-handling terms/disclosure themselves remain on this gate** |
 | **Stripe Tax enabled** (automated EU VAT / US sales-tax calculation and remittance on Checkout Sessions) | Compliance/finance configuration, not counsel-drafted | Same gate — charging real customers across jurisdictions without correct tax handling is its own launch blocker | Not pre-dogfood — Stripe test mode carries no real tax obligation. Which jurisdictions to register in first is decision point §10.9 |
 
 The plugin exception's counsel deadline — set in CHARTER.md §3's module boundary,
@@ -980,6 +981,87 @@ aspiration is now met for the mainline path; the self-host residue is the only p
 stays informational.
 
 ## 10. Decision points for TJ
+
+> **Resolved 2026-07-19 (TJ, acting as counsel — HT-5/HT-82 licensing session).**
+> The following items on this list, plus the three service-review policy calls from
+> HT-79's comment thread, are now DECIDED; each item below retains its original text
+> for the reasoning, with its disposition noted here:
+>
+> - **Licensing unit refined: one license = one domain.** The "per helpdesk
+>   deployment" term is formalized as *a license authorizes one helpdesk deployment
+>   serving one domain* (§2's License-key row updated). Bulk/multi-domain purchases
+>   are a possible later product; today, more domains = more licenses. Still a
+>   contractual term, never a technical control (no phone-home).
+> - **Partial refunds do NOT terminate** (HT-79 service-review call #1): only a
+>   refund of the full purchase price flips a license to `refunded` (webhook compares
+>   the charge's cumulative refunded amount to the amount captured). Goodwill/partial
+>   refunds leave the entitlement untouched. Code change ticketed.
+> - **Customer email uniqueness ENFORCED** (HT-79 call #2): `customers.email` gets a
+>   unique constraint; migration ticketed.
+> - **"Latest" stays publish-order** (HT-79 call #3): documented operator expectation
+>   is "publish releases in semver order"; revisit only if back-porting ever becomes
+>   real practice.
+> - **§10.3 signed off** — lapsed keys keep downloading already-entitled versions.
+> - **§10.6 signed off** — reactivation restores full latest access, no back-charge.
+> - **§10.8 confirmed** — no bundles in v1; TJ's bulk-domain idea is the noted v1.1
+>   candidate shape (multi-domain purchase, still 1 subscription : 1 license : 1
+>   domain underneath).
+> - **§10.9 decided** — Stripe Tax enabled at live-mode flip with US home-state nexus
+>   registration only; Stripe's threshold monitoring drives later registrations; EU
+>   VAT (OSS) revisited at first EU customer.
+> - **§10.10 confirmed** — control plane co-located (same repo/Supabase, distinct
+>   deployment + credential vault).
+> - **§10.11 confirmed** — 14-day B2B refund window; 7-day config-export grace;
+>   revoke decommissions immediately. Policy *wording* still counsel-drafted at the
+>   §8 gate (drafting in flight, same session).
+> - **§10.12 direction approved** — the scoped per-desk provisioning credential gets
+>   built (substrate ticket to file); the full service token is never handed to the
+>   control plane.
+> - **§10.13 RESOLVED** — charter §2 amended (same-day charter PR): the own-your-data
+>   promise is scoped to the core with the managed-hosting opt-in stated explicitly;
+>   the managed-hosting data-handling terms remain on the §8 gate.
+>
+> - **Provenance stamping + attribution display (decided in the same session,
+>   follow-up exchange):** the one-domain term stays contractually enforced —
+>   a blocking install/startup domain check was considered and REJECTED
+>   (defeatable in one line by anyone holding the source; false-positives on
+>   rebrands/staging; contradicts the charter's zero-runtime-checks invariant
+>   and commercial-license §7). Adopted instead, both non-blocking: every
+>   license-authenticated download embeds a signed provenance file (license id,
+>   licensed domain, issued-at, marketplace signature — leak attribution and
+>   audit evidence, HT-89), and every paid module displays "Licensed to:
+>   <domain>" in its diagnostics surface (display only, HT-90). Both are
+>   compatible with every posture invariant by construction; managed hosting
+>   already enforces 1:1 naturally at provisioning.
+>
+> **Addendum — Codex-review-round rulings (TJ, acting as counsel, 2026-07-19).** Five
+> further judgment calls settled while adjudicating the independent Codex review of the
+> HT-5 licensing texts:
+>
+> - **The 14-day refund window applies to the initial purchase only, not renewals.** A
+>   renewal charge does not reopen a refund window; only the first purchase of a
+>   subscription is refund-eligible under the B2B window.
+> - **A lapsed or terminated customer may create new internal modifications of versions
+>   they already hold.** The entitlement that ends is to *new releases and updates*,
+>   never to what they already possess; modifying an already-held version for their own
+>   internal use is theirs to do — consistent with the no-runtime-check, no-DRM posture
+>   and the self-host residual exposure (§3d).
+> - **The §7 exception's Corresponding Source exclusion covers module object code and
+>   build artifacts at maximal scope**, not only module source. Applied in
+>   `legal/module-api-exception.md`'s grant this same session.
+> - **The provenance policy splits into a public policy and a private counsel memo:** the
+>   customer-facing statement of what is recorded and displayed (HT-89/HT-90) is public;
+>   the legal analysis behind it lives in a separate counsel memo, not this public spec.
+> - **Managed-hosting model providers are the operator's own relationship.** When a
+>   hosted module calls a model provider with the operator's own key, Resonant IQ is an
+>   **instructed conduit** holding that key on the operator's behalf — it does **not**
+>   engage the model provider as its own subprocessor. Should Resonant IQ later offer a
+>   bundled model key (its own provider relationship), that provider would be added to
+>   Resonant IQ's subprocessor list at that time, and not before.
+>
+> Still genuinely open after this session: §10.1 (price points), §10.2 (store
+> domain), §10.4 (KB-vs-pipeline charter conflict — product/architecture, not
+> licensing), §10.5 and §10.7 (product confirmations).
 
 1. **Price points per module.** Not decided; blocks store page content, not the
    architecture above (Stripe Price objects are created per module regardless of the
@@ -1054,7 +1136,7 @@ stays informational.
     (confirmed fraud) decommissions immediately with no grace. The *mechanics* are
     decided (refund → decommission-after-grace; lapse → hosting continues indefinitely;
     frozen → keeps running; the self-host residual copy is consciously accepted, no DRM
-    ever). Only the exact day-counts and the customer-facing policy wording are OPEN —
+    ever). The day-counts are now CONFIRMED (see the resolved block above); only the customer-facing policy wording remains open —
     TJ/counsel, at the pre-revenue gate (§8). Test-mode dogfood (§7) uses the working
     figures.
 12. **Scoped per-desk provisioning credential — a new substrate requirement (§3e).**
@@ -1066,8 +1148,8 @@ stays informational.
     full service token (too broad). Confirm the direction; the detailed design is a
     separate spec, and this is a real dependency for managed hosting to ship, flagged so
     it isn't discovered late.
-13. **Charter §2 "own your data" reconciliation — genuinely a TJ call, not resolved
-    here (§8).** A Resonant IQ-hosted module reads the operator's conversation data on
+13. **Charter §2 "own your data" reconciliation — RESOLVED 2026-07-19 by the same-day
+    charter amendment (§8).** A Resonant IQ-hosted module reads the operator's conversation data on
     Resonant IQ infrastructure, which is in tension with charter §2's absolute wording
     "Conversation data never proxies through Helpthread's infrastructure." The anchor
     that makes managed hosting legitimate is already in the charter: §3 contemplates
@@ -1076,11 +1158,12 @@ stays informational.
     hosting is opt-in per operator, the *core* mail/data path is unchanged (still the
     operator's own Supabase), and the hosted module is the already-contemplated
     convenience service the operator knowingly enrolls in with disclosed data handling
-    (§8's managed-hosting terms). **But whether §2's absolute sentence needs its own
-    wording tweak to say so explicitly is a charter-invariant call that belongs to TJ**
-    — this spec flags it and does not edit §2. (The v1.1 charter amendment restates the
-    *credential/no-runtime-check* invariants only; the data-residency wording is left to
-    this decision point.) The same call covers the credential face of the question:
+    (§8's managed-hosting terms). **Resolved (TJ, acting as counsel, 2026-07-19):** §2
+    was amended the same day — its own-your-data promise now reads "conversation data
+    never touches Resonant IQ-operated infrastructure," with the managed-hosting opt-in
+    named explicitly (see CHARTER.md §2 and its §7 appendix, the HT-5/HT-82 own-your-data
+    scoping amendment; that amendment also corrected the earlier mis-scoped "the core" phrasing). The managed-hosting data-handling terms themselves
+    remain on the §8 pre-revenue counsel gate. The same call covers the credential face of the question:
     operator-supplied module secrets — most prominently the operator's own model API
     key (§3e "Module runtime configuration") — reside in the control-plane vault, i.e.
     on Resonant IQ infrastructure, when hosting is managed. One decision, two faces:
@@ -1104,9 +1187,9 @@ stays informational.
   literally even though Resonant IQ is now the host. Decided per TJ/coordinator
   (2026-07-19): purchase/licensing stay on the separate store service, the desk supplies
   only the in-app *feel* (Buy button opens hosted checkout, license lands via the
-  managed handoff, never in the core); refund ⇒ decommission-after-grace (working
-  figures 14-day refund window / 7-day grace, exact numbers OPEN §10.11); the self-host
-  residual copy of a refunded module is a **consciously accepted** exposure — no DRM, no
+  managed handoff, never in the core); refund ⇒ decommission-after-grace (14-day refund
+  window / 7-day grace — the working figures at v1.1 authoring, since confirmed §10.11);
+  the self-host residual copy of a refunded module is a **consciously accepted** exposure — no DRM, no
   runtime check, ever. Invariants held verbatim: license = distribution credential only,
   zero runtime license checks in any module, AGPL core holds no marketplace credential
   and never calls the marketplace. Entities (§2), commerce/download/update-check APIs
