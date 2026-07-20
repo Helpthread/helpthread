@@ -84,7 +84,9 @@ jobs:
           #    A row citing TJ without quote marks is the exact failure this gate exists for.
           #    sed form is BRE-portable (BSD and GNU) — `\+` is a GNU extension.
           if grep -qiE '^#{1,}[[:space:]]*Decision provenance' <<<"$BODY"; then
-            ROWS=$(sed -n '/^#\{1,\}[[:space:]]*[Dd]ecision provenance/,$p' <<<"$BODY" \
+            # Stop at the next heading — reading to end-of-body swallows any later
+            # table (a test-results table, for instance) and parses it as provenance rows.
+            ROWS=$(awk '/^#+[[:space:]]*[Dd]ecision provenance/{f=1;next} f&&/^#+[[:space:]]/{exit} f' <<<"$BODY" \
                    | grep -E '^\|' | grep -vE '^\|[[:space:]]*[-:[:space:]]+\|' | tail -n +2 || true)
             if [ -z "$ROWS" ]; then
               fail "The 'Decision provenance' section has no rows. If this PR encodes no decisions, say so in a row ('None — no new decisions')."
@@ -107,7 +109,7 @@ jobs:
             grep -qE '["“”]' <<<"$line" && continue
             grep -qiE 'INFERRED' <<<"$line" && continue
             fail "Attributes a decision to TJ without quoting him: ${line}"
-          done < <(grep -iE "(per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ)" <<<"$BODY" || true)
+          done < <(grep -iE "(per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ|CONFIRMED by TJ|SIGNED OFF by TJ|\(TJ,? [0-9]{4}-|, TJ [0-9]{4}-)" <<<"$BODY" || true)
 
           # 5. A green verdict must show the review bots were adjudicated.
           #    Bots review AFTER a PR opens, so nothing can honestly be green at open
