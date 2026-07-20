@@ -2,9 +2,12 @@
 
 Status: **draft for TJ review** (HT-95). Governed by CHARTER.md §3/§4 (module boundary,
 out-of-process preference, zero privileged first-party access), `specs/modules/catalog.md`
-(HT-66) §1's born-proprietary discipline, and CLAUDE.md's UI-fidelity rule. Depends on
-HT-93 (PR #103) and HT-94 landing first — this spec describes a package *generated from*
-`web/src/components/ds/`, so `ds/` must be reconciled before it can be a source.
+(HT-66) §1's born-proprietary discipline, and CLAUDE.md's UI-fidelity rule.
+
+**Not blocked on HT-93/HT-94.** The pack sources from the Claude Design project directly,
+as a sibling of `web/src/components/ds/` rather than downstream of it (§5). 16 of the 20
+components are already promoted there; the four new primitives arrive in the pack whenever
+HT-94 part B promotes them upstream.
 
 ## 1. Purpose
 
@@ -60,14 +63,15 @@ pack has its own release cadence.
 
 ## 3. Scope of the pack
 
-Generated from the reconciled `ds/`, in three layers:
+Sourced from the design project (§5), in three layers:
 
-1. **Tokens** — the `theme/tokens/` custom properties, published as CSS and as a typed
-   export. This is the layer that makes §4 work.
-2. **Core components** — the 16 primitives in `ds/core/` (Button, Avatar, DropdownMenu,
+1. **Tokens** — `tokens/{colors,shape,typography}.css` plus `theme/helpthread.css` and
+   `fonts/fonts.css`, published as CSS and as a typed export. This is the layer that
+   makes §4 work.
+2. **Core components** — the 16 primitives in `components/core/` (Button, Avatar, DropdownMenu,
    StatusPill, TagChip, Toast, TextInput, MenuItem, IconButton, EmptyState, Skeleton,
    Kbd, plus HT-93's SplitButton, CommandMenu, SnoozePicker, CredentialRow/PasskeyList).
-3. **Inbox components** — `ds/inbox/` (ConversationRow, MessageBand, ToolbarBand,
+3. **Inbox components** — `components/inbox/` (ConversationRow, MessageBand, ToolbarBand,
    FolderItem). Included because a module rendering conversation-shaped data should
    render it the same way the desk does.
 
@@ -95,19 +99,46 @@ public like everything else. Building it before that pair of conditions is met i
 speculative, and substrate-v1's rule applies: each surface waits for a real module to
 need it.
 
-## 5. Generated, never forked
+## 5. Sourced from the design project, as a sibling of `ds/`
 
 CLAUDE.md: `ds/` files are **verbatim copies** of the Claude Design project, and
 improvements go upstream. HT-94 exists because Biome silently broke that byte-equality.
 
-The pack inherits the same discipline, one hop further out: **the pack is generated from
-`ds/`, and `ds/` is generated from the design project.** A hand-maintained second copy
-would drift the desk and its modules apart — the precise failure §1 is trying to
-prevent, reintroduced one layer down.
+The pack inherits that discipline, but **not by chaining off `ds/`**. Both are
+independent verbatim consumers of the same upstream:
 
-Practical consequence: the pack needs a generation step and a drift check in CI, not a
-one-time copy. Byte-comparison is the check; HT-93's biome override is what makes byte
-comparison meaningful again.
+```
+Claude Design project ("Helpthread", 40b953cc)
+   ├── web/src/components/ds/     (the desk)
+   └── @helpthread/design-pack    (modules)
+```
+
+A chain (`pack ← ds/ ← design project`) would propagate any `ds/` drift into every
+module — reintroducing one layer down the exact failure §1 exists to prevent. As
+siblings, the desk and its modules cannot drift *from each other* without both drifting
+from a single source that byte-comparison catches.
+
+The upstream already carries everything the pack needs: `components/core/` (12),
+`components/inbox/` (4), `tokens/{colors,shape,typography}.css`, `theme/helpthread.css`,
+and `fonts/fonts.css`. The four new primitives are still staged at
+`templates/new-primitives/Primitives.jsx` and enter the pack when HT-94 part B promotes
+them to `components/core/`.
+
+### Sync is a process, not a pipe
+
+There is **no unattended sync**, and this spec does not assume one. DesignSync
+authenticates through the operator's claude.ai login and its write path requires an
+interactive plan approval, so it cannot hold a service credential or run in CI.
+
+What is real:
+
+- **The `/design-sync` skill** — an agent session that pulls changed components
+  incrementally, the same mechanism `ds/` already uses. Repeatable, human-initiated.
+- **Optionally, a scheduled agent** that runs that sync on a cadence and opens a PR
+  against the pack repo. Automation of the *cadence*, not a live connection.
+
+Either way the merge is a reviewed PR, which is what keeps §6's conformance claim
+honest.
 
 ## 6. Conformance is contractual, not technical
 
