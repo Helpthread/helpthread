@@ -20,4 +20,4 @@ export interface ConversationRowProps {
   selected?: boolean;
   onClick?: () => void;
 }
-export declare function ConversationRow(props: ConversationRowProps): JSX.Element;
+export declare function ConversationRow(props: ConversationRowProps): React.JSX.Element;

@@ -20,4 +20,4 @@ export interface SplitButtonProps {
   /** drops the fixed-position click-away scrim, for embedding inline */
   inline?: boolean;
 }
-export declare function SplitButton(props: SplitButtonProps): JSX.Element;
+export declare function SplitButton(props: SplitButtonProps): React.JSX.Element;

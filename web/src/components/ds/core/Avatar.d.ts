@@ -10,4 +10,4 @@ export interface AvatarProps {
   ring?: boolean;
   style?: React.CSSProperties;
 }
-export declare function Avatar(props: AvatarProps): JSX.Element;
+export declare function Avatar(props: AvatarProps): React.JSX.Element;

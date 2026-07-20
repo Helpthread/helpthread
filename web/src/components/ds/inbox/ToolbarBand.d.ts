@@ -4,4 +4,4 @@ export interface ToolbarBandProps {
   children?: React.ReactNode;
   style?: React.CSSProperties;
 }
-export declare function ToolbarBand(props: ToolbarBandProps): JSX.Element;
+export declare function ToolbarBand(props: ToolbarBandProps): React.JSX.Element;

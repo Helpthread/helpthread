@@ -6,4 +6,4 @@ export interface MenuItemProps {
   destructive?: boolean;
   children: React.ReactNode;
 }
-export declare function MenuItem(props: MenuItemProps): JSX.Element;
+export declare function MenuItem(props: MenuItemProps): React.JSX.Element;

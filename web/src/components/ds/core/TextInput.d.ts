@@ -6,4 +6,4 @@ export interface TextInputProps {
   id?: string;
   style?: React.CSSProperties;
 }
-export declare function TextInput(props: TextInputProps): JSX.Element;
+export declare function TextInput(props: TextInputProps): React.JSX.Element;
