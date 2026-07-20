@@ -75,15 +75,39 @@ export interface WebAuthnCeremonyDeps {
   rp: WebAuthnRpConfig
 }
 
-export interface VerifyAuthenticationCeremonyParams {
-  /** Which ceremony this verify call expects — checked against the token's OWN `ceremony` field before anything else runs (spec §7's application-level discriminator check). */
-  ceremony: 'authentication' | 'step-up'
+interface VerifyAuthenticationCeremonyParamsBase {
   /** The raw, untrusted request-body `response` field. */
   responseJson: unknown
   challengeToken: string
-  /** Step-up only (spec §5.1): the resolved credential's `agent_id` must equal this, or the ceremony is rejected — proving a factor for a DIFFERENT Agent does not step up THIS session. */
-  requireAgentId?: string
 }
+
+/**
+ * A discriminated union rather than one shape with an optional
+ * `requireAgentId`, so that "step-up without an Agent to bind to" cannot be
+ * written at all.
+ *
+ * That combination silently disabled BOTH halves of step-up's Agent binding
+ * — the pre-consume check here and `consumeChallenge`'s `AND agent_id = $3`
+ * — reopening the challenge-burn DoS the binding exists to close. No caller
+ * ever did it, but nothing except this type stopped one from starting
+ * (Codex review, PR #96). `authentication` takes `requireAgentId?: never`
+ * for the mirror-image reason: its challenges are minted with
+ * `agent_id IS NULL` (discoverable credential, spec §4.3), so binding one
+ * would match no row and break every login.
+ */
+export type VerifyAuthenticationCeremonyParams = VerifyAuthenticationCeremonyParamsBase &
+  (
+    | {
+        /** Checked against the token's OWN `ceremony` field before anything else runs (spec §7's application-level discriminator check). */
+        ceremony: 'authentication'
+        requireAgentId?: never
+      }
+    | {
+        ceremony: 'step-up'
+        /** Required (spec §5.1): the challenge must have been minted for this Agent, AND the resolved credential's `agent_id` must equal it — proving a factor for a DIFFERENT Agent does not step up THIS session. */
+        requireAgentId: string
+      }
+  )
 
 /** Every rejection this function can return collapses to one of two client-visible outcomes (spec §4.3, §6.2): `'challenge_expired'` (the one deliberate, safe exception to uniform 401 — see webauthn-provider.ts) or `'invalid'` (everything else, including a ceremony mismatch, unknown credential, bad signature, counter regression, inactive Agent, or userHandle mismatch — no finer distinction is ever surfaced). */
 export type CeremonyVerifyResult =
