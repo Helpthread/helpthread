@@ -70,13 +70,30 @@ you distribute to others. The AGPL fully protects your right to make and share
 modifications. This policy asks only that a **materially modified** version not present
 itself, through the Marks, as the genuine project.
 
+**This section is not a condition of the AGPL license and imposes no copyright-license
+restriction.** You may distribute modified copies of Helpthread under the AGPL-3.0
+regardless of this policy; nothing here adds a further restriction to the AGPL or
+conditions your copyright rights in the code. What follows concerns only **source-identifying
+use of the Marks** — the name and logos — and is enforceable only to the extent trademark
+law permits, no further.
+
+**What "materially modified" means.** The standard is **confusion**, not the size of the
+diff: a version is materially modified, for purposes of this section, when its
+**functionality or behavior has been changed** and it is nonetheless presented — through
+the Marks — as the genuine Helpthread project, such that users could be misled about the
+source of what they are getting. By contrast, the following are **not** material for this
+purpose and need no rename: security patches and backports; distribution or OS packaging;
+changes to configuration defaults; and other branding-neutral changes that leave the
+project's identity intact. Changed functionality presented as though it were the genuine
+project is what this section addresses.
+
 Concretely: if you distribute a version of Helpthread that you have **materially
-modified**, please **do not use the Helpthread name or logos in a way that implies your
-version originates from, or is endorsed by, the Helpthread project or Resonant IQ.**
-Give your modified version its own name and branding. This is the same courtesy the
-broader free-software community has long observed — the tradition in which Firefox
-becomes Iceweasel when rebuilt with changes — and it exists to protect users, not to
-restrain your code: someone who downloads something called "Helpthread" should get
+modified** in that sense, please **do not use the Helpthread name or logos in a way that
+implies your version originates from, or is endorsed by, the Helpthread project or
+Resonant IQ.** Give your modified version its own name and branding. This is the same
+courtesy the broader free-software community has long observed — the tradition in which
+Firefox becomes Iceweasel when rebuilt with changes — and it exists to protect users, not
+to restrain your code: someone who downloads something called "Helpthread" should get
 genuine Helpthread. You remain free, of course, to state truthfully and descriptively
 that your project is **based on** or **derived from** Helpthread (per section 3.1).
 
@@ -84,7 +101,7 @@ We would rather ask politely than police heavily. If you're unsure whether a cha
 "material," or you'd like to keep some brand continuity for a good-faith downstream
 build, get in touch — see section 7.
 
-## 5. Marketplace names
+## 5. Marketplace names and other source-identifying uses
 
 Do not use **Helpthread** — or any name confusingly similar to it or to the official
 Helpthread marketplace — as the name of a competing marketplace, store, or module
@@ -93,8 +110,23 @@ marketplace or is endorsed by Resonant IQ. The official marketplace name is one 
 Marks (section 2) precisely because it is where users expect to find genuine first-party
 modules; a confusingly similar name undermines that trust.
 
-Describing your offering as **"for Helpthread"** or **"compatible with Helpthread"** is
-fine (section 3.2); naming it so as to impersonate the official marketplace is not.
+The same concern applies wherever the Marks are used **as a source identifier** — as the
+name or brand under which something is offered — rather than to describe a truthful
+relationship. Uses that can confuse people about source, and that this policy asks you not
+to make without permission, include, for example:
+
+- **domain names** built around Helpthread (e.g. `helpthread-store.com`);
+- **social-media handles**, account names, or page titles presented as the project's own;
+- **app-store or extension listings** named as though they were the official app;
+- **package names or scopes** — an npm scope, package namespace, or registry name — that
+  read as the official Helpthread namespace;
+- **code-host organizations** — a GitHub org or similar — named to look official;
+- **"official," "genuine," or endorsement claims** that the project has not made.
+
+None of this narrows the truthful, descriptive uses that are always fine: describing your
+offering as **"for Helpthread"** or **"compatible with Helpthread"** (sections 3.1 and
+3.2), and other nominative references, remain permitted. What is not permitted is using the
+Marks so as to impersonate the official marketplace, project, or a first-party release.
 
 ## 6. What we don't restrict
 
@@ -113,9 +145,8 @@ consistently with them.
 
 If you want to use the Marks in a way this policy doesn't clearly allow, or you're unsure
 which side of a line you're on, please ask. Resonant IQ can grant permission for uses
-beyond those described here. *(Contact route to be set at publication — a project email
-or the marketplace contact page; not specified in the decided scope, so left as a
-placeholder for TJ.)*
+beyond those described here. Write to **trademarks@resonantiq.app** *[confirm mailbox
+before launch]*.
 
 ---
 
@@ -127,9 +158,13 @@ placeholder for TJ.)*
   Helpthread name and marks, the npm organization, the official marketplace."
 - **Rename-on-material-modification** is drafted in the Firefox/Iceweasel tradition and
   stated politely, as instructed — a request and a courtesy, not an AGPL restriction
-  (which would be void under the AGPL's own terms). Counsel may wish to define "material
-  modification" more precisely, or add a de minimis carve-out; left general by design.
-- **Placeholders.** The contact route (section 7) and any specific registered-mark
+  (which would be void under the AGPL's own terms). Per the adjudicated Codex-review fixes
+  (2026-07-19, HT-5), §4 now (a) states expressly that it is not a condition of the AGPL
+  and imposes no copyright-license restriction, and (b) defines "materially modified" on a
+  confusion-based standard with de minimis examples (security patches, packaging, config
+  defaults, backports = not material).
+- **Placeholders.** The contact route (section 7) is set to **trademarks@resonantiq.app**
+  with an inline **[confirm mailbox before launch]** flag. Any specific registered-mark
   notices (®/™ status, registration numbers) are not in the repo and are left for TJ.
 - **No new policy invented.** This encodes the allow/require list in the decided scope;
   it does not add a formal trademark-license program, logo-usage spec, or enforcement
