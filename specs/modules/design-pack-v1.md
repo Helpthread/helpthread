@@ -46,13 +46,17 @@ hosted engine are. AGPL on the design pack actively fights the goal in §1; a pe
 license serves it. And per `catalog.md` §1, **paid → free stays possible** — moving
 these components to a permissive license is a move in the permitted direction.
 
-**Open decision 1 (TJ): MIT or Apache-2.0.** Apache-2.0 adds an express patent grant and
-is the safer default for anything a competitor may adopt; MIT is shorter and more
-familiar to the module-author audience. Recommendation: **Apache-2.0**.
+**Decision: MIT.** Apache-2.0 was considered for its express patent grant and rejected —
+there is no patentable invention in a component library, so the grant covers a threat
+that does not exist here, while its NOTICE-preservation requirements are real overhead.
+MIT is the ecosystem norm for React component libraries (React, Radix, Tailwind, shadcn),
+and a third-party module author can read it without legal review. Adoption friction is
+the live constraint; patent exposure is not.
 
-**Open decision 2 (TJ): this repo or its own.** Recommendation: **its own repo**, because
-a permissively-licensed directory inside an AGPL tree is a recurring source of
-misreading, and the pack has its own release cadence.
+**Decision: its own repo** — `helpthread-design-pack`, published as
+`@helpthread/design-pack`. A permissively-licensed directory inside an AGPL tree is a
+recurring source of misreading by exactly the audience that needs to trust it, and the
+pack has its own release cadence.
 
 ## 3. Scope of the pack
 
@@ -80,12 +84,16 @@ own. The transport for those values is the one genuinely new engine-side surface
 spec implies, and per **zero privileged first-party access** it ships public — available
 to every module author, not just first-party ones.
 
-**Open decision 3 (TJ):** whether that transport is a public read endpoint on the
-engine, or whether modules that render in an embedded context inherit the desk's CSS
-scope directly. The second is cheaper and covers the embedded case; the first also
-covers a module rendering on its own origin. Recommendation: **defer until the first
-module needs it** — consistent with substrate-v1's "each waits for a real module to
-need it."
+**Decision: ship the custom properties with the pack and let the desk's values win. No
+endpoint.** A module rendering in an embedded context inherits the desk's token scope for
+free — no engine change, no new surface. A module on its own origin gets the pack's
+Helpthread defaults, which is correct until an operator has both re-skinned their desk
+*and* installed a cross-origin module.
+
+At that point the fix is a small public read endpoint serving token values, and it ships
+public like everything else. Building it before that pair of conditions is met is
+speculative, and substrate-v1's rule applies: each surface waits for a real module to
+need it.
 
 ## 5. Generated, never forked
 
