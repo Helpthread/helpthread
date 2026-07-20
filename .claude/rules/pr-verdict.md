@@ -107,4 +107,4 @@ Blanket agreement is the most common way an inferred decision acquires a false p
 
 ## Mechanical gate
 
-Instructions drift — that is exactly how the audit's findings happened. So the highest-risk tier gets a CI check, not a promise: any PR touching a charter, `legal/`, or licensing files fails unless its body carries a verdict marker and a provenance section. See `.github/workflows/pr-verdict.yml` in repos where it is installed.
+Instructions drift — that is exactly how the audit's findings happened. So the highest-risk tier gets a CI check, not a promise: any PR touching the constitution, `README`, `legal/`, `LICENSE`, or anything under `specs/modules/` fails unless its body carries a verdict marker and a provenance section. See `.github/workflows/pr-verdict.yml` in repos where it is installed.

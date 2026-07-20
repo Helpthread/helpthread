@@ -46,7 +46,7 @@ jobs:
             -e '^README\.md$' \
             -e '^legal/' \
             -e '^LICENSE' \
-            -e '^specs/modules/(catalog|marketplace-v1|substrate-v1)\.md$' \
+            -e '^specs/modules/' \
             || true)
 
           if [ -n "$HIGH_RISK" ]; then
