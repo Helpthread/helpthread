@@ -1136,7 +1136,7 @@ stays informational.
     (confirmed fraud) decommissions immediately with no grace. The *mechanics* are
     decided (refund → decommission-after-grace; lapse → hosting continues indefinitely;
     frozen → keeps running; the self-host residual copy is consciously accepted, no DRM
-    ever). Only the exact day-counts and the customer-facing policy wording are OPEN —
+    ever). The day-counts are now CONFIRMED (see the resolved block above); only the customer-facing policy wording remains open —
     TJ/counsel, at the pre-revenue gate (§8). Test-mode dogfood (§7) uses the working
     figures.
 12. **Scoped per-desk provisioning credential — a new substrate requirement (§3e).**
