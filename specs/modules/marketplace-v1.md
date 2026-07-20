@@ -602,6 +602,22 @@ issues this grant *to* the control plane (outbound, operator-initiated delegatio
 desk still holds no marketplace or license credential of its own — being called by the
 control plane is not the core calling the marketplace.
 
+**Module runtime configuration (install-time, browser → control plane).** Some modules
+genuinely need operator-supplied settings — most prominently the operator's **own model
+API key**, which charter §2 requires assistants to use ("with the operator's own
+keys"). §3d's Provision step injects these as instance env; they have to come from
+somewhere, and that somewhere is an **install-time configuration form in Manage →
+Modules that the browser submits directly to the control plane's endpoint** — the same
+never-transits-the-core rule as the claim token (step 3). The desk's backend never
+receives, stores, or proxies these values; they live in the control-plane vault
+alongside the license key and are re-injected on every update roll (§5.2). Two honest
+consequences, stated rather than glossed: (a) the "no hand-entered env vars" promise
+(§5.1) means *no hosting-dashboard plumbing* — a module that needs an operator secret
+still asks for it once, in-app, at install; (b) operator-supplied secrets residing in
+the control-plane vault are part of the same data-residency disclosure §8 requires and
+the same §10.13 call TJ owns — a model key in Resonant IQ's vault is the credential
+face of the question whose data face is a hosted module reading conversation content.
+
 ## 4. Artifact pipeline
 
 ```text
@@ -660,10 +676,14 @@ operator grants the control plane its scoped per-desk provisioning credential on
 After that, every module install is the three steps above.
 
 **What the operator never does** (the friction v1 was rejected for): download a
-tarball, push to a git provider, import a Vercel project, hand-enter env vars, or
-hand-run the admin API to wire up an Assistant and webhook. The control plane does all
-of it. **No license key ever reaches the desk or the module's runtime config** (§1,
-§3d) — managed hosting adds convenience, not a credential in the core.
+tarball, push to a git provider, import a Vercel project, hand-copy env vars into a
+hosting dashboard, or hand-run the admin API to wire up an Assistant and webhook. The
+control plane does all of it. Settings a module genuinely needs from the operator —
+e.g. their own model API key (charter §2) — are collected once by an in-app install
+form submitted browser-direct to the control plane (§3e "Module runtime
+configuration"), never typed into a hosting dashboard and never stored in the desk.
+**No license key ever reaches the desk or the module's runtime config** (§1, §3d) —
+managed hosting adds convenience, not a credential in the core.
 
 ### 5.2 Update a module — one-click (managed hosting)
 
@@ -1060,7 +1080,11 @@ stays informational.
     wording tweak to say so explicitly is a charter-invariant call that belongs to TJ**
     — this spec flags it and does not edit §2. (The v1.1 charter amendment restates the
     *credential/no-runtime-check* invariants only; the data-residency wording is left to
-    this decision point.)
+    this decision point.) The same call covers the credential face of the question:
+    operator-supplied module secrets — most prominently the operator's own model API
+    key (§3e "Module runtime configuration") — reside in the control-plane vault, i.e.
+    on Resonant IQ infrastructure, when hosting is managed. One decision, two faces:
+    conversation data read by a hosted module, and operator secrets held to run it.
 
 ## 11. Changelog
 
