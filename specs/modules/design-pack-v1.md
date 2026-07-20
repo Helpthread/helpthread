@@ -49,7 +49,16 @@ hosted engine are. AGPL on the design pack actively fights the goal in §1; a pe
 license serves it. And per `catalog.md` §1, **paid → free stays possible** — moving
 these components to a permissive license is a move in the permitted direction.
 
-**Decision: MIT.** Apache-2.0 was considered for its express patent grant and rejected —
+**Decision: MIT — ratified by TJ, 2026-07-20** ("yes MIT"), after confirming the scope is
+the design pack alone: the core stays AGPL-3.0, `LICENSE` is untouched, and
+`web/src/components/ds/` remains part of the AGPL core. This is not a relicensing of core
+code — Resonant IQ holds the copyright outright (`ds/` has a single author), so the same
+components are simply published under a second licence in a separate package while the
+copies inside the core stay AGPL. On the cost, TJ: *"i really don't care if someone does
+anything with design components."* The brand-asset carve-out in §3 is the one boundary
+that stands.
+
+Apache-2.0 was considered for its express patent grant and rejected —
 there is no patentable invention in a component library, so the grant covers a threat
 that does not exist here, while its NOTICE-preservation requirements are real overhead.
 MIT is the ecosystem norm for React component libraries (React, Radix, Tailwind, shadcn),
@@ -83,6 +92,16 @@ for others to use it, that failure mode is close to harmless. The audit is due d
 not a blocker to design around.
 
 ## 3. Scope of the pack
+
+**Brand assets are excluded, permanently.** The wordmark, logo, and any
+Helpthread-identifying mark stay out of the pack and out of its repo — including
+`guidelines/type-wordmark.html` and any brand-specific value in `theme/helpthread.css`.
+
+MIT grants copyright, **not trademark**, so a permissive licence would not let anyone
+call their product Helpthread regardless. But shipping the wordmark inside an MIT package
+invites exactly the confusion `legal/trademark-policy.md` exists to prevent, and a
+licence file is a poor place to litigate it. The pack ships the *system* — components and
+tokens — never the *identity*.
 
 Sourced from the design project (§5), in three layers:
 
