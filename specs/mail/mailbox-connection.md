@@ -64,7 +64,7 @@ There is also no UI for connecting a mailbox. The operator runs a raw `curl` aga
 
 Note the field is a latent hazard rather than a clean equivalence: the webhook writes the notification's *new* watermark into `historyId`, while a sweep writes the *stored cursor* — semantically opposite values in the same field. Harmless while nothing reads it, and a trap for anything that later does.
 
-Consequence: **push only makes the same job run sooner.** Making scheduled fetch the primary intake is a scheduling change, not new fetch code. The lease around `history.list` (`claimReconcileLease`) already prevents concurrent runs from double-fetching.
+Consequence: **push only makes the same job run sooner.** Making scheduled fetch a fully-supported intake path (rather than only a reconciliation backstop) is a scheduling change, not new fetch code. The lease around `history.list` (`claimReconcileLease`) already prevents concurrent runs from double-fetching.
 
 **IMAP + app password works.** Probed `help@resonantiq.app` directly: authenticated, `SELECT INBOX` (`UIDVALIDITY=1`, `UIDNEXT=32`, `EXISTS=29`), `UID FETCH BODY.PEEK[]` returned raw RFC822 for five messages in 1174 ms, connection closed on exit. A real reply's `References` chain carried the `ht.ht1.…` signed reply token intact — the CHARTER.md §2 threading anchor holds on this transport.
 
@@ -185,7 +185,7 @@ That is a configuration detail on the mailbox record, not a transport concern.
 
 ## 7. Build order
 
-1. **Make Pub/Sub optional — not unsupported.** Reschedule the existing Gmail reconcile sweep so it is the primary transport, and let the engine boot with no `GMAIL_PUBSUB_*` vars. The Gmail push adapter, the webhook, and the `watch()` renewal all remain fully supported for operators who want sub-minute latency; what changes is that they stop being *mandatory setup*. This removes both silent-failure traps and the billing requirement (Pub/Sub is what forced it). Least new code of any item here — and note this is Gmail-only, per §2: it does nothing for IMAP.
+1. **Make Pub/Sub optional — not unsupported.** Reschedule the existing Gmail reconcile sweep so it can carry intake on its own, and let the engine boot with no `GMAIL_PUBSUB_*` vars. Neither transport is designated primary — per CHARTER §2, the operator chooses at setup. The Gmail push adapter, the webhook, and the `watch()` renewal all remain fully supported for operators who want sub-minute latency; what changes is that they stop being *mandatory setup*. This removes both silent-failure traps and the billing requirement (Pub/Sub is what forced it). Least new code of any item here — and note this is Gmail-only, per §2: it does nothing for IMAP.
 2. **IMAP provider adapter** behind the existing `InboundEmailProvider` seam, with fixtures proving equivalence against the Gmail path.
 3. **Migrations** — UID cursor + `UIDVALIDITY`; encrypted mailbox credential.
 4. **SMTP sender** behind the existing `EmailSender` seam.
