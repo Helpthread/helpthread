@@ -32,6 +32,8 @@
   "overrides": [
     {
       "includes": ["web/src/components/ds/**"],
+      "formatter": { "enabled": false },
+      "assist": { "actions": { "source": { "organizeImports": "off" } } },
       "linter": {
         "rules": {
           "correctness": { "noUnusedImports": "off" },
