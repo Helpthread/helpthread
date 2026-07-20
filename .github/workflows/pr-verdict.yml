@@ -40,11 +40,13 @@ jobs:
 
           # The tier: constitution, legal text, and the specs that carry licensing,
           # pricing, and the free/paid line.
+          # Files that carry a promise, a licensing boundary, or money.
           HIGH_RISK=$(echo "$CHANGED" | grep -E \
             -e '^CHARTER\.md$' \
+            -e '^README\.md$' \
             -e '^legal/' \
             -e '^LICENSE' \
-            -e '^specs/modules/(catalog|marketplace-v1)\.md$' \
+            -e '^specs/modules/(catalog|marketplace-v1|substrate-v1)\.md$' \
             || true)
 
           if [ -n "$HIGH_RISK" ]; then
@@ -106,6 +108,16 @@ jobs:
             grep -qiE 'INFERRED' <<<"$line" && continue
             fail "Attributes a decision to TJ without quoting him: ${line}"
           done < <(grep -iE "(per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ)" <<<"$BODY" || true)
+
+          # 5. A green verdict must show the review bots were adjudicated.
+          #    Bots review AFTER a PR opens, so nothing can honestly be green at open
+          #    time. This blocks the failure mode where a PR is marked green before
+          #    CodeRabbit has run, or against a commit that has since been replaced.
+          if grep -qE 'SAFE TO MERGE' <<<"$BODY"; then
+            if ! grep -qiE '(CodeRabbit|Codex|review bot)s?[[:space:]]*:' <<<"$BODY"; then
+              fail "Verdict is SAFE TO MERGE but no review-bot adjudication line is present. Add one line stating what the bots found and how each finding was resolved — e.g. 'CodeRabbit: 7 findings, 5 real and fixed, 2 wrong (misread the token scope).' If a bot has not run on the current head yet, the verdict cannot be green."
+            fi
+          fi
 
           if [ "$FAILED" = "1" ]; then
             echo

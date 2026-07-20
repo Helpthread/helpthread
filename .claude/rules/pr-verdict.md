@@ -62,7 +62,7 @@ Two-way doors need no flag. Match the noise to the cost of undo.
 
 | PR touches | Treatment |
 |---|---|
-| A charter, constitution, `legal/`, licensing, pricing, or a public promise | Full block + provenance table + TJ reads the changed text itself |
+| A charter, `README`, `legal/`, `LICENSE`, licensing, pricing, or any public promise | Full block + provenance table + TJ reads the changed text itself |
 | Specs, ADRs, architecture docs | Full block + provenance table |
 | Code, tests, config | Verdict line only |
 | Typos, formatting, dependency bumps | Verdict line only |
@@ -78,6 +78,17 @@ TJ never reads CodeRabbit, Codex, or any bot output raw. You adjudicate and repo
 If a finding is real, fix it or explain why not. "The bot said something" is not a report; a verdict on each finding is.
 
 **A bot's silence is not approval.** Check that a review actually ran on the current head — a passing check can mean skipped, rate-limited, or reviewing a commit you have since replaced.
+
+**Bots review after a PR opens, so nothing is green at open time.** The sequence is fixed:
+
+1. Open the PR at 🟡 or 🔴. Never 🟢 — no bot has run yet.
+2. Wait for gates and bots. Verify a review actually landed on the current head.
+3. Adjudicate every finding: real or not, fixed or why not.
+4. If you pushed fixes, **request re-review explicitly** — incremental review is off in these repos, so a fix-up push is otherwise never looked at.
+5. Only then update the verdict to 🟢 and add the one-line bot summary.
+6. Tell TJ it is ready. **A PR he has not been told about is not ready**, whatever its checks say.
+
+The gate enforces step 5 mechanically: a 🟢 verdict with no review-bot adjudication line fails.
 
 ## Before you write the verdict
 
