@@ -1,13 +1,13 @@
 export interface AvatarProps {
   /** initials + tone derive from this */
-  email?: string
+  email?: string;
   /** explicit initials override */
-  initials?: string
-  size?: number
+  initials?: string;
+  size?: number;
   /** the Agent avatar: accent fill, "S" */
-  agent?: boolean
+  agent?: boolean;
   /** white ring + shadow (threads, context panel) */
-  ring?: boolean
-  style?: React.CSSProperties
+  ring?: boolean;
+  style?: React.CSSProperties;
 }
-export declare function Avatar(props: AvatarProps): JSX.Element
+export declare function Avatar(props: AvatarProps): JSX.Element;

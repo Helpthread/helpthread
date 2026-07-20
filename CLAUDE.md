@@ -44,7 +44,16 @@ Adapted in our own words from Andrej Karpathy's observations on LLM coding pitfa
 
 ## UI fidelity (TJ, 2026-07-12)
 
-The Agent Inbox UI's pixel source of truth is the Claude Design prototype — `Helpthread App.dc.html` in the "Helpthread Agent Inbox Design" project (the "Helpthread" design-system project carries the same components). **The dogfood site must match it exactly — the whole designed surface, not a subset.** Design-system files under `web/src/components/ds/` stay verbatim copies; improvements go upstream in the design project first. Any deviation — visual, copy, or interaction — requires TJ's explicit sign-off. Remaining gaps are tracked as the fidelity checklist on [HT-23](https://resonantiq.atlassian.net/browse/HT-23); the ticket is not done until the checklist is.
+The Agent Inbox UI's pixel source of truth is the Claude Design prototype — `Helpthread App.dc.html` in the "Helpthread Agent Inbox Design" project (the "Helpthread" design-system project carries the same components). **The dogfood site must match it exactly — the whole designed surface, not a subset.** Any deviation — visual, copy, or interaction — requires TJ's explicit sign-off. Remaining gaps are tracked as the fidelity checklist on [HT-23](https://resonantiq.atlassian.net/browse/HT-23); the ticket is not done until the checklist is.
+
+**Design and app reconcile in both directions (TJ, 2026-07-20).** The two are one system, and neither is allowed to silently drift from the other:
+
+- **Design → app.** Files under `web/src/components/ds/` are verbatim copies of the design project's components. Byte-for-byte: its quotes, its semicolons, its import order, its line wrapping. Biome is disabled for that path (`biome.json` override) precisely so a formatter pass can't quietly break the correspondence — without that, byte comparison stops working as a drift detector. New or changed design work comes down via DesignSync; it is not hand-edited in the app.
+- **App → design.** If TJ approved something into the dev app, it is approved, and it goes back up into the design project. App-first work is normal — it just isn't finished until the design system has it. `.tsx` screens with API wiring convert to presentational `.jsx` with fixture data on the way up; every style value survives the conversion unchanged.
+
+**Where things live upstream (TJ, 2026-07-20).** The design project has three component folders: `components/core/` for primitives (reusable, context-free, no knowledge of a screen), `components/inbox/` for inbox-specific composition, and `components/app/` for app-level surface — whole screens plus the chrome that frames every screen. The test for `app/` is that the thing owns a route or wraps all of them; anything smaller and reusable is `core/`. Screens upstream are presentational: fixture data, callback props, no API. The app keeps the wiring, the design project keeps the pixels. `web/src/components/ds/` mirrors `core/` and `inbox/`; the `app/` screens live at `web/src/components/` as `.tsx` and are *converted* on the way up, not copied — so they are the one part of the surface where the two sides are deliberately not byte-identical.
+
+The invariant underneath both directions is that **a difference between the two is always a bug in one of them** — so when a re-pull surfaces a semantic difference (a changed style value, prop, or logic, as opposed to formatting), that is a finding, not a merge conflict to resolve in passing. Stop and get TJ's call on which side wins.
 
 ## Ecosystem
 
