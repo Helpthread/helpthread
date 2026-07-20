@@ -102,7 +102,7 @@ substrate's own `assistants.module` / `webhook_endpoints.module` attribution,
 | **Release** | `id`, `module_id`, `semver`, `tarball_storage_path`, `checksum_sha256`, `changelog_md`, `published_at` | One row per published version. Immutable once published — a bad release ships a new version, never edits an old one. |
 | **Customer** | `id`, `stripe_customer_id`, `email`, `created_at` | The marketplace's own account, 1:1 with a Stripe Customer. Unrelated to the engine's `agents`/`assistants` tables — a store customer and a Helpthread Agent are different systems' users, even when the same human. |
 | **Subscription** | `id`, `customer_id`, `module_id`, `stripe_subscription_id`, `stripe_latest_payment_intent_id` (nullable; updated on each successful `invoice.paid` for this subscription), `interval` (`year`, per TJ's annual decision), `stripe_status` (mirrors Stripe's own status string), `current_period_end`, `created_at` | One subscription per (customer, module, deployment) — see License key below for why "per deployment" lands here, not as a separate column. **`stripe_latest_payment_intent_id` is the join key refund/dispute webhooks resolve against**: those events arrive on Stripe charge/payment-intent/dispute objects, not Subscription objects, and `stripe_customer_id` alone can't disambiguate which subscription a given charge belongs to when one customer holds multiple module subscriptions — see §3's webhook table. |
-| **License key** | `id`, `subscription_id` (1:1), `module_id`, `secret_hash` (SHA-256 digest of the token's secret half — the plaintext `ht_lic_<id>_<secret>` is never persisted), `state` (`active`\|`lapsed`\|`frozen`\|`refunded`\|`revoked`), `entitled_up_to_version` (semver, meaningful only while `lapsed`), `pre_freeze_state` and `stripe_dispute_id` (both nullable; set together on entering `frozen`, cleared together on leaving it), `created_at`, `rotated_at`, `revealed_at` (null until the customer has viewed the plaintext once, §3) | **Mint/verify mechanism inherited verbatim from Assistant tokens** (`src/auth/assistant-token.ts`, `src/api/assistants.ts`, `src/store/assistants.ts`) — the id is generated first, `ht_lic_<id>_<secret>` minted against it, and only `secret_hash` is ever stored; verification looks the row up by the id embedded in the presented token, then does a constant-time digest compare, exactly as `getForAuth`'s single-snapshot read does for Assistants. The plaintext is returned to the caller exactly once — at first reveal or at rotation (§3, §9) — never logged, never persisted, no reveal endpoint. **"Scoped to one helpdesk deployment" is a licensing TERM, not a technical control.** Per TJ's "annual subscription per helpdesk deployment" decision, an operator running two helpdesks is expected to buy two subscriptions and hold two keys — but nothing in this schema records which deployment a key is actually used against, and nothing can: the no-phone-home posture (§1) means the marketplace never learns a deployment's identity at all, so per-deployment scoping is enforced by the terms of sale (§8) an operator agrees to, never by a technical check. A subscription and its license key stay 1:1 — the subscription is the billing object, the key is what the operator's tooling holds. **Pre-freeze state is preserved, not assumed**: entering `frozen` snapshots the license's current `state` into `pre_freeze_state` and the triggering dispute's Stripe id into `stripe_dispute_id`; a `won` outcome restores exactly that saved state — a license that was `lapsed` before the dispute comes back `lapsed`, never promoted to `active` — see §2's states table and §3. |
+| **License key** | `id`, `subscription_id` (1:1), `module_id`, `secret_hash` (SHA-256 digest of the token's secret half — the plaintext `ht_lic_<id>_<secret>` is never persisted), `state` (`active`\|`lapsed`\|`frozen`\|`refunded`\|`revoked`), `entitled_up_to_version` (semver, meaningful only while `lapsed`), `pre_freeze_state` and `stripe_dispute_id` (both nullable; set together on entering `frozen`, cleared together on leaving it), `created_at`, `rotated_at`, `revealed_at` (null until the customer has viewed the plaintext once, §3) | **Mint/verify mechanism inherited verbatim from Assistant tokens** (`src/auth/assistant-token.ts`, `src/api/assistants.ts`, `src/store/assistants.ts`) — the id is generated first, `ht_lic_<id>_<secret>` minted against it, and only `secret_hash` is ever stored; verification looks the row up by the id embedded in the presented token, then does a constant-time digest compare, exactly as `getForAuth`'s single-snapshot read does for Assistants. The plaintext is returned to the caller exactly once — at first reveal or at rotation (§3, §9) — never logged, never persisted, no reveal endpoint. **"Scoped to one helpdesk deployment serving one domain" is a licensing TERM, not a technical control.** Per TJ's "annual subscription per helpdesk deployment" decision, refined 2026-07-19 to **one license = one domain** (§10 resolutions): an operator running two helpdesks — or one helpdesk serving two domains — is expected to buy two subscriptions and hold two keys — but nothing in this schema records which deployment a key is actually used against, and nothing can: the no-phone-home posture (§1) means the marketplace never learns a deployment's identity at all, so per-deployment scoping is enforced by the terms of sale (§8) an operator agrees to, never by a technical check. A subscription and its license key stay 1:1 — the subscription is the billing object, the key is what the operator's tooling holds. **Pre-freeze state is preserved, not assumed**: entering `frozen` snapshots the license's current `state` into `pre_freeze_state` and the triggering dispute's Stripe id into `stripe_dispute_id`; a `won` outcome restores exactly that saved state — a license that was `lapsed` before the dispute comes back `lapsed`, never promoted to `active` — see §2's states table and §3. |
 | **Download grant** | `id`, `license_key_id`, `release_id`, `issued_at`, `expires_at`, `redeemed_at`, `requester_ip` | Minted per download/update-check call (§3's download endpoint) as a short-lived, single-purpose authorization for one Supabase Storage object — never a standing credential. Exists so the download endpoint has an audit trail distinct from the long-lived license key itself, and so a leaked signed URL has a bounded blast radius (default expiry: 5 minutes). |
 | **Webhook event log** | `id` (Stripe `event.id`), `type`, `received_at`, `processed_at` | The idempotency/replay-protection ledger every incoming Stripe webhook is checked against before applying a state transition — keyed by Stripe's own event id, **never** by `stripe_subscription_id` (see the Implementation note below for why that would be wrong). |
 
@@ -980,6 +980,49 @@ aspiration is now met for the mainline path; the self-host residue is the only p
 stays informational.
 
 ## 10. Decision points for TJ
+
+> **Resolved 2026-07-19 (TJ, acting as counsel — HT-5/HT-82 licensing session).**
+> The following items on this list, plus the three service-review policy calls from
+> HT-79's comment thread, are now DECIDED; each item below retains its original text
+> for the reasoning, with its disposition noted here:
+>
+> - **Licensing unit refined: one license = one domain.** The "per helpdesk
+>   deployment" term is formalized as *a license authorizes one helpdesk deployment
+>   serving one domain* (§2's License-key row updated). Bulk/multi-domain purchases
+>   are a possible later product; today, more domains = more licenses. Still a
+>   contractual term, never a technical control (no phone-home).
+> - **Partial refunds do NOT terminate** (HT-79 service-review call #1): only a
+>   refund of the full purchase price flips a license to `refunded` (webhook compares
+>   the charge's cumulative refunded amount to the amount captured). Goodwill/partial
+>   refunds leave the entitlement untouched. Code change ticketed.
+> - **Customer email uniqueness ENFORCED** (HT-79 call #2): `customers.email` gets a
+>   unique constraint; migration ticketed.
+> - **"Latest" stays publish-order** (HT-79 call #3): documented operator expectation
+>   is "publish releases in semver order"; revisit only if back-porting ever becomes
+>   real practice.
+> - **§10.3 signed off** — lapsed keys keep downloading already-entitled versions.
+> - **§10.6 signed off** — reactivation restores full latest access, no back-charge.
+> - **§10.8 confirmed** — no bundles in v1; TJ's bulk-domain idea is the noted v1.1
+>   candidate shape (multi-domain purchase, still 1 subscription : 1 license : 1
+>   domain underneath).
+> - **§10.9 decided** — Stripe Tax enabled at live-mode flip with US home-state nexus
+>   registration only; Stripe's threshold monitoring drives later registrations; EU
+>   VAT (OSS) revisited at first EU customer.
+> - **§10.10 confirmed** — control plane co-located (same repo/Supabase, distinct
+>   deployment + credential vault).
+> - **§10.11 confirmed** — 14-day B2B refund window; 7-day config-export grace;
+>   revoke decommissions immediately. Policy *wording* still counsel-drafted at the
+>   §8 gate (drafting in flight, same session).
+> - **§10.12 direction approved** — the scoped per-desk provisioning credential gets
+>   built (substrate ticket to file); the full service token is never handed to the
+>   control plane.
+> - **§10.13 RESOLVED** — charter §2 amended (same-day charter PR): the own-your-data
+>   promise is scoped to the core with the managed-hosting opt-in stated explicitly;
+>   the managed-hosting data-handling terms remain on the §8 gate.
+>
+> Still genuinely open after this session: §10.1 (price points), §10.2 (store
+> domain), §10.4 (KB-vs-pipeline charter conflict — product/architecture, not
+> licensing), §10.5 and §10.7 (product confirmations).
 
 1. **Price points per module.** Not decided; blocks store page content, not the
    architecture above (Stripe Price objects are created per module regardless of the
