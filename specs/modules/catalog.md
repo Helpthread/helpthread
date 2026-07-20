@@ -91,9 +91,22 @@ rough priority.
   actor; an Agent approves in core UI. Pure out-of-process.
 - **Auto-triage** — tagging, routing, priority; same event-driven shape.
 - **KB-grounded auto-answers** — depends on the KB and widget; later.
+- **Conversation QA & coaching** (HT-96) — rubric scoring of the team's own replies:
+  qualitative criteria judged by a model, deterministic threshold/SLA criteria scored
+  without one, and customer-feedback criteria normalized alongside them; plus a human
+  review-and-correct queue and evidence-grounded coaching. Out-of-process: subscribes to
+  `conversation.reply_sent`, reads the thread through the assistant API, posts results
+  back as internal notes, and hosts its own review UI on the design pack (HT-95).
+  **The line against §2.2's free `satisfaction ratings`: those are the customer's
+  verdict, collected freely; QA is the operator's rubric applied to their own team's
+  work.** Related but not the same as §3.3's wallboards — QA scores individual
+  conversations, analytics aggregates whatever has been scored.
 - AI subsumes rather than ports several reference modules: ticket translation,
   learning spam filter, customer data enrichment, satisfaction/sentiment analysis become
-  facets of assistant modules, not standalone products.
+  facets of assistant modules, not standalone products. (Sentiment ≠ QA: sentiment reads
+  the customer's mood, QA evaluates the Agent's reply against a rubric a human maintains.
+  The former is a facet; the latter carries its own review workflow and is its own
+  module.)
 
 ### 3.2 Channels & integrations (the reference ecosystem's biggest paid cluster)
 
@@ -223,3 +236,17 @@ now so the marketplace design inherits it:
   (`marketplace-v1.md` v1.1), delivered by a hosting control plane that sits outside the
   AGPL core, so the "no special machinery in the product" clause still holds. Free/paid
   line and build sequence unchanged; the substrate stays AGPL-free.
+- **2026-07-20** (HT-96): **Conversation QA & coaching** added to §3.1 — the catalog had
+  no QA/quality-scoring line, and §1's one-way rule (free → paid never happens) means an
+  unclaimed slot is one accidental free shipment away from being permanently
+  unmonetizable. Claiming it now is the reversible direction; paid → free stays open.
+  Two boundaries stated with it, because QA sits next to three existing entries: it is
+  **not** §2.2's free `satisfaction ratings` (the customer's verdict, freely collected —
+  QA is the operator's rubric on their own team's work), **not** the sentiment-analysis
+  facet named in this same section (sentiment reads the customer's mood; QA evaluates a
+  reply against a human-maintained rubric and carries its own review workflow), and
+  **not** §3.3's wallboards (QA scores individual conversations; analytics aggregates
+  what QA produced). Paid catalog now 23 line items across four clusters (Intelligence 4,
+  Channels & integrations 9, Enterprise & ops 8, Self-service surfaces 2 paid + 1
+  free-with-branding). Build sequence unchanged — the module is out-of-process on the
+  shipped substrate and needs no new core hook.
