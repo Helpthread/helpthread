@@ -122,13 +122,13 @@ product with enforcement machinery that would make it hostile to the people who 
 
 ## 8. Termination
 
-**Full refund.** If your purchase is refunded in full within the refund window and under
-the conditions of the marketplace **terms of sale** (which state the exact window —
-working figure fourteen (14) days — and provide for full-refund-only termination), this
-License terminates and your entitlement to new downloads and updates ends. A
+**Full refund.** If your purchase is refunded in full within the refund window stated in
+the marketplace **terms of sale** (fourteen (14) days from purchase; only a refund of the
+full purchase price terminates — partial or goodwill refunds do not affect this License),
+this License terminates and your entitlement to new downloads and updates ends. A
 Resonant IQ-hosted instance is decommissioned after the configuration-export grace period
-stated in those terms (working figure seven (7) days), during which you may export the
-instance's configuration. Section 7 governs what a termination does **not** reach.
+stated in those terms (seven (7) days), during which you may export the instance's
+configuration. Section 7 governs what a termination does **not** reach.
 
 **Revocation for fraud.** Resonant IQ may revoke this License for confirmed fraud — for
 example a stolen payment method or a confirmed violation of the terms of sale —
@@ -199,11 +199,11 @@ contemporaneous understandings on that subject.
   states the state of incorporation; this rests solely on that instruction. Confirm before
   finalizing, and add a venue/forum-selection clause if desired (not specified in the
   decided scope, so not drafted).
-- **Cross-references left as pointers, by instruction.** The exact refund window (14 days),
-  full-refund-only termination, and the config-export grace window (7 days) are stated as
-  working figures and pointed at the terms of sale / managed-hosting terms rather than
-  restated, per `specs/modules/marketplace-v1.md` §8 and §10.11, where those exact day
-  figures are flagged as the business/counsel call.
+- **Cross-references left as pointers, by instruction.** The refund window (14 days),
+  full-refund-only termination, and the config-export grace window (7 days) — all
+  CONFIRMED by TJ 2026-07-19 (spec §10 resolution block) — are referenced with their
+  decided values but their full mechanics live in the terms of sale / managed-hosting
+  terms rather than being restated here.
 - **Scope held to the decided space.** Multi-domain / bulk licensing is deliberately not
   drafted (decision: "may exist later; do not draft it"). No venue, arbitration,
   assignment, or export-control clause is included beyond what the decided scope named.
