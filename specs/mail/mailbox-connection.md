@@ -58,7 +58,9 @@ There is also no UI for connecting a mailbox. The operator runs a raw `curl` aga
 
 ## 2. What the spike established (2026-07-20, verified live)
 
-**Scheduled fetch already ships.** `runGmailWatchMaintenance` (`src/mail/gmail-watch-maintenance.ts`, the daily cron in `vercel.json`) performs "a bounded reconciliation sweep" that enqueues *the same reconcile job the push path enqueues*. That job (`src/mail/gmail-reconcile.ts`) reads the mailbox's **stored cursor** — explicitly never the push notification's `historyId` — then calls `history.list` followed by `messages.get?format=raw`. It takes only `mailboxId` from the job payload; the payload's `historyId` is logged and never acted on.
+**GMAIL scheduled reconciliation already ships — not a generic scheduled fetch.** This distinction is load-bearing and the earlier wording blurred it. What exists today is Gmail *history* reconciliation: a cursor-based `history.list` walk against the Gmail API. It proves that cursor-driven, cron-triggered intake is architecturally sound and already in production, which is what the charter amendment rests on. It does **not** provide a byte of the IMAP UID-cursor fetch this document specifies — that adapter, its cursor semantics, its `UIDVALIDITY` handling, and its idempotency key are all new work, and substantial. Read the paragraph below as "the pattern is proven," never as "the transport is built."
+
+`runGmailWatchMaintenance` (`src/mail/gmail-watch-maintenance.ts`, the daily cron in `vercel.json`) performs "a bounded reconciliation sweep" that enqueues *the same reconcile job the push path enqueues*. That job (`src/mail/gmail-reconcile.ts`) reads the mailbox's **stored cursor** — explicitly never the push notification's `historyId` — then calls `history.list` followed by `messages.get?format=raw`. It takes only `mailboxId` from the job payload; the payload's `historyId` is logged and never acted on.
 
 Note the field is a latent hazard rather than a clean equivalence: the webhook writes the notification's *new* watermark into `historyId`, while a sweep writes the *stored cursor* — semantically opposite values in the same field. Harmless while nothing reads it, and a trap for anything that later does.
 
@@ -183,7 +185,7 @@ That is a configuration detail on the mailbox record, not a transport concern.
 
 ## 7. Build order
 
-1. **Drop the Pub/Sub dependency** — reschedule the existing reconcile sweep. Least new code, largest reduction in setup steps, removes both silent-failure traps and the billing requirement (Pub/Sub is what forced it).
+1. **Make Pub/Sub optional — not unsupported.** Reschedule the existing Gmail reconcile sweep so it is the primary transport, and let the engine boot with no `GMAIL_PUBSUB_*` vars. The Gmail push adapter, the webhook, and the `watch()` renewal all remain fully supported for operators who want sub-minute latency; what changes is that they stop being *mandatory setup*. This removes both silent-failure traps and the billing requirement (Pub/Sub is what forced it). Least new code of any item here — and note this is Gmail-only, per §2: it does nothing for IMAP.
 2. **IMAP provider adapter** behind the existing `InboundEmailProvider` seam, with fixtures proving equivalence against the Gmail path.
 3. **Migrations** — UID cursor + `UIDVALIDITY`; encrypted mailbox credential.
 4. **SMTP sender** behind the existing `EmailSender` seam.
