@@ -28,13 +28,21 @@ leaving the software as free as its license promises.
 The **"Marks"** are:
 
 - the name **Helpthread** and any Helpthread word marks and logos;
-- the Helpthread **npm organization** and its package namespace;
-- the name of the official **Helpthread marketplace**.
+- the name of the official **Helpthread marketplace** *(the literal marketplace name —
+  counsel to confirm the final string before adoption)*.
 
 The Marks are owned by **Resonant IQ, Inc.** (**"Resonant IQ"**). Helpthread is a
 Resonant IQ product. Nothing in the AGPL-3.0, or in any Helpthread commercial module
 license, transfers or licenses the Marks; they are governed by this policy and by
 applicable trademark law.
+
+Separately from trademark rights, Resonant IQ **controls the official distribution
+channels**: the Helpthread npm organization and its package namespace, and the official
+GitHub organization. These are platform accounts Resonant IQ administers, not trademarks
+— no trademark claim is made over a namespace string as such — but publishing into them
+is by Resonant IQ's permission, under the relevant platform's own rules. Use of the
+*Helpthread name* within someone else's package or account name remains governed by this
+policy's confusion standard like any other use.
 
 ## 3. Uses you may make without asking (permitted)
 

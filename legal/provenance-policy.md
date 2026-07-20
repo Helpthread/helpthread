@@ -79,6 +79,14 @@ the toolchain supports this **dependency and license hygiene**; it is not a dete
 copied code fragments — human review (section 5) is the primary safeguard against
 unrecognized reproduction.
 
+**Where attribution lives.** Where a permissive license requires attribution (MIT's
+copyright-notice condition, for adapted Chatwoot material, for example), the required
+notice is carried **in the repository**: adapted files identify their source and license
+at the point of adaptation, and each distributed artifact (the core repository, and each
+module tarball) carries the third-party license texts it is required to include. Adding
+the notice is part of the adaptation change itself — the same commit, reviewed together —
+not a separate cleanup pass.
+
 ## 5. Human design and review on every change
 
 **Our policy is that every substantive change receives real human design and review before
