@@ -145,8 +145,7 @@ consistently with them.
 
 If you want to use the Marks in a way this policy doesn't clearly allow, or you're unsure
 which side of a line you're on, please ask. Resonant IQ can grant permission for uses
-beyond those described here. Write to **trademarks@resonantiq.app** *[confirm mailbox
-before launch]*.
+beyond those described here. Write to **trademarks@resonantiq.app**.
 
 ---
 
@@ -164,7 +163,7 @@ before launch]*.
   confusion-based standard with de minimis examples (security patches, packaging, config
   defaults, backports = not material).
 - **Placeholders.** The contact route (section 7) is set to **trademarks@resonantiq.app**
-  with an inline **[confirm mailbox before launch]** flag. Any specific registered-mark
+  (mailbox alias to be created in Workspace before launch — tracked as a launch-gate action). Any specific registered-mark
   notices (®/™ status, registration numbers) are not in the repo and are left for TJ.
 - **No new policy invented.** This encodes the allow/require list in the decided scope;
   it does not add a formal trademark-license program, logo-usage spec, or enforcement
