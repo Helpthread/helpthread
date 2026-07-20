@@ -13,7 +13,7 @@ Open-source, serverless helpdesk — shared inbox, threaded email conversations,
 
 ## Architecture in one breath
 
-TypeScript on Vercel (Fluid Compute, Workflows, Queues, Cron — no daemons, no polling) plus Supabase (Postgres, Auth, Storage, Realtime). Inbound mail arrives by push webhook, not IMAP polling. Threading authority lives on the outbound side: signed reply tokens in the Message-IDs the engine emits. See the charter for the reasoning.
+TypeScript on Vercel (Fluid Compute, Workflows, Queues, Cron — no daemons, nothing stays resident) plus Supabase (Postgres, Auth, Storage, Realtime). Inbound mail arrives by push webhook where the provider offers one, or by a bounded scheduled fetch where it doesn't — either way as an invocation that ends, never a process sitting in a loop. Threading authority lives on the outbound side: signed reply tokens in the Message-IDs the engine emits. See the charter for the reasoning.
 
 ## Development
 

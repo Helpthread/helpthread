@@ -1,7 +1,49 @@
 # Mailbox connection — scheduled-fetch intake, IMAP/SMTP transport, and the connect screen
 
-**Ticket:** HT-92 · **Status:** spec, implementation not started
-**Charter dependency:** the scheduled-fetch amendment (CHARTER.md §7, 2026-07-20). This spec is unimplementable without it.
+**Ticket:** HT-92 · **Status: DRAFT — NOT approved to build against.**
+**Charter dependency:** the scheduled-fetch amendment (CHARTER.md §7, 2026-07-20).
+
+> ## ⛔ Three unresolved questions block the build order in §7
+>
+> Adversarial review (2026-07-20) found three gaps, all of which sit on the
+> **mail-semantics invariant** (CHARTER.md §2) and therefore need answers —
+> with fixtures — before any of §7 starts. They are recorded here rather than
+> papered over.
+>
+> **1. Self-echo suppression has no mechanism on SMTP+IMAP.**
+> `src/store/inbound-deliveries.ts`'s `preSuppressOwnSend` pre-seeds the
+> delivery ledger with the send's `providerMessageId` — "the SAME id the
+> transport will later report for that exact message." Gmail's API supplies
+> that shared id. **SMTP submission returns no id a later IMAP `FETCH` will
+> report.** Without an answer, every agent reply lands back in the connected
+> mailbox and is ingested as a new inbound customer message. HT-49/HT-50 were
+> this class of bug and were found *live*.
+> Candidate answer to evaluate: suppress on our own minted `Message-ID`, which
+> we control on the outbound side (CHARTER.md §2's threading authority) and
+> which SMTP submission was observed to preserve verbatim — but "observed
+> once" is not "proven," and this needs a fixture.
+>
+> **2. `providerMessageId` is undefined for IMAP.**
+> `specs/mail/inbound-ingestion.md` makes `(mailboxId, providerMessageId)` the
+> unique-constrained idempotency key and requires `providerMessageId` to be
+> "the transport's own **stable** id." §5 of this document states that a
+> `UIDVALIDITY` change makes every stored UID meaningless — so a UID-keyed
+> ledger re-ingests the entire mailbox on a `UIDVALIDITY` reset, the exact
+> silent duplication the ledger exists to prevent. IMAP UIDs are also only
+> unique per-folder, not per-account.
+>
+> **3. The named seam is the wrong shape.**
+> §5 and §7 place the IMAP adapter "behind the existing `InboundEmailProvider`
+> seam." That interface is webhook-shaped in both methods —
+> `verifySignature(request: Request)` and `receiveDelivery(request: Request)`.
+> A cron-driven fetch has no `Request`. The *data* contract
+> (`RawInboundMessage`, raw bytes, a single `parseInboundEmail`) is
+> satisfiable; the *interface* is not. The claims "least new code" and "not new
+> fetch code" both rest on this and are therefore overstated.
+>
+> Until these are answered, treat §4–§7 below as a sketch of intent, not a
+> buildable specification. §2's spike results and §3's provider matrix are
+> independently verified and stand on their own.
 
 ## 1. The problem
 
@@ -16,7 +58,9 @@ There is also no UI for connecting a mailbox. The operator runs a raw `curl` aga
 
 ## 2. What the spike established (2026-07-20, verified live)
 
-**Scheduled fetch already ships.** `runGmailWatchMaintenance` (`src/mail/gmail-watch-maintenance.ts`, the daily cron in `vercel.json`) performs "a bounded reconciliation sweep" that enqueues *the same reconcile job the push path enqueues*. That job (`src/mail/gmail-reconcile.ts`) reads the mailbox's **stored cursor** — explicitly never the push notification's `historyId` — then calls `history.list` followed by `messages.get?format=raw`. It consumes nothing from the push payload.
+**Scheduled fetch already ships.** `runGmailWatchMaintenance` (`src/mail/gmail-watch-maintenance.ts`, the daily cron in `vercel.json`) performs "a bounded reconciliation sweep" that enqueues *the same reconcile job the push path enqueues*. That job (`src/mail/gmail-reconcile.ts`) reads the mailbox's **stored cursor** — explicitly never the push notification's `historyId` — then calls `history.list` followed by `messages.get?format=raw`. It takes only `mailboxId` from the job payload; the payload's `historyId` is logged and never acted on.
+
+Note the field is a latent hazard rather than a clean equivalence: the webhook writes the notification's *new* watermark into `historyId`, while a sweep writes the *stored cursor* — semantically opposite values in the same field. Harmless while nothing reads it, and a trap for anything that later does.
 
 Consequence: **push only makes the same job run sooner.** Making scheduled fetch the primary intake is a scheduling change, not new fetch code. The lease around `history.list` (`claimReconcileLease`) already prevents concurrent runs from double-fetching.
 

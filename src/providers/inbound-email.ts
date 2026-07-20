@@ -3,11 +3,23 @@
  * webhooks.
  *
  * See `src/providers/README.md` for the pattern this fits into. Per
- * CHARTER.md §2/§4, inbound mail arrives via **push webhooks**, never IMAP
- * polling — "no daemons, no polling loops" applies to inbound mail first
- * and foremost. This is where Gmail-push-via-Pub/Sub plugs in today, and
- * where later providers (Postmark inbound, SES inbound, a forwarding-
- * address transport, ...) plug in without the engine changing.
+ * CHARTER.md §2/§4 (as amended 2026-07-20, HT-92), inbound mail arrives
+ * either by **push webhook** or by a **bounded, stateless scheduled fetch** —
+ * the constraint is "no daemons, no long-running processes," not "no
+ * fetching on a schedule." Nothing may stay resident either way: no IMAP
+ * IDLE, no held connections, no worker loops.
+ *
+ * **This interface is the WEBHOOK-shaped half of that seam** — both its
+ * methods take an HTTP `Request`, so a cron-driven fetch (which has no
+ * `Request`) does not fit here and must not be forced into it. Adding a
+ * scheduled-fetch transport means a sibling seam sharing this module's DATA
+ * contract (`RawInboundMessage`, raw bytes, one `parseInboundEmail`), not an
+ * implementation of this interface. That gap is called out in
+ * `specs/mail/mailbox-connection.md` §2 and is unresolved.
+ *
+ * This is where Gmail-push-via-Pub/Sub plugs in today, and where later
+ * webhook providers (Postmark inbound, SES inbound, ...) plug in without the
+ * engine changing.
  *
  * ## Raw bytes in, nothing pre-parsed
  *
