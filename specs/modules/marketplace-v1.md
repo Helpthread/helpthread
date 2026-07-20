@@ -1,5 +1,28 @@
 # Helpthread Marketplace v1.1
 
+> ## ⚠️ MANAGED HOSTING IS RESCINDED (2026-07-20, HT-100)
+>
+> **Resonant IQ hosts no module runtimes.** Every module is deployed and run by the
+> operator, on the operator's own infrastructure. The "managed hosting" model that
+> pervades this document — the §3d hosting control plane, the §3e control-plane vault,
+> per-desk hosted instances, "no operator DevOps" — **was never a decision TJ made.**
+>
+> It was inferred by an assistant on 2026-07-20 (asked "who hosts the module runtime?",
+> received no human input, and four minutes later recorded "Pivot locked in"), then
+> described back to TJ as the provision "you chose earlier." TJ's actual requirement was
+> only that install not be manual. PR #98 merged 26 minutes after opening with zero human
+> review comments. **No code was ever written against it.**
+>
+> **What holds instead:** §5's original install flow, plus the one-click path §5 already
+> named as additive — a Vercel deploy button provisioning into the **operator's own**
+> Vercel account. That path delivers in-place update with an ops log via Vercel's
+> `deployment.succeeded` webhooks, which §9's argument for managed hosting wrongly
+> claimed only Resonant-IQ-operated runtime could provide.
+>
+> Until this document's body is rewritten (cosmetic, tracked separately), **read every
+> managed-hosting passage below as rescinded.** Where the body and this banner conflict,
+> the banner governs.
+
 Status: **draft for TJ review** (HT-79; HT-81 in-product directory and HT-82
 dogfood-through-marketplace are child tickets scoped by this spec). Governed by
 CHARTER.md §3/§4/§5 (**2026-07-19 HT-79 amendment**: the marketplace is a launch-day
