@@ -8,6 +8,12 @@ Shared rule (mirrored from the resonantiq canonical doc) — imported so it load
 
 @.claude/rules/delegation-ladder.md
 
+## PR verdict protocol
+
+Every PR opens with a verdict TJ can act on in under 30 seconds, and **no decision is ever attributed to him without a direct quote**. Mirrored from the canonical rule so it loads in every session that reads this repo. Enforced mechanically for the constitution, `legal/`, and licensing specs by `.github/workflows/pr-verdict.yml`.
+
+@.claude/rules/pr-verdict.md
+
 ## References & provenance
 
 - Helpthread is an independent implementation. No code copied or derived from copyleft-licensed projects, ever.
