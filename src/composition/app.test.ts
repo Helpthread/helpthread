@@ -35,6 +35,7 @@ function makeHandler(opts: { cronSecret?: string; uiBaseUrl?: string } = {}) {
   const drainOutbox = vi.fn(async () => ({ claimed: 2, enqueued: 2, dispatched: 2 }))
   const runSnoozeWake = vi.fn(async () => ({ due: 1, woken: 1 }))
   const runWatchMaintenance = vi.fn(async () => ({ total: 1, renewed: 1 }))
+  const runReconcileSweep = vi.fn(async () => ({ total: 1, swept: 1, skipped: 0, failed: 0 }))
   const runHealthCheck = vi.fn(async (): Promise<HealthReport> => HEALTHY_REPORT)
   const handler = createAppHandler({
     inboxApi,
@@ -44,6 +45,7 @@ function makeHandler(opts: { cronSecret?: string; uiBaseUrl?: string } = {}) {
     drainOutbox,
     runSnoozeWake,
     runWatchMaintenance,
+    runReconcileSweep,
     runHealthCheck,
   })
   return {
@@ -53,6 +55,7 @@ function makeHandler(opts: { cronSecret?: string; uiBaseUrl?: string } = {}) {
     drainOutbox,
     runSnoozeWake,
     runWatchMaintenance,
+    runReconcileSweep,
     runHealthCheck,
   }
 }
@@ -146,6 +149,7 @@ describe('createAppHandler — queue drain endpoint', () => {
       drainOutbox: vi.fn(async () => ({})),
       runSnoozeWake: vi.fn(async () => ({})),
       runWatchMaintenance,
+      runReconcileSweep: vi.fn(async () => ({})),
       runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
     })
 
@@ -202,6 +206,7 @@ describe('createAppHandler — outbox drain endpoint (HT-69)', () => {
       }),
       runSnoozeWake: vi.fn(async () => ({})),
       runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
       runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
     })
 
@@ -256,6 +261,7 @@ describe('createAppHandler — snooze wake endpoint (HT-77)', () => {
         throw new Error('secret-internal-detail-should-not-leak')
       }),
       runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
       runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
     })
 

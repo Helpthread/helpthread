@@ -1,23 +1,28 @@
 /**
- * `runGmailWatchMaintenance` — the daily Gmail maintenance sweep (HT-42;
- * specs/mail/gmail-push.md §6). Two jobs, run per active mailbox:
+ * `runGmailWatchMaintenance` — the daily Gmail `watch()` renewal (HT-42;
+ * specs/mail/gmail-push.md §6). One job, run per active mailbox:
  *
- * 1. **Re-arm `watch()`.** Gmail push notifications stop — silently, with
- *    no error on either side — once a mailbox's `watch()` registration
- *    expires (~7 days out). This re-arms it and stores the fresh
- *    expiration. Daily (not every-6-days) buys a safety margin against a
- *    missed run; `watch()` is idempotent, so re-arming early is free.
- * 2. **A bounded reconciliation sweep.** Push is best-effort (gmail-push.md
- *    §1): Gmail rate-limits and may drop or delay notifications. This
- *    enqueues one reconcile job per active mailbox — the SAME job the push
- *    webhook enqueues (`../api/gmail-webhook.ts`'s `GMAIL_RECONCILE_TOPIC`,
- *    `GmailReconcileJob`) — so a dropped or delayed *last* notification
- *    before a quiet spell never leaves a mailbox stale indefinitely. The
- *    reconcile consumer (`./gmail-reconcile.ts`, HT-41) re-reads the
- *    mailbox's STORED cursor itself and ignores the job's `historyId`, so a
- *    redundant sweep of an already-current mailbox is free — deduped by
- *    the idempotent ingest pipeline (inbound-ingestion.md §4), never
- *    doubled.
+ * **Re-arm `watch()`.** Gmail push notifications stop — silently, with no
+ * error on either side — once a mailbox's `watch()` registration expires (~7
+ * days out). This re-arms it and stores the fresh expiration. Daily (not
+ * every-6-days) buys a safety margin against a missed run; `watch()` is
+ * idempotent, so re-arming early is free.
+ *
+ * ## Renewal only, as of HT-94
+ *
+ * This module also used to run a bounded reconciliation sweep, as a daily
+ * *backstop* for push being best-effort. That sweep is now the engine's
+ * PRIMARY inbound transport and lives in `./gmail-reconcile-sweep.ts`, running
+ * every minute (CHARTER.md §2, amended 2026-07-20). Two reasons it could not
+ * stay here, both in that module's doc: the cadences differ by three orders of
+ * magnitude, and renewal needs a per-mailbox access token while the sweep needs
+ * none — welding them would have meant refreshing a token every minute for a
+ * Gmail call the sweep never makes.
+ *
+ * Consequently this whole module is meaningful ONLY when push is configured.
+ * With no Pub/Sub topic there is no `watch()` to re-arm, and the composition
+ * root does not construct its deps at all; the cron endpoint stays routed and
+ * reports a skip (`../composition/root.ts`).
  *
  * ## A plain sweep function, not a queue/cron adapter
  *
@@ -64,14 +69,6 @@
  * the ~7-day expiry leaves ample margin for a few missed runs) rather than
  * halting a healthy mailbox on a transient Gmail blip.
  *
- * ## Re-arm and sweep are independent
- *
- * A `watch()` renewal failure does NOT skip the sweep for that mailbox
- * (and a sweep is attempted even for a mailbox whose renewal just failed)
- * — the two are unrelated Gmail API calls sharing only the mailbox's
- * access token, so one failing is no reason to skip the other. Both are
- * attempted for every mailbox with a valid token.
- *
  * ## Never overwrite the cursor on renewal
  *
  * `watchStateStore.setWatchExpiration` (`../store/gmail-watch-state.ts`)
@@ -80,25 +77,17 @@
  * fresh `historyId` is AHEAD of the stored cursor, and overwriting the
  * cursor with it would silently skip un-reconciled mail).
  *
- * ## The reconciliation lease lives in the CONSUMER, not here (HT-48)
+ * ## The reconciliation lease (HT-48) — now entirely the sweep's concern
  *
- * Push-triggered reconciliation and this sweep both advance the same
- * mailbox's cursor. gmail-push.md §6 calls serializing them a pure
- * efficiency guard (avoiding redundant `history.list`/`messages.get`
- * work), NOT a correctness requirement — the ingest pipeline's own dedup
- * (inbound-ingestion.md §4) already makes either ordering safe. HT-48
- * implements that lease entirely in the reconcile job's CONSUMER
- * (`./gmail-reconcile.ts`'s `claimReconcileLease`/`releaseReconcileLease`
- * around `history.list`), not in this PRODUCER — this sweep still enqueues
- * its reconcile job with NO `dedupeKey` on purpose (see
- * {@link maintainOneMailbox}): a daily sweep of an already-current, quiet
- * mailbox must still run, not be silently suppressed as a duplicate of an
- * earlier job. Whether the resulting job actually does any Gmail work, or
- * skips because another in-flight reconcile already holds the lease, is
- * decided entirely on the consumer side, once the job is dequeued.
+ * The lease that serializes overlapping reconciliation lives in the reconcile
+ * job's CONSUMER (`./gmail-reconcile.ts`'s
+ * `claimReconcileLease`/`releaseReconcileLease` around `history.list`), never
+ * in a producer. Since this module no longer produces reconcile jobs, that
+ * discussion moved with the sweep — see `./gmail-reconcile-sweep.ts`'s doc,
+ * where it matters considerably more: at every-minute cadence the lease stops
+ * being an efficiency guard and becomes structural.
  */
 
-import { GMAIL_RECONCILE_TOPIC, type GmailReconcileJob } from '../api/gmail-webhook.js'
 // Type-only: engine modules never take a RUNTIME dependency on a concrete
 // adapter (src/providers/README.md's rule) — mirrors `./gmail-reconcile.ts`'s
 // identical `createHistoryClient` injection and `./gmail-connect.ts`'s own
@@ -121,9 +110,6 @@ export interface GmailWatchMaintenanceDeps {
 
   /** The per-mailbox `watch_expiration` write and stored-cursor read (`../store/gmail-watch-state.ts`). */
   watchStateStore: GmailWatchStateStore
-
-  /** Where each mailbox's reconcile job is enqueued — the SAME `GMAIL_RECONCILE_TOPIC` the push webhook enqueues onto (`../api/gmail-webhook.ts`). */
-  queue: QueueProvider
 
   /**
    * Builds a {@link GmailWatchClient} bound to a per-mailbox
@@ -151,8 +137,6 @@ export interface GmailWatchMaintenanceReport {
   total: number
   /** Mailboxes whose `watch()` was successfully re-armed and `watch_expiration` updated. */
   renewed: number
-  /** Mailboxes for which a reconcile job was enqueued (had a stored cursor to sweep from). */
-  swept: number
   /** Mailboxes found `needs_reconnect` after a token-acquisition failure — the token layer's own transition, not this cron's (see module doc). */
   needsReconnect: number
   /** Mailboxes with a transient token or `watch()` failure this run — retried automatically on tomorrow's run. */
@@ -186,7 +170,6 @@ export async function runGmailWatchMaintenance(
 
   const counts: Omit<GmailWatchMaintenanceReport, 'total'> = {
     renewed: 0,
-    swept: 0,
     needsReconnect: 0,
     failed: 0,
   }
@@ -229,7 +212,7 @@ async function maintainOneMailbox(
   deps: GmailWatchMaintenanceDeps,
   counts: Omit<GmailWatchMaintenanceReport, 'total'>,
 ): Promise<void> {
-  const { tokenService, mailboxStore, watchStateStore, queue, createWatchClient, topicName } = deps
+  const { tokenService, mailboxStore, watchStateStore, createWatchClient, topicName } = deps
 
   // --- Step 1: acquire a token ONCE — this both probes the grant (to
   // distinguish a dead grant from a transient failure, the classification
@@ -292,29 +275,12 @@ async function maintainOneMailbox(
     })
   }
 
-  // --- Step 3: bounded reconciliation sweep — independent of re-arm
-  // above. Skips only when there's no baseline cursor yet (nothing to
-  // reconcile from — watch() at connect time, HT-40, seeds it; this cron
-  // only renews the expiration). NO dedupeKey (module doc): a daily sweep
-  // of an already-current, quiet mailbox must still run, never be
-  // suppressed as a duplicate of an earlier job — redundant reconcile work
-  // here is exactly what the consumer's lease (HT-48, ./gmail-reconcile.ts)
-  // now optimizes away when this job lands while another reconcile of the
-  // same mailbox is already in flight, and is otherwise safe because
-  // ingest dedups on (mailboxId, providerMessageId). ---
-  const cursor = await watchStateStore.getCursor(mailboxId)
-  if (cursor === null) {
-    logMaintenanceEvent('info', {
-      mailboxId,
-      outcome: 'skipped-sweep',
-      reason: 'no-baseline-cursor',
-    })
-    return
-  }
-
-  const job: GmailReconcileJob = { mailboxId, historyId: cursor }
-  await queue.enqueue(GMAIL_RECONCILE_TOPIC, job, {})
-  counts.swept++
+  // The bounded reconciliation sweep that used to be step 3 here moved to
+  // `./gmail-reconcile-sweep.ts` (HT-94). It is no longer a daily backstop for
+  // push but the primary inbound transport, running every minute — and it
+  // needs no access token, unlike the renewal above, so keeping the two welded
+  // would have meant a token refresh per mailbox per minute for a Gmail call
+  // the sweep never makes. See that module's doc for the full rationale.
 }
 
 /**

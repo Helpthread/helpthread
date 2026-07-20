@@ -59,6 +59,10 @@ import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
 import { createGmailOAuthTokenService } from '../mail/gmail-oauth.js'
 import { createGmailReconcileHandler } from '../mail/gmail-reconcile.js'
 import {
+  type GmailReconcileSweepDeps,
+  runGmailReconcileSweep,
+} from '../mail/gmail-reconcile-sweep.js'
+import {
   type GmailWatchMaintenanceDeps,
   runGmailWatchMaintenance,
 } from '../mail/gmail-watch-maintenance.js'
@@ -400,6 +404,15 @@ export async function buildApp(
       webhookDeliveryHandler(message as QueueMessage<WebhookDeliveryJob>),
   }
 
+  // --- Reconciliation-sweep deps (HT-94). Deliberately NO tokenService and no
+  // watch client: the sweep reads a cursor and enqueues, making no Gmail call
+  // of its own, which is what makes every-minute cadence affordable. ---
+  const reconcileSweepDeps: GmailReconcileSweepDeps = {
+    mailboxStore,
+    watchStateStore,
+    queue,
+  }
+
   // --- Watch-maintenance deps (daily re-arm). Only meaningful when push is
   // configured — with no topic there is no watch to re-arm. The reconciliation
   // sweep is NOT part of this any more (HT-94): it runs on its own every-minute
@@ -411,7 +424,6 @@ export async function buildApp(
           tokenService,
           mailboxStore,
           watchStateStore,
-          queue,
           createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
           topicName: config.gmailPush.topic,
         }
@@ -452,6 +464,15 @@ export async function buildApp(
       if (report.claimed > 0) {
         console.info(JSON.stringify({ event: 'outbox_drain', ...report }))
       }
+      return report
+    },
+    // The primary inbound transport (HT-94) — runs regardless of whether push
+    // is configured, since push only makes the SAME reconcile job run sooner.
+    // Quiet ticks are logged unlike the drains': a sweep that stops sweeping is
+    // an intake outage, and its every-minute silence is the only signal.
+    runReconcileSweep: async () => {
+      const report = await runGmailReconcileSweep(reconcileSweepDeps)
+      console.info(JSON.stringify({ event: 'reconcile_sweep', ...report }))
       return report
     },
     // With push unconfigured there is no watch() to re-arm, so this cron has
