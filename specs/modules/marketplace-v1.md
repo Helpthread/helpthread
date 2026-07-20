@@ -1020,6 +1020,19 @@ stays informational.
 >   promise is scoped to the core with the managed-hosting opt-in stated explicitly;
 >   the managed-hosting data-handling terms remain on the §8 gate.
 >
+> - **Provenance stamping + attribution display (decided in the same session,
+>   follow-up exchange):** the one-domain term stays contractually enforced —
+>   a blocking install/startup domain check was considered and REJECTED
+>   (defeatable in one line by anyone holding the source; false-positives on
+>   rebrands/staging; contradicts the charter's zero-runtime-checks invariant
+>   and commercial-license §7). Adopted instead, both non-blocking: every
+>   license-authenticated download embeds a signed provenance file (license id,
+>   licensed domain, issued-at, marketplace signature — leak attribution and
+>   audit evidence, HT-89), and every paid module displays "Licensed to:
+>   <domain>" in its diagnostics surface (display only, HT-90). Both are
+>   compatible with every posture invariant by construction; managed hosting
+>   already enforces 1:1 naturally at provisioning.
+>
 > Still genuinely open after this session: §10.1 (price points), §10.2 (store
 > domain), §10.4 (KB-vs-pipeline charter conflict — product/architecture, not
 > licensing), §10.5 and §10.7 (product confirmations).
