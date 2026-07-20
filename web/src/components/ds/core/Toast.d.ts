@@ -1,8 +1,8 @@
 export interface ToastProps {
-  message: string
-  detail?: string
+  message: string;
+  detail?: string;
   /** position fixed bottom-right */
-  fixed?: boolean
-  style?: React.CSSProperties
+  fixed?: boolean;
+  style?: React.CSSProperties;
 }
-export declare function Toast(props: ToastProps): JSX.Element
+export declare function Toast(props: ToastProps): JSX.Element;

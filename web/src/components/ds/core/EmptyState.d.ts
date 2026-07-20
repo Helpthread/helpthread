@@ -1,7 +1,7 @@
 export interface EmptyStateProps {
-  title: string
-  body?: string
+  title: string;
+  body?: string;
   /** italic celebration ("Inbox zero.") */
-  celebrate?: boolean
+  celebrate?: boolean;
 }
-export declare function EmptyState(props: EmptyStateProps): JSX.Element
+export declare function EmptyState(props: EmptyStateProps): JSX.Element;

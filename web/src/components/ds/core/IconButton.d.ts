@@ -1,13 +1,13 @@
 export interface IconButtonProps {
-  title: string
-  onClick?: () => void
+  title: string;
+  onClick?: () => void;
   /** lit background (menu open / active) */
-  active?: boolean
+  active?: boolean;
   /** "header" = on the accent top bar */
-  tone?: 'default' | 'header'
-  size?: number
-  style?: React.CSSProperties
+  tone?: "default" | "header";
+  size?: number;
+  style?: React.CSSProperties;
   /** a solid 13-16px SVG glyph */
-  children: React.ReactNode
+  children: React.ReactNode;
 }
-export declare function IconButton(props: IconButtonProps): JSX.Element
+export declare function IconButton(props: IconButtonProps): JSX.Element;

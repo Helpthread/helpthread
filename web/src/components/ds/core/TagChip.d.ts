@@ -1,6 +1,6 @@
 export interface TagChipProps {
-  label: string
+  label: string;
   /** renders the × when provided */
-  onRemove?: () => void
+  onRemove?: () => void;
 }
-export declare function TagChip(props: TagChipProps): JSX.Element
+export declare function TagChip(props: TagChipProps): JSX.Element;
