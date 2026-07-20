@@ -1,5 +1,13 @@
 # Helpthread Marketplace v1.1
 
+**STATUS: NON-AUTHORITATIVE pending rewrite (2026-07-20, HT-100).** Managed hosting is
+rescinded (see the banner below). Until the body is rewritten, **this document is not a
+valid implementation contract** — no section may be built against as written. The parts
+describing an operator-run tarball marketplace (license keys, Stripe, the update feed,
+distribution) remain broadly correct; every part describing Resonant-IQ-operated module
+hosting is void. The two sections that fully specify that hosting — **§3d** and **§5.1**
+— carry their own do-not-implement markers.
+
 > ## ⚠️ MANAGED HOSTING IS RESCINDED (2026-07-20, HT-100)
 >
 > **Resonant IQ hosts no module runtimes.** Every module is deployed and run by the
@@ -490,6 +498,11 @@ operator or anyone else as "usage."
 
 ## 3d. The hosting control plane (new in v1.1)
 
+> **🔴 RESCINDED — DO NOT IMPLEMENT (2026-07-20, HT-100).** This entire section describes
+> Resonant-IQ-operated module hosting, which was rescinded. Resonant IQ hosts no module
+> runtimes; there is no hosting control plane, no control-plane vault, and no per-desk
+> provisioning grant. Retained only as a record of the rescinded design. Text below is void.
+
 Managed hosting introduces exactly one new component, and it is the load-bearing piece
 of the whole revision: a Resonant IQ-operated **hosting control plane**. It exists
 because the managed experience requires *someone* to hold a license key and a
@@ -682,6 +695,11 @@ designed loop TJ specified — *browse, buy, install, enable*, no operator DevOp
 and open-core-credibility story — the same flow proven end-to-end today.
 
 ### 5.1 Install a module — managed hosting (mainline)
+
+> **🔴 RESCINDED — DO NOT IMPLEMENT (2026-07-20, HT-100).** The managed-hosting install
+> flow is void. The supported install path is the operator deploying the module to their
+> own infrastructure (§5's original tarball flow, and the Vercel deploy-button path §5
+> names as additive). Text below is retained only as a record of the rescinded design.
 
 From the desk's Manage → Modules Directory (§6), the whole loop is in-app and
 credential-free from the core's side:
