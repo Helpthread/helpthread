@@ -32,19 +32,39 @@
  * What remains in `./gmail-watch-maintenance.ts` is renewal alone, still
  * daily, and now only scheduled when push is configured.
  *
- * ## No dedupe key, deliberately
+ * ## The dedupe key is the bare `mailboxId` — corrected after review
  *
- * Enqueues carry NO `dedupeKey`, matching the behavior this inherited. A sweep
- * of an already-current, quiet mailbox must still run rather than be
- * suppressed as a duplicate of an earlier job. Redundant reconcile work is
- * already optimized away downstream by the consumer's lease (HT-48,
- * `./gmail-reconcile.ts`), which skips when another reconcile of the same
- * mailbox is in flight — and is harmless regardless, because ingest dedups on
- * `(mailboxId, providerMessageId)`.
+ * The inherited behavior was NO `dedupeKey`, on the reasoning that "a sweep of
+ * an already-current, quiet mailbox must still run rather than be suppressed
+ * as a duplicate." That reasoning is sound, and it argues against a COMPOSITE
+ * key like `mailboxId:historyId` — which would pin suppression to a cursor
+ * value and could wedge a quiet mailbox indefinitely. It does not argue
+ * against the bare `mailboxId`, because the queue's partial unique index only
+ * suppresses against jobs that are still LIVE
+ * (`../providers/adapters/postgres-queue/`: `WHERE dedupe_key IS NOT NULL AND
+ * dead_lettered_at IS NULL`). Once a mailbox's job completes, the next tick
+ * enqueues again. A quiet mailbox is still swept every minute.
  *
- * At every-minute cadence that lease stops being an optimization and becomes
- * structural: ticks WILL overlap a still-running reconcile on a busy mailbox,
- * and the lease is what makes that a no-op instead of duplicated fetching.
+ * Carrying "no dedupeKey" from a DAILY cadence to an every-minute one was the
+ * actual mistake, and it was not benign:
+ *
+ * - **The consumer lease does not make contention free.** A failed claim
+ *   returns `{ kind: 'retry' }` (`./gmail-reconcile.ts`), and the queue counts
+ *   attempts and DEAD-LETTERS at the cap. A reconcile that runs longer than
+ *   the retry window (a large history batch, or one multi-MB raw message
+ *   through blob write + ingest) causes every tick behind it to burn its
+ *   attempts and dead-letter — which then trips the `queue-dead-letter-growth`
+ *   health alert. The lease prevents duplicated *work*; it does nothing about
+ *   duplicated *rows*.
+ * - **There was no backpressure whatsoever.** Enqueue rate was one job per
+ *   active mailbox per minute, unconditional; drain capacity is a bounded
+ *   batch per tick, shared with webhook delivery. Past roughly that many
+ *   mailboxes, `queue_jobs` grew monotonically and intake latency grew without
+ *   bound. Keying on `mailboxId` collapses the redundant pending ticks that
+ *   caused it.
+ *
+ * Note this also aligns the sweep with the push path, which has always
+ * enqueued with a dedupe key (`../api/gmail-webhook.ts`).
  *
  * ## Failure isolation
  *
@@ -74,7 +94,15 @@ export interface GmailReconcileSweepDeps {
 export interface GmailReconcileSweepReport {
   /** Active mailboxes considered this pass. */
   total: number
-  /** Mailboxes a reconcile job was enqueued for (had a baseline cursor). */
+  /**
+   * Mailboxes an enqueue was ISSUED for (i.e. that had a baseline cursor).
+   *
+   * Not necessarily rows created: `QueueProvider.enqueue` returns `void`, so a
+   * dedupe-suppressed enqueue (a job for this mailbox already pending) is
+   * indistinguishable here from one that inserted. On a busy mailbox this
+   * counter therefore reads 1 whether or not the tick did anything — the
+   * queue's own depth metrics are the place to see that difference.
+   */
   swept: number
   /** Mailboxes skipped for having no baseline cursor yet — connect seeds it, so this means a mailbox that never completed connect. */
   skipped: number
@@ -132,7 +160,10 @@ export async function runGmailReconcileSweep(
       }
 
       const job: GmailReconcileJob = { mailboxId: mailbox.id, historyId: cursor }
-      await queue.enqueue(GMAIL_RECONCILE_TOPIC, job, {})
+      // Bare mailboxId, NOT `mailboxId:historyId` — see the module doc. This
+      // collapses a redundant tick against a still-pending job for the same
+      // mailbox, and stops suppressing as soon as that job leaves the live set.
+      await queue.enqueue(GMAIL_RECONCILE_TOPIC, job, { dedupeKey: mailbox.id })
       report.swept++
     } catch (err) {
       // Safe to log the message: everything reachable here is a plain

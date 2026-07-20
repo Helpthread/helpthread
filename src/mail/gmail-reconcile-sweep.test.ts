@@ -4,16 +4,19 @@
  * exercised, not just mocked) plus a fake `QueueProvider`. Split out of
  * `./gmail-watch-maintenance.test.ts` (HT-94) along with the sweep itself —
  * see `./gmail-reconcile-sweep.ts`'s module doc for why. Exercises: the
- * happy-path enqueue, the no-baseline-cursor skip, the no-dedupeKey rule
- * (the most important behavior in this file — see the module doc's "no
- * dedupe key, deliberately" section), per-mailbox failure isolation, and
- * propagation of a fault outside the per-mailbox loop.
+ * happy-path enqueue, the no-baseline-cursor skip, per-mailbox failure
+ * isolation, and propagation of a fault outside the per-mailbox loop with a
+ * fake queue; the bare-`mailboxId`-dedupe-key liveness contract (the most
+ * important behavior in this file — see the module doc's "The dedupe key is
+ * the bare mailboxId" section) against the REAL `createPostgresQueue`, since
+ * only the real adapter's partial unique index can actually prove it.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GMAIL_RECONCILE_TOPIC, type GmailReconcileJob } from '../api/gmail-webhook.js'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
+import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.js'
 import type { EnqueueOptions, QueueProvider } from '../providers/queue.js'
 import {
   createGmailWatchStateStore,
@@ -88,6 +91,15 @@ describe('runGmailReconcileSweep', () => {
     return { mailboxStore, watchStateStore, queue }
   }
 
+  /** Count `queue_jobs` rows, optionally restricted to the live set (not dead-lettered) — the partial unique index's own predicate. */
+  async function countQueueRows(db: Db, opts: { onlyLive?: boolean } = {}): Promise<number> {
+    const where = opts.onlyLive ? 'WHERE dead_lettered_at IS NULL' : ''
+    const rows = await db.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM queue_jobs ${where}`,
+    )
+    return rows[0].count
+  }
+
   it('two active mailboxes with cursors are both enqueued', async () => {
     const { mailboxStore, watchStateStore } = await freshStores()
     const mailboxA = await seedActiveMailboxWithCursor(
@@ -136,29 +148,85 @@ describe('runGmailReconcileSweep', () => {
     expect(await watchStateStore.getCursor(mailbox.id)).toBeNull()
   })
 
-  it('enqueues with no dedupeKey — two consecutive runs both enqueue for the same mailbox rather than being suppressed as a duplicate', async () => {
-    // The most important test in this file (module doc): at every-minute
-    // cadence, a dedupeKey here would silently suppress a sweep of an
-    // already-current, quiet mailbox as a "duplicate" of the prior tick's
-    // job — turning the primary inbound transport into an accidental noop.
-    const { mailboxStore, watchStateStore } = await freshStores()
-    await seedActiveMailboxWithCursor(
+  it('a second sweep tick does NOT enqueue a second row while the mailbox job is still pending (live) — the bare-mailboxId dedupe key, against the REAL queue', async () => {
+    // The most important test in this file (module doc's "The dedupe key is
+    // the bare mailboxId" section): only the real adapter's partial unique
+    // index (`WHERE dedupe_key IS NOT NULL AND dead_lettered_at IS NULL`) can
+    // prove this — a fake queue would be tautological here and would not
+    // catch a regression to a composite `mailboxId:historyId` key.
+    const { db, mailboxStore, watchStateStore } = await freshStores()
+    const mailboxId = await seedActiveMailboxWithCursor(
       mailboxStore,
       watchStateStore,
-      'repeat@example.test',
-      'cursor-repeat',
+      'live@example.test',
+      'cursor-live',
     )
-    const { queue, enqueued } = fakeQueue()
+    const queue = createPostgresQueue(db)
     const deps = buildDeps(mailboxStore, watchStateStore, queue)
 
     await runGmailReconcileSweep(deps)
     await runGmailReconcileSweep(deps)
 
-    expect(enqueued).toHaveLength(2)
-    for (const call of enqueued) {
-      expect(call.opts).not.toHaveProperty('dedupeKey')
-      expect(call.opts?.dedupeKey).toBeUndefined()
-    }
+    expect(await countQueueRows(db)).toBe(1)
+    const rows = await db.query<{ dedupe_key: string | null }>('SELECT dedupe_key FROM queue_jobs')
+    expect(rows[0].dedupe_key).toBe(mailboxId)
+  })
+
+  it('once the pending job is ACKED, the next sweep tick enqueues again — a quiet mailbox is not permanently suppressed', async () => {
+    const { db, mailboxStore, watchStateStore } = await freshStores()
+    await seedActiveMailboxWithCursor(
+      mailboxStore,
+      watchStateStore,
+      'acked@example.test',
+      'cursor-acked',
+    )
+    const queue = createPostgresQueue(db)
+    const deps = buildDeps(mailboxStore, watchStateStore, queue)
+
+    await runGmailReconcileSweep(deps)
+    expect(await countQueueRows(db)).toBe(1)
+
+    const drainReport = await queue.drainOnce({
+      handlers: { [GMAIL_RECONCILE_TOPIC]: async () => ({ kind: 'ack' }) },
+    })
+    expect(drainReport.acked).toBe(1)
+    expect(await countQueueRows(db)).toBe(0)
+
+    await runGmailReconcileSweep(deps)
+    expect(await countQueueRows(db)).toBe(1)
+  })
+
+  it('once the pending job is DEAD-LETTERED, the next sweep tick enqueues again — a quiet mailbox is not permanently suppressed', async () => {
+    const { db, mailboxStore, watchStateStore } = await freshStores()
+    await seedActiveMailboxWithCursor(
+      mailboxStore,
+      watchStateStore,
+      'dead-lettered@example.test',
+      'cursor-dead-lettered',
+    )
+    const queue = createPostgresQueue(db)
+    const deps = buildDeps(mailboxStore, watchStateStore, queue)
+
+    await runGmailReconcileSweep(deps)
+    expect(await countQueueRows(db)).toBe(1)
+
+    const drainReport = await queue.drainOnce({
+      handlers: {
+        [GMAIL_RECONCILE_TOPIC]: async () => ({ kind: 'deadLetter', reason: 'test dead-letter' }),
+      },
+    })
+    expect(drainReport.deadLettered).toBe(1)
+    // Dead-lettered row is retained (never deleted — invariant #1), but it is
+    // no longer "live", so the unique index's predicate no longer covers it.
+    expect(await countQueueRows(db)).toBe(1)
+    expect(await countQueueRows(db, { onlyLive: true })).toBe(0)
+
+    await runGmailReconcileSweep(deps)
+    // A new live row is inserted alongside the retained dead-lettered one —
+    // the dead-lettered row is excluded from the partial unique index, so it
+    // never conflicts with (and never suppresses) the fresh enqueue.
+    expect(await countQueueRows(db)).toBe(2)
+    expect(await countQueueRows(db, { onlyLive: true })).toBe(1)
   })
 
   it('a mailbox whose getCursor throws is counted failed — other mailboxes still enqueue', async () => {

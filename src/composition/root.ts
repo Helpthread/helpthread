@@ -485,7 +485,9 @@ export async function buildApp(
     runWatchMaintenance: async () => {
       if (watchMaintenanceDeps === undefined) {
         const report = { skipped: 'push-not-configured' as const }
-        console.info(JSON.stringify({ event: 'watch_maintenance', ...report }))
+        // Same event name the module itself logs under — one endpoint must not
+        // produce two event names, or a log filter finds half its own history.
+        console.info(JSON.stringify({ event: 'gmail_watch_maintenance', ...report }))
         return report
       }
       return runGmailWatchMaintenance(watchMaintenanceDeps)
@@ -504,7 +506,8 @@ export async function buildApp(
       }
       return report
     },
-    runHealthCheck: () => runHealthCheck({ db, queue }),
+    runHealthCheck: () =>
+      runHealthCheck({ db, queue, pushConfigured: config.gmailPush !== undefined }),
   })
 }
 

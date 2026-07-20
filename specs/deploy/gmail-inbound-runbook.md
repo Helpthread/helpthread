@@ -360,7 +360,8 @@ Each `alerts[]` entry is `<code>: <detail>`. The codes are stable:
 | `ingest-dead-letter-growth` | An inbound delivery exhausted its retry budget in the last 24h — a message an Agent has NOT seen | `SELECT provider_message_id, last_error, attempts FROM inbound_deliveries WHERE status = 'dead-letter' ORDER BY updated_at DESC`; the raw mail is still in Gmail — reprocess after fixing the cause |
 | `forged-token-burst` | ≥ threshold (default 5) stored deliveries in 24h carried reply tokens that FAILED signature verification — someone is guessing/tampering with threading tokens (threading.md §5) | Search Vercel logs for `forged_token_detected` (WARN); review `senderAddress`/`conversationId` across events. The mail itself threaded safely (a forged token never appends) |
 | `mailbox-needs-attention` | A mailbox is `paused` (cursor expired — gmail-push.md §5 rebaseline) or `needs_reconnect` (dead OAuth grant) — **inbound mail is not flowing** | `needs_reconnect`: re-run the Part E consent. `paused`: reconnect to rebaseline the cursor, then check for a gap |
-| `watch-expiring` | An active mailbox's Gmail `watch()` expires in < 72h (or was never armed) — the daily renewal has been failing for days | Function logs for `/internal/cron/watch-maintenance` (`gmail_watch_maintenance` events); a manual `GET` of that endpoint with the cron secret re-arms immediately |
+| `watch-expiring` | An active mailbox's Gmail `watch()` expires in < 72h (or was never armed) — the daily renewal has been failing for days. **Only ever raised when push is configured** (HT-94): with no `GMAIL_PUBSUB_*` vars there is no `watch()` to arm, a NULL expiration is the designed steady state, and this alert is suppressed | Function logs for `/internal/cron/watch-maintenance` (`gmail_watch_maintenance` events); a manual `GET` of that endpoint with the cron secret re-arms immediately. On a push-free deployment that GET is a no-op returning `{"skipped":"push-not-configured"}` — if you see this alert there at all, it is a bug, not a mailbox problem |
+| `queue-drain-stalled` / `queue-dead-letter-growth` (on a push-free deployment) | The reconcile sweep is the sole inbound transport (HT-94), so sustained queue trouble here means **mail is not arriving at all** | Function logs for `/internal/cron/reconcile-sweep` (`gmail_reconcile_sweep` per-mailbox events, `reconcile_sweep` per-tick summary). Check `SELECT count(*) FROM queue_jobs WHERE topic = 'gmail.reconcile' AND dead_lettered_at IS NULL` — the sweep dedupes on `mailboxId`, so a healthy desk holds at most one live job per mailbox; more than that means the drain is not keeping up |
 | `webhook-endpoint-auto-disabled` | HT-69: a webhook endpoint hit 20 consecutive delivery failures and auto-disabled — a module (or an operator's own integration) has silently stopped receiving events | `SELECT id, url, consecutive_failures FROM webhook_endpoints WHERE status = 'auto_disabled'`; fix the receiving side, then `PATCH /api/v1/webhooks/{id}` with `{"status":"active"}` to re-enable (resets the counter) |
 | `webhook-delivery-dead-letter-growth` | HT-69: a webhook delivery exhausted its retries in the last 24h (`WEBHOOK_DELIVERY_TOPIC` on `queue_jobs`) | `SELECT payload, last_error FROM queue_jobs WHERE topic = 'webhook.delivery' AND dead_lettered_at IS NOT NULL ORDER BY dead_lettered_at DESC` — `payload.endpointId` names the endpoint; this can precede (or accompany) an eventual auto-disable |
 
@@ -377,9 +378,15 @@ handled by the SAME drain), `outbox_drain` (HT-69: per outbox-drain tick
 that claimed at least one `event_outbox` row — claimed/enqueued/dispatched;
 quiet ticks don't log, same convention as `queue_drain`), `gmail_reconcile`
 (per reconcile job: cursor positions, skip/retry/ack reasons), and
-`gmail_watch_maintenance` (the daily renewal + sweep). Correlate transport
-events to ingest events on `(mailboxId, providerMessageId)`
-(inbound-ingestion.md §6).
+`gmail_watch_maintenance` (the daily `watch()` renewal — push deployments
+only), `gmail_reconcile_sweep` (per-mailbox sweep decisions: swept, skipped
+for no baseline cursor, failed) and `reconcile_sweep` (the per-tick summary
+`{total, swept, skipped, failed}`). Correlate transport events to ingest
+events on `(mailboxId, providerMessageId)` (inbound-ingestion.md §6).
+
+Unlike the drains, the sweep logs **every** tick including quiet ones: on a
+push-free deployment it is the only inbound transport, so its silence is the
+sole signal that intake has stopped.
 
 ## What this runbook does not cover
 

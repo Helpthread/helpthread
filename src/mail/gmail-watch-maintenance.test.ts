@@ -3,7 +3,8 @@
  * `GmailWatchStateStore` (so the SQL behind HT-42's new
  * `listActiveMailboxes`/`setWatchExpiration` methods is genuinely
  * exercised, not just mocked) plus fakes for the Gmail-API-facing seams
- * (`createWatchClient`, `GmailOAuthTokenService`) and the `QueueProvider`.
+ * (`createWatchClient`, `GmailOAuthTokenService`). No queue seam any more —
+ * renewal never enqueues; the sweep that did moved out in HT-94.
  * Exercises the orchestration control flow documented in
  * `gmail-watch-maintenance.ts`'s module doc: renewal and the
  * token-failure branches, and failure-isolation per mailbox. The
@@ -16,7 +17,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { GmailWatchClient } from '../providers/adapters/gmail/index.js'
-import type { QueueProvider } from '../providers/queue.js'
 import {
   createGmailWatchStateStore,
   type GmailWatchStateStore,
@@ -30,13 +30,6 @@ import {
 
 const TOPIC_NAME = 'projects/helpthread-test/topics/gmail-push'
 const DEFAULT_RENEWAL_EXPIRATION = new Date('2026-02-01T00:00:00.000Z')
-
-/** A `QueueProvider` that does nothing — `queue` is a required dep but renewal itself never enqueues (the sweep that used to live here moved to `./gmail-reconcile-sweep.ts`, HT-94). */
-function noopQueue(): QueueProvider {
-  return {
-    async enqueue() {},
-  }
-}
 
 /**
  * A fake `GmailOAuthTokenService` whose behavior is keyed by mailboxId.
@@ -138,7 +131,6 @@ describe('runGmailWatchMaintenance', () => {
   function buildDeps(
     mailboxStore: MailboxStore,
     watchStateStore: GmailWatchStateStore,
-    queue: QueueProvider,
     overrides: Partial<GmailWatchMaintenanceDeps> = {},
   ): GmailWatchMaintenanceDeps {
     return {
@@ -166,9 +158,7 @@ describe('runGmailWatchMaintenance', () => {
       'cursor-b',
     )
 
-    const report = await runGmailWatchMaintenance(
-      buildDeps(mailboxStore, watchStateStore, noopQueue()),
-    )
+    const report = await runGmailWatchMaintenance(buildDeps(mailboxStore, watchStateStore))
 
     expect(report).toEqual({ total: 2, renewed: 2, needsReconnect: 0, failed: 0 })
     expect((await readWatchExpiration(rawDb, mailboxA))?.toISOString()).toBe(
@@ -199,9 +189,7 @@ describe('runGmailWatchMaintenance', () => {
     const tokenService = fakeTokenService(mailboxStore, {})
     const getTokenSpy = vi.spyOn(tokenService, 'getAccessToken')
 
-    await runGmailWatchMaintenance(
-      buildDeps(mailboxStore, watchStateStore, noopQueue(), { tokenService }),
-    )
+    await runGmailWatchMaintenance(buildDeps(mailboxStore, watchStateStore, { tokenService }))
 
     // Exactly one token-service call per mailbox: step 1 acquires the token and
     // the watch client reuses it, rather than fetching a second time. (Two
@@ -219,9 +207,7 @@ describe('runGmailWatchMaintenance', () => {
     })
     // No seedBaseline call — this mailbox has no gmail_watch_state row at all.
 
-    const report = await runGmailWatchMaintenance(
-      buildDeps(mailboxStore, watchStateStore, noopQueue()),
-    )
+    const report = await runGmailWatchMaintenance(buildDeps(mailboxStore, watchStateStore))
 
     expect(report).toEqual({ total: 1, renewed: 1, needsReconnect: 0, failed: 0 })
     expect(await watchStateStore.getCursor(mailbox.id)).toBeNull()
@@ -243,7 +229,7 @@ describe('runGmailWatchMaintenance', () => {
     )
 
     const report = await runGmailWatchMaintenance(
-      buildDeps(mailboxStore, watchStateStore, noopQueue(), {
+      buildDeps(mailboxStore, watchStateStore, {
         tokenService: fakeTokenService(mailboxStore, { [dead]: 'needs_reconnect' }),
       }),
     )
@@ -268,7 +254,7 @@ describe('runGmailWatchMaintenance', () => {
     )
 
     const report = await runGmailWatchMaintenance(
-      buildDeps(mailboxStore, watchStateStore, noopQueue(), {
+      buildDeps(mailboxStore, watchStateStore, {
         tokenService: fakeTokenService(mailboxStore, { [flaky]: 'transient' }),
       }),
     )
@@ -294,7 +280,7 @@ describe('runGmailWatchMaintenance', () => {
     const originalExpiration = new Date('2026-01-01T00:00:00.000Z') // written by seedBaseline above
 
     const report = await runGmailWatchMaintenance(
-      buildDeps(mailboxStore, watchStateStore, noopQueue(), {
+      buildDeps(mailboxStore, watchStateStore, {
         createWatchClient: fakeCreateWatchClient([glitchy]),
       }),
     )
@@ -311,7 +297,7 @@ describe('runGmailWatchMaintenance', () => {
     const { mailboxStore, watchStateStore } = await freshStores()
     const listSpy = vi.spyOn(mailboxStore, 'listActiveMailboxes')
 
-    const deps = buildDeps(mailboxStore, watchStateStore, noopQueue(), { topicName: '' })
+    const deps = buildDeps(mailboxStore, watchStateStore, { topicName: '' })
 
     await expect(runGmailWatchMaintenance(deps)).rejects.toThrow(/topicName/)
     expect(listSpy).not.toHaveBeenCalled()

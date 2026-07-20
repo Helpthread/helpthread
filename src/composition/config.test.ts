@@ -53,10 +53,20 @@ describe('loadConfig — missing / malformed values', () => {
     expect(() => loadConfig(env)).toThrow(/DATABASE_URL/)
   })
 
-  it('treats a whitespace-only value as missing', () => {
-    expect(() => loadConfig({ ...validEnv(), GMAIL_PUBSUB_TOPIC: '   ' })).toThrow(
-      /GMAIL_PUBSUB_TOPIC/,
-    )
+  it('treats a whitespace-only GMAIL_PUBSUB_TOPIC as missing — triggers the Gmail-push partial-config error (the other two push vars are still set)', () => {
+    // Since HT-94 made the push trio optional-but-all-or-nothing, this is no
+    // longer a plain "required var missing" case: validEnv() still has the
+    // other two push vars set, so a whitespace-only topic lands in
+    // resolveGmailPush's PARTIAL branch, not the "all three unset" happy path.
+    let message = ''
+    try {
+      loadConfig({ ...validEnv(), GMAIL_PUBSUB_TOPIC: '   ' })
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+    expect(message).toContain('GMAIL_PUBSUB_TOPIC')
+    expect(message).toContain('partially configured')
+    expect(message).toContain('is unset')
   })
 
   it('aggregates ALL problems into one error, not just the first', () => {
@@ -124,6 +134,75 @@ describe('loadConfig — missing / malformed values', () => {
   it('returns the canonical origin (bare host, no trailing slash) for a valid origin with a port', () => {
     const config = loadConfig({ ...validEnv(), PUBLIC_BASE_URL: 'https://desk.example.com:8443/' })
     expect(config.publicBaseUrl).toBe('https://desk.example.com:8443')
+  })
+})
+
+describe('loadConfig — gmailPush / GMAIL_PUBSUB_* trio (HT-94, optional-but-all-or-nothing)', () => {
+  /** `validEnv()` with all three push vars removed — the push-free base every case here starts from. */
+  function envWithoutPush(): Record<string, string> {
+    const env = validEnv()
+    delete (env as Record<string, string | undefined>).GMAIL_PUBSUB_TOPIC
+    delete (env as Record<string, string | undefined>).GMAIL_PUBSUB_SUBSCRIPTION
+    delete (env as Record<string, string | undefined>).GMAIL_PUSH_SERVICE_ACCOUNT
+    return env
+  }
+
+  it('all three unset: config.gmailPush is undefined and loadConfig SUCCEEDS — the push-free happy path', () => {
+    const config = loadConfig(envWithoutPush())
+    expect(config.gmailPush).toBeUndefined()
+  })
+
+  it('only GMAIL_PUBSUB_TOPIC set (two missing): throws naming exactly the two missing vars, plural "are unset"', () => {
+    const env = { ...envWithoutPush(), GMAIL_PUBSUB_TOPIC: 'projects/x/topics/y' }
+    let message = ''
+    try {
+      loadConfig(env)
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+    expect(message).toContain('partially configured')
+    expect(message).toContain('GMAIL_PUBSUB_SUBSCRIPTION')
+    expect(message).toContain('GMAIL_PUSH_SERVICE_ACCOUNT')
+    expect(message).toContain('are unset')
+  })
+
+  it('two of three set (GMAIL_PUSH_SERVICE_ACCOUNT missing): throws naming just that one var, singular "is unset"', () => {
+    const env = {
+      ...envWithoutPush(),
+      GMAIL_PUBSUB_TOPIC: 'projects/x/topics/y',
+      GMAIL_PUBSUB_SUBSCRIPTION: 'projects/x/subscriptions/y',
+    }
+    let message = ''
+    try {
+      loadConfig(env)
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+    expect(message).toContain('partially configured')
+    expect(message).toContain('GMAIL_PUSH_SERVICE_ACCOUNT')
+    expect(message).toContain('is unset')
+    expect(message).not.toContain('GMAIL_PUBSUB_TOPIC is unset')
+    expect(message).not.toContain('GMAIL_PUBSUB_SUBSCRIPTION is unset')
+  })
+
+  it('a whitespace-only GMAIL_PUBSUB_SUBSCRIPTION counts as missing, same as unset — throws naming it, others treated present', () => {
+    const env = {
+      ...envWithoutPush(),
+      GMAIL_PUBSUB_TOPIC: 'projects/x/topics/y',
+      GMAIL_PUBSUB_SUBSCRIPTION: '   ',
+      GMAIL_PUSH_SERVICE_ACCOUNT: 'invoker@x.iam.gserviceaccount.com',
+    }
+    let message = ''
+    try {
+      loadConfig(env)
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+    expect(message).toContain('partially configured')
+    expect(message).toContain('GMAIL_PUBSUB_SUBSCRIPTION')
+    expect(message).toContain('is unset')
+    expect(message).not.toContain('GMAIL_PUBSUB_TOPIC is unset')
+    expect(message).not.toContain('GMAIL_PUSH_SERVICE_ACCOUNT is unset')
   })
 })
 
