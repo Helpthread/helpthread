@@ -178,10 +178,9 @@ upstream contributor representations.
 ## 11. Governing law
 
 This License is governed by the laws of the **State of Delaware**, United States,
-without regard to its conflict-of-laws rules. *(Basis: Resonant IQ, Inc. is a Delaware
-corporation. See the note to counsel below — the repository does not independently
-corroborate the state of incorporation, so TJ should confirm before this text is
-finalized.)*
+without regard to its conflict-of-laws rules. *(Verified: Certificate of
+Incorporation of Resonant IQ, Inc., a Delaware corporation, filed with the Delaware
+Secretary of State May 19, 2026, file no. 10629316 — corporate records on file.)*
 
 ## 12. Entire agreement
 
@@ -194,11 +193,10 @@ contemporaneous understandings on that subject.
 
 ### Notes to counsel (not part of the License)
 
-- **Governing law / incorporation.** Delaware is encoded per the stated decision that
-  Resonant IQ, Inc. is a Delaware corporation. No document in this repository independently
-  states the state of incorporation; this rests solely on that instruction. Confirm before
-  finalizing, and add a venue/forum-selection clause if desired (not specified in the
-  decided scope, so not drafted).
+- **Governing law / incorporation — VERIFIED 2026-07-19.** Delaware confirmed against the
+  filed Certificate of Incorporation (Delaware SoS, filed May 19, 2026, file no. 10629316)
+  in the company's corporate records. Venue/forum-selection remains undrafted (outside the
+  decided scope) — add if desired.
 - **Cross-references left as pointers, by instruction.** The refund window (14 days),
   full-refund-only termination, and the config-export grace window (7 days) — all
   CONFIRMED by TJ 2026-07-19 (spec §10 resolution block) — are referenced with their
