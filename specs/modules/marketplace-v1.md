@@ -1,27 +1,50 @@
-# Helpthread Marketplace v1
+# Helpthread Marketplace v1.1
 
 Status: **draft for TJ review** (HT-79; HT-81 in-product directory and HT-82
 dogfood-through-marketplace are child tickets scoped by this spec). Governed by
 CHARTER.md §3/§4/§5 (**2026-07-19 HT-79 amendment**: the marketplace is a launch-day
 component of Phase 3, built now and proven first as the project's own dogfood install
-path — not deferred to "once demand justifies it") and `specs/modules/catalog.md` §5,
-the additive contract this spec is built to satisfy exactly.
+path — not deferred to "once demand justifies it"; **2026-07-19 HT-79 managed-hosting
+amendment**: the default install path is managed hosting — clicking Install provisions
+a Resonant IQ-hosted instance of the module — with the self-host tarball path kept as
+the open-core escape hatch) and `specs/modules/catalog.md` §5, the additive contract
+this spec is built to satisfy exactly.
+
+**v1.1 — managed hosting (the mainline install path).** TJ walked the v1 manual
+self-host install as customer #1 (HT-82 dogfood, 2026-07-19) and rejected its
+friction: the intended experience is *visit the module store in-app, buy, install,
+enable* — one designed loop, not five hand-assembled seams. This revision makes
+**managed hosting** the default: Resonant IQ hosts the module runtime; clicking Install
+in Manage → Modules provisions a hosted instance for that deployment; enable/disable is
+a toggle; there is no operator DevOps. The manual tarball flow of v1 is not deleted —
+it is demoted to a documented self-host escape hatch (§5.4), still fully supported and
+already proven end-to-end today (purchase → license → key-authed download with verified
+checksum). The revision is contained: the entities (§2), the commerce/download/
+update-check service (§3a–§3c), and the artifact pipeline (§4) are **unchanged**; what
+is new is a third trust domain — a **hosting control plane** (§3d) — and the operator
+UX that rides it (§5). Every invariant this spec was built to protect survives verbatim
+(§1).
 
 **Citation basis.** The HT-79 charter amendment merged to `main` as PR #86, commit
-`b528971`. Every CHARTER.md citation below was re-verified against that merged text
-on 2026-07-19; the draft's earlier provisional citations no longer stand on an
-unmerged branch.
+`b528971`; the HT-79 managed-hosting amendment is drafted on this branch against §4 and
+the §7 appendix by the same direct-edit mechanism PR #86 used (this spec does not
+invent a separate amendment file — the charter's amendments live in its own Governance
+appendix). Every CHARTER.md citation below was re-verified against the merged text on
+2026-07-19.
 
 ## 1. Purpose & scope
 
 This spec pins the Helpthread Marketplace: the commerce plumbing — license keys,
-subscriptions, module distribution, an update feed — around the module substrate
+subscriptions, module distribution, an update feed — plus the **hosting control plane**
+that runs modules on the operator's behalf, both built around the module substrate
 (`specs/modules/substrate-v1.md`), which stays AGPL-free and unchanged. It covers
-entities, service architecture, the artifact pipeline, install UX v1, the in-product
-directory contract (HT-81), the dogfood-through-marketplace plan (HT-82), counsel
-dependencies, non-goals, and decision points for TJ. It does not re-spec the
-substrate's events/webhooks/assistant surfaces (already shipped, HT-67/69/70) or the
-module catalog's free/paid line (`catalog.md`, already decided).
+entities, service architecture (including the hosting control plane, §3d), the
+buy → install → enable managed handoff (§3e), the artifact pipeline, the managed-hosting
+install UX and its self-host escape hatch (§5), the in-product directory contract
+(HT-81), the dogfood-through-marketplace plan (HT-82), counsel dependencies, non-goals,
+and decision points for TJ. It does not re-spec the substrate's events/webhooks/
+assistant surfaces (already shipped, HT-67/69/70) or the module catalog's free/paid
+line (`catalog.md`, already decided).
 
 **The governing constraint, stated once because every design choice below derives
 from it** (`catalog.md` §5, restated verbatim in spirit):
@@ -32,15 +55,31 @@ from it** (`catalog.md` §5, restated verbatim in spirit):
 > it never reaches into a running helpdesk, and it never breaks a running module.
 > The dogfooded artifact IS the marketplace artifact.
 
-Concretely, this means: no code this spec describes runs *inside* a deployed
-Helpthread engine or a deployed module. Every entity, table, and endpoint below lives
-in one place only — the separate marketplace service (§3) — and a deployed module's
-own runtime configuration never contains a license key. This is independently
-verifiable today: `module-draft-assistant`'s full environment-variable table
-(`HELPDESK_API_URL`, `HELPDESK_ASSISTANT_TOKEN`, `WEBHOOK_SIGNING_SECRET`,
+Concretely, this means: **no code this spec describes runs inside the AGPL core, and
+no license-check code runs inside a deployed module — hosted or self-hosted.** The
+license key and every entitlement decision live in Resonant IQ-operated services
+outside the core: the marketplace service (§3a–§3c) and, new in v1.1, the hosting
+control plane (§3d). A deployed module's own runtime configuration never contains a
+license key, whether the operator deployed it or Resonant IQ hosts it — the two
+artifacts are byte-identical (§4), so "the dogfooded artifact IS the marketplace
+artifact" now also means *the hosted artifact IS the self-host artifact*. This is
+independently verifiable today: `module-draft-assistant`'s full environment-variable
+table (`HELPDESK_API_URL`, `HELPDESK_ASSISTANT_TOKEN`, `WEBHOOK_SIGNING_SECRET`,
 `ANTHROPIC_API_KEY`, `DRAFT_MODEL`, `DRAFT_SYSTEM_PROMPT_APPEND`) contains nothing
 resembling a license key or a marketplace URL — the reference module artifact already
-satisfies the constraint this spec is designed not to violate.
+satisfies the constraint this spec is designed not to violate, and managed hosting adds
+nothing to that table.
+
+**Managed hosting does not move a single check into the core or the module.** When
+Resonant IQ hosts a module, the license key sits in the hosting control plane's vault
+(§3d), never in the hosted module's environment; entitlement is enforced only by the
+control plane's *provisioning* decisions (whether to roll an update, whether to keep an
+instance running), exactly as it is enforced only by the marketplace's *download*
+decisions for a self-hoster. The running module contains no phone-home and no license
+logic in either case. The one genuinely new fact v1.1 introduces — that Resonant IQ,
+as host, is now *able* to stop a running instance it operates — is confined to the
+`refunded`/`revoked` lifecycle (§3d, §5.3) and is deliberately held to the same
+"a lapse never stops running software" floor the self-host path already guarantees.
 
 **Ownership.** Unlike the AGPL engine, the marketplace service itself is not
 self-hosted or distributed to operators — it is a Resonant IQ-run, closed-source,
@@ -416,6 +455,168 @@ operator or anyone else as "usage."
   its own runtime configuration.** No engine code path, no module's deployed runtime
   code path, references this endpoint or any license key. This is the same posture
   independently confirmed in §1 by `module-draft-assistant`'s actual env-var table.
+  **In managed hosting this caller is the hosting control plane (§3d), never the desk**
+  — the control plane holds the license key and runs the operator's update workflow on
+  their behalf. Nothing about that changes who *cannot* call it: the AGPL core still
+  never does.
+
+## 3d. The hosting control plane (new in v1.1)
+
+Managed hosting introduces exactly one new component, and it is the load-bearing piece
+of the whole revision: a Resonant IQ-operated **hosting control plane**. It exists
+because the managed experience requires *someone* to hold a license key and a
+provisioning credential at the same time and act on both — and the one place that must
+**never** be is the AGPL core. The control plane is that someone.
+
+**Three trust domains, stated once.** After v1.1 there are three, and the credential
+each may hold is the whole point of separating them:
+
+| Domain | Owned/run by | May hold | Must never hold |
+|---|---|---|---|
+| **Desk core** (the AGPL engine) | The operator (own Vercel + Supabase) | Its own substrate rows — `assistants`/`webhook_endpoints` carrying a `module` slug (the existing installed-ness signal, §6) | Any license key; any marketplace or control-plane credential in its runtime config |
+| **Marketplace service** (§3a–§3c) | Resonant IQ (closed SaaS) | Stripe data; `secret_hash` of license keys; Release tarballs | Per-desk provisioning credentials (desk admin tokens, deploy tokens) |
+| **Hosting control plane** (this section) | Resonant IQ (closed SaaS) | **Both** — the plaintext license key it redeemed for the operator (§3e), *and* the per-desk provisioning grant the operator delegated at enrollment | — (it is the deliberate single bridge; its blast radius is contained by keeping it off the public store surface) |
+
+The control plane is the *only* domain that holds both a license key and a desk
+credential, and it sits entirely outside the AGPL core. That is the precise, engineered
+form of the charter invariant "the helpdesk never calls the marketplace with
+credentials": the helpdesk (core) holds no such credential to call with, and the
+component that does is not the helpdesk.
+
+**Where it lives.** *Chosen default:* the control plane ships in the same private
+repo and Supabase project as the marketplace service (`Helpthread/marketplace`) but as
+a **distinct deployment and a distinct credential store** — a separate trust domain,
+co-located for v1 velocity, with a clean seam to split into its own service later.
+*Alternative considered:* a fully separate repo/infra from day one — rejected for v1 as
+premature operational overhead; the separation that matters for the invariant is
+credential isolation from the public store surface, which co-location with a separate
+vault already achieves. (Decision point §10.10.)
+
+**Responsibilities** — the full lifecycle of a hosted module instance, one row per
+`(customer desk, module)`, all driven from the desk's Manage → Modules surface (§5):
+
+- **Provision** — on a completed managed purchase (§3e), stand up a Resonant IQ-hosted
+  instance of the module at its entitled version: fetch the tarball via the
+  marketplace's own Bearer download endpoint (§3b) using the held license key, deploy
+  it onto Resonant IQ hosting, inject the module's *runtime* config (the ordinary
+  substrate env vars — `HELPDESK_API_URL`, `HELPDESK_ASSISTANT_TOKEN`,
+  `WEBHOOK_SIGNING_SECRET`, model keys, §4/§5; **never** a license key), and register
+  the module against the operator's desk (create its Assistant, register its webhook
+  endpoint) via the substrate admin API, using the per-desk provisioning grant.
+- **Enable / disable** — a toggle. Disable pauses the instance (and/or sets its
+  registered Assistant `disabled` and its webhook endpoint inactive via the substrate
+  admin API); enable resumes. No teardown, no data loss — a disabled instance is
+  dormant, not decommissioned.
+- **Update** — one-click, operator-initiated (§5.2): roll the hosted instance to a
+  newer entitled release. Because the control plane both knows the deployed version and
+  gates the roll on license state, this is where §6's "update available" question —
+  *unbuildable* for self-host in v1 — becomes buildable for hosted instances (§6).
+- **Decommission** — tear the instance down and deregister it. Reached by the
+  `refunded`/`revoked` lifecycle below and by an operator's own explicit uninstall,
+  always after a config-export grace window (§5.3).
+
+**Hosted-instance lifecycle vs. license state.** The five license states (§2) drive
+the marketplace's download/update-check endpoints unchanged. For a *hosted* instance,
+the control plane adds one rule the self-host path could never enforce because it could
+never reach a running deployment — and holds it to the "lapse never stops running
+software" floor deliberately:
+
+| License state | Hosted instance | Updates | Rationale |
+|---|---|---|---|
+| `active` | Runs latest entitled version | Available (one-click) | — |
+| `lapsed` | **Keeps running, pinned at `entitled_up_to_version`** | Stop (nudge shown) | The central promise, now literally enforced by the control plane *not acting*: a lapse is non-payment, not a verdict, and hosting continues **indefinitely**. Refund is a different thing (below). |
+| `frozen` (dispute filed) | **Keeps running** | Paused | A filed dispute is protective, not a verdict; stopping a customer's running support automation mid-dispute would punish them for exercising a chargeback right. Downloads/update-check pause per §2; the running instance does not. |
+| `refunded` (voluntary refund, or dispute lost) | **Decommissioned after a config-export grace window** (working figure 7 days — exact number OPEN, §10.11) | Hard-refused immediately (unchanged, §3b/§3c) | Refund unwinds the transaction and returns the money; unlike a lapse, entitlement has *ended*, and — because Resonant IQ is the host and bears the ongoing cost — continuing to run a fully-refunded instance forever is not owed. This is **not** a contradiction of "lapse never stops running software": refund is not lapse. A dispute resolved `lost` (§2) routes here. |
+| `revoked` (confirmed fraud, manual) | **Decommissioned immediately** | Hard-refused (unchanged) | The one case where an immediate stop is warranted — a manual admin action following an actual confirmed-fraud investigation (stolen card, ToS violation), never automatic. *Chosen default; §10.11.* |
+
+**Self-host residual exposure is accepted, consciously and permanently.** A refunded or
+revoked customer who took the self-host tarball path keeps a working old copy of the
+module — the marketplace refuses them new downloads and updates, but there is **no DRM,
+no kill switch, and no runtime license check, ever**, so the bits they already hold keep
+running. This is stated here so no future change "fixes" it: it is the direct, intended
+consequence of the charter's no-runtime-check posture (`catalog.md` §5), the same
+property that makes the product trustworthy to self-hosters, and it is a deliberately
+accepted cost, not an oversight. Managed hosting can decommission an instance *Resonant
+IQ operates*; it never reaches into anything the operator holds.
+
+**What the control plane logs** is bounded exactly as §3c's update-check is: license-key
+id, module, desk identity it is provisioning for, action, timestamp, status — the
+operational record a hosting operator needs to run the fleet. It is not usage telemetry
+and never surfaces helpdesk conversation content or volume back as "usage."
+
+## 3e. The buy → install → enable managed handoff (new in v1.1)
+
+The operator's experience is *in-app*: browse in Manage → Modules, click Buy, and the
+module ends up installed and enabled without ever copying a key. The architecture keeps
+purchase and licensing **on the separate store service** (confirmed 2026-07-19) and
+keeps every credential out of the AGPL core. The seam that makes both true is a
+one-time **claim token**, redeemed by the control plane — never by the desk.
+
+1. **Buy (browser, store-side).** The desk's Manage → Modules "Buy" button opens the
+   store's **hosted Stripe Checkout** in the operator's browser (the charter-preserving
+   rule that purchases happen in the operator's browser on the store site, §9, is
+   intact). The desk passes only non-secret context — the module slug and an opaque
+   desk-identifier for the return leg — as checkout metadata; **no credential, no
+   credentialed marketplace call originates in the core.**
+2. **License minted (marketplace webhook).** `checkout.session.completed` creates the
+   Customer / Subscription / License-key row exactly as §2/§3 already specify. In
+   addition, the marketplace mints a single-use, short-TTL **claim token** bound to that
+   license and the desk-identifier from step 1 — this token is *not* the license key and
+   *not* the plaintext secret; it is an OAuth-authorization-code-shaped one-time
+   credential whose only power is "redeem me, once, for this one license, into a control
+   plane."
+3. **Return leg (browser redirect).** Checkout's success URL redirects the browser to
+   the **hosting control plane's** claim endpoint carrying the claim token (the
+   OAuth-code pattern — a one-time, single-use, minutes-TTL token in a redirect URL,
+   never the license key and never PII). The redirect target is the control plane, not
+   the desk core, precisely so the key never transits the core.
+4. **Redeem + provision (control-plane-to-marketplace).** The control plane redeems the
+   claim token against the marketplace (both parties outside the core), receives the
+   plaintext license key **once**, and stores it in its own vault. It then runs the
+   Provision responsibility (§3d) for that desk. The raw one-time key reveal of v1 (§3's
+   account-area flow) still exists for self-hosters, but for a managed install it is now
+   *plumbing the operator never sees* — exactly the "invisible handoff" this revision
+   was asked to design.
+5. **Reflected as installed (desk, credential-free).** Provisioning registers the
+   module's Assistant + webhook endpoint on the desk via the substrate admin API, so the
+   desk's Manage → Modules infers the module as installed by the **same local
+   attribution signal it already uses** (§6) — no new "installed" table, no license key
+   in the desk, no cross-origin credentialed call from the core. The control plane
+   finally bounces the browser back to Manage → Modules, which now shows the module
+   enabled. "The license key handed back to the desk automatically" is, precisely, this:
+   the *operator experience* of an installed module appearing on its own, realized by
+   the control plane, with the actual key resident only in the control plane's vault.
+
+**Enrollment (one-time, prerequisite to step 4's provisioning).** Before the control
+plane can provision on a desk, the operator grants it a **scoped, revocable per-desk
+provisioning credential** — an OAuth-style consent the operator performs once from
+Manage → Modules ("Enable managed hosting"). *Chosen default:* the grant is a scoped
+substrate credential whose capability is limited to registering/rotating module
+Assistants and webhook endpoints — **not** the desk's full `HELPTHREAD_API_TOKEN`.
+**Dependency flagged:** the substrate today ships a single all-powerful service token
+(`docs/modules/README.md`), not per-grantee scoped, revocable credentials; managed
+hosting needs that scoped-credential class to exist, or it would have to hand the
+control plane the full service token, which is too broad. This is a real new substrate
+requirement, called out as decision/dependency §10.12, not silently assumed. The desk
+issues this grant *to* the control plane (outbound, operator-initiated delegation); the
+desk still holds no marketplace or license credential of its own — being called by the
+control plane is not the core calling the marketplace.
+
+**Module runtime configuration (install-time, browser → control plane).** Some modules
+genuinely need operator-supplied settings — most prominently the operator's **own model
+API key**, which charter §2 requires assistants to use ("with the operator's own
+keys"). §3d's Provision step injects these as instance env; they have to come from
+somewhere, and that somewhere is an **install-time configuration form in Manage →
+Modules that the browser submits directly to the control plane's endpoint** — the same
+never-transits-the-core rule as the claim token (step 3). The desk's backend never
+receives, stores, or proxies these values; they live in the control-plane vault
+alongside the license key and are re-injected on every update roll (§5.2). Two honest
+consequences, stated rather than glossed: (a) the "no hand-entered env vars" promise
+(§5.1) means *no hosting-dashboard plumbing* — a module that needs an operator secret
+still asks for it once, in-app, at install; (b) operator-supplied secrets residing in
+the control-plane vault are part of the same data-residency disclosure §8 requires and
+the same §10.13 call TJ owns — a model key in Resonant IQ's vault is the credential
+face of the question whose data face is a hosted module reading conversation content.
 
 ## 4. Artifact pipeline
 
@@ -445,38 +646,108 @@ compromised checksum-serving API itself, which matters more once third-party mod
 or an untrusted CDN enter the picture — both explicitly out of scope v1 (§9). Revisit
 when either changes.
 
-## 5. Install UX v1
+## 5. Install & hosting UX
 
-Extends `docs/modules/README.md` and mirrors `module-draft-assistant`'s own README
-exactly (the reference artifact already documents this flow one system early):
+There are two install paths. **Managed hosting is the mainline** (§5.1–§5.3): the
+designed loop TJ specified — *browse, buy, install, enable*, no operator DevOps. The
+**self-host tarball path** (§5.4) is preserved unchanged as the open-core escape hatch
+and open-core-credibility story — the same flow proven end-to-end today.
 
-1. **Buy** — Stripe Checkout on the store site (annual). The marketplace emails a
-   magic link into the account area (§3's Authentication); the operator authenticates
-   there and reveals the license key exactly once (§3 — never anywhere before that).
-2. **Download** — account area "Download" button hits the session-authenticated
-   `GET /account/subscriptions/{subscriptionId}/download` route (§3) — a separate
-   path from the Bearer-token API in §3b that shares its entitlement logic but never
-   touches the plaintext license key, which the browser never holds. Fetches the
-   tarball.
-3. **Deploy to Vercel** — extract the tarball, push to the operator's own git
-   provider (or import directly), `vercel` CLI or dashboard import — unchanged from
-   `module-draft-assistant`'s existing README.
+### 5.1 Install a module — managed hosting (mainline)
+
+From the desk's Manage → Modules Directory (§6), the whole loop is in-app and
+credential-free from the core's side:
+
+1. **Buy** — the module's "Buy" button opens the store's hosted Stripe Checkout in the
+   operator's browser (§3e step 1). Purchase and licensing stay on the separate store
+   service; the core originates no credentialed call.
+2. **Install** — on checkout success the buy → install handoff (§3e) runs end to end
+   automatically: the marketplace mints a one-time claim token, the browser carries it
+   to the hosting control plane, the control plane redeems it for the license key,
+   provisions a Resonant IQ-hosted instance of the module at the entitled version, and
+   registers its Assistant + webhook against the desk (§3d). The operator copies no key
+   and touches no Vercel dashboard.
+3. **Enable** — the module lands enabled; enable/disable is thereafter a toggle in
+   Manage → Modules, backed by the control plane (§3d). Disable is dormant, not
+   destructive.
+
+**Prerequisite, one-time:** managed-hosting enrollment (§3e "Enrollment") — the
+operator grants the control plane its scoped per-desk provisioning credential once.
+After that, every module install is the three steps above.
+
+**What the operator never does** (the friction v1 was rejected for): download a
+tarball, push to a git provider, import a Vercel project, hand-copy env vars into a
+hosting dashboard, or hand-run the admin API to wire up an Assistant and webhook. The
+control plane does all of it. Settings a module genuinely needs from the operator —
+e.g. their own model API key (charter §2) — are collected once by an in-app install
+form submitted browser-direct to the control plane (§3e "Module runtime
+configuration"), never typed into a hosting dashboard and never stored in the desk.
+**No license key ever reaches the desk or the module's runtime config** (§1, §3d) —
+managed hosting adds convenience, not a credential in the core.
+
+### 5.2 Update a module — one-click (managed hosting)
+
+When a newer entitled release exists, Manage → Modules shows an **Update** control next
+to the hosted module (for hosted instances the version diff is computable — the control
+plane knows the deployed version, §6). One click rolls the hosted instance forward: the
+control plane gates the roll on license state (`active` → latest; `lapsed` → refused
+past `entitled_up_to_version`, §3d), fetches the new release via §3b, redeploys the
+instance, and reports the outcome as a visible ops record. This is the concrete
+delivery of `admin-ia.md` §2's long-standing "in-place update with a visible ops log"
+aspiration — *unbuildable* under the self-host model (§9) and now buildable precisely
+because Resonant IQ operates the runtime.
+
+### 5.3 Uninstall & decommission — the config-export grace window
+
+Tearing down a hosted instance — whether by the operator's own explicit uninstall or by
+the `refunded`/`revoked` lifecycle (§3d) — always runs through **decommission** (§3d),
+and always after a short **config-export grace window** during which the operator can
+export the instance's configuration before it is destroyed:
+
+- **Operator-initiated uninstall** — immediate stop of new work, instance torn down
+  after the grace window; the operator keeps their exported config.
+- **Refund** (voluntary, or dispute `lost`) — the hosted instance is decommissioned
+  after the grace window (working figure **7 days** — exact number OPEN, §10.11);
+  downloads/update-check hard-refuse immediately (`refunded`, unchanged §3b/§3c). Refund
+  ends hosting; a **lapse does not** (§3d) — the two are deliberately different, and
+  "lapse never stops running software" stays literally true. A short B2B refund window
+  gates eligibility for this at all (working figure **14 days** — exact number OPEN,
+  §10.11).
+- **Revoke** (confirmed fraud, manual) — immediate decommission, no grace window owed
+  (§3d).
+- **Dispute open** (`frozen`) — **no decommission**; the instance keeps running while
+  the dispute is investigated (§3d). Only a `lost` outcome (→ `refunded`) reaches the
+  decommission flow.
+
+### 5.4 Self-host the module — the tarball escape hatch (preserved)
+
+The manual path from v1 remains fully supported for operators who want to run the module
+on their **own** infrastructure — the open-core credibility story, and the guarantee
+that nothing about the product depends on Resonant IQ hosting anything. It mirrors
+`module-draft-assistant`'s own README and was proven end-to-end today
+(2026-07-19, HT-82):
+
+1. **Buy** — Stripe Checkout on the store site (annual). The marketplace emails a magic
+   link into the account area (§3's Authentication); the operator authenticates there
+   and reveals the license key exactly once (§3).
+2. **Download** — account-area "Download" button hits the session-authenticated
+   `GET /account/subscriptions/{subscriptionId}/download` route (§3), or the operator's
+   own tooling calls the Bearer download endpoint (§3b) with the revealed key. Either
+   fetches the tarball with a verifiable checksum.
+3. **Deploy to Vercel** — extract, push to the operator's own git provider (or import
+   directly), `vercel` CLI or dashboard import.
 4. **Configure env vars** — module-specific config in Vercel project settings (e.g.
    `HELPDESK_API_URL`, `HELPDESK_ASSISTANT_TOKEN`, `WEBHOOK_SIGNING_SECRET`,
    `ANTHROPIC_API_KEY`). **No license key appears here** — licensing stayed at the
-   download step, never entering the module's own runtime config (§1).
+   download step (§1).
 5. **Provision credentials via the Helpthread admin API** — create an Assistant,
    register the module's webhook endpoint (`docs/modules/assistants-and-drafts.md`,
-   `docs/modules/webhooks.md`) — unchanged by the marketplace; the marketplace only
-   got the operator the tarball, not the wiring.
+   `docs/modules/webhooks.md`).
 
-**Friction, named honestly**: this is five manual steps, no one-click deploy, no
-automated env-var injection, no automated Assistant/webhook provisioning. **Additive
-path to one-click, later** (each layers onto these same v1 primitives, none requires
-rebuilding them): a Vercel "Deploy" button with pre-filled repo + env-var prompts
-collapses steps 3–4; a setup wizard driving the admin API collapses step 5; a
-license-key-parametrized deploy-button flow could fetch the tarball at Vercel build
-time instead of a manual extract-and-push, collapsing 2–3. None of this is built v1.
+This is five manual steps, named honestly — which is exactly why managed hosting exists
+as the mainline. The self-host path is not deprecated: it is the escape hatch that keeps
+the whole model honest, and it is the path a refunded/revoked customer's already-held
+copy keeps running on with no DRM and no runtime check, ever (§3d).
 
 ## 6. In-product directory contract (HT-81)
 
@@ -484,7 +755,11 @@ time instead of a manual extract-and-push, collapsing 2–3. None of this is bui
 caches the public feed (§3a) server-side — proxied, so the operator's browser never
 makes a cross-origin call to the marketplace and the feed is never fetched with any
 credential. No license key ever reaches the running helpdesk through this path,
-consistent with §1.
+consistent with §1. The Directory's per-module **Buy** button opens the store's hosted
+checkout in the browser and the managed handoff (§3e) takes it from there; **Install**,
+**Enable/disable**, and **Update** controls target the hosting control plane (§3d/§5),
+not the marketplace and not a credentialed core call — the core renders the controls and
+reflects state, the control plane does the credentialed work.
 
 **How "installed" is known.** There is no `module_installs` table yet — one is
 explicitly deferred (`substrate-v1.md` §1's non-goals, `catalog.md` §5's forward
@@ -504,24 +779,31 @@ name/summary/changelog, and shows health from data the engine already has:
 today at `/api/v1/internal/health`, HT-44). This is an honest inference, not a
 tracked install record — a module that never registered a webhook or never got an
 Assistant (unlikely for any real module, given §1's "typically uses all three")
-simply wouldn't appear.
+simply wouldn't appear. **For managed-hosting installs the very same rows are created
+by the control plane during provisioning (§3e step 5)**, so this inference is what makes
+a managed install show up as installed — no new `module_installs` table is needed even
+for hosted modules; the existing local-attribution signal already carries it.
 
-**"Update available" — scoped down for v1, flagged explicitly.** The task framing
-assumes a version-diff badge (installed version vs. latest feed version); that is
-**not buildable in v1** and the spec resolves it honestly rather than pretending
-otherwise: **nothing in the shipped substrate gives the engine, or the browser, any
-way to learn which version of a module is actually deployed.** A module's tarball
-carries no version marker the engine ever sees — the module runs as an entirely
-separate Vercel project, decoupled from the engine's own DB/schema, and reports
-nothing about itself back to the helpdesk. v1's answer: **Manage → Modules surfaces
-the feed's `latestVersion` and `changelogUrl` next to each inferred-installed module,
-informational only** — the operator does the "am I behind" comparison themselves,
-the same way they would reading any changelog. No update/current badge is computed.
-The additive path to a real diff (v2+): a module-authoring convention where a module
-self-reports its own version at a well-known path off the URL already on file in
-`webhook_endpoints.url` — that convention does not exist today and is not proposed by
-this spec; it is named here only so a future ticket has the honest starting point.
-This is called out again as decision point §10.5.
+**"Update available" — now split by install path.** The version-diff badge that was
+**unbuildable** for the self-host model *is* buildable for a **hosted** instance,
+because the hosting control plane knows both the deployed version and the latest
+entitled version. So:
+
+- **Hosted instances** — Manage → Modules shows a real "update available" state and a
+  one-click **Update** control (§5.2); the diff and the roll are the control plane's
+  (§3d), surfaced through the desk UI. The desk core still computes nothing about a
+  license and holds no key — it reflects control-plane state.
+- **Self-hosted instances** — unchanged from v1, and still honestly limited: **nothing
+  in the shipped substrate lets the engine or the browser learn which version a
+  self-hosted module is running.** Its tarball carries no version marker the engine ever
+  sees; it runs as a separate Vercel project the desk cannot inspect. Manage → Modules
+  surfaces the feed's `latestVersion` and `changelogUrl` next to it, informational only
+  — the operator does the "am I behind" comparison themselves. No current/diff badge is
+  computed for self-host. The additive path to a real self-host diff (a module-authoring
+  self-report convention off `webhook_endpoints.url`) still does not exist and is not
+  proposed here; it is named only so a future ticket has an honest starting point.
+
+Called out again as decision point §10.5.
 
 **Client-side, no keys**: every computation in this section — the feed fetch (server
 proxy, no credential needed because the feed itself needs none) and any comparison
@@ -545,49 +827,73 @@ wrong when written, but because the charter's requirement changed underneath it.
 this explicitly in the HT-82 ticket description so nobody reads catalog.md §4 as still
 current on this point without also reading this section.
 
+**The Stripe seam matrix (test clock, refund, dispute) is unchanged by v1.1** — those
+transitions are marketplace-side (§2/§3) and managed hosting adds no state to them. What
+v1.1 changes is the **install and update legs**: they now run the managed-hosting flow,
+and the hosted instance's behavior under each seam is an additional thing to assert.
+
 **Test plan, Stripe test mode:**
 
 1. Create a test-mode Stripe Product + annual Price for `draft-assistant`.
-2. Full flow as a real customer would: store checkout (test card) → webhook creates
-   Customer/Subscription/License key → account area one-time key reveal → download
-   tarball → deploy to a fresh Vercel project (not the existing npm-package-based
-   dogfood instance — a genuinely separate deployment, to prove the marketplace path
-   independent of any leftover shortcut) → provision Assistant + webhook against the
-   live Resonant IQ desk exactly per §5.
+2. **Managed install leg (mainline).** Full flow as a real customer would, in-app:
+   enroll the desk in managed hosting (§3e) → Manage → Modules "Buy" → store checkout
+   (test card) → `checkout.session.completed` mints Customer/Subscription/License key +
+   claim token → browser return leg redeems the claim token at the control plane → the
+   control plane provisions a Resonant IQ-hosted `draft-assistant` instance and
+   registers its Assistant + webhook against the live Resonant IQ desk → Manage →
+   Modules shows it installed and enabled. **Assert the license key never appears in the
+   desk or the hosted instance's env** (§1/§3d) and that the operator copied no key.
+   *Also, once,* re-verify the **self-host leg** (§5.4) end to end onto a genuinely
+   separate Vercel project — the escape hatch proven today (2026-07-19) must stay green.
 3. **Stripe test clock**, advance time to exercise:
-   - Successful renewal → license stays `active`.
-   - A failed charge → `past_due` → license flips `lapsed`; verify the update-check
-     and download endpoints correctly cap at `entitled_up_to_version`; verify **the
-     running helpdesk and the running module are completely unaffected** — no outage,
-     no runtime check trips anywhere in the deployed module. This is the literal proof
-     of catalog §5's central promise, exercised for real rather than argued abstractly.
+   - Successful renewal → license stays `active`; hosted instance unaffected.
+   - A failed charge → `past_due` → license flips `lapsed`; verify the update-check and
+     download endpoints correctly cap at `entitled_up_to_version`; verify **the running
+     helpdesk and the hosted module instance are completely unaffected** — no outage, no
+     decommission, no runtime check trips anywhere in the module, and the control plane
+     does **not** stop the instance (`lapsed` → hosting continues indefinitely, §3d).
+     This is the literal proof of catalog §5's central promise — now proven for the
+     *hosted* case too, where Resonant IQ *could* stop it and deliberately does not.
    - Resubscribe after lapse → license flips back to `active`, full latest access
-     restored, no back-charge (§2).
-4. **Refund**: trigger a test-mode refund (`charge.refunded`) → verify license flips
-   to `refunded`, downloads/update-check hard-refuse immediately, and — again — the
-   already-deployed module keeps running untouched.
-5. **Dispute lifecycle**, via Stripe test mode's dispute-simulation test cards —
+     restored, no back-charge (§2); hosted instance eligible for updates again.
+4. **Managed update leg.** With the license `active`, publish a newer `draft-assistant`
+   release → Manage → Modules shows "update available" for the hosted instance (§5.2/§6)
+   → click Update → verify the control plane rolls the hosted instance to the new
+   version and records a visible ops result. Then, with the license `lapsed`, confirm
+   the Update control is refused past `entitled_up_to_version` (§3d).
+5. **Refund**: trigger a test-mode refund (`charge.refunded`) → verify license flips to
+   `refunded`, downloads/update-check hard-refuse **immediately**, and the hosted
+   instance enters the **decommission flow after the config-export grace window** (§3d/
+   §5.3) — assert it is *not* torn down instantly, the config export is available during
+   the window, and it is decommissioned at the end of it. Separately assert a self-host
+   copy (from step 2's self-host leg), if used, keeps running with no runtime check —
+   the consciously-accepted residual exposure (§3d).
+6. **Dispute lifecycle**, via Stripe test mode's dispute-simulation test cards —
    run this twice, from two different starting states, to actually prove
    `pre_freeze_state` fidelity (§2) rather than the one path that happens to look
    right by coincidence:
    - **From `active`**: `charge.dispute.created` → verify license flips to `frozen`
      automatically, `pre_freeze_state = 'active'`, downloads/update-check fully
-     paused. Resolve `won` → verify the license restores to `active`.
+     paused — **and verify the hosted instance keeps running** (a filed dispute does
+     not stop hosting, §3d). Resolve `won` → verify the license restores to `active`.
    - **From `lapsed`**: force the subscription into `past_due` first, confirm the
      license is `lapsed`, *then* trigger `charge.dispute.created` → verify
      `pre_freeze_state = 'lapsed'`, not `'active'`. Resolve `won` → verify the
      license restores to `lapsed`, **not** `active` — this is the exact bug this
      revision fixed; the test must fail loudly if it regresses.
    - Repeat either starting state and resolve `lost` → verify the license flips to
-     `refunded` regardless of `pre_freeze_state`, and never to `revoked` — confirming
-     a filed-then-lost dispute is never treated as a fraud finding.
-6. **Revoke**: simulate a `revoked` state via *manual* admin action only (standing in
+     `refunded` regardless of `pre_freeze_state`, never to `revoked`, and the hosted
+     instance now enters the decommission-after-grace flow (§5.3) — confirming a
+     filed-then-lost dispute is treated as a refund, never as a fraud finding.
+7. **Revoke**: simulate a `revoked` state via *manual* admin action only (standing in
    for a confirmed-fraud investigation, never triggered by the dispute flow above) →
-   verify both download and update-check hard-fail immediately.
-7. **Exit criteria**: all of the above — active, lapsed, frozen, refunded, and
-   revoked, plus every transition between them exercised at least once — green in
-   test mode, using Resonant IQ's own store account as customer #1, before Stripe is
-   flipped to live mode for public launch (Phase 3).
+   verify both download and update-check hard-fail immediately **and** the hosted
+   instance is decommissioned immediately, no grace window owed (§3d).
+8. **Exit criteria**: all of the above — active, lapsed, frozen, refunded, and revoked,
+   the managed install/update/decommission legs, the one self-host escape-hatch leg,
+   plus every transition between them exercised at least once — green in test mode,
+   using Resonant IQ's own store account as customer #1, before Stripe is flipped to
+   live mode for public launch (Phase 3).
 
 ## 8. Counsel & compliance dependencies
 
@@ -603,8 +909,9 @@ dependencies" quietly become a catch-all label for anything pre-launch.
 | Item | Nature | Gate | Not gating |
 |---|---|---|---|
 | Commercial module license text (replaces the current placeholder) | Counsel-drafted | Before Stripe flips to live mode / before the marketplace takes real money | Does **not** gate HT-82's test-mode dogfood — Resonant IQ as its own test-mode customer needs no finished license text, only a placeholder |
-| Terms of sale — including the refund policy (§2's `refunded` state) and the dispute-handling policy (§2's `frozen` state): this spec pins the entitlement *mechanics*, but the customer-facing policy language itself is counsel's call | Counsel-drafted | Same gate | Same — pre-revenue, not pre-dogfood |
+| Terms of sale — including the refund policy (§2's `refunded` state, §5.3's decommission-after-refund), the refund window and config-export grace period (§5.3; the *exact* day figures are the business/counsel call, §10.11), and the dispute-handling policy (§2's `frozen` state): this spec pins the entitlement and hosting-lifecycle *mechanics*, but the customer-facing policy language and the exact windows are counsel's/TJ's call | Counsel-drafted (+ TJ business call on the windows) | Before Stripe flips to live mode / before the marketplace takes real money | Same — pre-revenue, not pre-dogfood (test-mode dogfood can use the working figures) |
 | Privacy policy for the store | Counsel-drafted | Same gate (real customer PII starts flowing at first live charge) | Same |
+| **Managed-hosting terms & data-handling disclosure** (new in v1.1) — because a Resonant IQ-hosted module reads the operator's conversation data on Resonant IQ infrastructure to do its job, managed hosting is the charter's "hosted convenience services" (§3) made real, and it needs its own disclosure/DPA-style terms the operator consents to at enrollment (§3e). This is distinct from the store privacy policy, which covers *purchaser* PII; this covers the *operator's end-customers'* conversation data flowing through a hosted module | Counsel-drafted | Same gate — real operator data starts flowing through a hosted module at first live managed install | Not pre-dogfood — Resonant IQ hosting its own module for its own desk raises no third-party data question. **See §10.13: the reconciliation with charter §2's "conversation data never proxies through Helpthread's infrastructure" wording is a TJ call, flagged there, not settled here** |
 | **Stripe Tax enabled** (automated EU VAT / US sales-tax calculation and remittance on Checkout Sessions) | Compliance/finance configuration, not counsel-drafted | Same gate — charging real customers across jurisdictions without correct tax handling is its own launch blocker | Not pre-dogfood — Stripe test mode carries no real tax obligation. Which jurisdictions to register in first is decision point §10.9 |
 
 The plugin exception's counsel deadline — set in CHARTER.md §3's module boundary,
@@ -621,10 +928,16 @@ no exception."*
 - **Third-party sellers.** Every Module row (§2) is first-party; no seller onboarding,
   no revenue split, no third-party publish credentials.
 - **Reviews / ratings.** Store pages show official copy only.
-- **In-product purchase.** No buy button inside the helpdesk itself — purchasing
-  always happens on the separate store site, never inside a running Helpthread
-  deployment (keeps commercial surface fully decoupled from the AGPL core's UI).
-- **npm distribution.** v1 ships tarball + Vercel deploy only, per TJ's decision;
+- **In-product *checkout*.** Manage → Modules now carries a **Buy button** (§3e/§6) —
+  the in-app feel TJ asked for — but it only *opens the separate store's hosted Stripe
+  Checkout in the operator's browser*; the purchase, the card entry, and the licensing
+  all still happen on the store service, never inside the AGPL core. The commercial
+  *checkout surface* stays decoupled from the core exactly as before; what changed in
+  v1.1 is that the core may now *link to* it in-app, not that it hosts it. (This
+  supersedes v1's flat "no buy button inside the helpdesk" phrasing, which conflated the
+  button with the checkout.)
+- **npm distribution.** v1 ships tarball distribution only (Resonant IQ-hosted deploy
+  for managed installs, operator Vercel deploy for self-host), per TJ's decision;
   publishing modules as installable npm packages is additive, later.
 - **Usage metering.** No conversation counts, no per-seat metering, no usage-based
   billing — flat annual per-deployment (§2), matching the update-check endpoint's
@@ -634,27 +947,37 @@ no exception."*
   point §10.8 for the schema consequence if this is added later — it isn't a free
   addition, since today's 1:1 subscription↔license-key design would need to become
   one-subscription-to-many-license-keys or similar.
-- **Automated in-place update / a build-time module API.** `admin-ia.md`'s Manage →
-  Modules description includes "in-place update with visible ops log" as an aspirational
-  future surface; v1 delivers none of that (see the conflict called out below) — updates
-  are the manual redeploy flow in §5, full stop.
-- **A `module_installs` table**, a version-diff "update available" badge, and any
-  module self-reporting convention (§6) — all explicitly deferred, not solved by this
-  spec.
+- **A build-time / in-process module API.** Modules remain out-of-process only
+  (`substrate-v1.md` §1); managed hosting runs the *same* out-of-process artifact on
+  Resonant IQ infrastructure — it does **not** introduce an in-process module API, UI
+  injection points, or any §7-exception-requiring surface. In-place update is now
+  delivered for hosted instances (below), but via the control plane operating a separate
+  runtime, never via an in-process hook.
+- **A version-diff "update available" badge and self-reporting convention *for
+  self-hosted instances*.** Still deferred for self-host (§6) — the substrate gives the
+  engine no way to learn a self-hosted module's deployed version. (For *hosted*
+  instances the control plane knows the version, so the badge and one-click update **are**
+  delivered — §5.2/§6. The non-goal is now scoped to self-host only.)
+- **A `module_installs` table.** Still none; installed-ness is inferred from local
+  attribution for both install paths (§6), managed provisioning simply creates those
+  same rows.
 
-**Conflict found and resolved here, named per house style**: `specs/ui/admin-ia.md`
-§2 describes the target "Manage → Modules" surface as "Installed (activate/deactivate,
-license-key entry, in-place update with a visible ops log) + Directory (browse/install)." That
-description predates both the module substrate (which has no in-process module API,
-`substrate-v1.md` §1) and this spec's v1 install flow (§5: manual tarball download,
-manual Vercel redeploy). **"In-place update with visible ops log" is not deliverable
-in v1** — there is no build-time module API for the engine to hook into, and no
-mechanism by which the engine could trigger or observe a *separate Vercel project's*
-redeploy. v1's actual Manage → Modules is: an inferred Installed list (§6) with
-health, and a Directory that links out to the store site rather than installing
-in-place. `admin-ia.md` should be read as the longer-term aspiration this spec does
-not yet fulfill, not as a same-phase requirement; flagging this discrepancy is this
-spec's honest deliverable on that front, not a silent scope-down.
+**Conflict from v1, now resolved by managed hosting, named per house style**:
+`specs/ui/admin-ia.md` §2 describes the target "Manage → Modules" surface as "Installed
+(activate/deactivate, license-key entry, in-place update with a visible ops log) +
+Directory (browse/install)." Under v1's manual self-host model this spec had to flag
+"in-place update with visible ops log" as **not deliverable** — there was no way for the
+engine to trigger or observe a *separate Vercel project's* redeploy. **Managed hosting
+delivers exactly that surface** (§5.2): because Resonant IQ operates the runtime, the
+control plane can roll a hosted instance and report the result, so Manage → Modules gets
+one-click in-place update with a visible ops record for hosted modules. Two nuances the
+`admin-ia.md` line predates, reconciled rather than silently absorbed: (1) "license-key
+entry" never happens *in the desk* — the operator never enters a key anywhere in the
+core (§1/§3e), so read that phrase as "the licensing step of install," which managed
+hosting makes invisible; (2) in-place update is delivered for **hosted** instances, not
+self-hosted ones (§6), which remain the informational-only case. `admin-ia.md`'s
+aspiration is now met for the mainline path; the self-host residue is the only part that
+stays informational.
 
 ## 10. Decision points for TJ
 
@@ -699,10 +1022,11 @@ spec's honest deliverable on that front, not a silent scope-down.
    CHARTER.md's Phase 3 text is understood to promise, and belongs to TJ, not to this
    draft. Needs resolution before the KB module itself is specced, not before this
    spec ships.
-5. **§6's "update available" simplification** (feed's latest version + changelog
-   link only, no version-diff badge) — confirm this is an acceptable v1 scope-down
-   given the substrate has no module self-reporting convention, rather than treating
-   it as a gap to close before HT-81 ships.
+5. **§6's "update available" simplification — now scoped to self-host only.** For
+   *hosted* instances the control plane delivers a real version diff and one-click
+   update (§5.2/§6); the informational-only limitation remains only for *self-hosted*
+   instances (the substrate has no self-report convention). Confirm this split is the
+   right v1 line rather than a gap to close before HT-81 ships.
 6. **Reactivation-after-lapse restores full latest access with no back-charge** (§2)
    — confirm acceptable; the alternative (pro-rated back-charge for skipped releases)
    was considered and rejected for v1 complexity reasons, not on principle.
@@ -717,9 +1041,80 @@ spec's honest deliverable on that front, not a silent scope-down.
 9. **Which tax jurisdictions to register Stripe Tax for** before flipping to live
    mode (§8) — not an engineering decision, but needed before that gate closes;
    flagged here so it isn't discovered late.
+10. **Hosting control plane — co-located vs. fully separate (§3d).** Recommended
+    default: same private repo + Supabase project as the marketplace service, but a
+    distinct deployment with its own credential vault (a separate trust domain,
+    co-located for v1 velocity, with a clean seam to split later). Confirm, or elect a
+    fully-separate repo/infra now. Either way the invariant that matters — the control
+    plane is outside the AGPL core and its credential store is isolated from the public
+    store surface — holds.
+11. **Refund window and config-export grace period — exact figures (§3d/§5.3/§8).**
+    Working figures: a **14-day** B2B refund window and a **7-day** config-export grace
+    window before a refunded/uninstalled hosted instance is decommissioned; **revoked**
+    (confirmed fraud) decommissions immediately with no grace. The *mechanics* are
+    decided (refund → decommission-after-grace; lapse → hosting continues indefinitely;
+    frozen → keeps running; the self-host residual copy is consciously accepted, no DRM
+    ever). Only the exact day-counts and the customer-facing policy wording are OPEN —
+    TJ/counsel, at the pre-revenue gate (§8). Test-mode dogfood (§7) uses the working
+    figures.
+12. **Scoped per-desk provisioning credential — a new substrate requirement (§3e).**
+    Managed-hosting enrollment needs the desk to grant the control plane a *scoped,
+    revocable* credential limited to registering/rotating module Assistants + webhook
+    endpoints. The substrate today ships a single all-powerful service token
+    (`docs/modules/README.md`), not per-grantee scoped credentials. Recommended: add
+    that scoped-credential class (its own ticket) rather than hand the control plane the
+    full service token (too broad). Confirm the direction; the detailed design is a
+    separate spec, and this is a real dependency for managed hosting to ship, flagged so
+    it isn't discovered late.
+13. **Charter §2 "own your data" reconciliation — genuinely a TJ call, not resolved
+    here (§8).** A Resonant IQ-hosted module reads the operator's conversation data on
+    Resonant IQ infrastructure, which is in tension with charter §2's absolute wording
+    "Conversation data never proxies through Helpthread's infrastructure." The anchor
+    that makes managed hosting legitimate is already in the charter: §3 contemplates
+    "hosted convenience services," and `catalog.md` §5 says "modules we host as
+    convenience services are ordinary SaaS billing." Recommended framing: managed
+    hosting is opt-in per operator, the *core* mail/data path is unchanged (still the
+    operator's own Supabase), and the hosted module is the already-contemplated
+    convenience service the operator knowingly enrolls in with disclosed data handling
+    (§8's managed-hosting terms). **But whether §2's absolute sentence needs its own
+    wording tweak to say so explicitly is a charter-invariant call that belongs to TJ**
+    — this spec flags it and does not edit §2. (The v1.1 charter amendment restates the
+    *credential/no-runtime-check* invariants only; the data-residency wording is left to
+    this decision point.) The same call covers the credential face of the question:
+    operator-supplied module secrets — most prominently the operator's own model API
+    key (§3e "Module runtime configuration") — reside in the control-plane vault, i.e.
+    on Resonant IQ infrastructure, when hosting is managed. One decision, two faces:
+    conversation data read by a hosted module, and operator secrets held to run it.
 
 ## 11. Changelog
 
+- **2026-07-19** (HT-79, v1.1 — managed hosting): after TJ walked the v1 manual
+  self-host install as customer #1 (HT-82 dogfood) and rejected its friction, the
+  **default install path becomes managed hosting**. New: a third trust domain, the
+  **hosting control plane** (§3d), the only component holding both a license key and a
+  per-desk provisioning grant, entirely outside the AGPL core; the **buy → install →
+  enable managed handoff** via a one-time claim token redeemed by the control plane, not
+  the desk (§3e); a rewritten **§5** with managed install/update/uninstall as the
+  mainline and the v1 five-step tarball flow demoted to a preserved **self-host escape
+  hatch** (§5.4); **one-click in-place update** for hosted instances, which resolves the
+  long-flagged `admin-ia.md` "in-place update with visible ops log" conflict (§5.2/§6/§9);
+  **hosted-instance lifecycle** tied to license state — `lapsed`/`frozen` keep running,
+  `refunded` decommissions after a config-export grace window, `revoked` decommissions
+  immediately (§3d/§5.3), with the "lapse never stops running software" floor preserved
+  literally even though Resonant IQ is now the host. Decided per TJ/coordinator
+  (2026-07-19): purchase/licensing stay on the separate store service, the desk supplies
+  only the in-app *feel* (Buy button opens hosted checkout, license lands via the
+  managed handoff, never in the core); refund ⇒ decommission-after-grace (working
+  figures 14-day refund window / 7-day grace, exact numbers OPEN §10.11); the self-host
+  residual copy of a refunded module is a **consciously accepted** exposure — no DRM, no
+  runtime check, ever. Invariants held verbatim: license = distribution credential only,
+  zero runtime license checks in any module, AGPL core holds no marketplace credential
+  and never calls the marketplace. Entities (§2), commerce/download/update-check APIs
+  (§3a–§3c), and the artifact pipeline (§4) are unchanged. New decision points §10.10–13
+  (control-plane co-location; exact refund/grace figures; the scoped provisioning-
+  credential substrate dependency; the charter §2 "own your data" data-residency
+  reconciliation, explicitly left to TJ). Charter amended by direct edit (§4 + §7
+  appendix) per the PR #86 mechanism; `catalog.md` §5 given a reconciling note.
 - **2026-07-19** (HT-79): initial draft. Entities, service architecture (Vercel +
   Supabase, Stripe Checkout/Portal/webhooks), artifact pipeline, install UX v1,
   in-product directory contract (HT-81), dogfood-through-marketplace plan (HT-82),

@@ -179,7 +179,13 @@ now so the marketplace design inherits it:
   install/uninstall/health tooling references existing rows rather than retrofitting
   identity.
 - Modules **we host** as convenience services are ordinary SaaS billing — no special
-  machinery in the product.
+  machinery in the product. *(Updated 2026-07-19, HT-79 managed hosting: hosting is now
+  the **mainline** module install path, not just an occasional convenience — clicking
+  Install provisions a Resonant IQ-hosted instance. The "no special machinery in the
+  product" clause still holds literally: the machinery — a hosting control plane that
+  holds the license key and per-desk provisioning grant — lives entirely **outside** the
+  AGPL core, never in the product. The self-host path remains as the escape hatch. See
+  `specs/modules/marketplace-v1.md` §3d/§5.)*
 
 ## 6. Changelog
 
@@ -212,3 +218,8 @@ now so the marketplace design inherits it:
   marketplace plumbing "stays deferred to its charter phase," which no longer
   matches step 4's own supersession note or `marketplace-v1.md` §1's "launch-day,
   built now" framing. Reworded so both steps agree.
+- **2026-07-19** (HT-79, managed hosting): §5's "modules we host … no special machinery
+  in the product" bullet annotated — hosting is now the mainline install path
+  (`marketplace-v1.md` v1.1), delivered by a hosting control plane that sits outside the
+  AGPL core, so the "no special machinery in the product" clause still holds. Free/paid
+  line and build sequence unchanged; the substrate stays AGPL-free.
