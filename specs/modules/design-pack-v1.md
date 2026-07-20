@@ -61,6 +61,27 @@ the live constraint; patent exposure is not.
 recurring source of misreading by exactly the audience that needs to trust it, and the
 pack has its own release cadence.
 
+### 2.1 Provenance gate before first publish
+
+Relicensing requires owning the rights. Generation from the design project establishes
+where the files came from, not what may be granted. Before the first publish:
+
+- **Fonts — cleared.** `fonts/fonts.css` `@import`s Source Serif 4 and Source Code Pro
+  from Google Fonts, both OFL, and **no font binaries are bundled**; the UI sans is the
+  native system stack. Nothing is redistributed, so no font license travels with the
+  pack. (Verified 2026-07-20; re-check if the pack ever vendors a binary.)
+- **Components — audit required.** The `ds/` components originate in the Claude Design
+  project as AI-assisted work product. Confirm the rights chain against the repo's own
+  provenance/AI policy (`legal/`, drafted for counsel under HT-5) — specifically that the
+  human review CLAUDE.md requires was real enough to support authorship, and that nothing
+  was adapted from a source whose license forbids relicensing (CHARTER provenance rules).
+
+**The asymmetry that lowers the stakes:** MIT grants whatever rights exist. If some of
+the pack turns out to be uncopyrightable, the license still functions — the exposure is
+"cannot stop others from using it," not "infringing." For a pack whose entire purpose is
+for others to use it, that failure mode is close to harmless. The audit is due diligence,
+not a blocker to design around.
+
 ## 3. Scope of the pack
 
 Sourced from the design project (§5), in three layers:
@@ -140,6 +161,29 @@ What is real:
 Either way the merge is a reviewed PR, which is what keeps §6's conformance claim
 honest.
 
+### The drift gate needs a content hash, not a revision pin
+
+"Regenerate and byte-compare" is only meaningful against a recorded baseline — otherwise
+a stale pack and a moved upstream are indistinguishable, and both look like "the files
+differ."
+
+The obvious answer, pinning an upstream revision, **is not available**: the design
+project is not a git repo and DesignSync exposes no commit or version identifier
+(`list_files`/`get_file` return paths and content, nothing more). So the baseline is a
+**content-hash manifest** committed to the pack repo — per-file SHA-256 of every sourced
+file, recorded at generation time.
+
+CI then re-fetches, re-hashes, and compares against the manifest, which distinguishes the
+two cases the byte-compare alone conflates:
+
+| Manifest vs. fetched | Manifest vs. published pack | Means |
+| --- | --- | --- |
+| differs | matches | **upstream moved** — regenerate, review, release |
+| matches | differs | **pack was hand-edited** — reject, this is the fork §5 forbids |
+
+HT-93's Biome override is what makes the hashes stable; without it, formatting-on-arrival
+would churn them on every sync.
+
 ## 6. Conformance is contractual, not technical
 
 An out-of-process module renders its own UI on its own origin. **Nothing in the engine
@@ -148,11 +192,19 @@ distribution-credential-only rule, none ever will.
 
 So conformance is a **marketplace listing requirement**, checked at review:
 
-- a listed module SHOULD consume the pack for any surface an operator sees
-- a listed module MUST NOT ship a look that impersonates core Helpthread UI while
+- a listed module **MUST** match the desk's design on every operator-visible surface.
+  The pack is the supported way to satisfy this and the only one that stays correct as
+  the design moves; an independent implementation is permitted but carries the whole
+  burden of proving parity, including after upstream changes.
+- a listed module **MUST NOT** ship a look that impersonates core Helpthread UI while
   behaving differently
 - deviations need the same sign-off any UI deviation needs (CLAUDE.md: TJ's explicit
-  sign-off)
+  sign-off), recorded on the listing
+
+The requirement is on the *outcome* (matches the desk), not the *mechanism* (imports the
+pack) — otherwise a module with no operator-visible UI at all, like a notifications
+relay, would be non-conformant for having nothing to style. Such a module is trivially
+conformant.
 
 Marketplace is first-party-only today — "Every Module row is first-party; no seller
 onboarding" (`marketplace-v1.md`) — so this costs nothing to adopt now. **The rule needs
