@@ -104,6 +104,13 @@ run indefinitely, per section 7. Resuming payment restores access to current ver
 A lapse is an ordinary non-payment event; it is not a finding of wrongdoing and carries
 no penalty beyond pausing access to **new** releases.
 
+**A lapse does not stop a Resonant IQ-hosted instance.** If Resonant IQ hosts your
+Module instance, that instance **keeps running, indefinitely, at the version you were
+entitled to at the moment of lapse**; it is **not** decommissioned, and it continues to
+serve your deployment until you cancel it or this License terminates under section 8.
+What stops is updates, nothing else. Decommissioning of a hosted instance follows only
+from a **full refund** or a **revocation** (section 8), never from non-payment alone.
+
 ## 7. Your held copies keep working — the Surviving Held-Copies License
 
 This is a deliberate and permanent commitment, stated affirmatively because it is part
@@ -168,12 +175,19 @@ may export the instance's configuration. Section 7 governs what the termination 
 **not** reach.
 
 **Revocation for fraud.** Resonant IQ may revoke this License for confirmed fraud — for
-example a stolen payment method or a confirmed violation of the terms of sale —
-following an actual investigation. Revocation ends the forward entitlement and all future
-marketplace download access (including to previously entitled versions) and, for a hosted
-instance, results in immediate decommissioning. Revocation is never triggered
-automatically by a payment dispute merely being filed. Section 7 again governs what
-revocation does **not** reach.
+example a stolen payment method, a fraudulent chargeback, or redistribution or resale of
+the Source in knowing breach of section 5 — following an actual investigation.
+Revocation ends the forward entitlement and all future marketplace download access
+(including to previously entitled versions) and, for a hosted instance, results in
+immediate decommissioning. Revocation is never triggered automatically by a payment
+dispute merely being filed. Section 7 again governs what revocation does **not** reach.
+
+**Ordinary breach is not fraud.** A non-fraudulent breach of the terms of sale — running
+a second deployment on a single-domain License, say — is **not** grounds for revocation
+under this section. Revocation is reserved for confirmed fraud, because its consequences
+(immediate loss of download access and decommissioning of a hosted instance) are the
+harshest this License provides. Ordinary breach is a commercial matter, handled under the
+terms of sale.
 
 The full mechanics and exact time windows of refunds, disputes, and hosted-instance
 decommissioning are set out in the marketplace **terms of sale** and **managed-hosting

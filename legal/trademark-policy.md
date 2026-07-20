@@ -63,7 +63,7 @@ in place — the name, logos, and notices that ship with the project. Passing al
 genuine, unmodified copy is exactly the case where the Marks should stay: what you are
 distributing really is Helpthread.
 
-## 4. Uses that require a change (forks and modified versions)
+## 4. Forks and modified versions — what we ask, and what trademark law limits
 
 The one place the Marks and the freedom to modify meet is a **fork** — a modified version
 you distribute to others. The AGPL fully protects your right to make and share
