@@ -102,6 +102,21 @@ export const WATCH_EXPIRY_ALERT_HOURS = 72
 export interface HealthCheckDeps {
   db: Db
   queue: { getStats(): Promise<QueueStats> }
+  /**
+   * Whether Gmail push is configured for this deployment (HT-94) — i.e.
+   * whether `AppConfig.gmailPush` is present.
+   *
+   * Gates the `watch-expiring` alerts ONLY. With push unconfigured there is no
+   * `watch()` to arm, so `watch_expiration` is NULL by design for every active
+   * mailbox — alerting on it would return 503 permanently on the install path
+   * the runbook now recommends, and since this endpoint's contract is a single
+   * boolean, a permanent false alarm makes every REAL alert invisible.
+   *
+   * Deliberately a config fact rather than inferred from the data: a NULL
+   * expiration means "no push configured" on one deployment and "renewal cron
+   * is broken" on another, and only the config can tell those apart.
+   */
+  pushConfigured: boolean
 }
 
 /** One mailbox's health row — see the module doc's Mailboxes section. */
@@ -263,7 +278,12 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
           'flowing until an operator acts (runbook Part G)',
       )
     }
-    if (row.status === 'active') {
+    // `watch()` only exists when push is configured (HT-94). With push off, a
+    // NULL expiration is the designed steady state, not a fault — see
+    // `HealthCheckDeps.pushConfigured`. Intake health on a push-free
+    // deployment is covered by the queue alerts above plus the reconcile
+    // sweep's own log line, not by watch state.
+    if (row.status === 'active' && deps.pushConfigured) {
       if (row.expires_in_seconds === null) {
         alerts.push(
           `watch-expiring: mailbox ${row.address} is active but has no Gmail watch() expiration ` +

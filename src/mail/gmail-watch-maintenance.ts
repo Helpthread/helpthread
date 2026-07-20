@@ -24,7 +24,7 @@
  * root does not construct its deps at all; the cron endpoint stays routed and
  * reports a skip (`../composition/root.ts`).
  *
- * ## A plain sweep function, not a queue/cron adapter
+ * ## A plain function, not a queue/cron adapter
  *
  * Exactly like `./delivery-worker.ts` (HT-16): `runGmailWatchMaintenance`
  * is a plain `async function` of injected dependencies, NOT built on a
@@ -42,7 +42,7 @@
  * (gmail-push.md §6). The whole per-mailbox unit of work
  * ({@link maintainOneMailbox}) is wrapped in its own try/catch inside
  * {@link runGmailWatchMaintenance}'s loop, so even a genuinely unexpected
- * throw (a store or queue failure outside the two expected-failure
+ * throw (a store failure outside the two expected-failure
  * branches below) only counts that one mailbox `failed` and moves on to
  * the next — never aborting the batch.
  *
@@ -95,7 +95,6 @@
 // `createGmailWatchClient` (`../providers/adapters/gmail/watch.ts`); tests
 // pass a fake.
 import type { GmailWatchClient } from '../providers/adapters/gmail/index.js'
-import type { QueueProvider } from '../providers/queue.js'
 import type { GmailWatchStateStore } from '../store/gmail-watch-state.js'
 import type { MailboxStore } from '../store/mailboxes.js'
 import type { GmailOAuthTokenService } from './gmail-oauth.js'
@@ -182,7 +181,7 @@ export async function runGmailWatchMaintenance(
       // expected-failure branches inside maintainOneMailbox. Never let one
       // mailbox stop the batch (module doc's "failure-isolated per
       // mailbox"). Safe to log err's message: everything reachable here
-      // (MailboxStore/GmailWatchStateStore/QueueProvider calls) is a plain
+      // (MailboxStore/GmailWatchStateStore calls) is a plain
       // store/queue error, never a token — see gmail-oauth.ts's and
       // watch.ts's module docs for why the token itself never surfaces in
       // a thrown error message.

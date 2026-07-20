@@ -19,7 +19,9 @@ describe('runHealthCheck', () => {
     db = database
     await migrate(database)
     const queue = createPostgresQueue(database)
-    const check = () => runHealthCheck({ db: database, queue })
+    // Default to push CONFIGURED so every pre-HT-94 case keeps asserting the
+    // behavior it was written for; the push-free cases pass `false` explicitly.
+    const check = (pushConfigured = true) => runHealthCheck({ db: database, queue, pushConfigured })
     return { database, check }
   }
 
@@ -233,7 +235,7 @@ describe('runHealthCheck', () => {
     })
   })
 
-  it('watch expiry: a healthy 7-day watch is silent; near-expiry, a NULL expiration, and a missing state row each trip watch-expiring', async () => {
+  it('watch expiry: a healthy 7-day watch is silent; near-expiry, a NULL expiration, and a missing state row each trip watch-expiring (push CONFIGURED)', async () => {
     const { database, check } = await fresh()
     await seedMailbox(database, 'healthy@example.test', 'active', {
       expiration: new Date(Date.now() + 7 * 24 * 3600 * 1000),
@@ -244,7 +246,10 @@ describe('runHealthCheck', () => {
     await seedMailbox(database, 'never-armed@example.test', 'active', { expiration: null })
     await seedMailbox(database, 'no-state-row@example.test', 'active')
 
-    const report = await check()
+    // Explicit `true` (not the default) — this is the case HT-94's
+    // `pushConfigured` gate exists to still catch: watch-expiring alerts fire
+    // when push IS configured, never suppressed by the gate.
+    const report = await check(true)
 
     expect(report.ok).toBe(false)
     expect(report.alerts).toHaveLength(3)
@@ -258,6 +263,40 @@ describe('runHealthCheck', () => {
     expect(byAddress.get('healthy@example.test')?.watchExpiresAt).toMatch(/^\d{4}-/)
     expect(byAddress.get('never-armed@example.test')?.watchExpiresAt).toBeNull()
     expect(byAddress.get('no-state-row@example.test')?.watchExpiresAt).toBeNull()
+  })
+
+  it('watch expiry is SILENT when push is NOT configured (HT-94) — an active mailbox with no watch_expiration is the designed steady state, not a fault', async () => {
+    const { database, check } = await fresh()
+    // Same shape as the "never-armed"/"no-state-row" cases above, which trip
+    // watch-expiring when push IS configured — this is the regression guard
+    // for the finding that the recommended push-free install path returned
+    // 503 permanently.
+    await seedMailbox(database, 'never-armed@example.test', 'active', { expiration: null })
+    await seedMailbox(database, 'no-state-row@example.test', 'active')
+
+    const report = await check(false)
+
+    expect(report.ok).toBe(true)
+    expect(report.alerts).toEqual([])
+    expect(report.alerts.some((a) => a.startsWith('watch-expiring: '))).toBe(false)
+  })
+
+  it('pushConfigured: false does NOT suppress mailbox-needs-attention — the gate is scoped to watch alerts only', async () => {
+    const { database, check } = await fresh()
+    await seedMailbox(database, 'paused@example.test', 'paused')
+    await seedMailbox(database, 'reconnect@example.test', 'needs_reconnect')
+
+    const report = await check(false)
+
+    expect(report.ok).toBe(false)
+    const attention = report.alerts.filter((a) => a.startsWith('mailbox-needs-attention: '))
+    expect(attention).toHaveLength(2)
+    expect(attention.join('\n')).toContain('paused@example.test')
+    expect(attention.join('\n')).toContain('reconnect@example.test')
+    // No watch-expiring alerts leak in either — these mailboxes aren't even
+    // `active`, so the watch-expiring branch is unreachable regardless of
+    // the gate, but assert it explicitly since this is the push-free path.
+    expect(report.alerts).toHaveLength(2)
   })
 
   it("mailbox statuses: paused and needs_reconnect trip mailbox-needs-attention; disconnected is silent (an operator's own action)", async () => {
