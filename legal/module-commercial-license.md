@@ -15,29 +15,40 @@
 ## 1. Parties and subject
 
 This Helpthread Commercial Module License (the **"License"**) is a legal agreement
-between **Resonant IQ, Inc.**, a Delaware corporation (**"Resonant IQ,"** **"we,"** or
-**"us,"** the licensor), and the individual or entity that purchases a subscription to a
-Helpthread commercial module (**"you,"** the **"Licensee"**).
+between **Resonant IQ, Inc.**, a Delaware corporation (**"Resonant IQ"**, **"we"**, or
+**"us"**, the licensor), and the individual or entity that purchases a subscription to a
+Helpthread commercial Module (**"you,"** the **"Licensee"**).
 
 A **"Module"** is a first-party Helpthread extension that Resonant IQ distributes for a
 fee through the official Helpthread marketplace, delivered to you as **Source** — a
 source-code tarball, not a compiled binary. The **"Source"** is the complete tarball
 contents of a Module release as published. This License governs your use of the Module
 and its Source. It does **not** govern the Helpthread core, which is separately licensed
-under the GNU Affero General Public License, version 3.0 (**"AGPL-3.0"**), nor any
-third-party dependency, which each carry their own licenses. Your rights in the Module are
+under the GNU Affero General Public License, version 3.0 (**"AGPL-3.0"**), together with
+any additional permissions the core's LICENSE file carries (including, once adopted, the
+Helpthread Module API Exception), nor any third-party dependency, which each carry their
+own licenses. The Source may include third-party materials under their own permissive
+licenses; their notices travel with the Source as delivered. Your rights in the Module are
 exercised through the documented module interfaces and out-of-process integration; nothing
 in this License restricts, modifies, or replaces any right you have in the AGPL-licensed
 core under the AGPL-3.0.
 
-Your rights under this License begin when your subscription is active and are subject to
-the survival and termination terms in sections 7 and 8.
+Your rights under this License **to receive downloads and updates** begin when your
+subscription is active. Your rights in copies you have already received are governed by
+the Surviving Held-Copies License (section 7), which continues as stated there
+**regardless of subscription status** — nothing in this section, or in any statement
+that rights "begin" with an active subscription, cuts back what section 7 grants.
 
 ## 2. Subscription
 
 The Module is licensed, not sold, on an **annual subscription** basis. A subscription
 grants the rights in section 4 for the paid term and entitles you to Module updates as
 described in section 6 for as long as the subscription remains in good standing.
+
+Subscription fees are **exclusive of taxes**. You are responsible for any sales, use,
+value-added, or similar taxes arising from your purchase, other than taxes on Resonant
+IQ's income; where Resonant IQ is required to collect them, they are added at checkout
+as stated in the terms of sale.
 
 ## 3. Licensing unit — one license, one domain
 
@@ -47,14 +58,17 @@ the Module for more than one domain requires a separate license — and therefor
 separate subscription — for each additional domain.
 
 This is a **contractual term**, and it is enforced solely by this License. Consistent
-with section 5, Resonant IQ does **not** and will not verify, meter, or technically
+with section 7, Resonant IQ does **not** and will not verify, meter, or technically
 constrain the number of domains on which the Module runs; the Module contains nothing
 that records, reports, or checks the Licensed Domain. Honoring the one-license-per-domain
 term is your contractual obligation, not a gate the software imposes.
 
 ## 4. What you may do
 
-Subject to sections 3 and 5, while your subscription is active you may:
+Resonant IQ grants you a **non-exclusive, non-transferable** (except as section 13
+allows), **non-sublicensable** license, for the term stated in sections 1, 2, and 7,
+to do the following. Subject to sections 3 and 5, while your subscription is active
+you may:
 
 1. **Run** the Module in your helpdesk deployment for the Licensed Domain, whether you
    self-host it on your own infrastructure or run it through Resonant IQ managed hosting.
@@ -105,11 +119,18 @@ A lapse is an ordinary non-payment event; it is not a finding of wrongdoing and 
 no penalty beyond pausing access to **new** releases.
 
 **A lapse does not stop a Resonant IQ-hosted instance.** If Resonant IQ hosts your
-Module instance, that instance **keeps running, indefinitely, at the version you were
-entitled to at the moment of lapse**; it is **not** decommissioned, and it continues to
-serve your deployment until you cancel it or this License terminates under section 8.
-What stops is updates, nothing else. Decommissioning of a hosted instance follows only
-from a **full refund** or a **revocation** (section 8), never from non-payment alone.
+Module instance, that instance **keeps running throughout any lapse, at the version you
+were entitled to at the moment of lapse**; it is **not** decommissioned for non-payment,
+and it continues to serve your deployment until you cancel it or one of the section 8
+events that ends hosting — a **full refund** or a **revocation for confirmed fraud** —
+occurs. What a lapse stops is updates, nothing else.
+
+**License keys are distribution credentials only.** Any license key, token, or other
+credential Resonant IQ issues under this License authenticates marketplace downloads and
+the update channel, and does nothing else. It is not required to run the Module, is never
+checked at runtime by the Module or the helpdesk core, and has no effect on copies you
+already hold. Disabling, rotating, or revoking a key affects marketplace download and
+update access only.
 
 ## 7. Your held copies keep working — the Surviving Held-Copies License
 
@@ -144,8 +165,10 @@ update channel**, never software already in your hands:
 - A **termination** — whether by full refund or by revocation for fraud (section 8) —
   ends **all** future marketplace download access, including to versions you were
   previously entitled to, and any instance Resonant IQ hosts on your behalf is
-  decommissioned in accordance with the published managed-hosting policy (a
-  configuration-export grace window applies; section 8). Termination never reaches any
+  decommissioned in accordance with the published managed-hosting policy. The
+  configuration-export grace window applies to termination by **full refund**;
+  revocation for confirmed fraud decommissions immediately, with no grace window
+  (section 8). Termination never reaches any
   copy of the Module, original or modified, that you already hold and run on your own
   infrastructure: those copies continue under the Surviving Held-Copies License above,
   because there is nothing in them to switch off.
@@ -175,26 +198,37 @@ may export the instance's configuration. Section 7 governs what the termination 
 **not** reach.
 
 **Revocation for fraud.** Resonant IQ may revoke this License for confirmed fraud — for
-example a stolen payment method, a fraudulent chargeback, or redistribution or resale of
-the Source in knowing breach of section 5 — following an actual investigation.
-Revocation ends the forward entitlement and all future marketplace download access
+example a stolen payment method or a fraudulent chargeback — following an actual
+investigation. Revocation ends the forward entitlement and all future marketplace download access
 (including to previously entitled versions) and, for a hosted instance, results in
 immediate decommissioning. Revocation is never triggered automatically by a payment
 dispute merely being filed. Section 7 again governs what revocation does **not** reach.
 
-**Ordinary breach is not fraud.** A non-fraudulent breach of the terms of sale — running
-a second deployment on a single-domain License, say — is **not** grounds for revocation
-under this section. Revocation is reserved for confirmed fraud, because its consequences
-(immediate loss of download access and decommissioning of a hosted instance) are the
-harshest this License provides. Ordinary breach is a commercial matter, handled under the
-terms of sale.
+**Ordinary breach is not fraud.** A non-fraudulent breach of this License or the terms
+of sale — running a second deployment on a single-domain License, say — is **not**
+grounds for revocation under this section. Revocation is reserved for confirmed fraud,
+because its consequences (immediate loss of download access and decommissioning of a
+hosted instance) are the harshest this License provides. Ordinary breach is addressed by
+the following paragraph, and commercially under the terms of sale.
+
+**Termination of forward entitlement for material breach.** If you materially breach
+section 3 or section 5 and the breach is not fraud, Resonant IQ may give you written
+notice describing the breach. If the breach is not cured within **thirty (30) days** of
+that notice (or, where the breach is incapable of cure — a completed public disclosure of
+the Source, say — immediately upon notice), Resonant IQ may terminate your **forward
+entitlement**: new downloads, updates, and managed hosting of new instances end. This
+remedy does **not** reach the Surviving Held-Copies License (section 7), does not
+decommission an already-running hosted instance, and is in addition to — not in place of
+— any claim for damages or injunctive relief Resonant IQ may have for the breach itself,
+subject to section 10.
 
 The full mechanics and exact time windows of refunds, disputes, and hosted-instance
 decommissioning are set out in the marketplace **terms of sale** and **managed-hosting
 terms**, and are not restated in full here; this section states only their effect on
 this License.
 
-Sections 5, 7, 9, 10, 11, 12, and 13 survive termination of this License.
+Sections 3 (as it applies to copies held under section 7), 5, 7, 9, 10, 11, 12, and 13
+survive termination of this License.
 
 ## 9. Warranty disclaimer
 
@@ -205,6 +239,10 @@ warranties of merchantability, fitness for a particular purpose, title, and
 non-infringement, and any warranty arising from course of dealing or usage of trade.
 Resonant IQ does not warrant that the Module will be uninterrupted, error-free, or free
 of harmful components, or that it will meet your requirements.
+
+**No support obligation.** This License itself includes no technical support,
+maintenance, or service-level commitment. Any support Resonant IQ offers is described
+in the terms of sale or a separate agreement, not here.
 
 ## 10. Limitation of liability
 
@@ -269,8 +307,11 @@ controls for that matter; no document is read to override another outside its ow
 - **Assignment; change of control.** You may not assign or transfer this License, in whole
   or in part, without Resonant IQ's prior written consent, except that this License
   transfers with a sale of all or substantially all of the licensee's business or assets to
-  which the Licensed Domain belongs, for continued use on that same Licensed Domain, on
-  written notice to Resonant IQ. Any other purported assignment is void. Resonant IQ may
+  which the Licensed Domain belongs, for continued use by the acquired operations, on
+  thirty (30) days' written notice to Resonant IQ. If those operations migrate to a
+  different domain, the acquirer may redesignate the Licensed Domain once as part of the
+  transfer — the License still covers exactly **one** domain (section 3); redesignation
+  changes which one, not how many. Any other purported assignment is void. Resonant IQ may
   assign this License in connection with a merger, acquisition, or sale of its business.
 
 ---
@@ -281,11 +322,13 @@ controls for that matter; no document is read to override another outside its ow
   filed Certificate of Incorporation (Delaware SoS, filed May 19, 2026, file no. 10629316)
   in the company's corporate records. Venue/forum-selection remains undrafted (outside the
   decided scope) — add if desired.
-- **Cross-references left as pointers, by instruction.** The refund window (14 days),
-  full-refund-only termination, and the config-export grace window (7 days) — all
-  CONFIRMED by TJ 2026-07-19 (spec §10 resolution block) — are referenced with their
-  decided values but their full mechanics live in the terms of sale / managed-hosting
-  terms rather than being restated here.
+- **Cross-references left as pointers.** The refund window (14 days), full-refund-only
+  termination, and the config-export grace window (7 days) are referenced as
+  **placeholders**, with their mechanics deferred to the terms of sale.
+  **⚠️ These figures were NOT decided by TJ.** An earlier draft cited them as "CONFIRMED
+  by TJ 2026-07-19"; an audit on 2026-07-20 searched every message he sent and found no
+  instance of any of them. They were generated by an assistant and cited back as his.
+  They stand as placeholders until he states the figures himself.
 - **Scope held to the decided space.** Multi-domain / bulk licensing is deliberately not
   drafted (decision: "may exist later; do not draft it"). Severability, waiver, notices,
   and assignment/change-of-control were added per the adjudicated Codex-review fixes

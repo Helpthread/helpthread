@@ -34,7 +34,8 @@ fork-based modules alike.
 >
 > If you modify this Program, or any covered work, by combining it with one or more
 > Helpthread Modules (as defined below), or by linking, loading, or invoking such
-> Modules through the Module API, the licensors of this Program grant you additional
+> Modules through the Module API, the copyright holders of this Program give you
+> additional
 > permission to convey the resulting combined work, and to make it available for use
 > over a computer network as described in section 13 of the GNU Affero General Public
 > License version 3, **without** being required to license the Helpthread Modules
@@ -48,9 +49,11 @@ fork-based modules alike.
 > version to you — including its typed event hooks, webhook and event-delivery
 > contracts, module manifest and entry-point conventions, and the public HTTP API
 > surfaces that the accompanying module documentation designates for module use — and
-> no other interface. Interfaces of the Program that the documentation for the version
-> you received does not designate as part of the Module API are not licensed for
-> combination under this permission. The published Module API documentation for the
+> no other interface. This additional permission applies only to combination, linking,
+> loading, or invocation through the Module API as defined above; combination with the
+> Program through any other interface is simply not covered by this additional
+> permission, and remains governed solely by the GNU Affero General Public License
+> version 3 without it. The published Module API documentation for the
 > version you received is the boundary object, whether that version came from this
 > Program's original licensors or from a later conveyor of a modified version.
 >
@@ -76,8 +79,17 @@ fork-based modules alike.
 > modified version.
 >
 > You may remove this additional permission from your copy or your modified version,
-> as section 7 of the GNU Affero General Public License permits; you may not narrow
-> it for works you convey while retaining it in name.
+> as section 7 of the GNU Affero General Public License permits.
+>
+> If you convey a modified version of this Program whose published and documented
+> Module API is narrower than the Module API of the version you received, this
+> additional permission does not apply to that modified version and is removed from it
+> by its own terms — the self-removal that section 7 of that License expressly
+> contemplates for additional permissions. Recipients of that modified version do not
+> receive this additional permission unless you separately place equivalent additional
+> permissions on that modified version in accord with section 7. Nothing in this
+> paragraph limits your right under section 7 to remove this additional permission for
+> any reason.
 
 ---
 
@@ -114,8 +126,36 @@ this note.
    it — AGPL §7 expressly permits a conveyor to remove an additional permission, and
    the removal paragraph above says so, so a fork may strip the exception entirely.
    That is the accepted §7 removal risk, named honestly here rather than papered over.
-   The proviso's job is narrower: it stops a fork that *retains* the exception in name
-   from silently *narrowing* its published Module API to strand third-party modules
+   The proviso's job is narrower, and — following the 2026-07-20 review — it is now
+   framed as **self-removal rather than prohibition**. AGPL-3.0 §7 ¶2 states in terms
+   that "[a]dditional permissions may be written to require their own removal in
+   certain cases when you modify the work," so a permission that lapses on narrowing
+   is a drafting shape the license itself contemplates. The earlier wording ("you may
+   not narrow it … while retaining it in name") was an *obligation on the conveyor*,
+   and §7's closing paragraph sweeps every non-permissive additional term outside
+   (a)–(f) into "further restrictions" under §10 — the one category that would make
+   this license non-free. Same practical effect, sanctioned mechanism.
+
+   Counsel may prefer to relocate the anti-mislabeling intent to the trademark policy
+   instead. Note that §7(c) independently permits terms "[p]rohibiting
+   misrepresentation of the origin of that material, or requiring that modified
+   versions of such material be marked in reasonable ways as different from the
+   original version," so an in-license route plausibly exists on that basis too.
+
+   A second review pass (2026-07-20, multi-model) caught that the first attempt at this
+   fix still carried a sentence — "it is not available in name to a modified version
+   that does not carry it in substance" — which reads as a prohibition on *labelling*
+   rather than a self-removal trigger, i.e. the same §10 defect in smaller form. The
+   operative text now states only the self-removal condition and expressly preserves the
+   §7 right to remove the permission for any reason. The scope sentence in the "Module
+   API" definition was reframed in the same pass, from "are not licensed for
+   combination" (which reads as a new prohibition on combining) to a statement that
+   combination through other interfaces is simply *not covered* and remains under the
+   unmodified AGPL. Which of the three framings to adopt is counsel's call; the defect
+   being fixed is that the
+   prior wording fit none of them. The intent throughout is to stop a fork that
+   *retains* the exception in name from silently *narrowing* its published Module API
+   to strand third-party modules
    while still claiming the permission applies — a fork's recipients get the exception
    against the Module API the fork actually publishes, or, if the fork removed it, no
    exception at all.
