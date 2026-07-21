@@ -188,6 +188,13 @@ describe('fetchImapInboundMessages', () => {
 
     expect(result.newCursor).toEqual({ uidValidity: 1, lastUid: 15 })
     expect(result.messages).toHaveLength(3)
+    // Emitted oldest-UID-first even though the client returned [12, 15, 13] —
+    // ingestion order must be deterministic regardless of FETCH stream order.
+    expect(result.messages.map((m) => m.providerMessageId)).toEqual([
+      'imap:1:12',
+      'imap:1:13',
+      'imap:1:15',
+    ])
   })
 
   it('passes maxPerInvocation straight through to uidFetchRawSince, and honours a custom value', async () => {

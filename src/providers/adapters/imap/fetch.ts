@@ -142,7 +142,14 @@ export async function fetchImapInboundMessages(
 
     const fetched = await client.uidFetchRawSince(sinceUid, maxPerInvocation)
 
-    const messages: RawInboundMessage[] = fetched.map((message) => ({
+    // Ingestion order is oldest-UID-first (`ImapFetchResult.messages`' doc).
+    // The client is expected to return sorted results, but a UID FETCH stream
+    // does not guarantee order, so enforce it here too rather than trust any
+    // one `ImapClient` implementation — reordering mailbox ingestion is a
+    // mail-semantics defect, not a cosmetic one.
+    const ordered = [...fetched].sort((a, b) => a.uid - b.uid)
+
+    const messages: RawInboundMessage[] = ordered.map((message) => ({
       content: { kind: 'inline', bytes: message.raw },
       mailboxId,
       providerMessageId: providerMessageIdFor(mailbox.uidValidity, message.uid),
@@ -152,7 +159,7 @@ export async function fetchImapInboundMessages(
     // Advances only as far as the highest UID actually fetched this batch —
     // if nothing new came back, this equals `sinceUid` and the cursor does
     // not move (no spurious advance on an empty tick).
-    const lastUid = fetched.reduce((max, message) => Math.max(max, message.uid), sinceUid)
+    const lastUid = ordered.reduce((max, message) => Math.max(max, message.uid), sinceUid)
 
     return {
       messages,

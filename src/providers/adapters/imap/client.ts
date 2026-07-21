@@ -9,6 +9,18 @@
  * server or network call — see `README.md`'s "adapters are selected at the
  * composition root" rule.
  *
+ * `createImapClient` ITSELF takes an injectable `createFlow` factory (default:
+ * a real `ImapFlow`) so that even this file's UID-discovery/bounding logic —
+ * the part that talks to imapflow — is exercised by `./client.test.ts` with a
+ * fake flow modelling real-world mailbox shapes (sparse UIDs, high base UIDs,
+ * gaps, out-of-order FETCH responses). An earlier draft bounded the fetch with
+ * a raw UID *range* (`sinceUid+1 : sinceUid+max`); that silently stalled on any
+ * mailbox whose next real UID sat above `sinceUid+max` (expunged history, or a
+ * UIDVALIDITY reset onto a high-UID epoch) — the fetch returned nothing, the
+ * cursor never advanced, and new mail was never ingested (CHARTER.md §2's
+ * never-drop invariant). The fix (see `uidFetchRawSince`) discovers the ACTUAL
+ * new UIDs via `SEARCH` and bounds by message COUNT, never by UID arithmetic.
+ *
  * ## Raw bytes only — `BODY.PEEK[]`, zero transformation
  *
  * specs/mail/mailbox-connection.md §5 requires `FETCH BODY.PEEK[]` — full
@@ -84,12 +96,17 @@ export interface ImapClient {
   selectInbox(): Promise<ImapMailboxInfo>
 
   /**
-   * `UID FETCH BODY.PEEK[] (INTERNALDATE)` for every message with UID
-   * strictly greater than `sinceUid`, bounded to at most `max` messages via
-   * the UID range's upper bound (`sinceUid+1 : sinceUid+max`) rather than by
-   * fetching-then-discarding — see `createImapClient`'s implementation doc
-   * for why that bound was chosen over an early-`break` from imapflow's
-   * fetch generator.
+   * Return the raw bytes of at most `max` messages whose UID is strictly
+   * greater than `sinceUid`, oldest-UID-first.
+   *
+   * The bound is by message COUNT, not by UID arithmetic: the implementation
+   * asks the server which UIDs above `sinceUid` actually exist (`SEARCH`),
+   * takes the lowest `max` of them, and fetches exactly that set. This is the
+   * only correct way to bound an IMAP incremental fetch, because UIDs are not
+   * dense — a mailbox's live messages can sit at any UID (RFC 3501 §2.3.1.1),
+   * so a `sinceUid+1 : sinceUid+max` range can span zero real messages while
+   * mail waits just above it. See the module doc for the stall that shape
+   * caused.
    */
   uidFetchRawSince(sinceUid: number, max: number): Promise<ImapRawMessage[]>
 
@@ -126,54 +143,89 @@ export interface ImapClientOptions {
   timeoutMs?: number
 }
 
+/**
+ * The minimal `imapflow` surface `createImapClient` uses — injectable so the
+ * UID-discovery/bounding logic in this file is testable with a fake, no real
+ * IMAP server or network. A real `ImapFlow` satisfies this structurally.
+ */
+export interface ImapFlowLike {
+  connect(): Promise<void>
+  mailboxOpen(path: string): Promise<{ uidValidity: bigint | number; uidNext: number }>
+  /** `UID SEARCH` when `options.uid` is true — resolves to the matching UIDs (ascending), or `false`. */
+  search(query: { uid: string }, options: { uid: boolean }): Promise<number[] | false>
+  /** `UID FETCH` of an explicit UID set when `options.uid` is true. */
+  fetch(
+    range: number[],
+    query: { source: boolean; internalDate: boolean },
+    options: { uid: boolean },
+  ): AsyncIterable<{ uid: number; source?: Buffer; internalDate?: Date | string }>
+  logout(): Promise<void>
+  close(): void
+}
+
 /** Matches the Gmail adapter's `timeoutMs` default (`../gmail/sender.ts`, `../gmail/history.ts`). */
 const DEFAULT_TIMEOUT_MS = 30_000
 
 /**
- * Build the real, imapflow-backed {@link ImapClient}. See the module doc for
- * the PEEK/zero-transformation and UIDVALIDITY-narrowing contracts. This
- * function is the ONLY place `imapflow` is imported in this codebase.
+ * The default `ImapFlowLike` factory — a real imapflow connection built from
+ * `options`. This is the ONLY place `imapflow` is instantiated in this
+ * codebase. Tests pass their own factory to {@link createImapClient} and this
+ * never runs.
  */
-export function createImapClient(options: ImapClientOptions): ImapClient {
+function defaultCreateFlow(options: ImapClientOptions): ImapFlowLike {
   const { host, port, secure = true, auth, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+  return new ImapFlow({
+    host,
+    port,
+    secure,
+    auth,
+    // Never held open across invocations (module doc) — no reason for
+    // imapflow to auto-start IDLE the moment authentication completes.
+    disableAutoIdle: true,
+    // imapflow's default logger writes connection/protocol detail (including
+    // AUTH exchanges) to stdout via pino. The app password is a long-lived,
+    // full-mailbox-access secret (specs/mail/mailbox-connection.md §5's
+    // "Credentials" section) — hardcoded off, not exposed as an option, so a
+    // caller cannot accidentally turn on a logger that leaks it. Mirrors
+    // every other adapter in this codebase never logging a credential
+    // (`../gmail/sender.ts`, `../gmail/history.ts`).
+    logger: false,
+    connectionTimeout: timeoutMs,
+    greetingTimeout: timeoutMs,
+    socketTimeout: timeoutMs,
+  }) as unknown as ImapFlowLike
+}
 
-  let client: ImapFlow | undefined
+/**
+ * Build the real, imapflow-backed {@link ImapClient}. See the module doc for
+ * the PEEK/zero-transformation, count-based-bounding, and UIDVALIDITY-narrowing
+ * contracts.
+ *
+ * @param createFlow Builds the underlying imapflow connection — defaults to a
+ *   real `ImapFlow` ({@link defaultCreateFlow}); tests inject a fake so this
+ *   file's own UID logic runs without a network.
+ */
+export function createImapClient(
+  options: ImapClientOptions,
+  createFlow: (options: ImapClientOptions) => ImapFlowLike = defaultCreateFlow,
+): ImapClient {
+  let flow: ImapFlowLike | undefined
 
-  function requireClient(): ImapFlow {
-    if (!client) {
+  function requireFlow(): ImapFlowLike {
+    if (!flow) {
       throw new Error('createImapClient: connect() must be called before any other method')
     }
-    return client
+    return flow
   }
 
   return {
     async connect() {
-      client = new ImapFlow({
-        host,
-        port,
-        secure,
-        auth,
-        // Never held open across invocations (module doc) — no reason for
-        // imapflow to auto-start IDLE the moment authentication completes.
-        disableAutoIdle: true,
-        // imapflow's default logger writes connection/protocol detail
-        // (including AUTH exchanges) to stdout via pino. The app password
-        // is a long-lived, full-mailbox-access secret
-        // (specs/mail/mailbox-connection.md §5's "Credentials" section) —
-        // hardcoded off, not exposed as an option, so a caller cannot
-        // accidentally turn on a logger that leaks it. Mirrors every other
-        // adapter in this codebase never logging a credential
-        // (`../gmail/sender.ts`, `../gmail/history.ts`).
-        logger: false,
-        connectionTimeout: timeoutMs,
-        greetingTimeout: timeoutMs,
-        socketTimeout: timeoutMs,
-      })
-      await client.connect()
+      flow = createFlow(options)
+      await flow.connect()
     },
 
     async selectInbox() {
-      const mailbox = await requireClient().mailboxOpen('INBOX')
+      const mailbox = await requireFlow().mailboxOpen('INBOX')
       return {
         // See the module doc for why narrowing bigint -> number is safe.
         uidValidity: Number(mailbox.uidValidity),
@@ -182,37 +234,33 @@ export function createImapClient(options: ImapClientOptions): ImapClient {
     },
 
     async uidFetchRawSince(sinceUid, max) {
-      const imap = requireClient()
+      const imap = requireFlow()
+
+      // Discover which UIDs above `sinceUid` actually exist, then bound by
+      // COUNT — never by UID arithmetic (module doc). `${sinceUid + 1}:*` is
+      // the IMAP idiom for "everything from here up"; `*` is the highest UID.
+      // A subtlety: when `sinceUid + 1` exceeds the highest UID, IMAP ranges
+      // are order-independent, so `N:*` still matches the single highest
+      // message — hence the explicit `> sinceUid` filter below, which drops
+      // that already-seen message so it is never re-fetched.
+      const found = await imap.search({ uid: `${sinceUid + 1}:*` }, { uid: true })
+      const uids = (Array.isArray(found) ? found : [])
+        .filter((uid) => uid > sinceUid)
+        .sort((a, b) => a - b)
+        .slice(0, max)
+
+      if (uids.length === 0) return []
+
       const results: ImapRawMessage[] = []
-
-      // Bounded via the UID range's own upper bound, not by consuming-then-
-      // discarding extra results from imapflow's fetch() async generator.
-      // IMAP UID ranges need not be contiguous (deleted messages leave
-      // gaps), so "sinceUid+1 : sinceUid+max" may yield FEWER than `max`
-      // messages but never MORE — an upper bound is all `max` promises.
-      // This was chosen over breaking out of the generator early because
-      // imapflow's `fetch()` runs the underlying FETCH command
-      // fire-and-forget in the background (module doc in
-      // `node_modules/imapflow/lib/imap-flow.js` around its `fetch()`
-      // method): breaking early still drains already-queued responses via
-      // the generator's own `finally`, but does not itself wait for the
-      // server's tagged completion response, which could race a
-      // same-invocation `close()`. A bounded range lets the FETCH command
-      // finish naturally with no early exit at all.
-      const range = `${sinceUid + 1}:${sinceUid + max}`
-
       // `{ uid: true }` MUST be the THIRD argument (`options`), not a field
       // inside the second (`query`) — verified directly in
       // `node_modules/imapflow/lib/imap-flow.js`'s `fetch()`: it is
-      // `options.uid` that gets forwarded to the low-level FETCH command as
-      // `uid: !!options.uid`, which is what makes this a `UID FETCH`
-      // (interpreting `range` as UIDs) rather than a plain `FETCH`
-      // (sequence numbers). Getting this wrong would silently fetch by
-      // sequence number instead of UID — caught by re-reading imapflow's
-      // source, not by this repo's test suite, which fakes `ImapClient` at
-      // a level above this call (see this ticket's report).
+      // `options.uid` that gets forwarded to the low-level FETCH command,
+      // which is what makes this a `UID FETCH` (interpreting `range` as UIDs)
+      // rather than a plain sequence-number `FETCH`. `range` is the explicit
+      // UID array resolved above.
       for await (const message of imap.fetch(
-        range,
+        uids,
         { source: true, internalDate: true },
         { uid: true },
       )) {
@@ -245,17 +293,20 @@ export function createImapClient(options: ImapClientOptions): ImapClient {
         })
       }
 
+      // imapflow's FETCH does not guarantee UID order in its response stream;
+      // the ingestion contract is oldest-UID-first, so sort before returning.
+      results.sort((a, b) => a.uid - b.uid)
       return results
     },
 
     async close() {
-      if (!client) return
+      if (!flow) return
       try {
         // Graceful LOGOUT first; only fall back to a hard socket close if
         // the server doesn't cooperate (e.g. already-broken connection).
-        await client.logout()
+        await flow.logout()
       } catch {
-        client.close()
+        flow.close()
       }
     },
   }
