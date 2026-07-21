@@ -1447,6 +1447,123 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
 `
 
 /**
+ * Migration 027 — `imap_mailbox_config`, `imap_mailbox_credentials`,
+ * `imap_watch_state` (HT-101 Stage 2a-i; specs/mail/mailbox-connection.md).
+ * Stage 1 (`src/providers/adapters/imap/*`, `smtp/*`) built the pure
+ * fetch/send adapters behind the existing `InboundEmailProvider`-adjacent
+ * and `EmailSender` seams with NO persistence of their own — every
+ * dependency (an `ImapClient`, an `SmtpTransporter`) is injected by the
+ * caller. This migration is where that persistence lands: three per-mailbox
+ * sidecar tables, kept OUT of the generic `mailboxes` schema exactly like
+ * `mailbox_oauth_tokens`/`gmail_watch_state` (migrations 010/011) are —
+ * `mailboxes` stays provider-agnostic, and an IMAP-specific column set adds
+ * nothing to a schema a future non-IMAP, non-Gmail transport would also have
+ * to carry. Same 1:1-sidecar shape throughout: `mailbox_id` is the PRIMARY
+ * KEY on all three tables (one row per mailbox), not a separate surrogate
+ * `id`.
+ *
+ * ## `imap_mailbox_config` — the non-secret connection parameters
+ *
+ * Host/port for BOTH transports (`imap_host`/`imap_port` for fetch,
+ * `smtp_host`/`smtp_port` for send) live in one row, not two, because a
+ * single IMAP/SMTP mailbox connection is configured as one unit in the
+ * connect flow this table backs — an operator supplies one server pair (or
+ * one provider's well-known pair) and one account, never a fetch-only or
+ * send-only half-connection. `username` is a single column shared by both
+ * transports: the overwhelmingly common case for an app-password-based
+ * mailbox (the credential this ticket's sibling table stores) is one
+ * account authenticating both IMAP and SMTP identically; a future
+ * split-credential mailbox is a schema change for whoever needs it; not a
+ * checkbox this migration is guessing at today. `secure` defaults `true`
+ * (TLS-first posture for both connections) — `imapflow`/`nodemailer` both
+ * take an explicit boolean, so this is a plain pass-through, not a schema
+ * opinion about how either library behaves.
+ *
+ * ## `imap_mailbox_credentials` — the secret, kept in its OWN table
+ *
+ * Deliberately a separate table from `imap_mailbox_config`, not one more
+ * nullable column on it — narrows which code path ever needs to `SELECT` an
+ * encrypted column at all: the connect-flow / settings-display code that
+ * reads back host/port/username for an operator to review never has a
+ * reason to touch ciphertext, and keeping the secret physically apart from
+ * the config makes "this query cannot possibly leak the password" true by
+ * construction for every config-only reader, not just true by discipline.
+ * `password_ciphertext` is `bytea NOT NULL` — this migration only reserves
+ * the column shape, exactly like migration 010's own framing for
+ * `mailbox_oauth_tokens`; `src/store/imap-credentials.ts` (this same
+ * ticket) is what actually encrypts/decrypts, reusing `token-crypto.ts`'s
+ * existing AES-256-GCM envelope rather than inventing a second one — one
+ * crypto module, two callers.
+ *
+ * ## `imap_watch_state` — the fetch cursor, reusing `ImapCursor` verbatim
+ *
+ * `uid_validity`/`last_uid` are the exact two fields of
+ * `src/providers/adapters/imap/fetch.ts`'s `ImapCursor` — `bigint`, not
+ * `integer`: IMAP UIDs and UIDVALIDITY values are unsigned 32-bit per RFC
+ * 3501 §2.3.1, so `bigint` gives full headroom with no risk of the
+ * range-overflow question migration 011's doc comment raised (and
+ * sidestepped with `text`) for Gmail's `historyId` — an IMAP UID is a true
+ * integer counter this store needs to compare and increment, so `bigint`
+ * (not `text`) is the right column type here, `pg`/PGlite's usual
+ * string-or-number wire representation for it handled the same way
+ * `webauthn_credentials.sign_count` already is (`src/store/webauthn.ts`'s
+ * `toSignCount`). Both columns are `NOT NULL`, unlike `gmail_watch_state
+ * .history_id` (nullable until Gmail's first async `watch()` call
+ * completes): an IMAP `SELECT INBOX` returns `UIDVALIDITY` synchronously in
+ * the very same connect-time round trip that establishes the mailbox
+ * (`fetch.ts`'s `selectInbox`), so there is no "connected but not yet
+ * baselined" gap for this transport — a row is only ever inserted once both
+ * values are already known, by `ImapWatchStateStore.seedBaseline`.
+ *
+ * `claimed_until` is the fetch lease (the never-double-fetch guard) —
+ * folded into this table from the start, unlike Gmail's own lease, which
+ * shipped two migrations after its cursor (011, then 016) once HT-48
+ * identified the need. IMAP's overlapping-invocation hazard (a cron tick
+ * still running when the next tick fires) exists from Stage 2a-i's first
+ * cursor-advancing caller, so the lease column ships in the same migration
+ * as the cursor rather than as a later patch. Nullable, `NULL` meaning
+ * "unclaimed" — same convention as `gmail_watch_state.claimed_until`
+ * (migration 016) and `threads.claimed_until` (migration 003).
+ * `ImapWatchStateStore.claimFetchLease`/`releaseFetchLease`
+ * (`src/store/imap-watch-state.ts`) mirror `GmailWatchStateStore
+ * .claimReconcileLease`/`releaseReconcileLease` (`src/store/gmail-watch-
+ * state.ts`) statement-for-statement, INCLUDING that store's `::text`
+ * lease-token rendering — see that module's doc for why a `Date`
+ * round-trip through the wire driver would silently truncate
+ * `claimed_until`'s microsecond precision and reintroduce the exact
+ * stale-release hole the token exists to prevent.
+ *
+ * No index beyond each table's PRIMARY KEY: every lookup across all three
+ * tables is a single-row fetch by `mailbox_id`, which the PK already serves
+ * — matching migration 016's own "no index: this column is only ever read
+ * via an equality match on the `mailbox_id` PRIMARY KEY" precedent.
+ */
+const MIGRATION_027_IMAP_TRANSPORT = `
+CREATE TABLE imap_mailbox_config (
+  mailbox_id uuid PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,
+  imap_host text NOT NULL,
+  imap_port integer NOT NULL CHECK (imap_port BETWEEN 1 AND 65535),
+  smtp_host text NOT NULL,
+  smtp_port integer NOT NULL CHECK (smtp_port BETWEEN 1 AND 65535),
+  username text NOT NULL,
+  secure boolean NOT NULL DEFAULT true,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE imap_mailbox_credentials (
+  mailbox_id uuid PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,
+  password_ciphertext bytea NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE imap_watch_state (
+  mailbox_id uuid PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,
+  uid_validity bigint NOT NULL CHECK (uid_validity BETWEEN 0 AND 4294967295),
+  last_uid bigint NOT NULL CHECK (last_uid BETWEEN 0 AND 4294967295),
+  claimed_until timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1577,6 +1694,11 @@ const MIGRATIONS: Migration[] = [
     id: 26,
     name: 'webauthn',
     sql: MIGRATION_026_WEBAUTHN,
+  },
+  {
+    id: 27,
+    name: 'imap_transport',
+    sql: MIGRATION_027_IMAP_TRANSPORT,
   },
 ]
 
