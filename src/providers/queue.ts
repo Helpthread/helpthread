@@ -8,8 +8,10 @@
  *
  * Serverless queue consumers are **push-delivered**, not pulled: the
  * platform invokes an HTTP handler with a queued message, rather than the
- * engine running a loop that polls for work (the charter's "no daemons, no
- * polling loops" principle). This interface models that shape directly —
+ * engine running a resident loop that polls for work (the charter's "no
+ * daemons, no long-running processes" principle — a bounded invocation that
+ * reads and exits is permitted; a process that stays up is not). This
+ * interface models that shape directly —
  * there is no `dequeue`/`poll` method. The handler side of the contract is
  * `QueueMessageHandler`, invoked by adapter glue that receives the
  * platform's webhook/invocation and adapts it into a `QueueMessage`.

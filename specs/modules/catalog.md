@@ -73,7 +73,10 @@ passkeys and tags.
 
 ### 2.3 Not ported — obsolete by architecture
 
-Move/Remove IMAP Message (no IMAP polling) · Faster Search via Meilisearch (search is
+Move/Remove IMAP Message (no server-side folder manipulation; note the "no IMAP
+polling" rationale this once carried is void as of HT-92 — scheduled fetch is now
+permitted, so if IMAP intake ships this entry needs re-deciding on its own merits) ·
+Faster Search via Meilisearch (search is
 Postgres-native) · Auto Login from notification emails · Custom Homepage · Ticket Number
 in subject (threading never depends on it; display numbers shipped in HT-27) · Mailbox
 Icons · Twitter/X DM integration (API effectively dead).
