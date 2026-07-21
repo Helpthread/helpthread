@@ -121,6 +121,30 @@ describe('createImapWatchStateStore', () => {
     })
   })
 
+  // --- seedBaselineIfAbsent --------------------------------------------------
+
+  describe('seedBaselineIfAbsent', () => {
+    it('seeds a baseline when no cursor row exists yet', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+
+      await store.seedBaselineIfAbsent(mailboxId, { uidValidity: 5, lastUid: 100 })
+
+      expect(await store.getCursor(mailboxId)).toEqual({ uidValidity: 5, lastUid: 100 })
+    })
+
+    it('PRESERVES an existing cursor (DO NOTHING) — a reconnect never rewinds past un-ingested mail', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db)
+      await store.seedBaseline(mailboxId, { uidValidity: 1, lastUid: 4 })
+
+      // A reconnect tries to re-baseline to a later point — must be a no-op.
+      await store.seedBaselineIfAbsent(mailboxId, { uidValidity: 1, lastUid: 29 })
+
+      expect(await store.getCursor(mailboxId)).toEqual({ uidValidity: 1, lastUid: 4 })
+    })
+  })
+
   // --- setCursor -------------------------------------------------------------
 
   describe('setCursor', () => {

@@ -185,11 +185,9 @@ export interface ImapConnectService {
 }
 
 /**
- * True if `value` contains any C0 control character (codes 0-31, including
- * CR/LF/TAB) or DEL (127) — used only to decide whether redacting the
- * password from an error message is meaningful (an empty/control-only
- * "password" has nothing worth splitting on). Mirrors
- * `../providers/adapters/smtp/sender.ts`'s identical scan shape.
+ * True if `value` is a non-empty string — used only to decide whether
+ * redacting the password from an error message is meaningful (an empty
+ * password has nothing worth splitting on).
  */
 function isNonEmpty(value: string): boolean {
   return value.length > 0
@@ -203,7 +201,17 @@ function isNonEmpty(value: string): boolean {
  */
 function sanitizeConnectionError(err: unknown, password: string): string {
   const raw = err instanceof Error ? err.message : String(err)
-  const redacted = isNonEmpty(password) ? raw.split(password).join('[redacted]') : raw
+  let redacted = raw
+  if (isNonEmpty(password)) {
+    // Redact the password both literally and as base64 — the form SMTP AUTH
+    // puts it on the wire, and so the likeliest encoding a diagnostic might
+    // echo back. Provider auth errors don't reflect the credential in
+    // practice; this is defense in depth on top of the spec-required verbatim
+    // error text.
+    redacted = redacted.split(password).join('[redacted]')
+    const base64 = Buffer.from(password, 'utf8').toString('base64')
+    redacted = redacted.split(base64).join('[redacted]')
+  }
   return redacted.length > MAX_ERROR_MESSAGE_LENGTH
     ? `${redacted.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…`
     : redacted
@@ -226,20 +234,33 @@ async function attemptImapConnection(
   input: ImapConnectInput,
   createImapClient: (options: ImapClientOptions) => ImapClient,
 ): Promise<ImapAttemptResult> {
-  const client = createImapClient({
-    host: input.imapHost,
-    port: input.imapPort,
-    secure: input.secure ?? true,
-    auth: { user: input.username, pass: input.password },
-  })
+  let client: ImapClient | undefined
   try {
+    // Construction is INSIDE the try so even a constructor throw becomes a
+    // sanitized LegResult, never a raw throw carrying connection options.
+    client = createImapClient({
+      host: input.imapHost,
+      port: input.imapPort,
+      secure: input.secure ?? true,
+      auth: { user: input.username, pass: input.password },
+    })
     await client.connect()
     const mailbox = await client.selectInbox()
     return { ok: true, uidValidity: mailbox.uidValidity, uidNext: mailbox.uidNext }
   } catch (err) {
     return { ok: false, error: sanitizeConnectionError(err, input.password) }
   } finally {
-    await client.close()
+    // A close() failure must never override the leg result nor propagate out
+    // of this "never throws" attempt — that would break checkConnection's
+    // both-legs-independent contract and could surface a raw, unsanitized
+    // error to the caller/logger.
+    if (client) {
+      try {
+        await client.close()
+      } catch {
+        /* swallow — see above */
+      }
+    }
   }
 }
 
@@ -331,10 +352,14 @@ export function createImapConnectService(deps: ImapConnectServiceDeps): ImapConn
           tx,
         )
         await credentialStore.upsertPassword(mailbox.id, input.password, tx)
-        // Baseline: lastUid = uidNext - 1, so only mail arriving AFTER this
-        // connect is ever fetched (module doc's "The baseline cursor"
-        // section) — never the mailbox's pre-existing history.
-        await watchStateStore.seedBaseline(
+        // Baseline ONLY if this inbox has no cursor yet. A RECONNECT
+        // (credential rotation, host/port edit) must PRESERVE the existing
+        // cursor — re-baselining would silently skip mail that arrived since
+        // the last fetch but is not yet ingested (CHARTER §2 never-drop). For
+        // a brand-new inbox, lastUid = uidNext - 1 starts fetching from "now,"
+        // never the mailbox's pre-existing history. A UIDVALIDITY change on a
+        // reconnect surfaces via the cron's pause path, not a silent reseed.
+        await watchStateStore.seedBaselineIfAbsent(
           mailbox.id,
           { uidValidity: imapAttempt.uidValidity, lastUid: imapAttempt.uidNext - 1 },
           tx,

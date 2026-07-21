@@ -295,19 +295,25 @@ describe('createImapConnectService', () => {
       expect(message).toContain('[redacted]')
     })
 
-    it('a reconnect (same address) re-baselines the cursor and replaces the stored config/credential — idempotent by address', async () => {
+    it('a reconnect (same address) PRESERVES the existing cursor — never re-baselines past un-ingested mail — while updating config/credential', async () => {
       const { db: rawDb, deps } = await freshDeps({
         createImapClient: fakeCreateImapClient({ mailbox: { uidValidity: 1, uidNext: 5 } }).factory,
       })
       const service = createImapConnectService(deps)
       const first = await service.connect(VALID_INPUT)
+      // First connect baselines at uidNext(5) - 1 = 4.
+      expect(await createImapWatchStateStore(rawDb).getCursor(first.id)).toEqual({
+        uidValidity: 1,
+        lastUid: 4,
+      })
 
-      // A fresh service instance over the SAME underlying stores, but a
-      // different IMAP client behavior (a new epoch) — mirrors an operator
-      // re-running connect against a since-changed mailbox.
+      // Mail has since arrived (uidNext advanced to 30, same epoch) and the
+      // operator reconnects — e.g. to rotate the app password. Re-baselining
+      // here would silently skip UIDs 5..29; the connect must preserve the
+      // cursor so the next scheduled fetch picks them up.
       const secondService = createImapConnectService({
         ...deps,
-        createImapClient: fakeCreateImapClient({ mailbox: { uidValidity: 999, uidNext: 30 } })
+        createImapClient: fakeCreateImapClient({ mailbox: { uidValidity: 1, uidNext: 30 } })
           .factory,
       })
       const second = await secondService.connect({
@@ -317,10 +323,12 @@ describe('createImapConnectService', () => {
 
       expect(second.id).toBe(first.id)
       expect(await countMailboxes(rawDb)).toBe(1)
+      // Config DOES update on reconnect...
       const config = await createImapConfigStore(rawDb).getConfig(second.id)
       expect(config?.imapHost).toBe('new-imap.example.test')
+      // ...but the cursor is PRESERVED at {1, 4}, not rewound to {1, 29}.
       const cursor = await createImapWatchStateStore(rawDb).getCursor(second.id)
-      expect(cursor).toEqual({ uidValidity: 999, lastUid: 29 })
+      expect(cursor).toEqual({ uidValidity: 1, lastUid: 4 })
     })
   })
 })

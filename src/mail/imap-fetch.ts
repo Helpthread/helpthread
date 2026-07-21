@@ -206,9 +206,12 @@ async function fetchOneMailbox(
     return
   }
 
+  // Hoisted so the password-redacting catch below can reference it; null until
+  // the credential load succeeds.
+  let password: string | null = null
   try {
     const config = await configStore.getConfig(mailboxId)
-    const password = await credentialStore.getPassword(mailboxId)
+    password = await credentialStore.getPassword(mailboxId)
     const cursor = await watchStateStore.getCursor(mailboxId)
     if (config === null || password === null || cursor === null) {
       counts.skipped++
@@ -223,6 +226,10 @@ async function fetchOneMailbox(
       return
     }
 
+    // Pinned to a const so the client-factory closure below captures a
+    // definite string — a captured `let` widens back to its declared
+    // `string | null` inside a closure.
+    const resolvedPassword = password
     const result = await fetchImapInboundMessages(
       mailboxId,
       cursor,
@@ -231,7 +238,7 @@ async function fetchOneMailbox(
           host: config.imapHost,
           port: config.imapPort,
           secure: config.secure,
-          auth: { user: config.username, pass: password },
+          auth: { user: config.username, pass: resolvedPassword },
         }),
       maxPerInvocation,
     )
@@ -287,6 +294,13 @@ async function fetchOneMailbox(
       previousCursor: cursor,
       newCursor: result.newCursor,
     })
+  } catch (err) {
+    // Redact the password from any thrown error before it reaches
+    // runImapFetch's logger. imapflow/nodemailer don't echo credentials (and
+    // imapflow's logger is off), but this guarantees an unexpected failure
+    // carrying connection detail can never leak the secret.
+    const message = err instanceof Error ? err.message : String(err)
+    throw new Error(password !== null ? message.split(password).join('[redacted]') : message)
   } finally {
     // Release on EVERY exit from the try above — success, the
     // uidValidityReset pause, the blocked-retry, AND an unexpected throw

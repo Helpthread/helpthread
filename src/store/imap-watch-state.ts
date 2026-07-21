@@ -109,6 +109,20 @@ export interface ImapWatchStateStore {
   seedBaseline(mailboxId: string, cursor: ImapCursor, tx?: Queryable): Promise<void>
 
   /**
+   * Seed the baseline cursor ONLY if this mailbox has no cursor row yet —
+   * `INSERT ... ON CONFLICT (mailbox_id) DO NOTHING`. This is what a connect
+   * flow uses so that RECONNECTING an already-connected inbox (to rotate the
+   * app password or edit host/port) PRESERVES the existing cursor instead of
+   * rewinding it to a fresh baseline — rewinding would skip (silently drop)
+   * any mail that arrived since the last fetch but has not yet been ingested
+   * (CHARTER §2 never-drop). If the server's UIDVALIDITY has since changed,
+   * the preserved (now-stale) cursor makes the next scheduled fetch report a
+   * UIDVALIDITY reset, which pauses the mailbox for deliberate rebaseline
+   * (`../mail/imap-fetch.ts`) — never a silent reseed here.
+   */
+  seedBaselineIfAbsent(mailboxId: string, cursor: ImapCursor, tx?: Queryable): Promise<void>
+
+  /**
    * Claim `mailboxId`'s fetch lease for `leaseMs` — the never-double-fetch
    * guard preventing an overlapping cron invocation from fetching the same
    * UID range twice. Returns an opaque **lease token** (module doc) iff
@@ -181,6 +195,17 @@ export function createImapWatchStateStore(db: Db): ImapWatchStateStore {
 
     async seedBaseline(mailboxId, cursor, tx) {
       await upsertCursor(mailboxId, cursor, tx)
+    },
+
+    async seedBaselineIfAbsent(mailboxId, cursor, tx) {
+      // DO NOTHING (not DO UPDATE) — a reconnect must never overwrite an
+      // existing cursor and skip un-ingested mail (interface doc).
+      await (tx ?? db).query(
+        `INSERT INTO imap_watch_state (mailbox_id, uid_validity, last_uid)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (mailbox_id) DO NOTHING`,
+        [mailboxId, cursor.uidValidity, cursor.lastUid],
+      )
     },
 
     async claimFetchLease(mailboxId, leaseMs) {
