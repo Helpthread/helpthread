@@ -6,6 +6,7 @@ import { migrate } from '../db/migrate.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
 import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
 import type { GmailOAuthTokenService } from '../mail/gmail-oauth.js'
+import type { ImapConnectService } from '../mail/imap-connect.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { GmailWatchClient } from '../providers/adapters/gmail/index.js'
 import type {
@@ -2761,6 +2762,141 @@ describe('createInboxApi', () => {
     it('existing routes are unaffected: /api/v1/conversations still 401s without a token', async () => {
       const { db } = await freshApi()
       const api = apiWithGmailDisconnect(db, realGmailDisconnect(db))
+
+      const res = await api(get('/api/v1/conversations', undefined))
+      expect(res.status).toBe(401)
+    })
+  })
+
+  // --- imap connect (HT-101 Stage 2a-ii) --------------------------------------
+  //
+  // Focused on the WIRING contract createInboxApi owns: both `POST
+  // .../imap/connect` and `POST .../imap/check` are ORDINARY Bearer-gated
+  // routes (no pre-auth carve-out at all — mirrors the "gmail disconnect"
+  // block above, not the "gmail connect" block's pre-auth callback), and
+  // `deps.imapConnect` absence 404s both. Handler-level response-shape
+  // details (body validation, error-code mapping) live in
+  // `src/api/imap-connect.test.ts` — this block does not re-derive those.
+  describe('imap connect', () => {
+    const CONNECT_PATH = '/api/v1/inbound/imap/connect'
+    const CHECK_PATH = '/api/v1/inbound/imap/check'
+
+    const VALID_BODY = {
+      address: 'support@example.test',
+      imapHost: 'imap.example.test',
+      imapPort: 993,
+      smtpHost: 'smtp.example.test',
+      smtpPort: 465,
+      username: 'support@example.test',
+      password: 'app-password',
+    }
+
+    /** A fake `ImapConnectService` — no real network, no real DB (that contract is `src/mail/imap-connect.test.ts`'s job). */
+    function fakeImapConnect(
+      overrides: Partial<ImapConnectService> = {},
+    ): InboxApiDeps['imapConnect'] {
+      const service: ImapConnectService = {
+        connect:
+          overrides.connect ??
+          (async () => ({
+            id: 'mb-1',
+            address: VALID_BODY.address,
+            provider: 'imap',
+            status: 'active',
+          })),
+        checkConnection:
+          overrides.checkConnection ?? (async () => ({ imap: { ok: true }, smtp: { ok: true } })),
+      }
+      return { service }
+    }
+
+    /** Build a full `createInboxApi` instance wired to `db`, with `imapConnect` present (or, if omitted, absent entirely — for the "not configured" tests). */
+    function apiWithImapConnect(
+      db: Db,
+      imapConnect?: InboxApiDeps['imapConnect'],
+    ): (request: Request) => Promise<Response> {
+      return createInboxApi({
+        store: createConversationStore(db),
+        apiToken: TOKEN,
+        sender: createFakeSender().sender,
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
+        ...(imapConnect !== undefined ? { imapConnect } : {}),
+      })
+    }
+
+    it('POST .../imap/connect with a valid Bearer token dispatches to the service: 200 with the mailbox', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(post(CONNECT_PATH, VALID_BODY))
+
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { address: string }
+      expect(body.address).toBe(VALID_BODY.address)
+    })
+
+    it('POST .../imap/connect WITHOUT a Bearer token → 401, before the handler ever runs', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(post(CONNECT_PATH, VALID_BODY, undefined))
+      expect(res.status).toBe(401)
+    })
+
+    it('deps.imapConnect absent: POST .../imap/connect 404s (no route-table special case needed — Bearer-gated either way)', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db) // no imapConnect
+
+      const res = await api(post(CONNECT_PATH, VALID_BODY))
+      expect(res.status).toBe(404)
+    })
+
+    it('POST .../imap/check with a valid Bearer token dispatches to the service: 200 with per-leg results', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(post(CHECK_PATH, VALID_BODY))
+
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ imap: { ok: true }, smtp: { ok: true } })
+    })
+
+    it('POST .../imap/check WITHOUT a Bearer token → 401', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(post(CHECK_PATH, VALID_BODY, undefined))
+      expect(res.status).toBe(401)
+    })
+
+    it('deps.imapConnect absent: POST .../imap/check 404s', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db) // no imapConnect
+
+      const res = await api(post(CHECK_PATH, VALID_BODY))
+      expect(res.status).toBe(404)
+    })
+
+    it('never echoes the password anywhere in either response body', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const connectRes = await api(post(CONNECT_PATH, VALID_BODY))
+      const checkRes = await api(post(CHECK_PATH, VALID_BODY))
+
+      expect(await connectRes.text()).not.toContain(VALID_BODY.password)
+      expect(await checkRes.text()).not.toContain(VALID_BODY.password)
+    })
+
+    it('existing routes are unaffected: /api/v1/conversations still 401s without a token', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
 
       const res = await api(get('/api/v1/conversations', undefined))
       expect(res.status).toBe(401)

@@ -89,6 +89,7 @@ import {
 } from './gmail-connect.js'
 import { type GmailDisconnectDeps, handleGmailDisconnect } from './gmail-disconnect.js'
 import { type GmailPushDeps, gmailPushRejected, handleGmailPushWebhook } from './gmail-webhook.js'
+import { handleImapCheck, handleImapConnect, type ImapConnectDeps } from './imap-connect.js'
 import type { ApiError } from './responses.js'
 import { apiError } from './responses.js'
 import {
@@ -240,6 +241,18 @@ export interface InboxApiDeps {
    * route-table special-casing needed, since it's Bearer-gated either way).
    */
   gmailDisconnect?: GmailDisconnectDeps
+  /**
+   * The IMAP/SMTP connect/check flow (HT-101 Stage 2a-ii; specs/mail/
+   * mailbox-connection.md §5): ABSENT BY DEFAULT — a deployment that hasn't
+   * wired the IMAP/SMTP connect service simply never configures this. When
+   * present, `POST /api/v1/inbound/imap/connect` verifies + persists a
+   * per-inbox IMAP/SMTP connection and `POST /api/v1/inbound/imap/check`
+   * verifies without persisting — see `src/api/imap-connect.ts`. Both are
+   * ORDINARY Bearer-gated routes (no pre-auth carve-out — unlike Gmail's
+   * OAuth `/callback`). When absent, both routes 404 through the normal
+   * authenticated dispatch, exactly like `gmailConnect`'s own absent-case.
+   */
+  imapConnect?: ImapConnectDeps
   /**
    * Attachment read-path deps (HT-46; specs/api/agent-inbox-v1.md §2's
    * `ThreadView.attachments`): ABSENT BY DEFAULT — a deployment that hasn't
@@ -557,6 +570,18 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
         case 'gmail-disconnect':
           return deps.gmailDisconnect !== undefined
             ? await handleGmailDisconnect(request, deps.gmailDisconnect)
+            : apiError(404, 'not_found', 'No such route.')
+
+        // --- IMAP/SMTP connect (HT-101 Stage 2a-ii) -------------------------
+
+        case 'imap-connect':
+          return deps.imapConnect !== undefined
+            ? await handleImapConnect(request, deps.imapConnect)
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'imap-check':
+          return deps.imapConnect !== undefined
+            ? await handleImapCheck(request, deps.imapConnect)
             : apiError(404, 'not_found', 'No such route.')
 
         // --- Agents & Authentication (HT-54) --------------------------------

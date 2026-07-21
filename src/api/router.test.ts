@@ -102,6 +102,36 @@ describe('matchRoute', () => {
     expect(matchRoute('POST', '/api/v1/inbound/gmail')).toEqual({ kind: 'not-found' })
   })
 
+  // --- IMAP/SMTP connect (HT-101 Stage 2a-ii) ---------------------------------
+
+  it('matches POST /api/v1/inbound/imap/connect', () => {
+    expect(matchRoute('POST', '/api/v1/inbound/imap/connect')).toEqual({ kind: 'imap-connect' })
+  })
+
+  it('returns method-not-allowed for a wrong method on the imap connect route, naming POST', () => {
+    expect(matchRoute('GET', '/api/v1/inbound/imap/connect')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+  })
+
+  it('matches POST /api/v1/inbound/imap/check', () => {
+    expect(matchRoute('POST', '/api/v1/inbound/imap/check')).toEqual({ kind: 'imap-check' })
+  })
+
+  it('returns method-not-allowed for a wrong method on the imap check route, naming POST', () => {
+    expect(matchRoute('GET', '/api/v1/inbound/imap/check')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['POST'],
+    })
+  })
+
+  it('does not confuse imap connect/check with each other or with the gmail routes', () => {
+    expect(matchRoute('POST', '/api/v1/inbound/imap/connect')).toEqual({ kind: 'imap-connect' })
+    expect(matchRoute('POST', '/api/v1/inbound/imap/check')).toEqual({ kind: 'imap-check' })
+    expect(matchRoute('POST', '/api/v1/inbound/imap')).toEqual({ kind: 'not-found' })
+  })
+
   // --- Agents & Authentication (HT-54) ----------------------------------------
 
   it('matches GET /api/v1/auth/providers', () => {

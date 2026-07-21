@@ -256,6 +256,72 @@ describe('buildApp — end-to-end wiring over PGlite', () => {
     const body = (await res.json()) as { error: { code: string } }
     expect(body.error.code).toBe('gmail_push_rejected')
   })
+
+  // --- IMAP/SMTP connect + scheduled fetch (HT-101 Stage 2a-ii) --------------
+  //
+  // No real network is exercised here (no IMAP/SMTP server available in the
+  // test environment): these prove the composition root's WIRING — route
+  // presence, Bearer/cron-secret gating, and validation dispatching through
+  // the real service — not connectivity behavior, which is already covered
+  // against fakes in `src/mail/imap-connect.test.ts`/`imap-fetch.test.ts`.
+
+  it('drives the imap-fetch cron endpoint: authenticated GET → 200 report (0 active imap mailboxes, no network attempted)', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/cron/imap-fetch`, {
+        headers: { Authorization: `Bearer ${CRON_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { ok: boolean; report: { total: number } }
+    expect(body.ok).toBe(true)
+    expect(body.report.total).toBe(0)
+  })
+
+  it('rejects the imap-fetch cron endpoint with a wrong cron secret → 401', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/cron/imap-fetch`, {
+        headers: { Authorization: 'Bearer wrong-secret-0000000000' },
+      }),
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('wires imapConnect: POST /inbound/imap/connect (Bearer) → reaches the real service and 400s a malformed body (no network attempted)', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/imap/connect`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: 'nobody@example.test' }), // missing every other field
+      }),
+    )
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: { code: string } }
+    expect(body.error.code).toBe('validation_failed')
+  })
+
+  it('wires imapCheck: POST /inbound/imap/check (Bearer) → reaches the real service and 400s a malformed body', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/imap/check`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }),
+    )
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: { code: string } }
+    expect(body.error.code).toBe('validation_failed')
+  })
+
+  it('rejects an imap connect request without the service Bearer token → 401', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/imap/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: 'nobody@example.test' }),
+      }),
+    )
+    expect(res.status).toBe(401)
+  })
 })
 
 describe('buildApp — passkeys (HT-75; specs/auth/passkeys.md §3)', () => {

@@ -8,3 +8,5 @@
 
 export type { SmtpEmailSenderOptions, SmtpTransporter } from './sender.js'
 export { createSmtpEmailSender } from './sender.js'
+export type { SmtpVerifyTransporter, VerifySmtpConnectionOptions } from './verify.js'
+export { verifySmtpConnection } from './verify.js'
