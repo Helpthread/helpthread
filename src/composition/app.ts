@@ -50,8 +50,23 @@ import type { HealthReport } from './health.js'
 /** `GET` (Vercel Cron) → drain one bounded batch of the durable job queue (runbook Part C: every minute). */
 export const QUEUE_DRAIN_PATH = '/api/v1/internal/queue/drain'
 
-/** `GET` (Vercel Cron) → daily Gmail `watch()` re-arm + reconciliation sweep (runbook Part C: daily at 06:00 UTC). */
+/** `GET` (Vercel Cron) → daily Gmail `watch()` re-arm (runbook Part C: daily at 06:00 UTC). Only meaningful when push is configured; reports a skip otherwise (HT-94). The reconciliation sweep this endpoint used to also perform now lives at {@link RECONCILE_SWEEP_PATH}. */
 export const WATCH_MAINTENANCE_PATH = '/api/v1/internal/cron/watch-maintenance'
+
+/**
+ * `GET` (Vercel Cron) → one bounded reconciliation sweep (HT-94;
+ * `src/mail/gmail-reconcile-sweep.ts`): enqueue a reconcile job per active
+ * mailbox with a baseline cursor.
+ *
+ * **This is the primary inbound transport** (CHARTER.md §2 as amended
+ * 2026-07-20), not a backstop — a deployment with no Pub/Sub ingests mail
+ * entirely through this endpoint, so it runs at the same every-minute cadence
+ * as {@link QUEUE_DRAIN_PATH} rather than the daily cadence
+ * {@link WATCH_MAINTENANCE_PATH} uses for infrastructure upkeep. Split out of
+ * that endpoint precisely so the two cadences could diverge, and so the sweep
+ * would stop paying for a per-mailbox token refresh it never needs.
+ */
+export const RECONCILE_SWEEP_PATH = '/api/v1/internal/cron/reconcile-sweep'
 
 /** `GET` (Vercel Cron) → drain one bounded batch of `event_outbox` into `queue_jobs` webhook-delivery fan-out (HT-69; `src/webhooks/outbox-drain.ts`; runbook Part C: every minute, same cadence as {@link QUEUE_DRAIN_PATH}). A SEPARATE endpoint from the queue drain — this one turns outbox rows into queue jobs; the queue drain is what then delivers them. */
 export const OUTBOX_DRAIN_PATH = '/api/v1/internal/outbox/drain'
@@ -80,8 +95,10 @@ export interface AppHandlerDeps {
   drainOutbox: () => Promise<unknown>
   /** Run one snooze wake pass (HT-77, {@link SNOOZE_WAKE_PATH}); returns a JSON-serializable report for the response body + logs. */
   runSnoozeWake: () => Promise<unknown>
-  /** Run one daily watch-renewal + reconciliation-sweep pass; returns a JSON-serializable report. */
+  /** Run one daily watch-renewal pass; returns a JSON-serializable report. */
   runWatchMaintenance: () => Promise<unknown>
+  /** Run one bounded reconciliation sweep (HT-94, {@link RECONCILE_SWEEP_PATH}) — the primary inbound transport; returns a JSON-serializable report. */
+  runReconcileSweep: () => Promise<unknown>
   /** Assemble the health report (`./health.ts`) — the {@link HEALTH_PATH} endpoint's work. */
   runHealthCheck: () => Promise<HealthReport>
   /**
@@ -113,6 +130,9 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
     }
     if (pathname === SNOOZE_WAKE_PATH) {
       return handleCronEndpoint(request, deps.cronSecret, 'snooze-wake', deps.runSnoozeWake)
+    }
+    if (pathname === RECONCILE_SWEEP_PATH) {
+      return handleCronEndpoint(request, deps.cronSecret, 'reconcile-sweep', deps.runReconcileSweep)
     }
     if (pathname === WATCH_MAINTENANCE_PATH) {
       return handleCronEndpoint(

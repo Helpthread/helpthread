@@ -57,6 +57,12 @@ export interface GmailWatchStateStore {
    * a new cursor, or vice versa — the two values always land together, from
    * the same `watch()` call, in one write.
    *
+   * `watchExpiration` is OPTIONAL as of HT-94: when push is not configured for
+   * the deployment, connect arms no `watch()`, so there is no expiration to
+   * record and the (already nullable) column is written NULL. The cursor still
+   * seeds — from `getProfile()` — because the bounded scheduled fetch resumes
+   * from it exactly as the push path's reconcile does.
+   *
    * Optionally runs against a caller-supplied `tx` (`Db.transaction`'s
    * `Queryable`) instead of the bound `db`, so the connect flow can commit
    * this seed together with the mailbox row and token write as one atomic
@@ -64,7 +70,7 @@ export interface GmailWatchStateStore {
    */
   seedBaseline(
     mailboxId: string,
-    input: { historyId: string; watchExpiration: Date },
+    input: { historyId: string; watchExpiration?: Date },
     tx?: Queryable,
   ): Promise<void>
 
@@ -239,7 +245,10 @@ export function createGmailWatchStateStore(db: Db): GmailWatchStateStore {
            history_id = EXCLUDED.history_id,
            watch_expiration = EXCLUDED.watch_expiration,
            updated_at = now()`,
-        [mailboxId, input.historyId, input.watchExpiration],
+        // `?? null` is explicit rather than relying on the driver's
+        // undefined→NULL coercion: with push unconfigured (HT-94) there is no
+        // watch to expire, and the column is nullable precisely for that case.
+        [mailboxId, input.historyId, input.watchExpiration ?? null],
       )
     },
 

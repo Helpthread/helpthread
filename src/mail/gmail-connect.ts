@@ -447,8 +447,16 @@ export interface GmailConnectServiceDeps {
   clientSecret: string
   /** Must exactly match `/api/v1/inbound/gmail/callback` on the deployment's public origin AND a redirect URI registered on the OAuth client (gmail-connect.md §3). */
   redirectUri: string
-  /** The Cloud Pub/Sub topic `watch()` arms notifications to (`projects/{project}/topics/{topic}`, HT-43-provisioned) — injected config. */
-  topicName: string
+  /**
+   * The Cloud Pub/Sub topic `watch()` arms notifications to
+   * (`projects/{project}/topics/{topic}`, HT-43-provisioned) — injected config.
+   *
+   * OPTIONAL as of HT-94. When absent, push is not configured for this
+   * deployment: connect skips the `watch()` arm entirely and seeds the
+   * baseline cursor from `getProfile()` instead, leaving the bounded
+   * scheduled fetch as the sole inbound transport.
+   */
+  topicName?: string
   /** OAuth scopes requested on the consent screen (gmail-connect.md §3: `gmail.readonly` + `gmail.send` for the dogfood). */
   scopes: string[]
   /** Signs/verifies the `state` CSRF token (module doc). */
@@ -524,7 +532,10 @@ export function createGmailConnectService(deps: GmailConnectServiceDeps): GmailC
   assertNonEmpty('clientId', clientId)
   assertNonEmpty('clientSecret', clientSecret)
   assertNonEmpty('redirectUri', redirectUri)
-  assertNonEmpty('topicName', topicName)
+  // Optional (HT-94): absent means push is not configured for this deployment.
+  // Present-but-blank is still a misconfiguration and still rejected — the
+  // all-or-nothing shape is enforced at the composition root (`resolveGmailPush`).
+  if (topicName !== undefined) assertNonEmpty('topicName', topicName)
   if (!Array.isArray(scopes) || scopes.length === 0) {
     throw new Error('createGmailConnectService: scopes must be a non-empty array')
   }
@@ -570,15 +581,32 @@ export function createGmailConnectService(deps: GmailConnectServiceDeps): GmailC
       const watchClient = createWatchClient(() => Promise.resolve(exchanged.accessToken))
       const profile = await watchClient.getProfile()
 
-      // --- Step 4: arm watch() BEFORE any persistence (module doc). ---
-      let armed: GmailWatchResult
-      try {
-        armed = await watchClient.watch({ topicName })
-      } catch (err) {
-        throw new GmailConnectError(
-          'watch_failed',
-          `Enabling Gmail push failed: ${errorMessage(err)}`,
-        )
+      // --- Step 4: arm watch() BEFORE any persistence (module doc).
+      //
+      // SKIPPED ENTIRELY when push is not configured (HT-94, CHARTER.md §2 as
+      // amended 2026-07-20): there is no topic to arm against, and the bounded
+      // scheduled fetch is the transport. The baseline then comes from the
+      // `getProfile()` call step 3 ALREADY made.
+      //
+      // That substitution is safe for exactly the reason the module doc gives
+      // for rejecting it in the push case: getProfile's separately-read
+      // historyId "could straddle the arm." With no arm, there is nothing to
+      // straddle — one read, one baseline, and the sweep resumes from it. No
+      // extra API call is made either; step 3's response carries the value. ---
+      let baseline: { historyId: string; watchExpiration?: Date }
+      if (topicName === undefined) {
+        baseline = { historyId: profile.historyId }
+      } else {
+        let armed: GmailWatchResult
+        try {
+          armed = await watchClient.watch({ topicName })
+        } catch (err) {
+          throw new GmailConnectError(
+            'watch_failed',
+            `Enabling Gmail push failed: ${errorMessage(err)}`,
+          )
+        }
+        baseline = { historyId: armed.historyId, watchExpiration: armed.expiration }
       }
 
       // --- Step 5: persist, now that the grant is proven usable — ONE atomic
@@ -599,11 +627,7 @@ export function createGmailConnectService(deps: GmailConnectServiceDeps): GmailC
           },
           tx,
         )
-        await watchStateStore.seedBaseline(
-          created.id,
-          { historyId: armed.historyId, watchExpiration: armed.expiration },
-          tx,
-        )
+        await watchStateStore.seedBaseline(created.id, baseline, tx)
         return created
       })
 

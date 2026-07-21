@@ -44,7 +44,8 @@ Gmail mailbox ──watch()──▶ Cloud Pub/Sub topic ──push sub (OIDC JW
         ▼
    Vercel Cron ──GET /api/v1/internal/queue/drain (every minute)──▶ drain N jobs:
         reconcile (history.list → messages.get raw) → idempotent ingest → conversation
-   Vercel Cron ──GET /api/v1/internal/cron/watch-maintenance (daily)──▶ re-arm watch() + sweep
+   Vercel Cron ──GET /api/v1/internal/cron/reconcile-sweep (every minute)──▶ enqueue reconcile per mailbox
+   Vercel Cron ──GET /api/v1/internal/cron/watch-maintenance (daily)──▶ re-arm watch() [push only]
 
 Operator connect:  POST /api/v1/inbound/gmail/connect (Bearer) → consentUrl
                    → browser → Google consent → GET /callback → mailbox connected
@@ -72,13 +73,34 @@ the row commits) is what protects invariant #1.
 
 ---
 
-## Part A — Google Cloud: OAuth app + Gmail + Pub/Sub
+## Part A — Google Cloud: OAuth app (+ optional Pub/Sub)
 
-Do this in the Google Cloud project that will own the push topic.
+> **Read this before starting.** As of HT-94, only **A1 and A2** are required.
+> A3 and A4 configure Gmail **push**, which is now optional: inbound mail
+> arrives either by push webhook or by the bounded scheduled fetch that runs
+> every minute (CHARTER.md §2, amended 2026-07-20).
+>
+> **Skipping A3/A4 is the recommended path for most operators.** It removes six
+> setup steps — including the two that fail *silently*, the
+> domain-restricted-sharing org-policy block and the missing
+> `serviceAccountTokenCreator` grant — and removes the requirement that the
+> Cloud project have **billing enabled**, which Pub/Sub forces and the Gmail API
+> alone does not.
+>
+> What you give up is latency: push delivers in seconds, the sweep within 60
+> seconds. For a support inbox that difference is not usually worth ten console
+> steps. Push remains fully supported and can be added later without a
+> reconnect — set the three env vars and redeploy.
+
+Do this in the Google Cloud project that will own the OAuth app.
 
 ### A1. Enable the APIs
-Console → *APIs & Services → Enable APIs* → enable **Gmail API** and **Cloud
-Pub/Sub API**. (CLI: `gcloud services enable gmail.googleapis.com pubsub.googleapis.com`.)
+Console → *APIs & Services → Enable APIs* → enable **Gmail API**.
+
+Also enable **Cloud Pub/Sub API** *only if* you are doing the optional A3.
+
+(CLI: `gcloud services enable gmail.googleapis.com`, adding
+`pubsub.googleapis.com` only when you want push.)
 
 ### A2. The Internal OAuth app + client credentials
 1. *APIs & Services → OAuth consent screen* → **Internal** user type. Fill
@@ -99,7 +121,17 @@ time): `https://www.googleapis.com/auth/gmail.readonly` +
 `https://www.googleapis.com/auth/gmail.send` (gmail-connect.md §3, least
 privilege).
 
-### A3. The Pub/Sub topic + push subscription
+### A3. The Pub/Sub topic + push subscription — **OPTIONAL**
+
+> Skip this whole section (and A4) unless you specifically want sub-minute
+> latency. Without it the engine ingests through the every-minute reconcile
+> sweep, and `GMAIL_PUBSUB_TOPIC` / `GMAIL_PUBSUB_SUBSCRIPTION` /
+> `GMAIL_PUSH_SERVICE_ACCOUNT` are all left unset.
+>
+> **All three or none.** Setting some but not all is rejected at boot with an
+> error naming the missing ones — a half-configured push is a push you believe
+> works and doesn't, which is exactly the failure this optionality exists to
+> remove.
 1. *Pub/Sub → Topics → Create topic*, e.g. `gmail-push`. Full name
    `projects/<project>/topics/gmail-push` → `GMAIL_PUBSUB_TOPIC`.
 2. **Grant Gmail permission to publish** to the topic: add principal
@@ -121,8 +153,16 @@ privilege).
 
 > The initial `users.watch()` (which points the mailbox at the topic) is armed
 > automatically by the **connect flow** (Part E) — you do not call it by hand.
+> When push is not configured, connect skips the arm entirely and seeds the
+> baseline cursor from `getProfile()` instead; nothing else about connect
+> changes.
 
-### A4. Console/CLI gotchas hit during live provisioning (2026-07-17)
+### A4. Console/CLI gotchas hit during live provisioning (2026-07-17) — **OPTIONAL, applies only to A3**
+
+> Both gotchas below fail **silently**: the grant or the subscription looks
+> created, and push simply never arrives. They are the strongest single
+> argument for skipping A3 entirely — the scheduled sweep has no equivalent
+> failure mode, because there is nothing to provision.
 
 1. **Domain-restricted sharing blocks the Gmail publisher grant.** If the org
    enforces `constraints/iam.allowedPolicyMemberDomains`, granting
@@ -180,13 +220,20 @@ privilege).
 2. `PUBLIC_BASE_URL` = your production URL (e.g. `https://desk.resonantiq.app`),
    matching the OAuth redirect URI (A2.3) and the Pub/Sub push endpoint (A3.4).
    No trailing slash (the composition root strips one defensively either way).
-3. Deploy. `vercel.json` (in the repo) declares three Vercel Cron jobs:
+3. Deploy. `vercel.json` (in the repo) declares **five** Vercel Cron jobs:
    - `*/1 * * * *` → `GET /api/v1/internal/queue/drain` (drain the job queue —
      also delivers webhooks, HT-69: `WEBHOOK_DELIVERY_TOPIC` is handled here).
    - `*/1 * * * *` → `GET /api/v1/internal/outbox/drain` (HT-69: turn
      `event_outbox` rows into webhook-delivery queue jobs — a SEPARATE tick
      from the queue drain above; that one then actually sends them).
-   - `0 6 * * *` → `GET /api/v1/internal/cron/watch-maintenance` (daily renewal + sweep; UTC).
+   - `*/1 * * * *` → `GET /api/v1/internal/cron/snooze-wake` (HT-77: flip due
+     `pending`+snoozed conversations back to `active`).
+   - `*/1 * * * *` → `GET /api/v1/internal/cron/reconcile-sweep` (HT-94: enqueue
+     a reconcile job per active mailbox — **this is the inbound transport**.
+     Runs whether or not push is configured; with push it is a backstop, without
+     it, it is how mail arrives at all).
+   - `0 6 * * *` → `GET /api/v1/internal/cron/watch-maintenance` (daily `watch()`
+     renewal; UTC). Reports a skip when push is not configured.
    Vercel Cron invokes these as HTTP GETs; the handlers require the
    `CRON_SECRET` (Vercel sends it as a bearer via the `Authorization` header on
    cron requests) and are idempotent + lease-bounded.
@@ -195,10 +242,15 @@ privilege).
    > more-frequent expression *fails deployment* — so the ~1-minute delivery
    > latency this design targets is a Pro-tier feature.
 4. **Vercel does not retry a failed cron invocation** — a transient non-2xx is
-   simply retried on the *next* scheduled tick. The queue drain self-heals on
-   the following minute; but the **daily** watch-maintenance job would go a full
-   day between attempts, so **alert on its non-2xx responses** (Vercel's cron
-   logs, or your log drain) rather than waiting to notice a stale mailbox.
+   simply retried on the *next* scheduled tick. The every-minute jobs self-heal
+   on the following minute; but the **daily** watch-maintenance job would go a
+   full day between attempts, so **alert on its non-2xx responses** (Vercel's
+   cron logs, or your log drain) rather than waiting to notice a stale mailbox.
+
+   The reconcile sweep deserves its own alert for a different reason: it
+   self-heals on the next tick, but a *persistently* failing sweep on a
+   push-free deployment means **no mail is arriving at all**, silently. Alert on
+   sustained non-2xx, not on a single one.
 5. **`maxDuration` must stay below the queue lease.** `vercel.json` caps the
    function at **50s**, under both the 60s job lease (`DEFAULT_LEASE_MS`,
    `src/providers/adapters/postgres-queue/`) and the 60s cron interval: the
@@ -222,9 +274,13 @@ function files. The cron paths above resolve through that same function.
 | `HELPTHREAD_BLOB_BUCKET` | Supabase B3 | private bucket name |
 | `GMAIL_OAUTH_CLIENT_ID` | Google A2 | |
 | `GMAIL_OAUTH_CLIENT_SECRET` | Google A2 | secret |
-| `GMAIL_PUBSUB_TOPIC` | Google A3.1 | `projects/…/topics/…` |
-| `GMAIL_PUBSUB_SUBSCRIPTION` | Google A3.4 | `projects/…/subscriptions/…` |
-| `GMAIL_PUSH_SERVICE_ACCOUNT` | Google A3.3 | the push SA email (JWT `email` claim) |
+| `GMAIL_PUBSUB_TOPIC` | Google A3.1 | **OPTIONAL** — `projects/…/topics/…` |
+| `GMAIL_PUBSUB_SUBSCRIPTION` | Google A3.4 | **OPTIONAL** — `projects/…/subscriptions/…` |
+| `GMAIL_PUSH_SERVICE_ACCOUNT` | Google A3.3 | **OPTIONAL** — the push SA email (JWT `email` claim) |
+
+> The three `GMAIL_PUBSUB*` / `GMAIL_PUSH*` vars are **all-or-nothing**. Set all
+> three to enable push, or none to run on the scheduled sweep alone. Any partial
+> combination fails at boot with an error naming what's missing.
 | `HELPTHREAD_TOKEN_ENC_KEY` | you mint (C1) | 32-byte base64; encrypts tokens at rest |
 | `HELPTHREAD_API_TOKEN` | you mint (C1) | Agent-inbox Bearer, ≥16 chars |
 | `CRON_SECRET` | you mint (C1) | guards internal cron endpoints |
@@ -304,7 +360,8 @@ Each `alerts[]` entry is `<code>: <detail>`. The codes are stable:
 | `ingest-dead-letter-growth` | An inbound delivery exhausted its retry budget in the last 24h — a message an Agent has NOT seen | `SELECT provider_message_id, last_error, attempts FROM inbound_deliveries WHERE status = 'dead-letter' ORDER BY updated_at DESC`; the raw mail is still in Gmail — reprocess after fixing the cause |
 | `forged-token-burst` | ≥ threshold (default 5) stored deliveries in 24h carried reply tokens that FAILED signature verification — someone is guessing/tampering with threading tokens (threading.md §5) | Search Vercel logs for `forged_token_detected` (WARN); review `senderAddress`/`conversationId` across events. The mail itself threaded safely (a forged token never appends) |
 | `mailbox-needs-attention` | A mailbox is `paused` (cursor expired — gmail-push.md §5 rebaseline) or `needs_reconnect` (dead OAuth grant) — **inbound mail is not flowing** | `needs_reconnect`: re-run the Part E consent. `paused`: reconnect to rebaseline the cursor, then check for a gap |
-| `watch-expiring` | An active mailbox's Gmail `watch()` expires in < 72h (or was never armed) — the daily renewal has been failing for days | Function logs for `/internal/cron/watch-maintenance` (`gmail_watch_maintenance` events); a manual `GET` of that endpoint with the cron secret re-arms immediately |
+| `watch-expiring` | An active mailbox's Gmail `watch()` expires in < 72h (or was never armed) — the daily renewal has been failing for days. **Only ever raised when push is configured** (HT-94): with no `GMAIL_PUBSUB_*` vars there is no `watch()` to arm, a NULL expiration is the designed steady state, and this alert is suppressed | Function logs for `/internal/cron/watch-maintenance` (`gmail_watch_maintenance` events); a manual `GET` of that endpoint with the cron secret re-arms immediately. On a push-free deployment that GET is a no-op returning `{"skipped":"push-not-configured"}` — if you see this alert there at all, it is a bug, not a mailbox problem |
+| `queue-drain-stalled` / `queue-dead-letter-growth` (on a push-free deployment) | The reconcile sweep is the sole inbound transport (HT-94), so sustained queue trouble here means **mail is not arriving at all** | Function logs for `/internal/cron/reconcile-sweep` (`gmail_reconcile_sweep` per-mailbox events, `reconcile_sweep` per-tick summary). Check `SELECT count(*) FROM queue_jobs WHERE topic = 'gmail.reconcile' AND dead_lettered_at IS NULL` — the sweep dedupes on `mailboxId`, so a healthy desk holds at most one live job per mailbox; more than that means the drain is not keeping up |
 | `webhook-endpoint-auto-disabled` | HT-69: a webhook endpoint hit 20 consecutive delivery failures and auto-disabled — a module (or an operator's own integration) has silently stopped receiving events | `SELECT id, url, consecutive_failures FROM webhook_endpoints WHERE status = 'auto_disabled'`; fix the receiving side, then `PATCH /api/v1/webhooks/{id}` with `{"status":"active"}` to re-enable (resets the counter) |
 | `webhook-delivery-dead-letter-growth` | HT-69: a webhook delivery exhausted its retries in the last 24h (`WEBHOOK_DELIVERY_TOPIC` on `queue_jobs`) | `SELECT payload, last_error FROM queue_jobs WHERE topic = 'webhook.delivery' AND dead_lettered_at IS NOT NULL ORDER BY dead_lettered_at DESC` — `payload.endpointId` names the endpoint; this can precede (or accompany) an eventual auto-disable |
 
@@ -321,9 +378,15 @@ handled by the SAME drain), `outbox_drain` (HT-69: per outbox-drain tick
 that claimed at least one `event_outbox` row — claimed/enqueued/dispatched;
 quiet ticks don't log, same convention as `queue_drain`), `gmail_reconcile`
 (per reconcile job: cursor positions, skip/retry/ack reasons), and
-`gmail_watch_maintenance` (the daily renewal + sweep). Correlate transport
-events to ingest events on `(mailboxId, providerMessageId)`
-(inbound-ingestion.md §6).
+`gmail_watch_maintenance` (the daily `watch()` renewal — push deployments
+only), `gmail_reconcile_sweep` (per-mailbox sweep decisions: swept, skipped
+for no baseline cursor, failed) and `reconcile_sweep` (the per-tick summary
+`{total, swept, skipped, failed}`). Correlate transport events to ingest
+events on `(mailboxId, providerMessageId)` (inbound-ingestion.md §6).
+
+Unlike the drains, the sweep logs **every** tick including quiet ones: on a
+push-free deployment it is the only inbound transport, so its silence is the
+sole signal that intake has stopped.
 
 ## What this runbook does not cover
 
