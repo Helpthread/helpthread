@@ -66,6 +66,7 @@ describe('Assistants admin API (HT-70)', () => {
       store: createConversationStore(db),
       apiToken: TOKEN,
       sender,
+      senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
@@ -301,6 +302,9 @@ describe('Assistants admin API (HT-70)', () => {
         store: createConversationStore(freshDb),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,

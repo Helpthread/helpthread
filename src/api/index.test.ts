@@ -258,6 +258,8 @@ describe('createInboxApi', () => {
   async function freshApi(
     overrides: {
       sender?: EmailSender
+      /** Overrides the WHOLE sender resolver (HT-101 Stage 2b-ii) — for tests exercising per-mailbox routing. When omitted, defaults to a resolver that ignores `mailboxId` and always resolves to `overrides.sender ?? defaultSender` + `SUPPORT_ADDRESS`, matching this suite's pre-2b-ii behavior byte-for-byte. */
+      senderResolver?: InboxApiDeps['senderResolver']
       openTracking?: { publicBaseUrl: string }
       gmailPush?: InboxApiDeps['gmailPush']
       gmailConnect?: InboxApiDeps['gmailConnect']
@@ -283,6 +285,12 @@ describe('createInboxApi', () => {
       store,
       apiToken: TOKEN,
       sender: overrides.sender ?? defaultSender,
+      senderResolver: overrides.senderResolver ?? {
+        resolve: async () => ({
+          sender: overrides.sender ?? defaultSender,
+          from: SUPPORT_ADDRESS,
+        }),
+      },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
@@ -680,6 +688,76 @@ describe('createInboxApi', () => {
   // --- reply -------------------------------------------------------------------
 
   describe('reply', () => {
+    // --- per-mailbox sender routing (HT-101 Stage 2b-ii) ----------------------
+
+    it("routes a reply through the conversation's OWN mailbox: an imap-mailbox conversation sends via the SMTP sender the resolver returns for it, with that inbox's from-address — not the deployment default", async () => {
+      const imapFromAddress = 'inbox-imap@example.test'
+      const { sender: defaultSender } = createFakeSender()
+      const { sender: imapSender, sent: imapSent } = createFakeSender()
+      const resolvedMailboxIds: (string | null)[] = []
+      // Set AFTER the mailbox is created below — the resolver closure reads
+      // it at CALL time (during the `api(...)` request), not at construction
+      // time, so the forward reference is safe.
+      let imapMailboxId: string | undefined
+      const { db, store, api } = await freshApi({
+        senderResolver: {
+          async resolve(mailboxId) {
+            resolvedMailboxIds.push(mailboxId)
+            if (mailboxId === imapMailboxId) {
+              return { sender: imapSender, from: imapFromAddress }
+            }
+            return { sender: defaultSender, from: SUPPORT_ADDRESS }
+          },
+        },
+      })
+      const mailbox = await createMailboxStore(db).upsertConnectedMailbox({
+        address: imapFromAddress,
+        provider: 'imap',
+      })
+      imapMailboxId = mailbox.id
+      const { conversationId } = await store.createConversation(
+        newConversation({ mailboxId: mailbox.id }),
+      )
+
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+      )
+
+      expect(res.status).toBe(201)
+      expect(resolvedMailboxIds).toEqual([mailbox.id])
+      // Went out through the RESOLVED (imap) sender, not the default one —
+      // and with that mailbox's own address as `from`, not SUPPORT_ADDRESS.
+      expect(imapSent).toHaveLength(1)
+      expect(imapSent[0].from).toBe(imapFromAddress)
+
+      const body = (await res.json()) as { from: string }
+      expect(body.from).toBe(imapFromAddress)
+    })
+
+    it("null mailboxId (a pre-2b-i conversation) resolves through the deployment default — verified via the resolver's own null argument and the from-address on the sent envelope", async () => {
+      const defaultSender = createFakeSender()
+      const resolvedMailboxIds: (string | null)[] = []
+      const { store, api } = await freshApi({
+        senderResolver: {
+          async resolve(mailboxId) {
+            resolvedMailboxIds.push(mailboxId)
+            return { sender: defaultSender.sender, from: SUPPORT_ADDRESS }
+          },
+        },
+      })
+      // newConversation() omits mailboxId entirely — the pre-2b-i shape.
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+      )
+
+      expect(res.status).toBe(201)
+      expect(resolvedMailboxIds).toEqual([null])
+      expect(defaultSender.sent).toHaveLength(1)
+      expect(defaultSender.sent[0].from).toBe(SUPPORT_ADDRESS)
+    })
+
     it('happy path: 201 with the outbound ThreadView; the fake sender received the derived headers verbatim; getConversation shows the outbound thread', async () => {
       const { store, api, sent } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
@@ -742,6 +820,7 @@ describe('createInboxApi', () => {
         store,
         apiToken: TOKEN,
         sender,
+        senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -852,6 +931,7 @@ describe('createInboxApi', () => {
         store: racedStore,
         apiToken: TOKEN,
         sender,
+        senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -1078,6 +1158,7 @@ describe('createInboxApi', () => {
         store: realStore,
         apiToken: TOKEN,
         sender,
+        senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2270,6 +2351,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2304,6 +2388,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2442,6 +2529,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2678,6 +2768,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2819,6 +2912,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2912,6 +3008,7 @@ describe('createInboxApi — hardening (Codex review)', () => {
   // construction-time validation and the conversations-route error paths.
   const dummyDeps = {
     sender: dummySender,
+    senderResolver: { resolve: async () => ({ sender: dummySender, from: SUPPORT_ADDRESS }) },
     keyring: KEYRING,
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,

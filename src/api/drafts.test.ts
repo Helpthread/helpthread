@@ -82,6 +82,9 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
       store,
       apiToken: TOKEN,
       sender: overrides.sender ?? defaultSender,
+      senderResolver: {
+        resolve: async () => ({ sender: overrides.sender ?? defaultSender, from: SUPPORT_ADDRESS }),
+      },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
@@ -679,6 +682,7 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
           store: racedStore,
           apiToken: TOKEN,
           sender,
+          senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
           keyring: KEYRING,
           mailDomain: MAIL_DOMAIN,
           supportAddress: SUPPORT_ADDRESS,

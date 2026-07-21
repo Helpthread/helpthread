@@ -61,6 +61,9 @@ describe('Saved replies & macros API (HT-76)', () => {
       store: createConversationStore(db),
       apiToken: TOKEN,
       sender: createFakeSender(),
+      senderResolver: {
+        resolve: async () => ({ sender: createFakeSender(), from: SUPPORT_ADDRESS }),
+      },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,

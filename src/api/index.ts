@@ -32,6 +32,7 @@
 import { TRANSPARENT_GIF, verifyViewToken } from '../mail/open-tracking.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { SelfEchoGuardDeps } from '../mail/send.js'
+import type { SenderResolver } from '../mail/sender-resolver.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
 import type { AssistantRecord } from '../store/assistants.js'
 import type { ThreadAttachmentStore } from '../store/attachments.js'
@@ -158,16 +159,32 @@ const ASSISTANT_ALLOWED_ROUTE_KINDS: ReadonlySet<RouteMatch['kind']> = new Set([
  * Dependencies `createInboxApi` closes over: the HT-17 read paths need only
  * `store` + `apiToken`; the HT-18 write paths (specs/api/agent-inbox-v1.md
  * §4a's `POST .../replies`) additionally need everything `sendReply`
- * (`src/mail/send.ts`) requires — `sender`, `keyring`, `mailDomain` — plus
- * `supportAddress`, the deployment's configured `from` address for outgoing
- * replies.
+ * (`src/mail/send.ts`) requires — `senderResolver`, `keyring`, `mailDomain`
+ * — plus `supportAddress`, the deployment's configured default `from`
+ * address (still used by invites/webauthn/draft-approval below; the reply
+ * endpoint itself resolves its OWN `from` per-mailbox, HT-101 Stage 2b-ii).
  */
 export interface InboxApiDeps {
   store: ConversationStore
   /** The configured service Bearer token (`HELPTHREAD_API_TOKEN`) every request is checked against. Must be at least {@link MIN_API_TOKEN_LENGTH} chars. */
   apiToken: string
-  /** The outbound mail transport a reply is sent through (spec §4a). */
+  /**
+   * The outbound mail transport used by every OTHER sender in this file
+   * (Agent invite emails, WebAuthn notify emails, draft creation/approval) —
+   * NOT the reply endpoint (`POST .../replies`), which resolves its own
+   * per-mailbox sender via `senderResolver` below (HT-101 Stage 2b-ii). Kept
+   * as the deployment's single default sender for every OTHER outbound path,
+   * none of which is mailbox-scoped the way a customer reply is.
+   */
   sender: EmailSender
+  /**
+   * Resolves the sender + `from` address a reply should use, from the
+   * conversation's OWN mailbox (HT-101 Stage 2b-ii; `src/mail/
+   * sender-resolver.ts`) — what `POST .../replies` (`handleReply`) uses
+   * instead of the single fixed `sender`/`supportAddress` pair every other
+   * handler above still uses.
+   */
+  senderResolver: SenderResolver
   /** Signing keys for minting the outbound `Message-ID` reply token (spec §4a; `src/mail/reply-token.ts`). */
   keyring: Keyring
   /** Domain minted into the outbound `Message-ID`'s `@domain` part (spec §4a). */
@@ -553,10 +570,9 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
           // author-identity forward-carry (spec §3), threaded to sendReply.
           return await handleReply(route.id, request, {
             store: deps.store,
-            sender: deps.sender,
+            senderResolver: deps.senderResolver,
             keyring: deps.keyring,
             mailDomain: deps.mailDomain,
-            supportAddress: deps.supportAddress,
             authorAgentId: (await resolveActingAgent(request, deps.agents.store))?.id ?? null,
             ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),
             ...(deps.selfEchoGuard !== undefined ? { selfEchoGuard: deps.selfEchoGuard } : {}),

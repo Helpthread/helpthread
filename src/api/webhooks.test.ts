@@ -85,6 +85,9 @@ describe('Webhooks admin API', () => {
       store: createConversationStore(db),
       apiToken: TOKEN,
       sender: createFakeSender(),
+      senderResolver: {
+        resolve: async () => ({ sender: createFakeSender(), from: SUPPORT_ADDRESS }),
+      },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,

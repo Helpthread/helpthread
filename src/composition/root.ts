@@ -13,6 +13,9 @@
  * - the `PostgresDb` (Supabase pooler) + every store over it,
  * - the token encryption seam (`createMailboxTokenStore` with the decoded key),
  * - the Gmail OAuth token service + the outbound `EmailSender`,
+ * - the per-conversation `SenderResolver` (HT-101 Stage 2b-ii), which routes
+ *   a reply through its OWN mailbox's Gmail token or IMAP/SMTP connection
+ *   instead of always through the single `EmailSender` above,
  * - the Gmail push signature verifier (JWKS source built ONCE — see below),
  * - the durable Postgres job queue,
  * - the Gmail connect/consent service and its disconnect counterpart (HT-47),
@@ -71,6 +74,7 @@ import { createImapConnectService } from '../mail/imap-connect.js'
 import { runImapFetch } from '../mail/imap-fetch.js'
 import { type IngestDeps, ingestInboundMessage } from '../mail/ingest.js'
 import type { Keyring } from '../mail/reply-token.js'
+import { createSenderResolver } from '../mail/sender-resolver.js'
 import { runSnoozeWake } from '../mail/snooze-wake.js'
 import {
   createGmailEmailSender,
@@ -81,7 +85,7 @@ import {
 } from '../providers/adapters/gmail/index.js'
 import { createImapClient } from '../providers/adapters/imap/index.js'
 import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.js'
-import { verifySmtpConnection } from '../providers/adapters/smtp/index.js'
+import { createSmtpEmailSender, verifySmtpConnection } from '../providers/adapters/smtp/index.js'
 import { createSupabaseStorageBlobStore } from '../providers/adapters/supabase-storage/index.js'
 import type { BlobStore } from '../providers/blob.js'
 import type { QueueMessage, QueueMessageHandler } from '../providers/queue.js'
@@ -237,6 +241,25 @@ export async function buildApp(
     },
   })
 
+  // --- Per-conversation sender resolution (HT-101 Stage 2b-ii) — routes each
+  // outbound reply through the SAME inbox its conversation arrived at,
+  // rather than always through the single `sender` above. `createGmailEmailSender`/
+  // `createSmtpEmailSender` are injected rather than imported by
+  // `sender-resolver.ts` itself, per `src/providers/README.md`'s composition-
+  // root rule (mirrors every other `createWatchClient`/`createImapClient`
+  // injection in this file). `defaultAddress: config.supportAddress` is what
+  // a `null` mailboxId (a pre-2b-i conversation) falls back to — see that
+  // module's doc comment. ---
+  const senderResolver = createSenderResolver({
+    mailboxStore,
+    tokenService,
+    imapConfigStore,
+    imapCredentialStore,
+    createGmailEmailSender,
+    createSmtpEmailSender,
+    defaultAddress: config.supportAddress,
+  })
+
   // --- Passkeys (HT-75; specs/auth/passkeys.md §3) — ONLY when
   // `config.uiBaseUrl` is set AND resolves to a domain-form hostname: there
   // is no safe fallback origin to bind WebAuthn ceremonies to, so a
@@ -367,6 +390,7 @@ export async function buildApp(
     store,
     apiToken: config.apiToken,
     sender,
+    senderResolver,
     keyring,
     mailDomain: config.mailDomain,
     supportAddress: config.supportAddress,
