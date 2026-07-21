@@ -1,5 +1,39 @@
 # Helpthread Marketplace v1.1
 
+**STATUS: NON-AUTHORITATIVE pending rewrite (2026-07-20, HT-100).** Managed hosting is
+rescinded (see the banner below). Until the body is rewritten, **this document is not a
+valid implementation contract** — no section may be built against as written. The parts
+describing an operator-run tarball marketplace (license keys, Stripe, the update feed,
+distribution) remain broadly correct; every part describing Resonant-IQ-operated module
+hosting is void. The two sections that fully specify that hosting — **§3d** and **§5.1**
+— carry their own do-not-implement markers.
+
+> ## ⚠️ MANAGED HOSTING IS RESCINDED (2026-07-20, HT-100)
+>
+> **Resonant IQ hosts no module runtimes.** Every module is deployed and run by the
+> operator, on the operator's own infrastructure. The "managed hosting" model that
+> pervades this document — the §3d hosting control plane, the §3e control-plane vault,
+> per-desk hosted instances, "no operator DevOps" — **was never a decision TJ made.**
+>
+> TJ selected it on 2026-07-20 — asked "Who hosts the module runtime for the v1 in-app
+> install experience?" at 00:12:17Z, he chose "Managed: RIQ hosts (Recommended)" at
+> 00:13:15Z. Two qualifiers: the assistant that wrote the question labelled that option
+> "(Recommended)", and the alternative in the same picker — "Deploy-button: operator's
+> Vercel" — is the design he later said he had wanted all along. On reviewing the
+> consequences he rejected the model: "i never ever intended that we would be hosting
+> running module code, that makes no sense at all." PR #98 merged 26 minutes after
+> opening with zero human review comments. **No code was ever written against it.**
+>
+> **What holds instead:** §5's original install flow, plus the one-click path §5 already
+> named as additive — a Vercel deploy button provisioning into the **operator's own**
+> Vercel account. That path delivers in-place update with an ops log via Vercel's
+> `deployment.succeeded` webhooks, which §9's argument for managed hosting wrongly
+> claimed only Resonant-IQ-operated runtime could provide.
+>
+> Until this document's body is rewritten (cosmetic, tracked separately), **read every
+> managed-hosting passage below as rescinded.** Where the body and this banner conflict,
+> the banner governs.
+
 Status: **draft for TJ review** (HT-79; HT-81 in-product directory and HT-82
 dogfood-through-marketplace are child tickets scoped by this spec). Governed by
 CHARTER.md §3/§4/§5 (**2026-07-19 HT-79 amendment**: the marketplace is a launch-day
@@ -464,6 +498,11 @@ operator or anyone else as "usage."
 
 ## 3d. The hosting control plane (new in v1.1)
 
+> **🔴 RESCINDED — DO NOT IMPLEMENT (2026-07-20, HT-100).** This entire section describes
+> Resonant-IQ-operated module hosting, which was rescinded. Resonant IQ hosts no module
+> runtimes; there is no hosting control plane, no control-plane vault, and no per-desk
+> provisioning grant. Retained only as a record of the rescinded design. Text below is void.
+
 Managed hosting introduces exactly one new component, and it is the load-bearing piece
 of the whole revision: a Resonant IQ-operated **hosting control plane**. It exists
 because the managed experience requires *someone* to hold a license key and a
@@ -656,6 +695,11 @@ designed loop TJ specified — *browse, buy, install, enable*, no operator DevOp
 and open-core-credibility story — the same flow proven end-to-end today.
 
 ### 5.1 Install a module — managed hosting (mainline)
+
+> **🔴 RESCINDED — DO NOT IMPLEMENT (2026-07-20, HT-100).** The managed-hosting install
+> flow is void. The supported install path is the operator deploying the module to their
+> own infrastructure (§5's original tarball flow, and the Vercel deploy-button path §5
+> names as additive). Text below is retained only as a record of the rescinded design.
 
 From the desk's Manage → Modules Directory (§6), the whole loop is in-app and
 credential-free from the core's side:

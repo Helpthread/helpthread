@@ -8,6 +8,17 @@ sign-off, the exception text below is appended to the repository's `LICENSE` fil
 beneath the AGPL-3.0 text, referenced from every source-file header block that names
 the license, and noted in CHARTER.md's §7 appendix with the adoption date.
 
+> **Provenance note (added 2026-07-20, HT-100).** This draft was authored by an assistant,
+> reviewed by an assistant, and merged in PR #99 with **zero human review comments** — 1h37m
+> from open to merge, inside a window with no human input at the decision point. The
+> "independent different-vendor review" comments on that PR were posted by the assistant
+> under TJ's GitHub account and adjudicated by the assistant; TJ's agreement covered a
+> five-item summary, not this text.
+>
+> The charter calls this exception "this project's real one-way door." **No human has read
+> this document line by line.** It remains DRAFT and unadopted, so the door has not been
+> walked through — but it must not be adopted until TJ, and counsel, have actually read it.
+
 Drafting tradition: the GPL Classpath Exception and the FSF's §7 additional-permission
 mechanism, adapted for (a) AGPL §13 network use, which the Classpath exception predates,
 and (b) Helpthread's build-time npm module model, where a module compiles into the same
