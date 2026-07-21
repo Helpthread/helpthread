@@ -434,6 +434,7 @@ async function processClaimedDelivery(
     const written = await storeAndMarkDelivered(
       deps.db,
       delivery.id,
+      delivery.mailboxId,
       decision,
       parsed,
       attachmentRefs,
@@ -633,17 +634,23 @@ async function recordFailure(
  * ledger mark, or a `thread_attachments` row pointing at a thread that was
  * never committed; the only trace it leaves is the orphaned blob bytes the
  * paragraph above already accounts for.
+ *
+ * `mailboxId` (HT-101 Stage 2b-i) is threaded straight through to {@link
+ * writeParsedEmail}, which stamps it on a genuinely NEW conversation only —
+ * purely additive, no other step in this function reads or is affected by
+ * it.
  */
 async function storeAndMarkDelivered(
   db: Db,
   deliveryId: string,
+  mailboxId: string,
   decision: ThreadingDecision,
   parsed: ParsedEmail,
   attachmentRefs: Omit<NewThreadAttachment, 'threadId'>[],
   claimedAttempts: number,
 ): Promise<{ conversationId: string; threadId: string; appendFallback?: AppendFallbackReason }> {
   return db.transaction(async (tx) => {
-    const written = await writeParsedEmail(tx, decision, parsed)
+    const written = await writeParsedEmail(tx, mailboxId, decision, parsed)
     await insertThreadAttachmentsInTx(
       tx,
       attachmentRefs.map((ref) => ({ ...ref, threadId: written.threadId })),
@@ -704,9 +711,19 @@ async function storeAndMarkDelivered(
  * this is exactly the same "a genuinely NEW row is the only thing that
  * counts" discipline `appendThreadInTx` already applies to its own reopen/
  * `updated_at`-bump decision, applied here to event emission too.
+ *
+ * `mailboxId` (HT-101 Stage 2b-i) is stamped onto {@link NewConversation.mailboxId}
+ * at BOTH `createConversationInTx` call sites below (a genuine `new`
+ * decision, and the deleted/not-found fallback) — both mint a brand-new
+ * conversation, so both record which mailbox took its first message. The
+ * `append` branch deliberately never touches it: an existing conversation
+ * already has whatever mailbox its own creation recorded, and a reply
+ * threaded onto it must not overwrite that, even if this particular reply
+ * happened to arrive at a different connected mailbox.
  */
 async function writeParsedEmail(
   tx: Queryable,
+  mailboxId: string,
   decision: ThreadingDecision,
   parsed: ParsedEmail,
 ): Promise<{ conversationId: string; threadId: string; appendFallback?: AppendFallbackReason }> {
@@ -724,6 +741,7 @@ async function writeParsedEmail(
       subject: parsed.subject,
       customerEmail: fromAddressOf(parsed),
       firstMessage,
+      mailboxId,
     })
     await emitNewConversationEvents(tx, created.conversationId, created.threadId)
     return created
@@ -750,6 +768,7 @@ async function writeParsedEmail(
     subject: parsed.subject,
     customerEmail: fromAddressOf(parsed),
     firstMessage,
+    mailboxId,
   })
   await emitNewConversationEvents(tx, created.conversationId, created.threadId)
   return { ...created, appendFallback: appended.reason }

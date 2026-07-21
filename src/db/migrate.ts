@@ -1564,6 +1564,42 @@ CREATE TABLE imap_watch_state (
 `
 
 /**
+ * Migration 028 — `conversations.mailbox_id`, recording which connected
+ * mailbox took inbound delivery of a conversation's first message (HT-101
+ * Stage 2b-i; the per-inbox outbound-routing foundation Stage 2b-ii builds
+ * on).
+ *
+ * Nullable, with NO backfill: every conversation that exists before this
+ * migration runs legitimately has no known mailbox (the column didn't exist
+ * when they were created, and this migration does not guess one), and
+ * `NULL` is exactly the value Stage 2b-ii's send path will read as "no
+ * mailbox on record — fall back to the deployment's default sender."
+ * `src/mail/ingest.ts` stamps this column ONLY on the `'new'`-conversation
+ * branch, from the inbound `RawInboundMessage`'s own `mailboxId` (already in
+ * scope there — see `src/providers/inbound-email.ts`) — a reply threaded
+ * onto an EXISTING conversation never touches this column, so the value
+ * recorded here is always the mailbox that took the conversation's very
+ * first inbound message, never overwritten by a later reply that happens to
+ * arrive at a different connected mailbox.
+ *
+ * `ON DELETE SET NULL`, not `CASCADE` — the same "the record outlives the
+ * pointer" policy migration 018 already applies to this same table's
+ * `assignee_agent_id`: a mailbox being disconnected/deleted must never
+ * delete customer conversations, it only forgets which mailbox they came in
+ * on.
+ *
+ * No index: nothing yet queries "every conversation for mailbox X" — the
+ * one planned reader (Stage 2b-ii's send path) looks up ONE conversation's
+ * own `mailbox_id` alongside its already-indexed primary key, the same
+ * "no index needed, this is only ever read via a single-row fetch"
+ * reasoning migration 027's doc comment applies to its own `mailbox_id`
+ * columns.
+ */
+const MIGRATION_028_CONVERSATION_MAILBOX_ID = `
+ALTER TABLE conversations ADD COLUMN mailbox_id uuid REFERENCES mailboxes(id) ON DELETE SET NULL;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1699,6 +1735,11 @@ const MIGRATIONS: Migration[] = [
     id: 27,
     name: 'imap_transport',
     sql: MIGRATION_027_IMAP_TRANSPORT,
+  },
+  {
+    id: 28,
+    name: 'conversation_mailbox_id',
+    sql: MIGRATION_028_CONVERSATION_MAILBOX_ID,
   },
 ]
 

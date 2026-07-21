@@ -109,6 +109,15 @@ async function setSnoozedUntil(db: Db, conversationId: string, snoozedUntil: Dat
   ])
 }
 
+/** Insert a `mailboxes` row directly (HT-101 Stage 2b-i) — `conversations.mailbox_id` is a real FK, and creating mailboxes is not this store's concern. */
+async function createMailbox(db: Db, address = 'support@example.test'): Promise<string> {
+  const rows = await db.query<{ id: string }>(
+    "INSERT INTO mailboxes (address, provider) VALUES ($1, 'gmail') RETURNING id",
+    [address],
+  )
+  return rows[0].id
+}
+
 // --- suite ---------------------------------------------------------------------
 
 describe('createConversationStore', () => {
@@ -150,6 +159,25 @@ describe('createConversationStore', () => {
       bodyText: 'Where is my order?',
     })
     expect(conversation?.threads[0].createdAt).toBeInstanceOf(Date)
+  })
+
+  it('createConversation persists a supplied mailboxId; getConversation round-trips it as StoredConversation.mailboxId (HT-101 Stage 2b-i)', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await createMailbox(db)
+
+    const { conversationId } = await store.createConversation(newConversation({ mailboxId }))
+    const conversation = await store.getConversation(conversationId)
+
+    expect(conversation?.mailboxId).toBe(mailboxId)
+  })
+
+  it('createConversation defaults mailboxId to NULL when omitted', async () => {
+    const { store } = await freshStore()
+
+    const { conversationId } = await store.createConversation(newConversation())
+    const conversation = await store.getConversation(conversationId)
+
+    expect(conversation?.mailboxId).toBeNull()
   })
 
   it('getConversation returns null for a conversation that does not exist', async () => {
@@ -2274,6 +2302,16 @@ describe('createConversationStore', () => {
       it('returns null for an unknown thread id', async () => {
         const { store } = await freshStore()
         expect(await store.getConversationByThreadId(RANDOM_UUID)).toBeNull()
+      })
+
+      it('round-trips mailboxId (HT-101 Stage 2b-i)', async () => {
+        const { store, db } = await freshStore()
+        const mailboxId = await createMailbox(db)
+        const { threadId } = await store.createConversation(newConversation({ mailboxId }))
+
+        const conversation = await store.getConversationByThreadId(threadId)
+
+        expect(conversation?.mailboxId).toBe(mailboxId)
       })
 
       it('with includeDeleted: false, a thread on a soft-deleted conversation is indistinguishable from unknown', async () => {

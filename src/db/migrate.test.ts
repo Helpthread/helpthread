@@ -67,6 +67,7 @@ describe('migrate', () => {
       { id: 25, name: 'conversation_snooze' },
       { id: 26, name: 'webauthn' },
       { id: 27, name: 'imap_transport' },
+      { id: 28, name: 'conversation_mailbox_id' },
     ])
   })
 
@@ -104,6 +105,7 @@ describe('migrate', () => {
       { id: 25 },
       { id: 26 },
       { id: 27 },
+      { id: 28 },
     ])
   })
 
@@ -1522,6 +1524,53 @@ describe('migrate', () => {
     )
     await expect(
       db.query(`UPDATE conversations SET status = 'active' WHERE id = $1`, [row.id]),
+    ).rejects.toThrow()
+  })
+
+  it('migration 028 adds conversations.mailbox_id: no backfill for pre-existing rows, real FK to mailboxes, ON DELETE SET NULL', async () => {
+    const database = await createPgliteDb()
+    db = database
+
+    // Apply only through migration 27, then write a conversation the way a
+    // pre-028 deployment would have — no mailbox_id column yet.
+    await migrate(database, { throughId: 27 })
+    const [existing] = await database.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    await expect(migrate(database)).resolves.toBeUndefined()
+
+    // No backfill: the pre-existing row reads NULL, exactly the value
+    // Stage 2b-ii's send path treats as "use the deployment default sender."
+    const [row] = await database.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(row.mailbox_id).toBeNull()
+
+    // Setting a real mailbox works; deleting that mailbox un-sets it (SET
+    // NULL) rather than deleting the conversation.
+    const [mailbox] = await database.query<{ id: string }>(
+      `INSERT INTO mailboxes (address, provider) VALUES ('support@example.test', 'gmail') RETURNING id`,
+    )
+    await database.query('UPDATE conversations SET mailbox_id = $1 WHERE id = $2', [
+      mailbox.id,
+      existing.id,
+    ])
+    await database.query('DELETE FROM mailboxes WHERE id = $1', [mailbox.id])
+    const [afterDelete] = await database.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(afterDelete.mailbox_id).toBeNull()
+
+    // A nonexistent mailbox id violates the FK.
+    await expect(
+      database.query('UPDATE conversations SET mailbox_id = $1 WHERE id = $2', [
+        '00000000-0000-0000-0000-000000000000',
+        existing.id,
+      ]),
     ).rejects.toThrow()
   })
 })

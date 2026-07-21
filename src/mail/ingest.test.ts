@@ -334,6 +334,65 @@ describe('ingestInboundMessage', () => {
     expect(await countRows(db, 'threads')).toBe(2)
   })
 
+  // --- HT-101 Stage 2b-i: mailbox_id is stamped once, at creation, never
+  // re-stamped on append (purely additive — no other ingest behavior above
+  // this line is touched by these two tests). ------------------------------
+
+  it('a new conversation records the mailbox its first message arrived at', async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+
+    const outcome = await ingestInboundMessage(
+      inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+      deps,
+    )
+    if (outcome.kind !== 'stored') throw new Error('unreachable')
+
+    const rows = await db.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [outcome.conversationId],
+    )
+    expect(rows[0].mailbox_id).toBe(mailboxId)
+  })
+
+  it('a reply threaded onto an existing conversation does NOT change its recorded mailbox_id, even when the reply arrives at a DIFFERENT connected mailbox', async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+    const otherMailboxId = await createMailbox(db, 'other@example.test')
+
+    const first = await ingestInboundMessage(
+      inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+      deps,
+    )
+    if (first.kind !== 'stored') throw new Error('unreachable')
+
+    const replyToken = mintReplyMessageId(
+      { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+      keyring,
+    )
+    const replyRaw = rawMessage(
+      {
+        From: 'customer@example.test',
+        To: 'support@example.test',
+        Subject: 'Re: Help with my order',
+        'Message-ID': '<cust-2@customer.example.test>',
+        'In-Reply-To': replyToken,
+      },
+      'Still broken, please help.',
+    )
+
+    const second = await ingestInboundMessage(
+      inboundDelivery(otherMailboxId, 'provider-msg-2', replyRaw),
+      deps,
+    )
+    expect(second).toMatchObject({ kind: 'stored', conversationId: first.conversationId })
+
+    // Still the FIRST mailbox — the append branch never touches mailbox_id.
+    const rows = await db.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [first.conversationId],
+    )
+    expect(rows[0].mailbox_id).toBe(mailboxId)
+  })
+
   // --- HT-49: the exact live-production failure, reproduced as a fixture ---
   //
   // Live evidence (2026-07-17, first HT-44 run against real Gmail): Gmail's
