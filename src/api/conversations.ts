@@ -18,8 +18,8 @@
 import { deriveReplyHeaders } from '../mail/reply-headers.js'
 import type { Keyring } from '../mail/reply-token.js'
 import { type SelfEchoGuardDeps, sendReply } from '../mail/send.js'
-import type { SenderResolver } from '../mail/sender-resolver.js'
-import type { BlobStore } from '../providers/index.js'
+import { SenderResolutionError, type SenderResolver } from '../mail/sender-resolver.js'
+import type { BlobStore, EmailSender } from '../providers/index.js'
 import type { AgentRecord, AgentStore } from '../store/agents.js'
 import type { StoredThreadAttachment, ThreadAttachmentStore } from '../store/attachments.js'
 import {
@@ -500,7 +500,25 @@ export async function handleReply(
   // default mailbox — see `SenderResolver`'s doc comment) — replaces the
   // single fixed `deps.sender`/`deps.supportAddress` pair every reply used
   // to route through regardless of which inbox the conversation belongs to.
-  const { sender, from } = await deps.senderResolver.resolve(conversation.mailboxId)
+  let sender: EmailSender
+  let from: string
+  try {
+    const resolved = await deps.senderResolver.resolve(conversation.mailboxId)
+    sender = resolved.sender
+    from = resolved.from
+  } catch (err) {
+    if (err instanceof SenderResolutionError) {
+      // The conversation's inbox can't send as configured (missing IMAP
+      // config/credential, or its mailbox was deleted) — a clean send-domain
+      // error, not an opaque 500.
+      return apiError(
+        502,
+        'send_failed',
+        'The reply could not be sent — this inbox is not configured for sending.',
+      )
+    }
+    throw err
+  }
 
   const result = await sendReply(
     {

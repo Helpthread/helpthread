@@ -175,6 +175,23 @@ export async function runDeliveryWorker(
     try {
       const conversation = await deps.store.getConversationByThreadId(claimed.id)
       const resolved = await deps.senderResolver.resolve(conversation?.mailboxId ?? null)
+      // Guard against a From/transport MISMATCH on retry. The row's persisted
+      // `fromAddress` is the inbox the ORIGINAL send went out as. If the
+      // conversation's mailbox was since hard-deleted (mailbox_id → null via
+      // `ON DELETE SET NULL`), `resolve(null)` yields the deployment DEFAULT
+      // sender, whose `from` differs from this row's own `fromAddress` —
+      // sending then would put the deleted inbox's address in `From` while a
+      // different server transmits it (an SPF/DKIM misalignment). Refuse:
+      // treat it as an unresolvable row (failed below, sweep continues), never
+      // a mismatched send. For every normal row `resolved.from` equals the
+      // persisted `fromAddress` (both are the mailbox's own address), so this
+      // only ever fires on the genuine mismatch.
+      if (resolved.from !== claimed.fromAddress) {
+        throw new SenderResolutionError(
+          'mailbox-not-found',
+          `thread ${claimed.id} was sent as ${claimed.fromAddress} but its mailbox now resolves to a different transport (${resolved.from}) — refusing to retry from a mismatched inbox`,
+        )
+      }
       sender = resolved.sender
       assertLeaseExceedsSenderBound(sender, leaseMs)
     } catch (err) {

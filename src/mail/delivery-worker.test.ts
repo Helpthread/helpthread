@@ -425,10 +425,10 @@ describe('runDeliveryWorker', () => {
   // --- per-mailbox sender resolution (HT-101 Stage 2b-ii) ---------------------
 
   describe('per-mailbox sender resolution (HT-101 Stage 2b-ii)', () => {
-    /** Builds a conversation stamped with `mailboxId` and one 'failed' outbound thread — a retry candidate belonging to a specific mailbox. */
+    /** Builds a conversation stamped with `mailbox.id` and one 'failed' outbound thread whose `fromAddress` is `mailbox.address` — a retry candidate whose persisted From matches the inbox it belongs to (so the worker's from/transport guard passes on the happy path). */
     async function seedConversationForMailbox(
       store: ConversationStore,
-      mailboxId: string,
+      mailbox: { id: string; address: string },
       messageId: string,
     ): Promise<{ conversationId: string; threadId: string }> {
       const { conversationId } = await store.createConversation({
@@ -440,12 +440,12 @@ describe('runDeliveryWorker', () => {
           fromAddress: 'customer@example.test',
           bodyText: 'Where is my order?',
         },
-        mailboxId,
+        mailboxId: mailbox.id,
       })
       const appended = await store.appendThread(conversationId, {
         direction: 'outbound',
         messageId,
-        fromAddress: 'mailbox-address@example.test',
+        fromAddress: mailbox.address,
         bodyText: 'retry me',
         deliveryStatus: 'failed',
         sendEnvelope: envelope(),
@@ -466,16 +466,8 @@ describe('runDeliveryWorker', () => {
         provider: 'imap',
       })
 
-      await seedConversationForMailbox(
-        store,
-        mailboxA.id,
-        '<ht.k1.mailbox-a.sig@mail.example.test>',
-      )
-      await seedConversationForMailbox(
-        store,
-        mailboxB.id,
-        '<ht.k1.mailbox-b.sig@mail.example.test>',
-      )
+      await seedConversationForMailbox(store, mailboxA, '<ht.k1.mailbox-a.sig@mail.example.test>')
+      await seedConversationForMailbox(store, mailboxB, '<ht.k1.mailbox-b.sig@mail.example.test>')
 
       const senderA = fakeSender()
       const senderB = fakeSender()
@@ -519,12 +511,12 @@ describe('runDeliveryWorker', () => {
 
       const { threadId: brokenThreadId } = await seedConversationForMailbox(
         store,
-        brokenMailbox.id,
+        brokenMailbox,
         '<ht.k1.broken-mailbox.sig@mail.example.test>',
       )
       await seedConversationForMailbox(
         store,
-        goodMailbox.id,
+        goodMailbox,
         '<ht.k1.good-mailbox.sig@mail.example.test>',
       )
 
@@ -582,6 +574,38 @@ describe('runDeliveryWorker', () => {
 
       expect(report).toEqual({ attempted: 1, sent: 1, failed: 0, skipped: 0 })
       expect(resolvedMailboxIds).toEqual([null])
+    })
+
+    it('refuses to retry a row whose persisted fromAddress no longer matches its resolved transport (mailbox deleted → default) — fails it, never sends mismatched', async () => {
+      const { store } = await freshStore()
+      // A conversation with no mailbox (mailbox_id null, as if its inbox was
+      // hard-deleted) but a row originally sent as a SPECIFIC inbox address.
+      const { conversationId } = await seedConversation(store)
+      await store.appendThread(conversationId, {
+        direction: 'outbound',
+        messageId: '<ht.k1.mismatch.sig@mail.example.test>',
+        fromAddress: 'deleted-inbox@example.test',
+        bodyText: 'retry me',
+        deliveryStatus: 'failed',
+        sendEnvelope: envelope(),
+      })
+
+      const defaultSender = fakeSender()
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      // resolve(null) yields the DEFAULT transport (from = support@...), which
+      // does NOT match the row's persisted 'deleted-inbox@example.test'.
+      const senderResolver: SenderResolver = {
+        async resolve() {
+          return { sender: defaultSender, from: 'support@example.test' }
+        },
+      }
+
+      const report = await runDeliveryWorker({ store, senderResolver })
+
+      expect(report).toEqual({ attempted: 1, sent: 0, failed: 1, skipped: 0 })
+      // The from/transport guard fired BEFORE the sender was ever invoked.
+      expect(defaultSender.sent).toHaveLength(0)
+      errorSpy.mockRestore()
     })
   })
 })
