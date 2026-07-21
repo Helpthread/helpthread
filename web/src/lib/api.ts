@@ -39,11 +39,14 @@ import type {
   Agent,
   AgentRole,
   AuthProviderDescriptor,
+  ConnectedMailbox,
   ConversationDetail,
   ConversationFolder,
   ConversationListResponse,
   ConversationStatus,
   ConversationSummary,
+  ImapCheckResult,
+  ImapConnectionInput,
   MailboxSummary,
   SelfAgent,
   ThreadView,
@@ -370,4 +373,19 @@ export async function putAgentMailboxes(id: string, mailboxIds: string[]): Promi
     actingAgent: true,
   })
   return result.mailboxIds
+}
+
+// --- IMAP/SMTP mailbox connection (HT-101; specs/mail/mailbox-connection.md §5) ---
+// Ordinary Bearer-gated routes, same posture as Gmail connect — no
+// acting-Agent header (`src/api/imap-connect.ts`'s module doc: unlike
+// `/agents/*`, there's no acting-Agent identity to attach to either route).
+
+/** `POST /api/v1/inbound/imap/check` — attempt both legs and report each independently; persists nothing. */
+export function imapCheckConnection(input: ImapConnectionInput): Promise<ImapCheckResult> {
+  return request('/api/v1/inbound/imap/check', { method: 'POST', body: input })
+}
+
+/** `POST /api/v1/inbound/imap/connect` — verify both legs (aborting on the first failure), then persist the mailbox atomically. `422` (`imap_failed`/`smtp_failed`) on a connectivity failure — never echoes the password (module doc). */
+export function imapConnect(input: ImapConnectionInput): Promise<ConnectedMailbox> {
+  return request('/api/v1/inbound/imap/connect', { method: 'POST', body: input })
 }

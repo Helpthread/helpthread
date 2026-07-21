@@ -81,6 +81,48 @@ export interface MailboxSummary {
   status: MailboxStatus
 }
 
+// --- IMAP/SMTP mailbox connection (HT-101; specs/mail/mailbox-connection.md §5) ---
+
+/**
+ * Request body shared by `imapCheckConnection` and `imapConnect` — mirrors
+ * the engine's `ImapConnectInput` (`src/mail/imap-connect.ts`).
+ */
+export interface ImapConnectionInput {
+  address: string
+  imapHost: string
+  imapPort: number
+  smtpHost: string
+  smtpPort: number
+  username: string
+  /** Never logged, never echoed back by the engine — see `imap-connect.ts`'s module doc. */
+  password: string
+  /** Implicit TLS for both legs. Defaults to `true` when omitted. */
+  secure?: boolean
+}
+
+/** One connectivity leg's outcome (`POST /api/v1/inbound/imap/check`) — never carries the submitted password. */
+export type ImapLegResult = { ok: true } | { ok: false; error: string }
+
+/** `POST /api/v1/inbound/imap/check`'s response — both legs attempted independently; persists nothing. */
+export interface ImapCheckResult {
+  imap: ImapLegResult
+  smtp: ImapLegResult
+}
+
+/**
+ * `POST /api/v1/inbound/imap/connect`'s success response — the persisted
+ * mailbox (`MailboxRecord`, `src/store/mailboxes.ts`). Wider than
+ * {@link MailboxSummary} (adds `provider`) because THIS endpoint's mapper is
+ * the one place `provider` crosses the wire — `GET /mailboxes` deliberately
+ * omits it (see `MailboxSummary`'s doc).
+ */
+export interface ConnectedMailbox {
+  id: string
+  address: string
+  provider: string
+  status: MailboxStatus
+}
+
 /** v1.1 (HT-46) — one inbound attachment's metadata plus a time-limited
  *  signed `BlobStore` URL (never a stable/public path; it expires). */
 export interface AttachmentView {

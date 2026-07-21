@@ -7,14 +7,15 @@
  * into sections down a left rail, and Settings sections are the injection
  * points future increments (HT-56: Mail Settings, Alerts) and modules
  * extend. Sections today: **General** (deployment identity + the branding
- * note) and **Keyboard shortcuts**. Appearance moved to the Agent's own
- * profile (TJ, 2026-07-18): a theme is a PERSONAL preference, and the
- * three-scope rule puts personal things in the personal scope — device-local
- * persistence for now, account-synced with HT-61.
+ * note), **Inboxes** (HT-101: connect an IMAP/SMTP mailbox — see
+ * `ConnectInboxForm`), and **Keyboard shortcuts**. Appearance moved to the
+ * Agent's own profile (TJ, 2026-07-18): a theme is a PERSONAL preference,
+ * and the three-scope rule puts personal things in the personal scope —
+ * device-local persistence for now, account-synced with HT-61.
  *
  * Sections are client-side state within the one /settings route for now —
- * three shallow sections don't justify three routes; HT-56 graduates
- * sections to routes (the AgentDetailShell pattern) when they gain depth.
+ * shallow sections don't justify their own routes; HT-56 graduates sections
+ * to routes (the AgentDetailShell pattern) when they gain depth.
  *
  * Keyboard shortcuts moved here from the top bar's menus (a personal
  * preference is not a Manage- or avatar-scoped affordance); the global `?`
@@ -24,8 +25,12 @@
 import Link from 'next/link'
 import type { ReactNode } from 'react'
 import { useState } from 'react'
+import type { MailboxStatus, MailboxSummary } from '../lib/api-types'
+import { ConnectInboxForm } from './ConnectInboxForm'
 import { Button } from './ds/core/Button'
+import { EmptyState } from './ds/core/EmptyState'
 import { Kbd } from './ds/core/Kbd'
+import { StatusPill } from './ds/core/StatusPill'
 import { FolderItem } from './ds/inbox/FolderItem'
 import { useShortcutsOverlay } from './ShortcutsProvider'
 
@@ -35,7 +40,7 @@ export interface DeploymentInfo {
   mailDomain: string
 }
 
-type SettingsSection = 'general' | 'shortcuts'
+type SettingsSection = 'general' | 'inboxes' | 'shortcuts'
 
 function GeneralIcon() {
   return (
@@ -43,6 +48,17 @@ function GeneralIcon() {
       <path
         fill="currentColor"
         d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6a.5.5 0 0 0 .1-.7l-2-3.4a.5.5 0 0 0-.6-.2l-2.5 1a7.7 7.7 0 0 0-1.7-1L14.4 2.4a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4L9 5.1a7.7 7.7 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.4a.5.5 0 0 0 .1.7L4.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6a.5.5 0 0 0-.1.7l2 3.4c.1.2.4.3.6.2l2.5-1a7.7 7.7 0 0 0 1.7 1l.4 2.7c0 .2.3.4.5.4h4c.2 0 .5-.2.5-.4l.4-2.7a7.7 7.7 0 0 0 1.7-1l2.5 1c.2.1.5 0 .6-.2l2-3.4a.5.5 0 0 0-.1-.7L19.4 13zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"
+      />
+    </svg>
+  )
+}
+
+function InboxesIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z"
       />
     </svg>
   )
@@ -75,9 +91,36 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-export function SettingsScreen({ deployment }: { deployment: DeploymentInfo }) {
+/**
+ * `MailboxStatus` → `StatusPill` — `active` matches the pill's own META key
+ * directly; the other three lifecycle states don't (`src/store/
+ * mailboxes.ts`'s states are mailbox-specific, not the conversation-status
+ * vocabulary `StatusPill` ships with), so they borrow a META key for color
+ * only and supply their own label — the same "unrecognized status, our
+ * label" pattern `TeamListScreen`'s `statusBadge` and the Team roster's role
+ * chip already use, not a one-off hack.
+ */
+function mailboxStatusPill(status: MailboxStatus) {
+  if (status === 'active') return <StatusPill status="active" />
+  if (status === 'paused') return <StatusPill status="pending" label="Paused" />
+  if (status === 'needs_reconnect') return <StatusPill status="spam" label="Needs reconnect" />
+  return <StatusPill status="closed" label="Disconnected" />
+}
+
+export function SettingsScreen({
+  deployment,
+  mailboxes,
+  viewerIsAdmin,
+}: {
+  deployment: DeploymentInfo
+  /** Only fetched for an admin viewer (`GET /mailboxes` 403s otherwise) — always `[]` when `viewerIsAdmin` is `false`. */
+  mailboxes: MailboxSummary[]
+  /** Gates the Inboxes section — admin-only, same posture as Team/Permissions (`app/settings/page.tsx`'s doc). */
+  viewerIsAdmin: boolean
+}) {
   const { open: openShortcuts } = useShortcutsOverlay()
   const [section, setSection] = useState<SettingsSection>('general')
+  const [showConnectForm, setShowConnectForm] = useState(false)
 
   return (
     <main style={{ flex: 1, minWidth: 0, padding: 24, display: 'flex', gap: 28 }}>
@@ -102,6 +145,15 @@ export function SettingsScreen({ deployment }: { deployment: DeploymentInfo }) {
             hasItems
             onClick={() => setSection('general')}
           />
+          {viewerIsAdmin && (
+            <FolderItem
+              icon={<InboxesIcon />}
+              label="Inboxes"
+              active={section === 'inboxes'}
+              hasItems
+              onClick={() => setSection('inboxes')}
+            />
+          )}
           <FolderItem
             icon={<ShortcutsIcon />}
             label="Keyboard shortcuts"
@@ -148,6 +200,65 @@ export function SettingsScreen({ deployment }: { deployment: DeploymentInfo }) {
               </p>
             </Card>
           </div>
+        )}
+
+        {section === 'inboxes' && viewerIsAdmin && (
+          <Card title="Connected inboxes">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {mailboxes.length === 0 && !showConnectForm && (
+                <EmptyState
+                  title="No inboxes connected"
+                  body="Connect a mailbox over IMAP/SMTP to start receiving mail here."
+                />
+              )}
+
+              {mailboxes.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {mailboxes.map((mailbox) => (
+                    <div
+                      key={mailbox.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 12,
+                        border: '1px solid var(--ht-border)',
+                        borderRadius: 'var(--ht-radius-sm)',
+                        padding: '10px 12px',
+                      }}
+                    >
+                      <div
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          fontSize: 13,
+                          fontFamily: 'var(--ht-mono)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {mailbox.address}
+                      </div>
+                      {mailboxStatusPill(mailbox.status)}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {showConnectForm ? (
+                <ConnectInboxForm
+                  onConnected={() => setShowConnectForm(false)}
+                  onCancel={() => setShowConnectForm(false)}
+                />
+              ) : (
+                <div>
+                  <Button variant="primary" onClick={() => setShowConnectForm(true)}>
+                    Add inbox
+                  </Button>
+                </div>
+              )}
+            </div>
+          </Card>
         )}
 
         {section === 'shortcuts' && (
