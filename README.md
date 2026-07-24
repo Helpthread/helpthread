@@ -1,19 +1,35 @@
 # Helpthread
 
-Open-source, serverless helpdesk — shared inbox, threaded email conversations, knowledge base — for teams who live on Vercel and Supabase. Aimed at the ease of use Help Scout set the bar for, fully owned by the operator. FreeScout proved the self-hosted market is real; Helpthread is built for it on modern rails.
+**Open-source support infrastructure.**
 
-> **Status: early and pre-release.** This repository is being built in the open from its first day. Today it holds the project's constitution ([CHARTER.md](CHARTER.md)), behavioral specifications, a test-fixture harness, and the platform interfaces — **not yet a runnable product.** It is dogfooded first, as [Resonant IQ](https://resonantiq.app)'s own support system, before it's anything anyone else should deploy. Watch or star to follow along; expect things to move and change.
+Helpthread provides the foundation upon which support systems are built: durable
+conversations, trustworthy email threading, an operator inbox, public APIs and events,
+and an extension model available equally to first-party and community software.
 
-## What's here now
+It is serverless-native and optimized first for Vercel and Supabase, while keeping
+platform services behind Helpthread-owned interfaces. Organizations deploy Helpthread
+into infrastructure they choose and control.
 
-- **[CHARTER.md](CHARTER.md)** — the founding document: vision, principles, licensing, architecture, roadmap. Read this first.
-- **`specs/`** — behavioral specifications (the conversation API contract, mail threading) that the engine will be built and tested against.
-- **`fixtures/`** — a black-box test harness and recorded fixtures that form the mail engine's acceptance suite.
-- **`src/providers/`** — the platform-provider interfaces (queue, scheduler, storage, inbound email) the engine depends on, keeping it Vercel-first but not Vercel-only.
+> **Status: pre-release and dogfooded in production.** Helpthread is developed by
+> Resonant IQ, Inc. and runs the company's support operation today, but it is not ready for general deployment. See
+> [STATUS.md](STATUS.md) for the current product surface and roadmap.
+
+## Start here
+
+- **[Founding Charter](CHARTER.md)** — identity, principles, and project commitments
+- **[Architecture](docs/architecture/README.md)** — the map to current technical contracts
+- **[Status](STATUS.md)** — what is live, underway, and deferred
+- **[Governance](GOVERNANCE.md)** — how project decisions are made today
+- **[Legal and licensing](legal/README.md)** — the AGPL core and commercial-module boundary
+- **[`specs/`](specs/)** — the maintained behavioral and product contracts
+- **[`fixtures/`](fixtures/)** — the mail engine's black-box acceptance suite
 
 ## Architecture in one breath
 
-TypeScript on Vercel (Fluid Compute, Workflows, Queues, Cron — no daemons, nothing stays resident) plus Supabase (Postgres, Auth, Storage, Realtime). Inbound mail arrives by push webhook where the provider offers one, or by a bounded scheduled fetch where it doesn't — either way as an invocation that ends, never a process sitting in a loop. Threading authority lives on the outbound side: signed reply tokens in the Message-IDs the engine emits. See the charter for the reasoning.
+TypeScript on Vercel plus Supabase for Postgres, authentication, storage, and realtime.
+Inbound mail arrives through push delivery and bounded reconciliation rather than a
+long-running poller. Signed reply tokens minted into outbound messages give Helpthread
+verifiable threading authority. See the [architecture overview](docs/architecture/README.md).
 
 ## Development
 
@@ -33,8 +49,11 @@ Scripts:
 
 ## Contributing
 
-Not accepting external contributions yet — see [CONTRIBUTING.md](CONTRIBUTING.md). Issues and discussion are welcome.
+Helpthread is not accepting external code contributions yet. Issues and discussion are
+welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[AGPL-3.0](LICENSE) for the core. © Resonant IQ, Inc. Commercially-licensed first-party modules will come later via a marketplace; the core stays free software, forever. See the charter's licensing section.
+[AGPL-3.0](LICENSE) for the core. © Resonant IQ, Inc. Commercial modules add to the
+core; they do not subtract from it. See
+[legal and licensing](legal/README.md).

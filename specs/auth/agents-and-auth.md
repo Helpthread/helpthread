@@ -2,8 +2,8 @@
 
 Status: **draft** (2026-07-18, amended 2026-07-19 — see Changelog draft.6–.7) — the contract for
 real per-Agent identity, login, and user management, replacing the single shared operator
-password that HT-51 shipped as a deliberate placeholder. Authored native (Helpthread's own
-domain model); the *experience* is modelled on the Help Scout / FreeScout user-management UX
+password that shipped as a deliberate placeholder. Authored native (Helpthread's own
+domain model); the experience follows Helpthread's own information architecture and design system
 (black-box observation only — never their source), rendered entirely in Helpthread's own
 design system.
 
@@ -22,7 +22,7 @@ splitting them at a seam:
 - **Resonant IQ's own deployment, and paying customers:** want Google SSO, magic-link,
   SAML/enterprise SSO. These are **licensed marketplace modules**, not part of the free
   core. **Passkey login (WebAuthn) is the one exception — it is core, not a marketplace
-  module:** security hygiene is always free (module catalog §1, HT-66, 2026-07-18); when
+  module:** security hygiene is always free (module catalog §1,  2026-07-18); when
   built, it ships as a second **core** auth provider on this same seam (catalog §2.2),
   never through the marketplace path below. It is not yet built in this increment (§11).
 
@@ -30,7 +30,7 @@ The mechanism that makes both true at once is an **auth-provider seam** (§4). T
 the seam and exactly one provider — `password`. A marketplace module is a package that
 registers an additional provider against that seam. **This seam is a concrete instance of
 the AGPL-3.0 §7 module-marketplace boundary** the charter is built around and that counsel
-is defining ([HT-5](https://resonantiq.atlassian.net/browse/HT-5), critical path). Building
+is defining (critical path). Building
 the seam and the free `password` provider in core is AGPL-clean and can proceed now; it also
 gives counsel a *concrete* boundary to write the exception text against. Shipping any
 premium provider module waits on that text being counsel-final (charter: the §7 exception
@@ -47,8 +47,7 @@ change** (§3.2 is why).
 **Agent** = a human member of the support staff who operates the inbox. **Assistant** = an AI
 actor. Never conflated. The identity records this spec introduces are **Agents**. We never
 call them "users" loosely in schema, API, or UI copy; the API resource is `/agents`, the
-records are Agents. (The FreeScout screens we model call them "Users"; our copy says
-"Agents" or "Team" — a deliberate, charter-required departure, not a fidelity miss.)
+records are Agents. Our copy says "Agents" or "Team" consistently.
 
 ## 3. Data model
 
@@ -61,8 +60,7 @@ engine's Postgres (`src/db/migrate.ts`, next migration ids). Web has no DB acces
 ### 3.1 `agents` — the identity
 
 ```sql
-CREATE TABLE agents (
-  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE agents (   id          uuid PRIMARY KEY DEFAULT gen_random_uuid,
   email       text NOT NULL,                       -- normalised lower-case; unique (below)
   name        text NOT NULL,                        -- display name, "First Last"
   role        text NOT NULL DEFAULT 'agent'
@@ -70,16 +68,16 @@ CREATE TABLE agents (
   status      text NOT NULL DEFAULT 'invited'
                 CHECK (status IN ('invited', 'active', 'disabled')),
   timezone    text NOT NULL DEFAULT 'UTC',          -- the one profile nicety in v1 (§7 decision)
-  created_at  timestamptz NOT NULL DEFAULT now(),
-  updated_at  timestamptz NOT NULL DEFAULT now()
+  created_at  timestamptz NOT NULL DEFAULT now,
+  updated_at  timestamptz NOT NULL DEFAULT now
 );
 CREATE UNIQUE INDEX agents_email_key ON agents (lower(email));
 ```
 
 `status`: `invited` = created via the invite path, no usable password yet (awaiting invite
 acceptance) — **only** the invite path ever produces this status; `active` = can sign in;
-`disabled` = soft-off, cannot sign in, records and history retained (FreeScout's "Prevent
-user from logging in"). **Both provisioning paths converge on `active`** — invite acceptance
+`disabled` = soft-off, cannot sign in, records and history retained. **Both provisioning
+paths converge on `active`** — invite acceptance
 flips `invited`→`active` (§6), and an admin-set-password Agent is created `active` outright
 (§8) — so a working Agent is never left at `invited`. Login (`/auth/verify`) treats `invited`
 and `disabled` identically to a wrong password: a generic `401`, no status leak (§6, §9).
@@ -90,16 +88,15 @@ Deletion is separate and hard (§6).
 This is the table that makes the marketplace work. **One Agent, many login methods.**
 
 ```sql
-CREATE TABLE agent_auth_identities (
-  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE agent_auth_identities (   id           uuid PRIMARY KEY DEFAULT gen_random_uuid,
   agent_id     uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   provider     text NOT NULL,          -- 'password' (core, v1); 'google','saml',... (marketplace);
                                        -- 'passkey' is core too (§1) but stores its credentials in
                                        -- webauthn_credentials (passkeys.md §2.1), never here
   subject      text NOT NULL,          -- provider's stable identifier for this Agent
   secret_hash  text,                   -- scrypt hash for 'password'; NULL for OAuth-style providers
-  created_at   timestamptz NOT NULL DEFAULT now(),
-  updated_at   timestamptz NOT NULL DEFAULT now(),
+  created_at   timestamptz NOT NULL DEFAULT now,
+  updated_at   timestamptz NOT NULL DEFAULT now,
   UNIQUE (provider, subject)
 );
 CREATE INDEX agent_auth_identities_agent ON agent_auth_identities (agent_id);
@@ -120,14 +117,14 @@ CREATE UNIQUE INDEX agent_auth_identities_one_password_per_agent
   Agent record is re-created if the email must change.
 - A marketplace `google` module inserts `provider='google', subject=<google sub>,
   secret_hash=NULL` — **no core migration**. The seam (§4) is the only code that reads this
-  table by provider. **Amended (HT-75):** a `passkey` (WebAuthn) module does **not** use this
+  table by provider. **Amended :** a `passkey` (WebAuthn) module does **not** use this
   table, despite an earlier draft of this section anticipating it would. WebAuthn's
   per-credential mutable state (a signature counter, transports, backup flags) has no analog
   in this table's shape (one row, one optional secret hash, per identity) — it gets its own
   table instead (`webauthn_credentials`; `specs/auth/passkeys.md` §2.1, which is explicit that
   cardinality — an Agent holding several credentials — is **not** the reason, since nothing
   here restricts `provider='passkey'` to one row per Agent), the same move
-  `mailbox_oauth_tokens` (HT-38) already made for Gmail's OAuth material. This table remains
+  `mailbox_oauth_tokens`  already made for Gmail's OAuth material. This table remains
   the right shape for single-secret,
   single-subject providers like `google`.
 - Deleting an Agent cascades their identities. An Agent may have several rows (`password` plus
@@ -154,21 +151,20 @@ ALTER TABLE conversations DROP COLUMN assignee;
 (precedent: `inbound_deliveries.thread_id`). This is **one of two breaking changes** to the
 existing surface (§10), coordinated backend+UI in a single deploy — exactly as
 `agent-inbox-v1.md` §4f anticipated ("the multi-Agent increment replaces `'me'` with real
-Agent ids") and how HT-26 was handled.
+Agent ids") and how  was handled.
 
 ### 3.4 Per-Agent mailbox scoping — **grants managed now, enforcement deferred** (§12.4, decided)
 
-FreeScout scopes each user to specific mailboxes, and Helpthread already carries `mailbox_id`
+Helpthread scopes each Agent to specific mailboxes and already carries `mailbox_id`
 throughout. Originally decided as schema-only; **superseded the same day by TJ's fidelity
 review**: the grants are real, managed data now — auto-granted at Agent creation, read and
 written through the §6 endpoints and the per-Agent Permissions screen (§7). What remains
 deferred is *enforcement of conversation visibility*, per the pinned semantics below.
 
 ```sql
-CREATE TABLE agent_mailbox_access (
-  agent_id    uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+CREATE TABLE agent_mailbox_access (   agent_id    uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   mailbox_id  uuid NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
-  created_at  timestamptz NOT NULL DEFAULT now(),
+  created_at  timestamptz NOT NULL DEFAULT now,
   PRIMARY KEY (agent_id, mailbox_id)
 );
 ```
@@ -176,7 +172,7 @@ CREATE TABLE agent_mailbox_access (
 **Semantics pinned (TJ, 2026-07-18 — the Permissions UI ships now):**
 
 - **Admins have implicit access to all mailboxes** — grants rows are never consulted for
-  an admin (FreeScout's own rule: "Administrators have access to all mailboxes").
+  an admin.
 - A non-admin Agent's mailbox access = their rows in this table.
 - **Every newly created Agent (any role, both provisioning paths and `/setup`) is
   auto-granted all mailboxes existing at creation time**, in the same transaction — no
@@ -200,7 +196,7 @@ interface AuthProvider {
   readonly key: string                       // 'password', 'google', ...
   // What the login UI needs to render this method (a password field; a "Sign in with X"
   // button + start URL). Serialised by GET /auth/providers (§6).
-  descriptor(): AuthProviderDescriptor
+  descriptor: AuthProviderDescriptor
   // Verify an attempt and resolve it to an existing Agent identity, or null.
   // 'password' reads agent_auth_identities; an OAuth module runs its own flow then maps
   // the verified external subject → an Agent. Never mints the session — that is the core's
@@ -217,7 +213,7 @@ interface AuthProvider {
   core *code* edit to `root.ts` (wire one more provider), not a drop-in. That is fine and
   deliberate: the §7 boundary this spec makes concrete is the **`AuthProvider` interface + the
   provider-agnostic identity schema** (§3.2), which a module targets; the packaging/discovery
-  mechanism is later marketplace infrastructure (§11), and HT-5's exception text points at the
+  mechanism is later marketplace infrastructure (§11), and the module-API exception points at the
   interface, not at a plugin loader that doesn't exist yet. Do not overclaim a plugin API is
   delivered.
 - **`PasswordAuthProvider`** (core): `authenticate({email, password})` → look up the Agent by
@@ -232,10 +228,10 @@ interface AuthProvider {
   `agent_auth_identities` directly — direct cross-module table writes are exactly the shared-DB
   coupling the charter's marketplace boundary exists to prevent. Core ships this service and
   uses it for `password`; a module calls it. (The link/provision API is sketched here so the
-  boundary is real; its full shape lands with the first module, gated on HT-5.)
+  boundary is real; its full shape lands with the first module, gated on final legal review.)
 - Building the interface, the registry, the core provider, and the identity-service seam now
   is **not** speculative: it *is* the product architecture (the marketplace boundary) and the
-  artifact HT-5's legal text points at. We build no marketplace scaffolding beyond that.
+  artifact 's legal text points at. We build no marketplace scaffolding beyond that.
 
 ## 5. Roles & authorization
 
@@ -313,7 +309,7 @@ Response envelopes (as built): a single Agent rides as `{ agent }` (`/setup`,
 `{ agents }`, and provider discovery as `{ providers, needsSetup }` — object envelopes
 throughout, extensible without breaking clients, matching the wrapped shapes below.
 
-- **`GET /api/v1/agents`** (any active Agent) → `{ agents: Agent[] }`. *(Amended at build time, HT-54:
+- **`GET /api/v1/agents`** (any active Agent) → `{ agents: Agent[] }`. *(Amended during implementation:
   was admin-only in the draft, but the assignee UI — any Agent may assign any Agent, §5 —
   needs the roster to render names and offer choices; an admin-only list would make a
   non-admin's assignee menu impossible. The roster carries no secrets (no identities, no
@@ -363,42 +359,42 @@ Mailbox access (§3.4, all admin-only; the acting-Agent header is required):
 
 ## 7. Web UI (screens, in our design system)
 
-Modelled on the observed FreeScout UX, composed from Helpthread's existing DS primitives.
-Each is a **new designed surface** requiring your fidelity sign-off (same gate as the HT-51
+Composed from Helpthread's existing design-system primitives.
+Each is a **new designed surface** requiring your fidelity sign-off (same gate as the
 login screen). The Claude Design project has the login template but **not** these — they are
 new. Copy uses Agent/Team vocabulary (§2), never "user".
 
 1. **`/setup` — first run.** Shown when `needsSetup`. Create the first admin: name, email,
    password (+ confirm). One-shot; once an Agent exists, `/setup` redirects to `/login`.
    *(New surface.)*
-2. **`/login` — per-Agent.** Extends HT-51's screen: **email + password** (was password
+2. **`/login` — per-Agent.** Extends the original login screen: **email + password** (was password
    only), verified against the engine. Renders whatever `/auth/providers` reports (a password
    form in core; premium builds add a "Sign in with …" button here — the seam surfaces).
-3. **Team / Agents list** (route e.g. `/settings/team`, admin-only). FreeScout-modelled:
+3. **Team / Agents list** (route e.g. `/settings/team`, admin-only):
    cards (avatar-or-initial, name, email, a role chip), a "New Agent" action, search.
-4. **New Agent** (admin-only). FreeScout-modelled wizard: **Role** (Agent/Admin), First/Last
+4. **New Agent** (admin-only). Wizard: **Role** (Agent/Admin), First/Last
    name, Email, and provisioning — **"Send an invite email"** (default on, when a sender is
    configured) with the *"an invite can be sent later"* fallback, **or** an **admin-set
    password** when invite is off. No password field when inviting.
 5. **Agent profile / edit** (`/settings/team/{id}`; admin for anyone, self for own).
-   FreeScout-modelled: Role, **Disabled** ("prevent sign-in") toggle, name, **Change password**
+   Role, **Disabled** ("prevent sign-in") toggle, name, **Change password**
    (self, or admin reset), timezone; **Save** and, for admins on others, **Delete**
-   (destructive, two-step per our pattern — never `confirm()`). **Email is displayed
+   (destructive, two-step per our pattern — never `confirm`). **Email is displayed
    read-only** (immutable in v1, §3.2) — the field shows the address but cannot be edited.
 6. **`/invite/{token}` — accept invite.** Validate token → set password → signed in.
    *(New surface.)*
 7. **Own profile & logout** — wire the avatar menu's existing "Your profile" and "Log out"
-   stubs to #5 (self) and HT-51's `logoutAction`.
+   stubs to #5 (self) and the existing `logoutAction`.
 
 ## 8. Session, acting-Agent trust model, and provisioning
 
-**Session carries identity.** HT-51's cookie payload `{v:1, iat}` becomes `{v:2, iat, sub:
+**Session carries identity.** 's cookie payload `{v:1, iat}` becomes `{v:2, iat, sub:
 <agentId>}`. The `v` field exists for exactly this bump. Signing/verification (HMAC via Web
 Crypto, Edge-safe middleware — which still only *verifies* the cookie, never touching the
 Agent store, so the `node:crypto`-free Edge constraint holds), the route gate, and
 open-redirect hardening carry over. **One thing does NOT carry over unchanged:** the
 sliding-expiry re-stamp in `middleware.ts` re-mints the cookie
-(`response.cookies.set(..., await mintSessionCookie(), ...)`), so `mintSessionCookie` gains a
+(`response.cookies.set(..., await mintSessionCookie, ...)`), so `mintSessionCookie` gains a
 required `sub` parameter and the refresh path must thread it from the just-verified session
 (`mintSessionCookie(session.payload.sub)`). Make `sub` **required** on `mintSessionCookie` so
 the compiler rejects any call that would silently re-mint an identity-less cookie mid-session.
@@ -407,9 +403,9 @@ acceptable.
 
 **Acting-Agent trust model — and the `api.ts` change it requires.** The web verifies the
 session cookie (getting `sub`) and asserts it to the engine as
-`X-Helpthread-Agent-Id: <agentId>`. Today `web/src/lib/api.ts`'s `request()` reads only server
+`X-Helpthread-Agent-Id: <agentId>`. Today `web/src/lib/api.ts`'s `request` reads only server
 env and has no access to the request's session, so this is a **real refactor, specified here,
-not a free carry-over**: `request()` (server-only already) reads and verifies the session
+not a free carry-over**: `request` (server-only already) reads and verifies the session
 cookie via `next/headers` and attaches the header on calls that need it. Per-endpoint rule
 (pinned precisely, so neither side guesses):
   - **Header required** on every `/agents/*` op, `/auth/me`, and `PUT
@@ -457,27 +453,26 @@ trust boundary is stated so it is a decision, not an accident.
 - **Admin-set password (fallback + first-run reality):** when invite is off (or no sender is
   connected yet — a fresh deploy can't email before it can), the admin sets the Agent's
   initial password inline; the Agent signs in with it and may change it. Always available; the
-  only path that works before a mailbox is connected. (FreeScout's "an invite can be sent
-  later" is the same admission.) **This path creates the Agent directly as `active`** — it has
+  only path that works before a mailbox is connected. **This path creates the Agent directly as `active`** — it has
   a usable password from the moment it exists, `invited` would be a lie the login path (§6)
   would then have to special-case, and no invite token is ever minted for it. This is honestly
   an *admin-set* password, not a temporary one: v1 has no forced-change-on-first-login
   machinery or credential expiry (deferred, §11), so nothing forces the Agent to rotate it —
-  the admin handing over the password out-of-band is the trust step, same as FreeScout.
+  the admin handing over the password out-of-band is the trust step.
 
-**Retiring HT-51's shared password.** `HELPTHREAD_UI_PASSWORD` is *replaced*, not extended
-(per HT-51's own note). On deploy: if zero Agents exist, the web routes to `/setup`; the old
+**Retiring 's shared password.** `HELPTHREAD_UI_PASSWORD` is *replaced*, not extended
+(per 's own note). On deploy: if zero Agents exist, the web routes to `/setup`; the old
 single password stops being consulted. `HELPTHREAD_UI_SESSION_SECRET` stays (it signs the
 now-identity-carrying cookie). Document the retirement in the runbook and README.
 
 ## 9. Security
 
-- **Password hashing at rest — now real.** Unlike HT-51 (which compared against a plaintext
+- **Password hashing at rest — now real.** Unlike  (which compared against a plaintext
   env value and used scrypt only as a length-blind), there is now a **hash at rest**
   (`agent_auth_identities.secret_hash`), so a slow KDF genuinely matters. Use **scrypt**
   (`node:crypto`, no new dep) with a **per-identity random salt** stored alongside the hash
   (encode salt+params+hash in one string). Verify in constant time. CodeQL's
-  `js/insufficient-password-hash` is satisfied by scrypt (learned on HT-51).
+  `js/insufficient-password-hash` is satisfied by scrypt (learned on).
 - **No account enumeration.** `POST /auth/verify` returns the same `401` and comparable timing
   whether the email is unknown or the password wrong (do the scrypt work against a dummy hash
   on a missing Agent).
@@ -488,21 +483,21 @@ now-identity-carrying cookie). Document the retirement in the runbook and README
   §11. Self-service reset, if added later, acts on an already-`active` Agent, so it cannot lean
   on the status transition for one-time-ness — it will need its own mechanism, e.g. a
   per-identity token nonce/version; called out so it is not assumed free.)
-- **Session crypto** unchanged from HT-51 (HMAC, Web Crypto on Edge). Middleware still only
+- **Session crypto** remains HMAC using Web Crypto on Edge. Middleware still only
   *verifies* the cookie — it never touches the Agent store, so the Edge/`node:crypto`
   constraint holds.
-- **Rate-limiting** remains the HT-51 per-instance gap
-  ([HT-53](https://resonantiq.atlassian.net/browse/HT-53)) — now more pressing with multiple
+- **Rate-limiting** remains a per-instance gap
+   — now more pressing with multiple
   accounts and a public login. Not solved here; called out.
 - **Charter "own your data":** identity is entirely self-contained in the operator's own
   Postgres. No Helpthread-hosted identity service, ever. A premium Google-SSO module uses the
   *operator's own* Google Workspace (OIDC), not ours.
-- **No secret in the client bundle** (the HT-51 gate): password verification and hashing are
+- **No secret in the client bundle**: password verification and hashing are
   server-only (engine); the web never sees a hash. `web/` gains no DB access.
 
 ## 10. Rollout
 
-Two breaking changes, both coordinated single-deploy (dogfood = one deploy, per HT-16/HT-26):
+Two breaking changes, both coordinated in a single deployment:
 
 1. **`assignee` shape** (§3.3): `PUT /conversations/{id}/assignee` body becomes
    `{ assigneeAgentId: uuid | null }` (was `{ assignee: 'me' | null }`); the summary field
@@ -516,15 +511,15 @@ is retired (§8).
 ## 11. What this is NOT (scope)
 
 - **No marketplace providers** (Google SSO, magic-link, SAML/enterprise SSO) — only the seam
-  + the free `password` provider. Premium modules wait on the HT-5 §7 exception text.
+  + the free `password` provider. Premium modules wait on the §7 exception text.
 - **No passkey provider either** — passkey (WebAuthn) is core, not a marketplace module
-  (module catalog §1/§2.2, HT-66), but it is not yet built in this increment. It lands later
+  (module catalog §1/§2.2), but it is not yet built in this increment. It lands later
   as a second **core** auth provider on the §4 seam, wired in `root.ts` alongside
   `PasswordAuthProvider`, not through the marketplace path.
 - **No entitlement/licensing machinery** — separate marketplace infrastructure.
 - **No per-Agent mailbox scoping** (§3.4) — deferred; the model accommodates it.
-- **No teams/groups, granular permissions, or per-mailbox roles** (FreeScout has these;
-  out of scope for a two-role v1).
+- **No teams/groups, granular permissions, or per-mailbox roles** — out of scope for a
+  two-role v1.
 - **No per-Agent API tokens / public multi-Agent API** — the acting-Agent assertion (§8) is
   the first-party trust model; direct Agent-authenticated API is later.
 - **No forced password change / credential expiry** — the admin-set-password fallback (§8)
@@ -540,7 +535,7 @@ is retired (§8).
 1. **Roles:** Admin + Agent. *(Confirmed.)*
 2. **First admin:** `/setup` first-run screen, zero-Agents-guarded. *(Confirmed.)*
 3. **Provisioning:** both — invite-primary (via the core `EmailSender`) + admin-set-password
-   fallback. *(Recommended; FreeScout confirms.)*
+   fallback. *(Recommended.)*
 4. **Per-Agent mailbox scoping (§3.4):** model the `agent_mailbox_access` table in this
    migration; no scoping behavior or UI. *(Confirmed — TJ, 2026-07-18.)*
 5. **Profile fields (§3.1):** lean v1 — name, email, password, role, disable, **timezone**;
@@ -550,16 +545,16 @@ is retired (§8).
 
 ## Changelog
 
-- **draft.6 (2026-07-19, catalog reconciliation, HT-76):** flagged by CodeRabbit on PR #82 —
+- **draft.6 (2026-07-19, catalog reconciliation):** flagged by CodeRabbit on PR #82 —
   this spec (written 2026-07-18, pre-dating the module catalog) classified passkey login as
   a marketplace-only add-on; the catalog decision the same day (`specs/modules/catalog.md`
-  §1/§2.2, HT-66) made passkey login core, security hygiene, never paid. Reclassified
+  §1/§2.2) made passkey login core, security hygiene, never paid. Reclassified
   throughout (§1, §3.2, §11): passkey is core, just not yet built — it will land as a second
   **core** auth provider on the §4 seam, not a marketplace module. Google SSO, magic-link,
   and SAML/enterprise SSO remain marketplace, unchanged. The provider-abstraction
   architecture (§3.2, §4) is unaffected — it already supports multiple core providers, not
   just marketplace ones.
-- **draft.7 (2026-07-19, HT-75 passkey spec review):** §3.2 corrected — a `passkey`/WebAuthn
+- **draft.7 (2026-07-19,  passkey spec review):** §3.2 corrected — a `passkey`/WebAuthn
   provider does **not** use `agent_auth_identities` (an earlier draft of this section said it
   would); it gets its own table, `webauthn_credentials`, specified in `specs/auth/passkeys.md`
   §2.1. No schema or behavior change to anything in THIS spec — a same-day correction of a
@@ -574,14 +569,14 @@ is retired (§8).
   admin-only grant endpoints (§6: `GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes`);
   conversation-visibility enforcement explicitly deferred to the multi-mailbox increment
   (conversations carry no `mailbox_id` yet).
-- **draft.4 (2026-07-18, HT-54 build):** `GET /agents` opened to any active Agent (was
+- **draft.4 (2026-07-18,  build):** `GET /agents` opened to any active Agent (was
   admin-only) — the assignee UI needs the roster; mutations stay admin-gated (§6).
 - **draft.3 (2026-07-18):** status is a closed lifecycle (CodeRabbit round 2): PATCH may
   only toggle `active`↔`disabled`; `invited` exits solely via invite acceptance (or
   delete/re-create); password writes on an `invited` Agent are refused (§6) — closing the
   incoherent states (credential-less `active`, permanently-stranded invite, unusable
   password) an unconstrained `status` field permitted.
-- **draft.2 (2026-07-18):** decisions resolved for the build (TJ's HT-54 go-ahead):
+- **draft.2 (2026-07-18):** decisions resolved for the build (TJ's  go-ahead):
   `agent_mailbox_access` is modelled now, schema-only, no behavior (§3.4, §12.4 confirmed);
   the acting-Agent header rule pinned per-endpoint — required on `/agents/*`, `/auth/me`,
   and `PUT .../assignee`; other inbox endpoints stay bearer-only this increment, with the
@@ -596,7 +591,7 @@ is retired (§8).
   snapshot); vocabulary nit in §2.
 - **draft (2026-07-18):** initial contract — data model (§3), auth-provider seam (§4), roles
   (§5), engine API (§6), UI screens (§7), session/trust/provisioning (§8), security (§9),
-  rollout (§10). Replaces the HT-51 single-operator password per that ticket's own mandate.
+  rollout (§10). Replaces the former single-operator password as planned.
   Hardened after an independent adversarial review against the codebase/charter: the session
   refresh path threads `sub` (was silently dropping identity mid-session); the acting-Agent
   header is specified as a real `api.ts` change with a per-endpoint rule and an engine-side

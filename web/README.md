@@ -1,6 +1,6 @@
 # Helpthread — Agent Inbox UI (`@helpthread/web`)
 
-The Agent Inbox web app (HT-23): a Next.js client of the Agent Inbox API and
+The Agent Inbox web app is a Next.js client of the Agent Inbox API and
 nothing more — per CHARTER.md's API-first rule, anything this UI does, the
 typed public API does. It composes the design system handed back from the
 Claude Design project (`src/components/ds/**`, ported verbatim) into working
@@ -11,7 +11,7 @@ screens.
 From the repo root, in two terminals:
 
 ```sh
-npm run dev:api           # the HT-24 harness: real engine, seeded data, :8787
+npm run dev:api           # real engine, seeded data, :8787
 npm run -w web dev        # the app on :3000
 ```
 
@@ -29,8 +29,8 @@ The app's dev defaults match the harness (`http://localhost:8787`,
   Next's Edge runtime — hence Web Crypto (`crypto.subtle`) rather than
   `node:crypto` for the cookie's HMAC.
 
-`HELPTHREAD_UI_PASSWORD` (HT-51's single shared operator password) is
-**retired** (HT-54; `specs/auth/agents-and-auth.md` §8) — replaced by real
+`HELPTHREAD_UI_PASSWORD` (the former shared operator password) is
+**retired** (`specs/auth/agents-and-auth.md` §8) — replaced by real
 per-Agent accounts. There is no env-var password anymore: on a fresh
 deployment (zero Agents), the app routes to `/setup` to create the first
 Admin; from then on, each Agent signs in with their own email/password at
@@ -55,12 +55,12 @@ and is REQUIRED — with no fallback — once `NODE_ENV=production`.
   rendered: DOMPurify always (spec §5's stored-XSS contract), remote images
   stripped.
 - `src/middleware.ts` / `src/lib/session.ts` / `src/lib/auth-actions.ts` /
-  `src/lib/next-path.ts` — the per-Agent login gate (HT-51, real identity
-  since HT-54): every route requires a signed session cookie (carrying the
+  `src/lib/next-path.ts` — the per-Agent login gate: every route requires a
+  signed session cookie (carrying the
   signed-in Agent's id) except `/login`, `/setup`, and `/invite/{token}`. See
   `specs/auth/agents-and-auth.md` §8 for the session/trust model.
-- `src/lib/agent-actions.ts` — the Agents & Authentication write path
-  (HT-54): create/edit/disable/delete an Agent, resend an invite, change a
+- `src/lib/agent-actions.ts` — the Agents & Authentication write path:
+  create/edit/disable/delete an Agent, resend an invite, change a
   password — all through the engine's acting-Agent header
   (`src/lib/api.ts`'s `actingAgent` option), never a raw client call.
 
@@ -70,9 +70,7 @@ and is REQUIRED — with no fallback — once `NODE_ENV=production`.
 App.dc.html` in the "Helpthread Agent Inbox Design" project), and this app is
 not done until it matches that design exactly — all of its surface, not a
 subset. Deviations of any kind (visual, copy, interaction) need TJ's explicit
-sign-off. See the "UI fidelity" section of the repo CLAUDE.md; the live gap
-list is the fidelity checklist on
-[HT-23](https://resonantiq.atlassian.net/browse/HT-23).
+sign-off. See the "UI fidelity" section of the repo CLAUDE.md.
 
 ## Shipped so far
 
@@ -91,7 +89,7 @@ after a validation failure; honest send-failure copy with retry) · keyboard
 shortcuts throughout (inbox j/k/Enter/x; conversation j/k/r/n/⌘+↵/cascading
 Escape; global `?` overlay).
 
-Agents & Authentication (HT-54; `specs/auth/agents-and-auth.md`): real
+Agents & Authentication (`specs/auth/agents-and-auth.md`): real
 per-Agent accounts — `/setup` (first admin), `/login` (email+password),
 `/manage/agents` (roster, admin-only UI, reached via the top bar's `Manage ▾`
 — admin-only scope), `/manage/agents/new` (invite or admin-set password),
@@ -104,6 +102,4 @@ split by `assigneeAgentId`). The avatar menu is personal-scope only (Your
 Profile, Log out); keyboard shortcuts live under Settings.
 
 Still not wired: Forward, Merge, and composing a NEW conversation from
-scratch ("New message") — all spec'd for v1 but not yet implemented. See the
-fidelity checklist on [HT-23](https://resonantiq.atlassian.net/browse/HT-23)
-for the authoritative list of remaining gaps.
+scratch ("New message") — all spec'd for v1 but not yet implemented.

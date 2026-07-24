@@ -1,6 +1,6 @@
 # Outbound sending & the reply-token lifecycle
 
-Status: accepted (HT-15, HT-16, HT-49). Companion to [threading.md](./threading.md) — that
+Status: accepted. Companion to [threading.md](./threading.md) — that
 spec decides which conversation an *inbound* message joins; this one covers how an
 *outbound* reply is minted, persisted, and sent, and is where the threading
 model's authority actually originates.
@@ -14,7 +14,7 @@ own. That means every outbound message is a promise: the token it carries is the
 sole future handle on this conversation. If sending mints a token that doesn't
 match what's stored, or stores a token for a message that never went out, the
 thread breaks. So sending is held to the same "correctness outranks velocity"
-bar as the threading decision itself (CHARTER.md invariant #3).
+bar as the threading decision itself (the charter's "Conversation integrity" rule).
 
 ## 2. The id/token knot, and its resolution
 
@@ -24,7 +24,7 @@ The outbound `Message-ID` must embed a token over `{conversationId, threadId}`
 the row is inserted. The database generating the id at insert time is circular.
 
 **Resolution (option A):** the application generates the outbound thread's UUID
-(`crypto.randomUUID()` — a CSPRNG) *before* persistence, mints the token from it,
+(`crypto.randomUUID` — a CSPRNG) *before* persistence, mints the token from it,
 and inserts the row with `id` **and** `message_id` set together in one write.
 
 - **`threadId` in the token identifies the outbound thread that carries it** —
@@ -66,11 +66,11 @@ threading handles for one logical message and risk double-sends. The stable
 `Message-ID` is the idempotency anchor: a provider that de-dupes on `Message-ID`
 will not double-deliver a retried send.
 
-## 3a. Send idempotency + delivery leasing (HT-16)
+## 3a. Send idempotency + delivery leasing
 
 §3's "retries reuse, never re-mint" rule describes what a retry must DO once
 one is recognized; this section is how a retry gets recognized and kept safe
-under concurrency, closing the increment §5 of the HT-15 version of this spec
+under concurrency, closing the concurrency gap identified in an earlier version of this spec
 left open.
 
 **Caller-supplied idempotency key, scoped per conversation.** A caller that
@@ -82,7 +82,7 @@ DO NOTHING RETURNING *`, falling back to a `SELECT` of the pre-existing row on
 conflict — inside the same transaction that holds the conversation row's `FOR
 UPDATE` lock, so two callers racing with the identical key on the identical
 conversation are serialized rather than double-inserting. Omitting the key is
-still legal and unchanged from HT-15: a fresh send every call, no dedup
+still legal and unchanged from the original contract: a fresh send every call, no dedup
 protection — a deliberate, permanently-tested contract for callers that don't
 need it.
 
@@ -95,14 +95,14 @@ resends EXACTLY that stored envelope, never re-derives `to`/`subject`/
 because time passes between an attempt and its retry, and inbound mail can
 arrive in that gap: recomputing `References` at retry time could silently
 absorb a message that wasn't part of the original send, changing what goes
-out without anyone deciding it should (CHARTER.md invariant #5). The
+out without anyone deciding it should (the charter's "Conversation integrity" rule). The
 persisted snapshot makes a retry byte-identical to the attempt it retries, by
 construction.
 
 **A lease keeps at most one attempt in flight per row.** Before either a
 keyed retry or the delivery worker sends a `pending`/`failed` row, it must
 first claim the row's delivery lease (`claimThreadForDelivery`: an atomic
-`UPDATE ... WHERE claimed_until IS NULL OR claimed_until < now()`). A failed
+`UPDATE ... WHERE claimed_until IS NULL OR claimed_until < now`). A failed
 claim means someone else already holds it; the caller does not send and
 reports back accordingly rather than retrying the claim itself. A successful
 attempt releases the lease as it marks `sent`/`failed`. This is what makes
@@ -110,7 +110,7 @@ attempt releases the lease as it marks `sent`/`failed`. This is what makes
 same key concurrently with the delivery worker sweeping the same row —
 **but only if the lease strictly outlives the send it is protecting.** The
 lease duration (`DEFAULT_LEASE_MS`, `src/mail/send.ts`) MUST strictly exceed
-the worst-case duration of the configured `EmailSender`'s `send()` call; a
+the worst-case duration of the configured `EmailSender`'s `send` call; a
 send that outlives its own lease can be re-claimed and retried by another
 attempt while the original call is still in flight — a genuine concurrent
 double-send, not merely a race over which of two callers marks the outcome.
@@ -148,7 +148,7 @@ sweep function** — `runDeliveryWorker(deps, options?)` — not built on a
 queue or scheduler provider (no such adapter exists yet; see §5). One call
 selects a bounded batch of eligible rows (`delivery_status = 'failed'`, or
 `'pending'` older than a staleness threshold, with a free lease and a stored
-envelope — pre-HT-16 rows with no envelope are left for manual handling
+envelope — pre- rows with no envelope are left for manual handling
 rather than guessed at), claims each in turn, and retries it via the exact
 same "rebuild `OutboundEmail` from the row, send, mark" helper a keyed
 `sendReply` retry uses. Wiring a real schedule around it (Vercel Cron, or a
@@ -175,7 +175,7 @@ in-repo fake used by the engine tests proves only that `sendReply` *passes* the
 value to the seam — not that any given adapter preserves it on the wire.
 
 **A compliant adapter is not sufficient — the provider's OWN infrastructure can
-still rewrite `Message-ID` after transmission (HT-49, live production evidence,
+still rewrite `Message-ID` after transmission (live production evidence,
 2026-07-17).** Gmail's `users.messages.send` accepted the Gmail adapter's
 verbatim `Message-ID` on the request and substituted its own generated id on
 the wire — a rewrite downstream of transmission, outside the adapter's control,
@@ -196,7 +196,7 @@ every future reply to its conversation). The engine-minted final entry passes
 any such filter by construction (`reply-token.ts`'s bounded `[A-Za-z0-9_-]` /
 `.` / `@` charset contains no control characters and stays far under the
 octet bound) and MUST reach the wire intact — an adapter that drops or alters
-IT is as unusable as one that rewrites `Message-ID`. The HT-49 fix is in what
+IT is as unusable as one that rewrites `Message-ID`. The  fix is in what
 the engine puts into `References` before handing it to the adapter, not a
 change to this adapter contract.
 
@@ -208,17 +208,17 @@ into the mailbox it was sent from, and that self-echo now carries a verifiable t
 one `inbound-ingestion.md` §5's `Message-ID`-only loop guard cannot recognize, for the
 exact same reason as above (Gmail rewrites the echo's `Message-ID` too). Left alone, the
 echo would `append` into its own conversation as a phantom inbound message. `sendReply`
-closes this immediately after a successful send: if `EmailSender.send()` returned an
+closes this immediately after a successful send: if `EmailSender.send` returned an
 `EmailSendResult.providerMessageId` (`src/providers/email-sender.ts`) — the SAME id the
 transport later reports for that message during reconcile — it resolves `SendReplyInput.
 from` to its `MailboxRecord` and pre-seeds `(mailboxId, providerMessageId)` as an
 already-`suppressed` row in the inbound delivery ledger (`InboundDeliveryStore.
-preSuppressOwnSend`; `inbound-ingestion.md` §5's HT-49 amendment has the full mechanism
+preSuppressOwnSend`; `inbound-ingestion.md` §5 has the full mechanism
 and its one known residual race). This is OPTIONAL (`SendReplyDeps.selfEchoGuard`) and a
 no-op wherever absent or wherever the sender reports no `providerMessageId` — a deployment
 with no self-reflecting transport configured behaves exactly as before this guard existed.
 
-**Recommended: a provider SHOULD de-duplicate on `Message-ID` (HT-16).** This
+**Recommended: a provider SHOULD de-duplicate on `Message-ID`.** This
 is not a precondition the engine requires — at-least-once delivery (§3a) holds
 with or without it — but it is not an aside either: it is the one thing
 standing between this system's structural at-least-once delivery (§3a) and
@@ -233,9 +233,9 @@ test (above) should note whether the provider is known to de-dupe, so this
 gap is a documented, deliberate property of a given deployment rather than
 a surprise discovered in production.
 
-**A lease that outlives the provider's `send()` call is a precondition
+**A lease that outlives the provider's `send` call is a precondition
 too.** §3a's lease only holds "at most one attempt in flight per row" if the
-provider's `send()` reliably returns well inside the lease window — an
+provider's `send` reliably returns well inside the lease window — an
 adapter whose HTTP call has no timeout (or one comparable to or longer than
 the lease) can outlive its own claim and collide with a re-claimed retry.
 The contract makes this precondition checkable: every `EmailSender` declares
@@ -253,7 +253,7 @@ Deliberately narrow; each deferral below has a named later home:
   one `sendReply` call. Retrying a stuck row is now covered (§3a: a keyed
   replay, or the delivery worker's sweep) — what's still deferred is wiring a
   real *schedule* around that sweep (Vercel Cron, or a future
-  `SchedulerProvider` adapter, CHARTER.md §4) — today it is only invoked
+  `SchedulerProvider` adapter, the architecture guide) — today it is only invoked
   directly (e.g. from a test or a manual trigger), never on a timer.
 - **Reply to an existing conversation only.** Agent-*initiated* brand-new
   conversations are a separate later flow.
@@ -261,7 +261,7 @@ Deliberately narrow; each deferral below has a named later home:
   inbound message being answered; `agent-inbox-v1.md` §4a's `deriveReplyHeaders`
   derives them from stored threads today). `sendReply` then APPENDS its own
   freshly-minted `messageId` as the final `References` entry unconditionally
-  (HT-49; threading.md §2a) — the caller-supplied field is never itself the
+  (threading.md §2a) — the caller-supplied field is never itself the
   reply's own id. Once persisted into `send_envelope` (§3a) that full chain,
   own id included, is authoritative for every retry regardless of how the
   ancestor portion was originally derived.

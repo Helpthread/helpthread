@@ -4,7 +4,7 @@
 > first draft encoding already-made decisions; it is not legal advice and has not been
 > reviewed by outside counsel — TJ is the reviewing counsel.
 >
-> **Gate:** must clear review **before public launch** (CHARTER.md §3 lists "the
+> **Gate:** must clear review **before public launch** (the [legal guide](README.md) lists "the
 > trademark policy (before public launch)" among the counsel paperwork in deadline
 > order).
 
@@ -159,14 +159,14 @@ beyond those described here. Write to **trademarks@resonantiq.app**.
 
 ### Notes to counsel (not part of the policy)
 
-- **Owner / entity.** Marks attributed to Resonant IQ, Inc. per CHARTER.md §3
+- **Owner / entity.** Marks attributed to Resonant IQ, Inc. per the [legal guide](README.md)
   ("owns the Helpthread name and marks"). The npm org and official marketplace name are
   named as Marks per the charter's "the assets that stay with the company — the
   Helpthread name and marks, the npm organization, the official marketplace."
 - **Rename-on-material-modification** is drafted in the Firefox/Iceweasel tradition and
   stated politely, as instructed — a request and a courtesy, not an AGPL restriction
   (which would be void under the AGPL's own terms). Per the adjudicated Codex-review fixes
-  (2026-07-19, HT-5), §4 now (a) states expressly that it is not a condition of the AGPL
+  (2026-07-19), §4 now (a) states expressly that it is not a condition of the AGPL
   and imposes no copyright-license restriction, and (b) defines "materially modified" on a
   confusion-based standard with de minimis examples (security patches, packaging, config
   defaults, backports = not material).

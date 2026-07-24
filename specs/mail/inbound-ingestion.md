@@ -1,6 +1,6 @@
 # Inbound ingestion pipeline
 
-Status: draft (HT-34). Companion to [threading.md](./threading.md) (which conversation
+Status: draft. Companion to [threading.md](./threading.md) (which conversation
 an inbound message joins) and [sending.md](./sending.md) (how an outbound reply is
 minted and delivered). This spec is the orchestration those two repeatedly defer to
 as "the mail-ingestion pipeline, not yet built" (threading.md §5; store/conversations.md) —
@@ -15,10 +15,9 @@ Everything below serves three rules, in priority order:
 
 1. **Parse exactly once, by our own code.** Inbound MIME is parsed by `parseInboundEmail`
    (`src/mail/parse.ts`, postal-mime) and nothing else. No transport, provider, or SDK
-   parses the message into a shape the engine then threads on. This is charter §2's
-   "boringly faithful on mail semantics" applied to the front door: a second, provider-
-   specific parser in the ingest path is exactly the kind of divergence the charter's
-   origin story warns against, and it would make threading depend on how faithfully a
+   parses the message into a shape the engine then threads on. Under the charter's
+   "Conversation integrity" rule, a second, provider-specific parser in the ingest path
+   would introduce unverified semantic drift and make threading depend on how faithfully a
    provider preserved headers we didn't control.
 2. **Thread only on our token.** Which conversation a message joins is decided solely by
    `decideThreading` (threading.md) — never re-derived here, never influenced by the
@@ -40,17 +39,17 @@ Provider metadata is the minimum the pipeline needs and the transport authoritat
 knows:
 
 - `mailboxId` — which connected mailbox this arrived at (the namespace anchor for
-  storage, blobs, dedup, and — later — tenancy; HT-36). The transport resolves this to a
+  storage, blobs, dedup, and — later — tenancy). The transport resolves this to a
   known mailbox and rejects a delivery it cannot (gmail-push.md §3); the pipeline receives
   an already-resolved `mailboxId`, never a raw provider address.
 - `providerMessageId` — the transport's own stable id for the message (for Gmail, the
   Gmail message id). This is the idempotency authority (§4), *not* the RFC `Message-ID`.
 - `receivedAt` — when the transport recorded delivery (not a header-parsed `Date`).
 
-> **Correction (HT-35).** The interface as first drafted returns a `NormalizedInboundEmail`
+> **Correction.** The interface as first drafted returns a `NormalizedInboundEmail`
 > — headers and body already parsed, attachments already blob-referenced. That is wrong
 > under invariant #1: it puts the parse *inside the provider*, before the engine, in a
-> provider-specific place, and hands attachment ownership to the transport. HT-35 changes
+> provider-specific place, and hands attachment ownership to the transport.  changes
 > the seam to yield raw bytes + metadata; this spec describes the corrected contract, and
 > every transport is written against it.
 
@@ -94,7 +93,7 @@ a freshly minted UUID, formable before any row id exists). This write happens **
 step 5's transaction opens — `BlobStore.put` is a non-transactional external side effect,
 so it cannot be undone if that transaction later aborts — and only the resulting blob-key
 **reference** (`thread_attachments`, migration 015) is persisted inside the transaction,
-stamped with the thread id that same transaction mints. HT-46 implements this: a
+stamped with the thread id that same transaction mints.  implements this: a
 step-5 abort after a successful blob write leaves that blob orphaned (unreferenced by any
 `thread_attachments` row, since the insert never committed) — exactly the partial-failure
 mode this section's next paragraph already blesses, and a retry re-parses, re-decides, and
@@ -112,7 +111,7 @@ the authority that decides "have we already ingested this." The transport's own 
 id is stable and provider-issued. The RFC `Message-ID` is retained on the stored thread
 as data and as a *secondary* duplicate signal, never as the dedup key.
 
-**The delivery ledger** (a table, HT-36) is one row per `(mailboxId, providerMessageId)`
+**The delivery ledger** (a table) is one row per `(mailboxId, providerMessageId)`
 with a **unique constraint** on that pair, carrying `status` (`received` | `stored` |
 `suppressed` | `failed` | `dead-letter`), `attempts`, `last_error`, and the resulting
 `threadId` (the produced/appended thread; its conversation follows from
@@ -132,7 +131,7 @@ separately durable. It is the inbound mirror of the outbound get-or-insert in se
 §3a, keyed on `(mailboxId, providerMessageId)` rather than `(conversationId,
 idempotencyKey)`.
 
-**The claim carries a lease, so a crash mid-unit is reclaimed, not stranded (HT-45).** The
+**The claim carries a lease, so a crash mid-unit is reclaimed, not stranded.** The
 previous paragraph's "the retry redoes the whole unit cleanly" only holds if a retry's
 §3-step-1 claim is actually willing to re-claim a `received` row that never made it to the
 step-5 commit — a hard process crash (SIGKILL / OOM / redeploy) between the claim committing
@@ -143,7 +142,7 @@ rule — refuses to touch it, on every subsequent redelivery, permanently. The d
 `claimed_until` column is what breaks that permanence: every successful claim (fresh insert,
 or a `failed`/`received` reclaim) stamps a lease `leaseMs` into the future, and a `received`
 row becomes reclaimable — by the ordinary §3-step-1 claim path, no separate sweep — once
-`claimed_until IS NULL OR claimed_until < now()`. A single row-locked `UPDATE` performs the
+`claimed_until IS NULL OR claimed_until < now`. A single row-locked `UPDATE` performs the
 reclaim, so two concurrent reclaim attempts on the same lapsed lease can never both win — the
 same atomicity this ledger already relies on for the `failed`-row reclaim and that
 `ConversationStore.claimThreadForDelivery` (sending.md) relies on for the outbound lease. The
@@ -219,7 +218,7 @@ backstop against floods and reflection storms; a rate-capped message is deferred
 for review, not dropped.
 
 **Generic third-party auto-submitted / bulk mail — preserve the observed behavior.**
-Here the sacred rule bites (charter §2: mail-behavior changes need fixture-proven
+Here the sacred rule bites (charter's "Conversation integrity" rule: mail-behavior changes need fixture-proven
 equivalence *or* explicit written justification). `fixtures/mail/observed/auto-submitted.json`
 shows the reference helpdesk **ingesting** an `Auto-Submitted: auto-replied` message
 normally — it created a conversation, it was **not** suppressed (threading.md §5). So the
@@ -240,11 +239,11 @@ loop yet; the suppression that matters now is the verifiable own-message loop ru
 A suppressed message is recorded in the ledger (`suppressed`, with the reason) — visible,
 auditable, never a silent drop.
 
-**HT-49 amendment: the `Message-ID` loop-suppression correlation is defeated for a
+**Amendment: the `Message-ID` loop-suppression correlation is defeated for a
 provider that rewrites it (Gmail, confirmed live) — a second, ledger-level guard closes
 the resulting gap.** The rule above ("our exact outbound `Message-ID` ... appearing as
 this message's `Message-ID`") assumes the provider transmits `Message-ID` unaltered end
-to end. `specs/mail/sending.md`'s HT-49 amendment records live evidence that Gmail's
+to end. `specs/mail/sending.md` records live evidence that Gmail's
 `users.messages.send` does not: it accepts the engine's verbatim `Message-ID` but
 substitutes its own generated id on the wire. Concretely, this means: (1) every outbound
 reply now also carries the reply token as the FINAL entry of its own `References` chain
@@ -268,7 +267,7 @@ after a successful send whose sender reports a `providerMessageId`
 exact message during reconcile) — pre-seeds `(mailboxId, providerMessageId)` as an
 ALREADY-`suppressed` row in the delivery ledger itself
 (`InboundDeliveryStore.preSuppressOwnSend`, §4's idempotency/claim machinery, unchanged).
-When reconcile later lists that same provider id, `claim()`'s ordinary "terminal row, do
+When reconcile later lists that same provider id, `claim`'s ordinary "terminal row, do
 not double-process" branch (§4) absorbs it — no new suppression code path, no change to
 `decideThreading`, no heuristic on message content. This is a ledger-level, `providerMessageId`-keyed
 correlation — a DIFFERENT (and more precise) mechanism than the `Message-ID` correlation
@@ -276,11 +275,11 @@ this section otherwise describes, chosen precisely because it does not touch the
 customer-autoresponder case above at all.
 
 **Known residual: a race, conceded rather than corrected.** The pre-seed happens
-AFTER the send resolves; if reconcile's own `claim()` for the same provider id wins that
+AFTER the send resolves; if reconcile's own `claim` for the same provider id wins that
 race first (an unusually fast push-triggered reconcile), the message ingests normally
 before the pre-seed ever runs — `preSuppressOwnSend` then finds the key already claimed
 and is a no-op (it never overwrites an existing row, `src/store/inbound-deliveries.ts`'s
-doc comment). This reproduces the PRE-HT-49-fix failure mode for that one send, not a new
+doc comment). This reproduces the PRE--fix failure mode for that one send, not a new
 one, and is not silently hidden: the phantom message is still recorded and visible in the
 conversation, exactly as it would have been before this guard existed.
 
@@ -295,13 +294,13 @@ reason (if any), parse size, attachment count, and the final ledger outcome (wit
 `stage`/`attempts`/`error` on the failure paths).
 
 **The transport cursor position deliberately lives on the transport's own events, not
-here** (HT-44): this pipeline is provider-agnostic (§2) and a history cursor is transport
+here**: this pipeline is provider-agnostic (§2) and a history cursor is transport
 state, so per-batch cursor positions (`previousCursor`/`newHistoryId`) are emitted by the
 Gmail transport's `gmail_reconcile` records ([gmail-push.md](./gmail-push.md)). The two
 streams correlate on `(mailboxId, providerMessageId)`.
 
 `decideThreading` emits `forgedTokenCount` (threading.md §3 rule 3, §5); **this pipeline
-is where it is consumed** (HT-44), three ways:
+is where it is consumed**, three ways:
 
 1. Persisted onto the delivery's ledger row (`inbound_deliveries.forged_token_count`,
    migration 019) at the `stored` transition, making the signal queryable/aggregatable —
@@ -319,21 +318,22 @@ is where it is consumed** (HT-44), three ways:
 ## 7. Scope and deferrals
 
 - **Transport-specific concerns** — webhook authentication, Pub/Sub, history reconciliation,
-  `watch()` — live in the transport spec ([gmail-push.md](./gmail-push.md)), not here.
+  `watch` — live in the transport spec ([gmail-push.md](./gmail-push.md)), not here.
 - **The forwarding-address transport** is deferred (the external/GA default); it will
   implement the same §2 provider boundary and feed this pipeline **unchanged** — which is
-  the point of keeping the pipeline provider-agnostic (charter §4's owned interfaces).
+  the point of keeping the pipeline provider-agnostic (see the
+  [architecture guide](../../docs/architecture/README.md)).
 - **HTML sanitization on render** is not this spec's concern; storage keeps bodies verbatim
   (threading.md §5's `html-body.json` flag), and a sanitization spec owns the render-time
   guarantee. Inbound HTML is already sanitized at *render* in the web client
   (`SanitizedHtml`); the engine stores raw.
 - **Multi-tenant enforcement** is out of scope; the schema carries `mailboxId` from day one
-  (HT-36) so nothing bakes in a global singleton, but behavior is single-tenant for the
+   so nothing bakes in a global singleton, but behavior is single-tenant for the
   dogfood.
 
 ## 8. Acceptance
 
-Exercised end-to-end against the in-memory `InboundEmailProvider` fake (HT-35) and the
+Exercised end-to-end against the in-memory `InboundEmailProvider` fake  and the
 engine's existing store/keyring fakes — no cloud required:
 
 - A fresh message (no valid token) → a new conversation.
@@ -345,12 +345,12 @@ engine's existing store/keyring fakes — no cloud required:
 - Two concurrent deliveries of the same key → exactly one conversation (the §3-step-1
   atomic claim; the second returns the first's outcome).
 - A simulated partial failure (transaction aborts after a blob write) → ledger `failed`,
-  retried to `stored`, no orphaned/duplicate conversation. HT-46: the ORIGINAL blob write
+  retried to `stored`, no orphaned/duplicate conversation. : the ORIGINAL blob write
   is left orphaned (never referenced), and the successful retry's `thread_attachments` rows
   point at a FRESH blob write, not the orphan.
 - A message with multiple attachments → one `thread_attachments` row per attachment, each
   with its own blob key, all inserted in the same step-5 transaction as the thread they
-  belong to (HT-46).
+  belong to the relevant conversation.
 - A verifiable own-message loop → `suppressed`, nothing created; a message that merely
   *claims* our `From` without a verifiable correlation → **ingested**, not dropped.
 - `append→deleted` → falls back to a fresh conversation, mail never lost.

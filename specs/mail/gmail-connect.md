@@ -1,17 +1,17 @@
 # Gmail OAuth connect / consent flow
 
-Status: draft (HT-40). The **write-side** that the Gmail push transport
+Status: draft. The **write-side** that the Gmail push transport
 ([gmail-push.md](./gmail-push.md)) deliberately stubbed: everything in
 gmail-push.md assumes a *connected mailbox* already exists — a `mailboxes` row
-(migration 009), an encrypted refresh token (migration 010, HT-38), and an
-armed `watch()` with a baseline `gmail_watch_state.history_id` cursor
+(migration 009), an encrypted refresh token (migration 010), and an
+armed `watch` with a baseline `gmail_watch_state.history_id` cursor
 (migration 011). Nothing created any of those. **This flow does.**
 
 It runs Google's OAuth2 **authorization-code** flow to obtain a long-lived
 refresh token for a mailbox, persists it encrypted-at-rest, then arms the
-initial `users.watch()` and seeds the baseline cursor the reconcile consumer
-(gmail-push.md §3, HT-41) reads. gmail-push.md §7 names this as its own
-deferred concern ("the connect/consent flow → HT-40"); this spec is that
+initial `users.watch` and seeds the baseline cursor the reconcile consumer
+(gmail-push.md §3) reads. gmail-push.md §7 names this as its own
+deferred concern ("the connect/consent flow → "); this spec is that
 concern.
 
 This is the **workspace-native mode** (memory: inbound-email architecture
@@ -20,25 +20,25 @@ an **Internal** OAuth app — no CASA verification, no external-user consent
 screen. The forwarding-address transport (the external/GA default) is separate
 and later, and will need its own onboarding, not this OAuth flow.
 
-## 1. The HT-40 / HT-42 split — stated once, authoritatively
+## 1. Initial connection and renewal — stated once, authoritatively
 
-`watch()` appears in two tickets, and the boundary matters:
+`watch` appears in two tickets, and the boundary matters:
 
-- **HT-40 (this spec) owns the INITIAL arm.** gmail-push.md §6 bullet 1:
-  "`watch()` is called when a mailbox is connected (OAuth, HT-40) and returns
+- **This spec owns the initial arm.** gmail-push.md §6 bullet 1:
+  "`watch` is called when a mailbox is connected (OAuth) and returns
   the initial `historyId` (the cursor's starting point) and an expiration
-  (~7 days out)." So the first `watch()` call and the first
+  (~7 days out)." So the first `watch` call and the first
   `gmail_watch_state` row — the baseline cursor everything else resumes from —
   are minted **here, at connect**.
-- **HT-42 owns RENEWAL** (the daily re-arm before the ~7-day expiry) and the
+- **The scheduled maintenance path owns renewal** (the daily re-arm before the ~7-day expiry) and the
   reconciliation lease (gmail-push.md §6).
 
-> **Corrects two already-merged comments.** HT-41's
-> `src/mail/gmail-reconcile.ts` ("watch() (HT-42) seeds the baseline cursor at
+> **Corrects two already-merged comments.**
+> `src/mail/gmail-reconcile.ts` ("watch seeds the baseline cursor at
 > connect") and `src/store/gmail-watch-state.ts`'s module doc ("normally
-> seeded by watch() (HT-42 …)") both attribute the baseline seed to HT-42.
-> The spec (§6 bullet 1) and this ticket place the *initial* seed in **HT-40**;
-> HT-42 only *renews* it. Those comments are corrected as part of landing this
+> seeded by `watch()`") both attribute the baseline seed to renewal rather than initial setup.
+> The spec (§6 bullet 1) places the *initial* seed in the connection flow;
+> scheduled maintenance only *renews* it. Those comments are corrected as part of landing this
 > flow, since it makes them wrong.
 
 ## 2. Two routes, two authentication models
@@ -60,7 +60,7 @@ POST /api/v1/inbound/gmail/connect      Authorization: Bearer <service token>
   → 200 { "consentUrl": "https://accounts.google.com/o/oauth2/v2/auth?..." }
 ```
 
-The caller (an operator's tool, or the future Agent-inbox admin UI, HT-23)
+The caller (an operator's tool, or the future Agent-inbox admin UI)
 then navigates the browser to `consentUrl`. Returning the URL as JSON rather
 than a `302` is deliberate: a top-level browser navigation cannot carry the
 `Authorization: Bearer` header, so gating a redirecting `GET` would force a
@@ -99,7 +99,7 @@ The consent URL (`https://accounts.google.com/o/oauth2/v2/auth`) is built with:
   `client_secret`, `src/store/token-crypto.ts` / `src/mail/gmail-oauth.ts`).
   `redirect_uri` must exactly match `/api/v1/inbound/gmail/callback` on the
   deployment's public origin **and** a redirect URI registered on the OAuth
-  client (operator runbook, HT-43).
+  client (operator runbook).
 - `response_type=code`.
 - `scope` — **least privilege for the dogfood: `gmail.readonly` +
   `gmail.send`.** `gmail.readonly` is sufficient for `users.watch`,
@@ -141,11 +141,11 @@ no armed watch to clean up.
    `emailAddress`. The address comes from Google, not operator input, so a
    connected `mailboxes.address` can never disagree with the account that
    actually granted access.
-4. **Arm `watch()`** with the fresh access token: `POST
+4. **Arm `watch`** with the fresh access token: `POST
    users/{me}/watch { topicName }` → `{ historyId, expiration }` (topic is
-   injected config, provisioned per HT-43). **This is done before any
-   persistence**, so a `watch()` failure aborts the connect cleanly with
-   nothing written. `historyId` here — **watch()'s**, not getProfile's — is
+   injected config, provisioned per). **This is done before any
+   persistence**, so a `watch` failure aborts the connect cleanly with
+   nothing written. `historyId` here — **watch's**, not getProfile's — is
    the baseline cursor (gmail-push.md §6 bullet 1): it is the exact watermark
    from which `history.list` will resume, so using getProfile's separately-read
    `historyId` could straddle the arm and miss or replay a sliver of history.
@@ -155,25 +155,25 @@ no armed watch to clean up.
    no cursor — a partial state that is *worse* than no mailbox at all, since
    the webhook would then enqueue reconcile jobs for a mailbox whose cursor
    never gets seeded, silently no-op'ing every push the already-armed
-   `watch()` delivers):
+   `watch` delivers):
    - `MailboxStore.upsertConnectedMailbox({ address, provider: 'gmail' })` →
      the `mailboxes` row, `status = 'active'`. **Upsert by `address`** so a
      **reconnect** (a mailbox previously `needs_reconnect` or `paused`
      re-consenting) reactivates the existing row rather than colliding with its
      `UNIQUE(address)` constraint — this is the "transitioning back to
-     `active`" the store's own module doc reserves for HT-40.
+     `active`" the store's own module documentation reserves for the connection flow.
    - `MailboxTokenStore.upsertTokens(mailboxId, { refreshToken, accessToken,
      accessTokenExpiresAt, scopes })` — the refresh token **encrypted at rest**
      (AES-256-GCM, `src/store/token-crypto.ts`); this module is the only place
      plaintext tokens exist. **Sacred (invariant): the plaintext refresh token
      never touches the database, a log line, or an error message.**
-   - `GmailWatchStateStore` baseline seed: `history_id = watch().historyId`
-     **and** `watch_expiration = watch().expiration` (migration 011's
-     `watch_expiration` column, which had no writer before this ticket).
+   - `GmailWatchStateStore` baseline seed: `history_id = watch.historyId`
+     **and** `watch_expiration = watch.expiration` (migration 011's
+     `watch_expiration` column, which previously had no writer).
 6. **Success page.** The mailbox is live: push will now arrive (gmail-push.md
-   §2), and the daily sweep + renewal (HT-42) will keep it so.
+   §2), and the daily sweep + renewal  will keep it so.
 
-**`watch()` failure** (step 4): abort with an error page, nothing persisted —
+**`watch` failure** (step 4): abort with an error page, nothing persisted —
 the operator retries. (This differs from gmail-push.md §6's "mark
 needs-reconnect" guidance, which concerns a *renewal* failure on an
 *already-connected* mailbox; here there is no connected mailbox yet to mark.)
@@ -185,9 +185,9 @@ step 5 is an upsert keyed by the resolved mailbox (`upsertConnectedMailbox` by
 `address`; `upsertTokens` and the watch-state seed by `mailbox_id`). Re-running
 connect for the same account — an operator reconnecting a `needs_reconnect`
 mailbox, or simply retrying — reactivates the row, replaces the stored tokens,
-re-arms `watch()`, and rebaselines the cursor to the fresh `historyId`.
+re-arms `watch`, and rebaselines the cursor to the fresh `historyId`.
 
-A reconnect **rebaselines**: the new cursor is `watch()`'s current `historyId`,
+A reconnect **rebaselines**: the new cursor is `watch`'s current `historyId`,
 so any history between a prior broken/expired state and the reconnect is *not*
 back-filled — the same deliberate, gap-accepting manual rebaseline
 gmail-push.md §5 describes for an expired cursor. Reconnect is the operator's
@@ -195,21 +195,21 @@ gmail-push.md §5 describes for an expired cursor. Reconnect is the operator's
 
 ## 6. What this flow does not own
 
-- **Token refresh / `invalid_grant` handling** → HT-38
+- **Token refresh / `invalid_grant` handling** →
   (`src/mail/gmail-oauth.ts`); this flow only mints and stores the *first*
   refresh token that service later reads.
-- **`watch()` renewal + the reconciliation lease** → HT-42 (gmail-push.md §6);
-  this flow only arms `watch()` *once*, at connect.
-- **History reconciliation / raw fetch** → HT-41 (gmail-push.md §3); this flow
+- **`watch` renewal + the reconciliation lease** →  (gmail-push.md §6);
+  this flow only arms `watch` *once*, at connect.
+- **History reconciliation / raw fetch** →  (gmail-push.md §3); this flow
   seeds the cursor that consumer resumes from.
 - **One-time GCP/Pub-Sub provisioning** (Internal OAuth app + client
   credentials; enable APIs; create the topic/subscription; grant the push
-  service account) → operator runbook, HT-43. The engine assumes the OAuth
+  service account) → operator runbook. The engine assumes the OAuth
   client and Pub/Sub topic exist and its `redirect_uri` is registered.
-- **Real Google consent + the live end-to-end proof** → HT-44 / the operator.
+- **Real Google consent + the live end-to-end proof** →  / the operator.
   Completing a real consent screen is an operator action, never the
-  assistant's; this ticket ships the code and a fully faked test path, and
-  defers real-credential verification to HT-44.
+  assistant's; this specification ships the code and a fully faked test path, and
+  defers real-credential verification to live deployment testing.
 
 ## 7. Acceptance
 
@@ -222,15 +222,15 @@ store fakes — no cloud, no real consent:
   scopes, `redirect_uri`, and a signed `state`. Without the Bearer token →
   `401`, no URL minted.
 - A callback with a valid `state` + `code` → code exchanged → address resolved
-  from `getProfile` → `watch()` armed → a `mailboxes` row (`active`), an
+  from `getProfile` → `watch` armed → a `mailboxes` row (`active`), an
   **encrypted** `mailbox_oauth_tokens` row, and a `gmail_watch_state` row whose
-  `history_id`/`watch_expiration` equal `watch()`'s response. Response is a
+  `history_id`/`watch_expiration` equal `watch`'s response. Response is a
   `200` HTML success page.
 - A callback whose `state` is missing / forged / expired → rejected, no code
   exchange, nothing persisted.
 - A code exchange that returns **no** `refresh_token` → error page, nothing
   persisted.
-- A `watch()` failure → error page, nothing persisted (no orphan mailbox or
+- A `watch` failure → error page, nothing persisted (no orphan mailbox or
   token row).
 - A reconnect (second successful connect for the same address) → the existing
   mailbox row is reactivated, tokens replaced, cursor rebaselined — one
@@ -239,10 +239,10 @@ store fakes — no cloud, no real consent:
   and the database column holds ciphertext, not plaintext (the sacred check,
   verified directly).
 
-The **live** proof — a real consent, a real `watch()`, a real push threading a
-real reply — is HT-44's, not this fake-backed suite's.
+The **live** proof — a real consent, a real `watch`, a real push threading a
+real reply — is 's, not this fake-backed suite's.
 
-## 8. Disconnect (HT-47) — the admin action that undoes §2-§5
+## 8. Disconnect  — the admin action that undoes §2-§5
 
 The inverse of the connect flow above: an admin action that cleanly
 disconnects a connected Gmail mailbox. Implemented by
@@ -272,7 +272,7 @@ to know.
 ### 8b. The three steps, and the best-effort ordering decision
 
 1. **Stop the watch** (`GmailWatchClient.stop`, `users.stop`) using a LIVE
-   access token (`GmailOAuthTokenService.getAccessToken`, HT-38). This runs
+   access token (`GmailOAuthTokenService.getAccessToken`). This runs
    FIRST — see the ordering rationale below.
 2. **Revoke the refresh token** (`revokeToken`, Google's
    `https://oauth2.googleapis.com/revoke`, RFC 7009 §2.1) — the grant itself.
@@ -281,9 +281,9 @@ to know.
    `gmail_watch_state` rows, in ONE transaction — regardless of whether steps
    1/2 succeeded.
 
-**Ordering decision**: `stop()` runs *before* revoke, not after, because
+**Ordering decision**: `stop` runs *before* revoke, not after, because
 revoking the refresh token can invalidate every access token issued under
-that grant immediately — calling `stop()` afterward would likely fail
+that grant immediately — calling `stop` afterward would likely fail
 against a token Google has already killed.
 
 **Best-effort decision**: steps 1 and 2 are best-effort. A failure in either
@@ -298,7 +298,7 @@ must never leave Helpthread still ingesting or sending as that mailbox.
 
 ### 8c. The `disconnected` status (migration 017)
 
-The DEFAULT this ticket chose: keep the `mailboxes` row (don't delete it —
+The default chosen here: keep the `mailboxes` row (don't delete it —
 preserving the address's history and its `UNIQUE(address)` claim) and add a
 FOURTH lifecycle status, `'disconnected'`, to migration 009's CHECK
 (`active`/`paused`/`needs_reconnect`). `disconnected` is distinct from
@@ -339,11 +339,11 @@ stores — no cloud, no real credentials:
 - A connected mailbox, valid Bearer → `200`; the mailbox row's `status`
   becomes `disconnected`, its `mailbox_oauth_tokens` and `gmail_watch_state`
   rows are gone, and `revoked`/`watchStopped` are both `true`.
-- `stop()` is called with a getAccessToken bound to THIS mailbox, and BEFORE
+- `stop` is called with a getAccessToken bound to THIS mailbox, and BEFORE
   the revoke call (the ordering decision above), proven directly.
 - A revoke failure (non-2xx) → still `200`, still deactivated locally, still
   rows deleted; `revoked: false` reported.
-- A `stop()` failure → still `200`, still deactivated locally, still rows
+- A `stop` failure → still `200`, still deactivated locally, still rows
   deleted; `watchStopped: false` reported.
 - Both failing → still `200`, still deactivated locally (local state always
   wins).
@@ -358,4 +358,4 @@ stores — no cloud, no real credentials:
 
 The **live** proof — a real revoke, a real `users.stop`, confirmed against a
 real Google account — is deferred the same way §7's live connect proof is
-(HT-44 territory), not this fake-backed suite's.
+( territory), not this fake-backed suite's.

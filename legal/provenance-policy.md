@@ -1,7 +1,7 @@
 # Provenance & AI-Assisted Development Policy (DRAFT)
 
 > **Status: DRAFT for counsel review (TJ).** Drafted 2026-07-19. This is a faithful
-> first draft codifying practices already stated in CHARTER.md §3; it is not legal advice
+> first draft codifying practices already stated in the [legal guide](README.md); it is not legal advice
 > and has not been reviewed by outside counsel — TJ is the reviewing counsel.
 >
 > **This document states policy and process — the commitments and practices the project
@@ -22,7 +22,7 @@ project's ability to enforce the AGPL on its core (you can only enforce a copyri
 prove you hold), supports Resonant IQ's title to its commercial modules, and is intended to
 support the copyrightability of AI-assisted work under current U.S. Copyright Office
 guidance. This policy states, as our standing practice, how the Helpthread codebase is
-built so that its provenance stays clean and demonstrable. It codifies what CHARTER.md §3
+built so that its provenance stays clean and demonstrable. It codifies what the [legal guide](README.md)
 (Provenance) already commits the project to; where this policy and the charter appear to
 differ, the charter governs.
 
@@ -35,21 +35,19 @@ project's own code, built on permissively-licensed foundations, and our practice
 specify its behavior from first principles against public sources rather than reproduce
 another project's implementation.
 
-This is one of the project's **sacred invariants** (CHARTER.md §6): *provenance
+This is one of the project's **project commitments** (CHARTER.md, "Provenance must be defensible"): *provenance
 purity — no copyleft-derived code enters the shipping tree.*
 
 ## 3. What we read, and what we do not
 
-The distinction between a **behavioral reference** (which informs *what* the software
-should do) and a **code source** (from which implementation is taken) is load-bearing,
-and the project holds it strictly.
+The distinction between **observed behavior** (evidence about how a system can behave)
+and a **code source** (from which implementation is taken) is load-bearing, and the
+project holds it strictly. Observations do not define Helpthread's product decisions.
 
 **Our policy is that copyleft codebases are not opened during development.**
-Copyleft-licensed source — FreeScout's AGPL source foremost among the references the
-project is otherwise aware of — is not consulted while building Helpthread. FreeScout
-serves only as a *window into the user experience* of a self-hosted helpdesk; it is a UX
-and feature-surface reference, never a source of code, and our practice is not to consult
-its source.
+Copyleft-licensed source is not consulted while building Helpthread. Historical
+black-box observations of running systems may remain as evidence, but they do not
+govern Helpthread's interface, feature set, or commercial boundaries.
 
 **Where behavior comes from instead:**
 
@@ -94,7 +92,7 @@ it is merged** — ordinary pull-request review, preserved in git history. This 
 first-class practice, not a formality:
 
 - it is how threading correctness, mail-semantics equivalence, and the other sacred
-  invariants are actually protected (CHARTER.md §6);
+  invariants are actually protected (CHARTER.md, "Conversation integrity" and "Provenance must be defensible");
 - it is the human authorship and creative control that, under current U.S. Copyright
   Office guidance on AI-assisted works, is **intended to support the copyrightability** of
   the resulting code — a rubber stamp would not meet that bar;
@@ -106,7 +104,7 @@ first-class practice, not a formality:
 
 Contributions are accepted under the **Developer Certificate of Origin (DCO)** — a
 sign-off on **every commit**, with the inbound license identical to the outbound license
-and no contributor license agreement (CHARTER.md §3, §7). The DCO sign-off is each
+and no contributor license agreement (see the [legal guide](README.md)). The DCO sign-off is each
 contributor's attestation that they have the right to submit the work under the project's
 license. Contributors keep the copyright on their own work; Resonant IQ holds the
 copyright on its own.
@@ -139,18 +137,17 @@ AI-assisted development is assessed and managed under internal counsel review.
 
 ### Notes to counsel (not part of the policy)
 
-- **Faithful to CHARTER.md §3.** Sections 2–7 restate practices the charter already
+- **Faithful to the [legal guide](README.md).** Sections 2–7 restate practices the charter already
   commits to (independent implementation; no copyleft-derived code; copyleft source never
   opened; behavior from RFCs / public docs / black-box; permissive references —
   postal-mime MIT-0, Chatwoot MIT core with `enterprise/` excluded; license verification
   at adoption; human review as the copyrightability basis; DCO on every commit). No new
   policy is invented.
 - **AI-training-data risk moved to a private counsel memo.** Per the adjudicated
-  Codex-review fixes (2026-07-19, HT-5), the candid residual-risk analysis that was §8 is
+  Codex-review fixes (2026-07-19), the candid residual-risk analysis that was §8 is
   no longer in this public file; §8 now states only that the risk is assessed and managed
   under internal counsel review. The full analysis and mitigations live in a privileged
   counsel memo held outside the repository.
-- **Reference-list scope.** FreeScout is named only as the UX/experience window it is
-  (never a code source); the "look-only" posture for reference projects whose license
-  doesn't resolve is carried from the charter and CLAUDE.md. Specific such projects are
-  not named here to avoid dating the policy; counsel can add or omit names as desired.
+- **Reference-list scope.** The "look-only" posture for projects whose license does not
+  resolve is carried from the charter and CLAUDE.md. Specific such projects are not named
+  here to avoid dating the policy; counsel can add or omit names as desired.

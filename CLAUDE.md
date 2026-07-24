@@ -1,6 +1,6 @@
 # Helpthread — engine repo
 
-Helpthread is an open-source serverless helpdesk (AGPL-3.0 core; a Resonant IQ, Inc. product). **CHARTER.md is the constitution** — read it before substantive work.
+Helpthread is open-source support infrastructure (AGPL-3.0 core; a Resonant IQ, Inc. product). **CHARTER.md is the constitution** — read it before substantive work.
 
 ## Delegation ladder
 
@@ -16,8 +16,12 @@ Shared rule (mirrored from the resonantiq canonical doc) — imported so it load
   - **postal-mime** (MIT-0) — modern serverless MIME parsing; the parsing dependency.
   - **Chatwoot** (MIT core; the `enterprise/` folder is NOT MIT — exclude it) — behavioral/feature reference, adaptable with attribution.
   - Modern TS/AI helpdesks (e.g. antiwork/helper) may be *looked at* for UX/AI patterns, but **their code is not adapted unless a permissive LICENSE is confirmed** — as of 2026-07-10 helper's and cossistant's licenses did not resolve on GitHub, so: look-only.
-- **FreeScout's role: a window into the Help Scout experience, nothing more.** Help Scout (closed SaaS) is the ease-of-use North Star; FreeScout is the open, self-hostable pane of glass we use to *model the interface* toward that bar. It is a UX/experience reference, never a code source. Its AGPL source is never read in a Helpthread session (the operating habit lives in `CLAUDE.local.md`).
-- Behavior is specified from RFCs, public documentation, and — where already captured — the black-box fixtures; we do not observe FreeScout further.
+- Product and interface decisions are governed by Helpthread's charter and specifications,
+  not by competitor parity. Existing black-box observations may provide evidence for a
+  behavior, but they do not define the product. Copyleft-licensed projects are never code
+  sources and their source is not read in a Helpthread development session.
+- Behavior is specified from RFCs, public documentation, and — where already captured —
+  black-box fixtures.
 - Every substantive change gets real human review before merge — ordinary PR review, preserved in git history. This is also what keeps AI-assisted work copyrightable; a rubber stamp doesn't meet that bar.
 
 ## Coding discipline
@@ -31,10 +35,10 @@ Adapted in our own words from Andrej Karpathy's observations on LLM coding pitfa
 
 ## Workflow
 
-- Branches: `<type>/ht-<ticket>-<kebab-desc>` (Jira project **HT**). PRs to `main`; `main` stays releasable (charter invariant #4). No direct pushes to `main` after Phase 0.
+- Branches: `<type>/<kebab-description>`. PRs to `main`; `main` stays releasable. No direct pushes to `main` after Phase 0.
 - Commit author email stays the noreply address already set in `.git/config` (GitHub email-privacy blocks the real one).
 - Delegate work to subagents on the cheapest capable model: Haiku for mechanical, Sonnet for standard implementation, top-tier only for correctness-critical reasoning.
-- Mail semantics are sacred (charter §2, invariant #5): changes require fixture-proven equivalence or explicit written justification. Verify against reality before claiming done; put the evidence in the PR.
+- Mail semantics are sacred under the charter's "Conversation integrity" rule: changes require fixture-proven equivalence or explicit written justification. Verify against reality before claiming done; put the evidence in the PR.
 
 ## Vocabulary
 
@@ -44,7 +48,7 @@ Adapted in our own words from Andrej Karpathy's observations on LLM coding pitfa
 
 ## UI fidelity (TJ, 2026-07-12)
 
-The Agent Inbox UI's pixel source of truth is the Claude Design prototype — `Helpthread App.dc.html` in the "Helpthread Agent Inbox Design" project (the "Helpthread" design-system project carries the same components). **The dogfood site must match it exactly — the whole designed surface, not a subset.** Any deviation — visual, copy, or interaction — requires TJ's explicit sign-off. Remaining gaps are tracked as the fidelity checklist on [HT-23](https://resonantiq.atlassian.net/browse/HT-23); the ticket is not done until the checklist is.
+The Agent Inbox UI's pixel source of truth is the Claude Design prototype — `Helpthread App.dc.html` in the "Helpthread Agent Inbox Design" project (the "Helpthread" design-system project carries the same components). **The dogfood site must match it exactly — the whole designed surface, not a subset.** Any deviation — visual, copy, or interaction — requires TJ's explicit sign-off. The work is not complete until the maintained fidelity checklist is clear.
 
 **Design and app reconcile in both directions (TJ, 2026-07-20).** The two are one system, and neither is allowed to silently drift from the other:
 

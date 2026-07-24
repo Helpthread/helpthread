@@ -1,7 +1,7 @@
 # Passkeys (WebAuthn) login for Agents
 
-Status: **draft.4** (2026-07-19). HT-75. Extends the auth-provider seam
-`specs/auth/agents-and-auth.md` (HT-54) built with exactly one provider,
+Status: **draft.4** (2026-07-19). Extends the auth-provider seam
+`specs/auth/agents-and-auth.md`  built with exactly one provider,
 `password` — this is the second provider, and the first thing to actually
 exercise the seam's multi-provider extensibility (agents-and-auth.md §1, §4)
 with real code. Spec only: no migrations, no implementation. Every schema
@@ -21,7 +21,7 @@ challenge tokens reuse); `src/auth/provider.ts`, `src/auth/
 password-provider.ts`, `src/auth/invite-token.ts`, `src/auth/invite-email.ts`
 (the exact HMAC-token and notification-email shapes this spec mirrors);
 `src/composition/config.ts` (`uiBaseUrl`/`publicBaseUrl` origin validation);
-`src/composition/health.ts` (the HT-44 alertable surface §8 routes into).
+`src/composition/health.ts` (the alertable surface §8 routes into).
 
 ## 1. Purpose & scope
 
@@ -31,18 +31,18 @@ core/marketplace boundary: "Passkey login (WebAuthn) is the one
 exception — it is core, not a marketplace module... it ships as a second
 **core** auth provider on this same seam (catalog §2.2), never through the
 marketplace path." This matches the module catalog's own free-core line
-(`specs/modules/catalog.md` §1, §2.2 — accepted 2026-07-18, HT-66):
+(`specs/modules/catalog.md` §1, §2.2 — accepted 2026-07-18):
 "Security hygiene is always free: passkey login (WebAuthn) is core,
-deliberately, where the reference ecosystem sells 2FA."
+deliberately; baseline security hygiene belongs in core."
 
 **Corrected here, draft.4 (2026-07-19).** Drafts 1–3 of this spec carried a
-stale "licensed marketplace module... waiting-on-HT-5" framing — written
+stale "licensed marketplace module... waiting-on-" framing — written
 *after* the catalog decision above but *before* `agents-and-auth.md` itself
-caught and fixed the identical staleness in its own text (HT-76, PR #85,
+caught and fixed the identical staleness in its own text (PR #85,
 merged 2026-07-19, same day). This spec inherited the error rather than the
 fix; nothing downstream of §1 depended on the wrong framing (no code,
 schema, or endpoint in this spec is gated behind an entitlement check
-anywhere), so this is a documentation-only correction. HT-5 (the AGPL §7
+anywhere), so this is a documentation-only correction.  (the AGPL §7
 module exception) gates **in-process third-party modules and external
 contributions** — Google SSO, magic-link, and SAML/enterprise SSO remain
 marketplace and wait on it (agents-and-auth.md §11) — it does **not** gate
@@ -57,7 +57,7 @@ accommodates a second **core** provider just as readily as a future
 marketplace one.
 
 **Additive only.** No existing Agent, provisioning path, or endpoint from
-HT-54 changes. Every Agent still gets a `password` identity through the
+ changes. Every Agent still gets a `password` identity through the
 unchanged invite or admin-set-password flow (agents-and-auth.md §8); a
 passkey is something an **already-authenticated** Agent optionally adds from
 their own profile. There is no passkey-only provisioning in v1 — corollary:
@@ -113,12 +113,11 @@ and 2 didn't hold, cardinality alone would not have justified a separate
 table.
 
 Precedent for "a provider gets its own table": `mailbox_oauth_tokens`
-(HT-38) holds Gmail's OAuth material rather than living in a shared
+ holds Gmail's OAuth material rather than living in a shared
 credentials table. Same move here.
 
 ```sql
-CREATE TABLE webauthn_credentials (
-  id                        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE webauthn_credentials (   id                        uuid PRIMARY KEY DEFAULT gen_random_uuid,
   agent_id                  uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   credential_id             text NOT NULL,             -- base64url, from the authenticator (WebAuthn's own id)
   public_key                bytea NOT NULL,            -- COSE_Key, raw bytes, as returned by attestationObject
@@ -127,10 +126,10 @@ CREATE TABLE webauthn_credentials (
   backup_eligible           boolean NOT NULL,          -- BE flag, captured at registration (WebAuthn §6.1)
   backup_state              boolean NOT NULL,          -- BS flag, refreshed on every authentication
   name                      text NOT NULL,             -- Agent-assigned label ("MacBook Touch ID")
-  sign_count_regression_at  timestamptz,               -- set on a Tier-2 counter regression (§8) — the HT-44 health check's signal
-  created_at                timestamptz NOT NULL DEFAULT now(),
+  sign_count_regression_at  timestamptz,               -- set on a Tier-2 counter regression (§8) — the health check's signal
+  created_at                timestamptz NOT NULL DEFAULT now,
   last_used_at              timestamptz,
-  updated_at                timestamptz NOT NULL DEFAULT now()
+  updated_at                timestamptz NOT NULL DEFAULT now
 );
 CREATE UNIQUE INDEX webauthn_credentials_credential_id_key ON webauthn_credentials (credential_id);
 CREATE INDEX webauthn_credentials_agent ON webauthn_credentials (agent_id);
@@ -159,8 +158,7 @@ Needed for single-use enforcement; see §7 for the full reasoning. One row
 per minted challenge, keyed by its nonce.
 
 ```sql
-CREATE TABLE webauthn_challenges (
-  nonce        text PRIMARY KEY,
+CREATE TABLE webauthn_challenges (   nonce        text PRIMARY KEY,
   ceremony     text NOT NULL CHECK (ceremony IN ('registration', 'authentication', 'step-up')),
   agent_id     uuid REFERENCES agents(id) ON DELETE CASCADE,  -- set for registration/step-up (session-bound); NULL for authentication (pre-identification, §6.2)
   expires_at   timestamptz NOT NULL,
@@ -188,7 +186,7 @@ rather than quietly patched.
 **Fix: opportunistic purge on every mint, no cron.** Each `INSERT` that
 mints a new `webauthn_challenges` row (any of the three ceremonies) is
 preceded, in the same transaction, by one extra statement: `DELETE FROM
-webauthn_challenges WHERE expires_at < now()`, using the
+webauthn_challenges WHERE expires_at < now`, using the
 `webauthn_challenges_expires` index already defined above. This keeps the
 table's steady-state size bounded to roughly (mint-rate × TTL) rather than
 growing without limit, with no separate sweep job, cron, or maintenance
@@ -205,8 +203,7 @@ artifact (proof of an existing factor, not a WebAuthn ceremony challenge)
 even though it reuses the identical signed-token-plus-DB-row mechanism.
 
 ```sql
-CREATE TABLE webauthn_stepup_tokens (
-  nonce        text PRIMARY KEY,
+CREATE TABLE webauthn_stepup_tokens (   nonce        text PRIMARY KEY,
   agent_id     uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   expires_at   timestamptz NOT NULL,
   consumed_at  timestamptz
@@ -266,7 +263,7 @@ they want checked against, collapsing the protection to nothing.
   other web-platform purposes. **`http://127.0.0.1` and `http://[::1]` are
   therefore unsupported for passkeys even though `config.ts` accepts them as
   a valid `HELPTHREAD_UI_BASE_URL` in general** — a deployment developing
-  against a loopback IP gets every other HT-54 feature working and passkeys
+  against a loopback IP gets every other  feature working and passkeys
   silently failing at the first ceremony. Stated here so it's a documented
   gap, not a support ticket waiting to happen: local passkey development
   must use `http://localhost:<port>`, never an IP literal.
@@ -308,7 +305,7 @@ resolves one attempt to an identity or `null`. `password` fits this exactly
 authentication, and step-up are all two-step (mint options, then verify a
 signed response), and the options step must hand the browser a fresh,
 unpredictable `challenge` that the verify step later checks byte-for-byte.
-`provider.ts` has no hook for "mint per-attempt state before authenticate()
+`provider.ts` has no hook for "mint per-attempt state before authenticate
 runs" — nor should it grow one speculatively for a shape only one provider
 needs (the same restraint the module doc already applies to the OAuth
 "start URL" case, which is genuinely a different mechanism — a redirect to
@@ -319,7 +316,7 @@ providers needing the same hook).
 interface entirely**, as its own pre-auth (or session-bound, for
 registration/step-up) endpoint pairs (§9). Only the *final* verify step for
 login — cryptographic signature check, resolve to an Agent — goes through
-`authenticate()`, dispatched via the existing generic `POST /auth/verify
+`authenticate`, dispatched via the existing generic `POST /auth/verify
 { providerKey, ... }`, exactly like `password`. This keeps the seam's one
 formal contract (`authenticate`) doing the one thing every provider
 genuinely shares — "verify an attempt, name who it is" — and puts
@@ -351,10 +348,10 @@ routes the seam doesn't need to know about.
   safe.)
 - **Extra checks with no `password` analog:** the signed challenge token
   and its ceremony discriminator (§7) and the counter/clone policy (§8) run
-  inside `authenticate()` before it can return non-null.
+  inside `authenticate` before it can return non-null.
 - **The `agent.status === 'active'` gate is repeated independently.**
   `password`'s check lives naturally on the path through
-  `agent_auth_identities`; `WebAuthnAuthProvider.authenticate()` doesn't
+  `agent_auth_identities`; `WebAuthnAuthProvider.authenticate` doesn't
   touch that table, so it re-checks `agents.status` itself after resolving
   `agent_id` from `webauthn_credentials`. Same rule, enforced on a different
   path — an `invited`/`disabled` Agent's passkey (if one somehow exists) is
@@ -409,14 +406,14 @@ session claims to be.** A live session alone is deliberately insufficient.
 
 ### 5.1 Proving step-up
 
-Two paths, mirroring the two factor types this spec and HT-54 already
+Two paths, mirroring the two factor types this spec and  already
 support:
 
 - **`POST /api/v1/auth/step-up/password`** (session-required) `{ password }`
   — resolves the ACTING Agent's own email from the session (`sub`), **never**
   from client input (so a caller cannot attempt to step up as anyone but
   themselves), and re-runs the same verification `PasswordAuthProvider.
-  authenticate()` already performs (agents-and-auth.md §4) against that
+  authenticate` already performs (agents-and-auth.md §4) against that
   resolved email and the submitted password.
 - **`POST /api/v1/auth/step-up/webauthn/options`** then **`POST
   /api/v1/auth/step-up/webauthn/verify`** (both session-required) — a
@@ -440,8 +437,8 @@ time, TTL **5 minutes**.
 
 `registration/options` requires `{ stepUpToken }` in its body: verify
 signature + TTL + `payload.agentId === session.sub`, then **consume** it
-(`UPDATE webauthn_stepup_tokens SET consumed_at = now() WHERE nonce = $1
-AND consumed_at IS NULL AND expires_at > now()`; zero rows → reject) —
+(`UPDATE webauthn_stepup_tokens SET consumed_at = now WHERE nonce = $1
+AND consumed_at IS NULL AND expires_at > now`; zero rows → reject) —
 single-use, DB-backed, the same two-layer discipline §7 uses for challenge
 tokens.
 
@@ -494,7 +491,7 @@ All three use `@simplewebauthn/server` (§13) for the CBOR/COSE/signature
 work; this section states what Helpthread configures and verifies, not the
 library's internals.
 
-### 6.1 Registration — `navigator.credentials.create()`
+### 6.1 Registration — `navigator.credentials.create`
 
 Session-required (an already-authenticated Agent adding a passkey from
 their own profile, agents-and-auth.md §7 item 5's "Change password"
@@ -564,7 +561,7 @@ owned by the *same* Agent is what `excludeCredentials` above exists to stop
 client-side; the `UNIQUE` index is what actually enforces it server-side
 either way.)
 
-### 6.2 Authentication — `navigator.credentials.get()`, conditional UI
+### 6.2 Authentication — `navigator.credentials.get`, conditional UI
 
 **Pre-session** (no acting-Agent header — joins agents-and-auth.md §8's
 bootstrap group: `/setup`, `/auth/verify`, `/auth/invite/accept`,
@@ -582,11 +579,11 @@ enumeration surface by construction (contrast a design that first asks "does
 this email have a passkey," which would itself be an oracle; this spec
 never adds one).
 
-**Client side, HT-52-gap-aware** (`LoginScreen.tsx` already flags that the
+**Client side, implementation-gap-aware** (`LoginScreen.tsx` already flags that the
 email input isn't `ds/core/TextInput`-`type="email"`/`autoComplete`-capable
 today): the login form's email field gets `autoComplete="username webauthn"`
 (the exact value MDN's Web Authentication API guide specifies for autofill
-UI), and on mount, if `PublicKeyCredential.isConditionalMediationAvailable()`
+UI), and on mount, if `PublicKeyCredential.isConditionalMediationAvailable`
 resolves `true`, the page calls `navigator.credentials.get({ publicKey:
 options, mediation: 'conditional' })` in the background. A matching platform
 passkey then appears in the browser's native autofill dropdown alongside
@@ -594,7 +591,7 @@ saved passwords; selecting it resolves the promise with a `PublicKeyCredential`
 with no separate "sign in with a passkey" click required. Where conditional
 mediation isn't supported (feature-detected `false`), the login screen falls
 back to an explicit "Sign in with a passkey" button that calls the same
-`get()` without `mediation: 'conditional'` (a normal modal WebAuthn prompt)
+`get` without `mediation: 'conditional'` (a normal modal WebAuthn prompt)
 — stated so the flow is honestly degrading, not silently broken, on
 unsupported browsers.
 
@@ -613,7 +610,7 @@ wrong. Two complementary layers, not a single either/or:
   `CredentialRequestOptions.signal`) and, on a timer well under the
   5-minute TTL — every 3 minutes, 60% of TTL, leaving real margin — aborts
   it, calls `authentication/options` again for a fresh challenge, and
-  re-issues `get()` with the new one. A tab left open indefinitely always
+  re-issues `get` with the new one. A tab left open indefinitely always
   has a fresh, live challenge whenever the user actually picks a
   credential.
 - **Reactive fallback: re-mint and retry once on server-detected expiry.**
@@ -752,19 +749,19 @@ authentication already leaked, but a second free session on top of it is
 still strictly worse). Given the stakes — this endpoint mints a login
 session, one of the two highest-value artifacts in this spec (the other
 being §5's step-up token) — **the honest answer is that pure statelessness
-cannot hold single-use here**, exactly the case this ticket's brief
+cannot hold single-use here**, exactly the case this specification
 anticipated.
 
 **Resolution: `webauthn_challenges` (§2.2), one small row per minted
 challenge.** Insert at options-mint time (`nonce`, `ceremony`, `agent_id`,
-`expires_at = now() + 5m`), preceded by the opportunistic purge (§2.2).
+`expires_at = now + 5m`), preceded by the opportunistic purge (§2.2).
 Consume at verify time with a single guarded statement — **parameterized on
 ceremony, not just nonce**:
 
 ```sql
 UPDATE webauthn_challenges
-SET consumed_at = now()
-WHERE nonce = $1 AND ceremony = $2 AND consumed_at IS NULL AND expires_at > now()
+SET consumed_at = now
+WHERE nonce = $1 AND ceremony = $2 AND consumed_at IS NULL AND expires_at > now
 ```
 
 Zero rows affected → reject as expired-or-already-used-or-wrong-ceremony,
@@ -854,7 +851,7 @@ so plainly.
   REJECTED** (the caller sees the same generic `401` every other
   authentication failure produces — §4.3's no-enumeration posture is
   unchanged; this is a server-side policy decision, not a new client-visible
-  error class) **and the event is routed to the HT-44 alertable surface**,
+  error class) **and the event is routed to the alertable surface**,
   not left in a log nobody reads. **"The stored maximum" means the value
   read under §6.2's `SELECT ... FOR UPDATE`, not a value read earlier in
   the request** — the comparison against it and the write that updates it
@@ -863,7 +860,7 @@ so plainly.
   §6.2's atomicity fix is what makes this Tier mean what this paragraph
   says it means, not just what it says in the common case.
 
-**Routing to `/internal/health` (HT-44, runbook Part G) — mirroring the
+**Routing to `/internal/health` (runbook Part G) — mirroring the
 existing pattern exactly, not inventing a new one.** `src/composition/
 health.ts`'s `runHealthCheck` already has this shape for a structurally
 identical problem: `forgedTokens`/`forged-token-burst` counts
@@ -874,12 +871,12 @@ so the signal is growth, never the standing count"). This spec adds a
 directly analogous column and check:
 
 - `webauthn_credentials.sign_count_regression_at` (§2.1, nullable) is set to
-  `now()` whenever Tier 2 rejects a regression — overwritten on each new
+  `now` whenever Tier 2 rejects a regression — overwritten on each new
   occurrence, a single timestamp, not a log table, matching the
   forged-token column's own "a count/marker, not an audit trail" shape.
 - `runHealthCheck` gains one more check, the same idiom as every other one
   in that function: `SELECT count(*) FROM webauthn_credentials WHERE
-  sign_count_regression_at > now() - interval '24 hours'`; any count `> 0`
+  sign_count_regression_at > now - interval '24 hours'`; any count `> 0`
   pushes a `webauthn-counter-regression: <n> credential(s) rejected for
   signature-counter regression in the last 24h — a high-quality clone
   signal for a non-synced credential; inspect and consider revoking
@@ -989,7 +986,7 @@ footgun someone has to remember to re-derive later.
   attestation conveyance is the mechanism that would, and it's deliberately
   not used (§6.1's justification).
 - **Rate limiting — same unresolved gap agents-and-auth.md §9 already
-  names** ([HT-53](https://resonantiq.atlassian.net/browse/HT-53)): none
+  names**: none
   of this spec's endpoints add rate limiting, and none is solved here. The
   pre-session endpoints (`authentication/options`, the `webauthn` case
   of `/auth/verify`) inherit exactly the same per-instance gap `password`'s
@@ -1035,7 +1032,7 @@ footgun someone has to remember to re-derive later.
 ## 12. What this is NOT (scope)
 
 - **No passkey-only provisioning.** Every Agent still gets a password from
-  the unchanged HT-54 invite/admin-set-password flow; a passkey is always
+  the unchanged  invite/admin-set-password flow; a passkey is always
   an addition to, never a replacement for, that password (§1, §9.1).
 - **No attestation verification / FIDO Metadata Service integration**
   (§6.1, §10) — `'none'` conveyance only.
@@ -1051,9 +1048,9 @@ footgun someone has to remember to re-derive later.
   is core (§1, corrected draft.4), not a paid module, so there is no
   license check for anything in this spec to ever gate. Contrast a genuine
   marketplace provider (Google SSO, magic-link, SAML/enterprise SSO), which
-  DOES wait on the HT-5 §7 exception text and on entitlement infrastructure
+  DOES wait on the §7 exception text and on entitlement infrastructure
   that neither exists yet nor is built here (agents-and-auth.md §11).
-- **No rate limiting** (§10) — HT-53, unresolved, called out not solved.
+- **No rate limiting** (§10) — unresolved and explicitly called out.
 - **No session revocation / active-session management for Agents.** §10
   states plainly that a session cannot be individually invalidated today;
   building that (a session table, a "sign out everywhere" control) is a
@@ -1155,15 +1152,15 @@ recollection of the package's reputation.
 
 ## Changelog
 
-- **draft.4 (2026-07-19, HT-75 engine-implementation review):** Corrects a
+- **draft.4 (2026-07-19, engine-implementation review):** Corrects a
   core-vs-marketplace classification error that survived drafts 1–3
   unnoticed (§1, §12). Passkey login is core, not a licensed marketplace
   module — `specs/modules/catalog.md` §1/§2.2 decided this on 2026-07-18
-  (HT-66, the day before draft.1), and `agents-and-auth.md` §1 already
-  carries the corrected framing as of HT-76/PR #85 (merged 2026-07-19,
+  (the day before draft.1), and `agents-and-auth.md` §1 already
+  carries the corrected framing as of PR #85 (merged 2026-07-19,
   the same day as draft.1–3 were written). This spec's own "licensed
-  marketplace module... waiting-on-HT-5" language was stale from the
-  moment it was written; caught during HT-75's engine-implementation
+  marketplace module... waiting-on-" language was stale from the
+  moment it was written; caught during the engine-implementation
   review, not by an independent re-read of the catalog. No prior draft's
   technical content (schema, ceremonies, tokens, counter policy, endpoint
   surface) depended on the marketplace framing — this is a documentation
@@ -1200,7 +1197,7 @@ recollection of the package's reputation.
   `ceremony` discriminator is now enforced at both the application and
   database layers, not just recorded (§7). Counter/clone policy reversed
   from log-only to a two-tier exempt/reject-and-alert policy, with
-  rejections routed to the existing HT-44 `/internal/health` alertable
+  rejections routed to the existing  `/internal/health` alertable
   surface via a new `webauthn_credentials.sign_count_regression_at` column
   (§8) — an honest correction of draft.1's own reasoning, not a quiet
   patch. The challenge-row volume claim (§2.2) is corrected from "low,

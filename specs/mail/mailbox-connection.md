@@ -1,6 +1,6 @@
 # Mailbox connection — scheduled-fetch intake, IMAP/SMTP transport, and the connect screen
 
-**Ticket:** HT-92 · **Status: DRAFT — NOT approved to build against.**
+**Status: DRAFT — NOT approved to build against.**
 **Charter dependency:** the scheduled-fetch amendment (CHARTER.md §7, 2026-07-20).
 
 > ## ⛔ Three unresolved questions block the build order in §7
@@ -16,8 +16,8 @@
 > transport will later report for that exact message." Gmail's API supplies
 > that shared id. **SMTP submission returns no id a later IMAP `FETCH` will
 > report.** Without an answer, every agent reply lands back in the connected
-> mailbox and is ingested as a new inbound customer message. HT-49/HT-50 were
-> this class of bug and were found *live*.
+> mailbox and is ingested as a new inbound customer message. Earlier self-echo
+> bugs of this class were found *live*.
 > Candidate answer to evaluate: suppress on our own minted `Message-ID`, which
 > we control on the outbound side (CHARTER.md §2's threading authority) and
 > which SMTP submission was observed to preserve verbatim — but "observed
@@ -70,7 +70,11 @@ Consequence: **push only makes the same job run sooner.** Making scheduled fetch
 
 **SMTP + app password works.** Same credential, `smtp.gmail.com:465`, `AUTH PLAIN`, 1833 ms. Our own `Message-ID` was preserved verbatim, confirmed by an `rfc822msgid:` lookup at the recipient.
 
-Worth recording: HT-49 exists because Gmail's `users.messages.send` **API** rewrites the `Message-ID` we set, which is why the reply token had to move into `References` (`src/mail/send.ts`). SMTP submission did not rewrite it. One observation is not proof of a general rule, and the `References` mechanism works on both transports — so this is a point in SMTP's favour, not a reason to change the threading model.
+Worth recording: Gmail's `users.messages.send` **API** rewrites the `Message-ID` we set,
+which is why the reply token had to move into `References` (`src/mail/send.ts`). SMTP
+submission did not rewrite it. One observation is not proof of a general rule, and the
+`References` mechanism works on both transports — so this is a point in SMTP's favour,
+not a reason to change the threading model.
 
 **Outbound needs no NEW DNS.** Replies go through the operator's own mail server, so they are signed by whatever DKIM that server already uses, from its IPs, under its existing SPF record. Every provider-webhook alternative considered (Postmark, Resend, SES, Cloudflare) requires the operator to add records for a *new* sending identity; this transport requires none.
 
@@ -92,7 +96,7 @@ Verified 2026-07-20. App-password availability gates the whole approach.
 
 Two consequences:
 
-1. **OAuth is a required second connector, not a nice-to-have** — Microsoft business mail is unreachable without it. The HT-40 OAuth machinery is reused, not rebuilt.
+1. **OAuth is a required second connector, not a nice-to-have** — Microsoft business mail is unreachable without it. The existing OAuth machinery is reused, not rebuilt.
 2. **Generic IMAP still earns its place** — it is what makes Helpthread work with any mailbox rather than only Google and Microsoft.
 
 Watch item: Google documents app passwords as legacy with no committed lifetime. No announced EOL, but no commitment either; OAuth is the hedge.
@@ -191,16 +195,20 @@ That is a configuration detail on the mailbox record, not a transport concern.
 4. **SMTP sender** behind the existing `EmailSender` seam.
 5. **The connection screen** — design session first, then implementation.
 6. **`Check connection` / `Send test email`**, including the round-trip verification.
-7. **Microsoft OAuth connector**, reusing the HT-40 machinery.
+7. **Microsoft OAuth connector**, reusing the existing OAuth machinery.
 8. Demote Gmail push in the docs to the advanced low-latency option; keep it fully supported.
 
 ## 8. Out of scope — tracked separately
 
 Roughly half the current setup burden is not email at all: Supabase project creation, 26 manual migrations, two separate Vercel projects with duplicated env vars, and four hand-minted `openssl` secrets.
 
-The **Vercel Pro requirement** was assessed and dismissed as a blocker: three `*/1` crons already force it today, independent of mail intake, and Vercel's Hobby plan prohibits commercial use — so any company running Helpthread as a real support desk needs Pro by licence terms regardless. Evaluation friction is answered by managed hosting (CHARTER.md §7, HT-79), not by architecture.
+The **Vercel Pro requirement** was assessed and dismissed as a blocker: three `*/1` crons
+already force it today, independent of mail intake, and Vercel's Hobby plan prohibits
+commercial use — so any company running Helpthread as a real support desk needs Pro by
+licence terms regardless. Evaluation friction should be addressed through setup automation
+and documentation, not by changing Helpthread's operator-deployed model.
 
-Also found while mapping the current path, each needing its own ticket:
+Also found while mapping the current path, each requiring separate follow-up:
 
 - **RLS is disabled on all 19 tables**, including `conversations` and `mailbox_oauth_tokens`. Exposure depends on whether the anon key is distributed; enabling RLS without policies would break the engine's own access, so this needs deliberate policy design.
 - **Three doc-drift defects** in `specs/deploy/gmail-inbound-runbook.md`: it names an `api/[...path].ts` entrypoint that was tried and abandoned (the real file is `api/index.ts`, which documents why), says "three cron jobs" where `vercel.json` declares four, and omits `HELPTHREAD_UI_BASE_URL` and the entire web-project env set — so an operator following only the runbook gets a working engine and a non-functional UI.
