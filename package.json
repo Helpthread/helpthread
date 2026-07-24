@@ -23,7 +23,7 @@
     "@electric-sql/pglite": "^0.5.4",
     "@simplewebauthn/server": "^13.3.2",
     "@supabase/supabase-js": "^2.110.6",
-    "jose": "^6.2.3",
+    "jose": "^6.2.4",
     "mimetext": "^3.0.28",
     "pg": "^8.22.0",
     "postal-mime": "^2.7.5"
