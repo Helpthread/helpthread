@@ -1,14 +1,14 @@
 # Helpthread Module API Exception — AGPL-3.0 §7 Additional Permission
 
 **Status: DRAFT for counsel review (TJ, acting as counsel). Not yet adopted.**
-Adoption gate (CHARTER.md §3): this text must be final and applied to the core's
+Adoption gate (see [the legal guide](README.md)): this text must be final and applied to the core's
 license **before the first external contribution is merged** — under DCO, broadening
 it afterward requires the consent of every copyright holder. Adoption mechanics: on
 sign-off, the exception text below is appended to the repository's `LICENSE` file
 beneath the AGPL-3.0 text, referenced from every source-file header block that names
-the license, and noted in CHARTER.md's §7 appendix with the adoption date.
+the license, and recorded in this directory with the adoption date.
 
-> **Provenance note (added 2026-07-20, HT-100).** This draft was authored by an assistant,
+> **Provenance note (added 2026-07-20).** This draft was authored by an assistant,
 > reviewed by an assistant, and merged in PR #99 with **zero human review comments** — 1h37m
 > from open to merge, inside a window with no human input at the decision point. The
 > "independent different-vendor review" comments on that PR were posted by the assistant
@@ -22,7 +22,7 @@ the license, and noted in CHARTER.md's §7 appendix with the adoption date.
 Drafting tradition: the GPL Classpath Exception and the FSF's §7 additional-permission
 mechanism, adapted for (a) AGPL §13 network use, which the Classpath exception predates,
 and (b) Helpthread's build-time npm module model, where a module compiles into the same
-running program as the core (CHARTER.md §3: "Repository separation alone does no legal
+running program as the core ([legal guide](README.md): "Repository separation alone does no legal
 work"). Symmetric by design: the same permission for first-party, third-party, and
 fork-based modules alike.
 

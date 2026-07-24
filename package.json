@@ -4,7 +4,7 @@
   "private": false,
   "type": "module",
   "license": "AGPL-3.0-only",
-  "description": "Open-source, serverless helpdesk engine — shared inbox, threaded email, knowledge base — for teams who live on Vercel and Supabase.",
+  "description": "Open-source support infrastructure.",
   "engines": {
     "node": ">=20"
   },

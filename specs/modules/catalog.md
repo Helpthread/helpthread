@@ -1,28 +1,23 @@
 # Module Catalog & the Open-Core Line
 
-Status: **accepted** (2026-07-18, TJ — HT-66). This is the canonical free-vs-paid line for
-Helpthread functionality. CHARTER.md §3/§4 governs the legal/architectural mechanics;
+Status: **accepted** (2026-07-18, TJ). This is the canonical free-vs-paid line for
+Helpthread functionality. docs/history/CHARTER-v1.md §3/§4 governs the legal/architectural mechanics;
 `specs/ui/admin-ia.md` §2 carries the reference-instance observations this catalog resolves.
-Where `admin-ia.md` deferred core-vs-module calls to "ticket grooming," this document is
-that decision.
+Where `admin-ia.md` deferred core-vs-module calls, this document records the decision.
 
-**Provenance.** The market inventory below derives from FreeScout's public module listing
-(freescout.net/modules — 71 official modules, read 2026-07-18) and the black-box
-observations already recorded in `admin-ia.md`. It is priced-demand data: a decade of what
-self-hosted helpdesk operators actually pay for. No module source code was observed
-(CHARTER provenance rules). FreeScout's third-party community marketplace has not yet been
-inventoried; revisit at grooming if a gap appears.
+**Provenance.** The market inventory below draws on public module listings and the
+black-box observations already recorded in `admin-ia.md`. Those sources were used as
+market research, not as product definitions. No module source code was observed
+(CHARTER provenance rules).
 
 ## 1. The line, stated once
 
-**Free core = parity and hygiene. Paid = intelligence, channels, enterprise, and
+**Free core = a capable, secure support operation. Paid = AI and automation, channels, enterprise, and
 self-service surfaces (§3.4).**
 
-- Everything a self-hosted helpdesk operator would call table stakes — including features
-  FreeScout paywalls — ships AGPL-free in core. Security hygiene is always free:
-  **passkey login (WebAuthn) is core**, deliberately, where the reference ecosystem sells
-  2FA. The conventionally accepted auth paywall is enterprise SSO, and that is where ours
-  sits (§3.3).
+- Everything needed to run a capable, secure support operation ships in the AGPL core.
+  Security hygiene is always free: **passkey login (WebAuthn) is core**. Enterprise
+  identity administration belongs in the paid Enterprise Auth module (§3.3).
 - The charter floor applies verbatim: nothing free today gets paywalled retroactively;
   monetization adds, never subtracts.
 - The line is one-way asymmetric: free → paid never happens; paid → free stays possible.
@@ -36,20 +31,20 @@ self-service surfaces (§3.4).**
   API — which needs no §7 exception at all. The in-process build-time module API is built
   only when a module genuinely needs UI presence, and not before a real module hits that
   wall.
-- Positioning corollary, used deliberately in marketing: tags, the public API + webhooks,
-  dark mode, keyboard shortcuts, and passkey-class security are paid modules in the
-  FreeScout ecosystem and free in Helpthread core.
+- Positioning corollary: tags, the public API and webhooks, dark mode, keyboard
+  shortcuts, and passkey-class security belong in Helpthread core because they make the
+  foundation useful, accessible, and secure.
 
 ## 2. Free core
 
 ### 2.1 Already shipped
 
-Tags (HT-29) · internal notes (HT-28) · single-Agent assignee, now roster-wide (HT-31,
-HT-54) · soft delete (HT-30) · four-state status incl. spam and pending (HT-26) · folder
+Tags · internal notes · roster-wide Agent assignment · soft delete · four-state status
+including spam and pending · folder
 semantics (open/closed/spam listing) · public API (charter-core, with the MCP server to
-follow it) · per-Agent identity, login, team management, mailbox-access grants (HT-54) ·
-theme/appearance preference (HT-54) · keyboard-shortcuts surface (admin-ia deviation
-list) · open-tracking privacy default OFF (HT-32).
+follow it) · per-Agent identity, login, team management, mailbox-access grants  ·
+theme/appearance preference  · keyboard-shortcuts surface (admin-ia deviation
+list) · open-tracking privacy default OFF.
 
 ### 2.2 Committed core, built incrementally (priority at grooming)
 
@@ -62,44 +57,43 @@ and external-image blocking · extra security (reCAPTCHA, IP allowlisting) · CS
 GDPR-grade hard delete and export (extends soft delete) · extended editor · inline
 embedded images · extended attachments (richer file management/search) · dark mode
 (full surface) · **passkey login** and baseline **OAuth/social login** (WebAuthn plus
-alt-provider login on the HT-54 session infrastructure, same hygiene logic) · custom
+alt-provider login on the core session infrastructure, using the same hygiene logic) · custom
 agent profile fields · global cross-mailbox inbox view · sent-folder tracking ·
 notifications matrix (email/browser, per admin-ia).
 
-The chat channel is core engine work when it arrives (charter §4: a second channel over
-the same engine), distinct from any paid trappings layered on it — including
-FreeScout's own paywalled Live Chat module; ours ships free by the same logic as
-passkeys and tags.
+The chat channel is core engine work when it arrives (architecture guide: a second channel
+over the same engine), distinct from optional paid capabilities layered on it. It ships
+free by the same logic as passkeys and tags.
 
 ### 2.3 Not ported — obsolete by architecture
 
 Move/Remove IMAP Message (no server-side folder manipulation; note the "no IMAP
-polling" rationale this once carried is void as of HT-92 — scheduled fetch is now
+polling" rationale this once carried is void now that scheduled fetch is
 permitted, so if IMAP intake ships this entry needs re-deciding on its own merits) ·
 Faster Search via Meilisearch (search is
 Postgres-native) · Auto Login from notification emails · Custom Homepage · Ticket Number
-in subject (threading never depends on it; display numbers shipped in HT-27) · Mailbox
+in subject (threading never depends on it; display numbers shipped in) · Mailbox
 Icons · Twitter/X DM integration (API effectively dead).
 
 ## 3. Paid modules — four clusters
 
 Each entry is born proprietary (closed repo), integrates out-of-process unless noted, and
-ships through the marketplace when that phase opens (charter §5). Order within clusters is
+ships through the marketplace when that phase opens (STATUS.md). Order within clusters is
 rough priority.
 
-### 3.1 Intelligence (the differentiator; charter-named leading candidates)
+### 3.1 AI & automation
 
 - **Draft-reply assistant** — the first module (§4). Subscribes to inbound events, calls
   the operator-configured model with the operator's keys, posts a draft as an assistant
   actor; an Agent approves in core UI. Pure out-of-process.
 - **Auto-triage** — tagging, routing, priority; same event-driven shape.
 - **KB-grounded auto-answers** — depends on the KB and widget; later.
-- **Conversation QA & coaching** (HT-96) — rubric scoring of the team's own replies:
+- **Conversation QA & coaching**  — rubric scoring of the team's own replies:
   qualitative criteria judged by a model, deterministic threshold/SLA criteria scored
   without one, and customer-feedback criteria normalized alongside them; plus a human
   review-and-correct queue and evidence-grounded coaching. Out-of-process: subscribes to
   `conversation.reply_sent`, reads the thread through the assistant API, posts results
-  back as internal notes, and hosts its own review UI on the design pack (HT-95).
+  back as internal notes, and hosts its own review UI on the design pack.
   **The line against §2.2's free `satisfaction ratings`: those are the customer's
   verdict, collected freely; QA is the operator's rubric applied to their own team's
   work.** Related but not the same as §3.3's wallboards — QA scores individual
@@ -111,7 +105,7 @@ rough priority.
   The former is a facet; the latter carries its own review workflow and is its own
   module.)
 
-### 3.2 Channels & integrations (the reference ecosystem's biggest paid cluster)
+### 3.2 Channels & integrations
 
 WhatsApp · Telegram (integration + notifications) · SMS (Twilio-class) · Facebook
 Messenger · Slack notifications · Rocket.Chat notifications · Jira · commerce
@@ -140,21 +134,21 @@ conversation engine; an integration consumes events and the public API.
 
 - **Knowledge base** — the entire KB ships as a paid module, not core: content-as-code
   (docs in git, static build, build-time search index) as its initial form, a runtime
-  editor later. Reclassified 2026-07-19 (HT-75, charter-amended) — FreeScout's own
-  reference instance runs its Knowledge Base as a paid purchase (`admin-ia.md`), which
-  is market signal, not just a differentiator play.
+  editor later. Reclassified 2026-07-19 (charter-amended) because knowledge
+  authoring and publishing are an optional application built on Helpthread's support
+  infrastructure, not a prerequisite for operating the core.
 - **End-user portal** — customer ticket submission and history ships as a paid module
   in full. No free tier; distinct from the embeddable widget below.
 - **Embeddable support widget** — ships **free with Helpthread branding**; **branding
-  removal is paid** (the Beacon pattern, unchanged). Every free install is
-  distribution; additive monetization, charter-clean.
+  removal is paid**. The free widget remains fully useful; paid branding removal is an
+  additive commercial capability.
 
 ## 4. Build sequence
 
-1. **HT-67 — module substrate v1 spec**: typed event vocabulary, webhook delivery
+1. **Module substrate v1 spec**: typed event vocabulary, webhook delivery
    (registration, signed payloads, retries), assistant-actor API (draft-post,
    list-pending, approve/send with audit). Doubles as counsel raw material for the
-   §7-exception text (HT-5) — the exception gets drafted against a real API, before the
+   §7-exception text  — the exception gets drafted against a real API, before the
    first external contribution.
 2. **Core: event emission + webhook delivery** (AGPL — the substrate is always free).
 3. **Core: assistant-actor API + draft-review inbox UI** (design-project-first per the
@@ -162,13 +156,13 @@ conversation engine; an integration consumes events and the public API.
 4. **First module: draft-reply assistant** in a closed repo, dogfooded on the live
    Resonant IQ desk. Dogfood installs are a private npm package in the Vercel build —
    no marketplace plumbing required to use our own modules. *(Superseded 2026-07-19 —
-   see `specs/modules/marketplace-v1.md` §7 / HT-82: once the marketplace ships,
+   see `specs/modules/marketplace-v1.md` §7: once the marketplace ships,
    Resonant IQ's own install moves onto the real marketplace flow, not this
    shortcut.)*
 5. **Marketplace plumbing** (license keys, registry, update channel — pinned in
-   `specs/modules/marketplace-v1.md`, HT-79) is built now, during the dogfood phase,
-   not deferred to "once demand justifies it": the 2026-07-19 HT-79 charter amendment
-   made the marketplace itself the project's proven install path (HT-82), so this
+   `specs/modules/marketplace-v1.md`) is built now, during the dogfood phase,
+   not deferred to "once demand justifies it": the marketplace launch decision
+   made the marketplace itself the project's proven install path, so this
    step lands inside the dogfood phase rather than after launch. Step 4's point still
    stands on its own terms — Resonant IQ's early installs didn't strictly *need* this
    plumbing to use our own modules — but the plumbing is no longer future work.
@@ -194,21 +188,13 @@ now so the marketplace design inherits it:
   endpoints carry a `module` slug from substrate v1, so marketplace-phase
   install/uninstall/health tooling references existing rows rather than retrofitting
   identity.
-- Modules **we host** as convenience services are ordinary SaaS billing — no special
-  machinery in the product. *(Updated 2026-07-19, HT-79 managed hosting: hosting is now
-  the **mainline** module install path, not just an occasional convenience — clicking
-  Install provisions a Resonant IQ-hosted instance. The "no special machinery in the
-  product" clause still holds literally: the machinery — a hosting control plane that
-  holds the license key and per-desk provisioning grant — lives entirely **outside** the
-  AGPL core, never in the product. The self-host path remains as the escape hatch. See
-  `specs/modules/marketplace-v1.md` §3d/§5.)*
 
 ## 6. Changelog
 
-- **2026-07-18**: initial version (HT-66). Free/paid line decided by TJ from the
-  FreeScout official-catalog inventory + charter constraints; passkeys-core,
+- **2026-07-18**: initial version. Free/paid line decided by TJ from market
+  inventory and charter constraints; passkeys-core,
   Enterprise-Auth-paid, white-label pattern, and the three paid clusters locked.
-- **2026-07-19** (HT-75): full 71-module FreeScout listing re-audited item-by-item
+- **2026-07-19**: public module inventory re-audited item-by-item
   against this catalog's coverage; ~14 gaps found and classified using the existing
   free/paid logic. New free-core items (§2.2): extended attachments, sent-folder
   tracking, inline image embeds, global cross-mailbox inbox view, sticky notes,
@@ -220,26 +206,21 @@ now so the marketplace design inherits it:
   amendment) — not a retroactive paywall, since it was never shipped. **End-user
   portal reclassified free-with-branding → paid module in full** (§3.4); the
   embeddable widget keeps the unchanged free/branding-paid pattern. Live chat's
-  free-core status (§2.2, charter §4) reaffirmed as a deliberate divergence from
-  FreeScout's paid Live Chat module. Paid catalog now 22 line items across four
-  clusters (Intelligence 3, Channels & integrations 9, Enterprise & ops 8,
+  free-core status (§2.2, architecture guide) reaffirmed from Helpthread's own
+  core/product boundary. Paid catalog now 22 line items across four
+  clusters (AI & automation 3, Channels & integrations 9, Enterprise & ops 8,
   Self-service surfaces 2 paid + 1 free-with-branding).
-- **2026-07-19** (HT-79): §4 step 4's npm-package dogfood-install sentence marked
-  superseded by `specs/modules/marketplace-v1.md` §7 / HT-82 — the HT-79 charter
+- **2026-07-19**: §4 step 4's npm-package dogfood-install sentence marked
+  superseded by `specs/modules/marketplace-v1.md` §7 — the charter
   amendment now requires the marketplace itself to be Resonant IQ's proven install
   path, so the shortcut this step describes stops being current once that spec
   ships. Sentence left in place for history; the supersession note is the current
   instruction.
-- **2026-07-19** (HT-79, CodeRabbit PR review): §4 step 5 corrected — it still said
+- **2026-07-19** (CodeRabbit PR review): §4 step 5 corrected — it still said
   marketplace plumbing "stays deferred to its charter phase," which no longer
   matches step 4's own supersession note or `marketplace-v1.md` §1's "launch-day,
   built now" framing. Reworded so both steps agree.
-- **2026-07-19** (HT-79, managed hosting): §5's "modules we host … no special machinery
-  in the product" bullet annotated — hosting is now the mainline install path
-  (`marketplace-v1.md` v1.1), delivered by a hosting control plane that sits outside the
-  AGPL core, so the "no special machinery in the product" clause still holds. Free/paid
-  line and build sequence unchanged; the substrate stays AGPL-free.
-- **2026-07-20** (HT-96): **Conversation QA & coaching** added to §3.1 — the catalog had
+- **2026-07-20**: **Conversation QA & coaching** added to §3.1 — the catalog had
   no QA/quality-scoring line, and §1's one-way rule (free → paid never happens) means an
   unclaimed slot is one accidental free shipment away from being permanently
   unmonetizable. Claiming it now is the reversible direction; paid → free stays open.
@@ -249,7 +230,7 @@ now so the marketplace design inherits it:
   facet named in this same section (sentiment reads the customer's mood; QA evaluates a
   reply against a human-maintained rubric and carries its own review workflow), and
   **not** §3.3's wallboards (QA scores individual conversations; analytics aggregates
-  what QA produced). Paid catalog now 23 line items across four clusters (Intelligence 4,
+  what QA produced). Paid catalog now 23 line items across four clusters (AI & automation 4,
   Channels & integrations 9, Enterprise & ops 8, Self-service surfaces 2 paid + 1
   free-with-branding). Build sequence unchanged — the module is out-of-process on the
   shipped substrate and needs no new core hook.

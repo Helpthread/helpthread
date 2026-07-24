@@ -1,117 +1,213 @@
 # Helpthread — Founding Charter
 
-> Helpthread is an open-source, serverless helpdesk — shared inbox, threaded email conversations, knowledge base — built for teams who live on Vercel and Supabase rather than a LAMP server. It is aimed at the bar Help Scout set for ease of use — the experience this project exists to make ownable — rebuilt in modern TypeScript with no daemons, no long-running processes, and an extension system designed for how serverless software actually deploys. FreeScout, the established self-hosted PHP helpdesk, proved the self-hosted market is real; Helpthread is built for that market on modern rails. Core is AGPL-3.0; the project is dogfooded first, built by the team behind Resonant IQ as their own production support system before anyone else touches it.
+> **Helpthread is open-source support infrastructure.**
+>
+> It exists so organizations can own, extend, and operate the systems through which they support their customers.
 
-## 1. Mission & positioning
+## First Principles
 
-Helpthread starts from a personal fact: its founder ran customer support on Help Scout for years and loved it. Help Scout remains the gold standard for a helpdesk that feels effortless on both sides of the conversation — and that experience is the bar this project holds itself to. What Help Scout never offered is ownership: your helpdesk, your data, your customization, on your own infrastructure, with no rent forever. Help Scout's ease, fully owned — that combination is the product.
+### 1. The operator owns the system
 
-The self-hosted market is real: thousands of teams run FreeScout instead of paying rent to Zendesk or Help Scout. We ran it ourselves — and hit its walls. It's a decade-old Laravel 5.5 app that needs a persistent host running scheduler daemons, its extensibility means dropping PHP into a runtime plugin folder, and even basic customization — the knowledge base's design, its URLs — is out of reach without forking. Proof of the demand, and proof of the ceiling. FreeScout serves one further purpose here: because Help Scout is closed SaaS you can't inspect, FreeScout is our open *window* into that experience — a self-hostable reference for modeling the interface toward Help Scout's ease of use. It is a UX reference, never a source of code. The core is our own, built on modern, permissively-licensed foundations.
+Organizations should be free to own, operate, and extend the infrastructure through which they support their customers.
 
-Helpthread is the answer for people who already live on serverless infrastructure. Same ownership promise — rebuilt for a world of edge functions, managed Postgres, and push-based delivery where providers offer it, bounded scheduled fetches where they don't — and no resident process either way. Two audiences have to come out of this feeling the same way: customers should find getting support dead easy, and operators should find running the thing dead easy. Neither of those is negotiable in favor of the other.
+Operators decide where Helpthread runs, where its data lives, which providers it uses, which extensions it trusts, and when it changes. They should be able to inspect, extend, and replace parts of the stack without losing the conversations entrusted to it.
 
-## 2. Product principles
+Ownership includes control over execution, configuration, integrations, customization, and upgrade timing. Changes to Helpthread must preserve meaningful operator choice.
 
-- **Innovate on the platform. Be boringly faithful on mail semantics.** Everything about *how* Helpthread runs — compute model, storage, deployment — is fair game for rethinking from scratch. How it parses, threads, and sends email is not. Mature systems — FreeScout and Chatwoot among them — have earned a decade of edge-case scars in production email handling; we respect that earned knowledge, reproduce proven behavior, and verify against fixtures rather than re-deriving from first principles. Any change to mail behavior needs proof of equivalence or an explicit, written justification — not a hunch that the old way looked wrong. During this project's own early development we watched well-intentioned "improvements" to mail handling silently destroy message content in testing; that lesson is why this rule exists and why it's not up for debate per-PR.
-- **Threading authority lives on the outbound side.** Inbound threading headers (`References`, `In-Reply-To`) are written by every mail client on earth, inconsistently — they cannot be trusted. The one header the engine fully controls is the Message-ID it emits. So threading is anchored there: signed reply tokens in outbound Message-IDs, authenticating replies on their way back in — a pattern as old as mailing-list software. This is the mechanism the whole system leans on; treat it accordingly.
-- **API-first — and the UI isn't the only client.** Anything the UI can do, a typed public API can do. The UI is a client of that API, not a special case; so are AI agents. An MCP server exposing the same operations ships as a first-class client of the same API, so any operator can point their own AI tooling at their own helpdesk.
-- **Serverless-native, Vercel-first, not Vercel-only.** No daemons, no long-running processes. Inbound mail arrives either by push webhook (Gmail push through Pub/Sub, and equivalents as we add providers) or by a bounded, stateless scheduled fetch — a function that connects, reads from a stored cursor, and exits. **Neither is "the primary" — the operator chooses at setup, trading latency against setup cost:** push is near-instant but needs a GCP project and roughly six provisioning steps (`specs/deploy/gmail-inbound-runbook.md` Part A); scheduled fetch costs up to a cron interval of latency and needs an app password or OAuth. Both are fully supported intake paths; neither is a fallback for the other. Nothing stays resident either way: no held connections, no IMAP IDLE, no worker loops. Anything that needs to happen later is a scheduled action or a cron trigger, not a process sitting in a loop. The engine's core reaches every platform service through interfaces the project owns — see the platform posture note in the architecture section. *(Amended 2026-07-20 — scheduled-fetch intake; see §7 appendix.)*
-- **Own your data.** Self-hosted on the operator's own Vercel and Supabase accounts. Conversation data never touches Resonant IQ-operated infrastructure — we don't sit in the data path — and AI features preserve that: assistants call model providers the operator configures, with the operator's own keys. **The promise is absolute and carries no exception.** *(The 2026-07-19 "managed hosting" carve-out was **rescinded 2026-07-20** on TJ's review — he had selected managed hosting from a picker that labelled it "Recommended", and rejected the model once its consequences were clear. See the §7 appendix.)*
+### 2. Conversations are the source of truth
 
-## 3. Licensing & intellectual property
+Support begins with a conversation between an organization and its customer.
 
-Helpthread's core is licensed **AGPL-3.0**. Contributions are accepted under the **Developer Certificate of Origin (DCO)** — a sign-off on every commit, inbound license identical to outbound, no CLA, no copyright assignment. Contributors keep the copyright on their work, which makes the core's license permanent by structure rather than by promise. What makes it lawful to sell first-party commercial modules alongside the AGPL core is not ownership of the core — it is the module boundary and its plugin exception, defined below. Paid first-party modules ship under a separate proprietary/commercial license from their own closed repositories, distributed through an official marketplace — live at public launch, proven first as the project's own dogfood install path (amended 2026-07-19; see below).
+Tickets, assignments, statuses, workflows, summaries, and reports organize or interpret that conversation. They do not replace it. Helpthread preserves the original record—its participants, provenance, sequence, and history—so future applications can interpret it without obscuring what occurred.
 
-**Given up, deliberately:** dual-licensing the core — selling AGPL exceptions or relicensing later — is off the table once outside contributions land; no one can relicense the core without the consent of every contributor. That option is worth little here: the demonstrated buyers of AGPL exceptions *embed* a component in their own product, and Helpthread is an end application its users operate (running an unmodified AGPL helpdesk carries no copyleft obligations at all) — what remains, white-label resellers and blanket-AGPL-ban enterprises, is small. Also given up: a CLA's patent grant, warranties, and employer sign-offs — AGPL §11's per-contributor patent grant partially substitutes, and any indemnity offered to module customers is priced without upstream contributor representations. The revenue model is modules and the marketplace, not license arbitrage. The same structure binds Resonant IQ symmetrically: the company is a licensee of its contributors' code like anyone else, so core modifications running in any hosted offering get source-offered to its users under AGPL §13.
+Communication correctness is therefore a core responsibility.
 
-**What's free and what's paid, stated early:** the core helpdesk — mail engine, conversations, agent inbox, the public API and MCP server, self-hosting — is AGPL-licensed free software, forever, and nothing free today gets paywalled retroactively. Paid, eventually: advanced first-party modules (AI assistants are the leading candidates, and the knowledge base is now one too) and possibly hosted convenience services. Monetization adds; it never subtracts.
+### 3. Infrastructure outlives applications
 
-### Module boundary
+Interfaces, workflows, channels, providers, and AI systems will change. The underlying records and contracts should remain dependable.
 
-The line between the AGPL core and commercial modules must be an engineered artifact, not an accident. Modules — first- or third-party — integrate through a narrowly-defined, documented public plugin API, and the core's license will carry an explicit plugin exception for it (an AGPL-3.0 §7 additional permission in the Classpath-exception tradition), so module authors are never left guessing whether their work becomes a derivative of the core. Repository separation alone does no legal work — a build-time npm module compiles into the same running program as the core — so the exception text is the mechanism, and it carries the load for everyone: it covers network use (AGPL §13), not just conveyance, and it is deliberately symmetric — the same permission for first-party, third-party, and fork-based modules alike. First-party modules hold no privileged position: any hook a paid module needs ships in the public plugin API. Where a module can live out-of-process — webhooks, the event API — that is the preferred shape; it needs no exception at all.
+Helpthread invests first in durable primitives: conversations, participants, identities, messages, events, routing, storage, and public contracts. Interfaces and optional capabilities build upon those primitives through the same platform available to everyone.
 
-Under DCO the exception text is this project's real one-way door: once outside contributions merge, broadening it requires the consent of every copyright holder. Drawing the boundary precisely is therefore counsel-review work **before the first external contribution is accepted** — not before the marketplace opens — including how the exception text may evolve as the plugin API matures without ever becoming a back-door relicense of contributed code. The exception travels with every conveyed copy; a fork may keep it and grow its own module ecosystem, or may remove it as AGPL §7 permits — either way that is the accepted price and structure of the trust model, and it is why the assets that stay with the company — the Helpthread name and marks, the npm organization, the official marketplace — matter commercially. The discipline the boundary demands — narrow, stable, documented extension points — is the same discipline a good module API needs anyway.
+## Project Commitments
 
-### Provenance
+These commitments turn the first principles into practical product and engineering constraints.
 
-Helpthread is an independent implementation. The repository contains no code copied or derived from any copyleft-licensed project. The core is our own code, built on permissively-licensed foundations (RFCs for mail semantics, and MIT/Apache libraries and references such as postal-mime and Chatwoot's MIT core), with each license verified at adoption. Behavior is specified and validated against public standards, public documentation, and black-box observation of running systems. Every substantive change receives real human design and review before merge — ordinary pull-request review, preserved in git history — which is also what keeps AI-assisted work firmly copyrightable under current U.S. Copyright Office guidance. Copyright we can prove we hold is what gives the project standing to enforce the AGPL — copyright claims belong to whoever owns the lines at issue — and clean title to the commercial modules.
+### Operator ownership
 
-**Ownership, decided:** Resonant IQ, Inc. holds the copyright on its own work — pre-launch, that is the entire tree — owns the Helpthread name and marks, and will run the marketplace; Helpthread is a Resonant IQ product. Contributors keep theirs. Counsel paperwork, in deadline order: a short board consent memorializing founder alignment (before the repository goes public); the plugin exception text (before the first outside contribution is accepted — see the module boundary above); the trademark policy (before public launch). **Resolved 2026-07-10:** the contribution instrument is the DCO. The CLA that earlier drafts of this charter required is dropped — its consolidated-copyright rationale was wrong, and the relicensing power a CLA holds in reserve is precisely what the self-hosted audience this project serves has learned to distrust.
+Helpthread preserves meaningful operator choice over deployment, data, configuration, credentials, integrations, extensions, and AI providers.
 
-This charter is not legal advice. Counsel reviews the licensing structure, the plugin exception, and the trademark policy, each by its deadline above.
+Operators choose the infrastructure providers through which they operate Helpthread. Those providers may offer managed infrastructure, but Helpthread has no project-operated data path: conversation data stays within the infrastructure and services the operator selects.
 
-## 4. Architecture direction
+The operator-owned deployment path must remain real, documented, and functionally credible.
 
-Serverless kills the traditional runtime plugin-folder model — there's no long-lived filesystem to drop a module into. Helpthread's extension model is designed in from day one along two tracks: **build-time npm modules**, where an operator adds a package and redeploys — the install *is* the Vercel build — and **typed event hooks / webhooks** for integrations that live out-of-process entirely. The plumbing paid modules need (license keys, license-gated distribution, an update channel) is built alongside the modules themselves and exercised through the project's own installs long before a stranger's money touches it — never as a runtime restriction: a license authenticates downloads and updates, and no shipped module ever phones home or stops working when a license lapses (`specs/modules/catalog.md` §5).
+### The core stays open
 
-**~~Amended 2026-07-19 (managed hosting)~~ — RESCINDED 2026-07-20 by TJ on review.** TJ selected this option, and the record should say so: asked "Who hosts the module runtime for the v1 in-app install experience?" (2026-07-20T00:12:17Z), he chose **"Managed: RIQ hosts (Recommended)"** at 00:13:15Z. Two things qualify that: the option was labelled *"(Recommended)"* by the assistant that wrote the question, and the alternative offered in the same picker — *"Deploy-button: operator's Vercel"* — is the design he later described as what he had wanted all along. Reviewing the consequences on 2026-07-20 he rejected the model outright: *"i never ever intended that we would be hosting running module code, that makes no sense at all."* A one-click selection under a recommendation is thin consent for narrowing a constitutional promise, and it is reversed here on his instruction. **Resonant IQ hosts no module runtimes.** The operator deploys and runs every module on their own infrastructure, as before; the one-click path is the Vercel deploy-button flow `specs/modules/marketplace-v1.md` §5 already named as additive. No code was ever written against this amendment. Text preserved below, struck, for the record — it states no operative rule. See HT-100.
+The Helpthread core is AGPL-3.0 free software. Contributors retain copyright in their work and contribute it under the same license the project gives everyone else.
 
-~~the *default* install path is no longer the operator redeploying a module themselves — clicking Install in Manage → Modules provisions a Resonant IQ-hosted instance of the module for that deployment, the realization of the hosted convenience services §3 already contemplates. The self-host path (download the versioned tarball, deploy to your own Vercel) remains fully supported as the open-core escape hatch. Both preserve the same invariants without exception: a license is only ever a distribution credential — no runtime license check ships in any module, hosted or self-hosted, and the hosted artifact is byte-identical to the self-host tarball; no module phones home; and a lapsed license never stops running software, even when Resonant IQ is the host. The credential-bearing install/update orchestration lives entirely outside the AGPL core, in a Resonant IQ-operated hosting control plane — the one component that holds both a license key and a per-desk provisioning grant; the core holds neither and never calls the marketplace (`specs/modules/marketplace-v1.md` §3/§5).~~
+Capabilities released as part of the free core are not later withdrawn behind a commercial license. Commercial offerings may add modules, updates, support, or other conveniences. They do not subtract from the open core.
 
-**Platform posture: Vercel-first, not Vercel-only.** The first-class deployment target is Vercel + Supabase, and the deploy story is optimized for it without apology. But the engine's core never calls a platform directly: queueing, scheduled and durable work, blob storage, and inbound email all sit behind thin provider interfaces the project owns, with today's implementations (Vercel Queues, Vercel Cron and Workflows, Supabase Storage, Gmail push) as adapters rather than assumptions. Inbound email forces this discipline anyway — Gmail can't be the only supported mailbox forever — and applying it to the other seams keeps a future plain-Node-plus-Postgres deployment mode reachable without an engine rewrite. Supabase itself is open source and self-hostable, so that half of the stack is a soft dependency by construction. No additional deployment targets are promised at launch: every supported target is a permanent test matrix, and that cost gets taken on only when demand justifies it.
+Helpthread sustains itself through commercial software and services around the core, not by selling exceptions to the core’s license.
 
-The conversation model is **channel-agnostic from day one**. Email is the founding channel — but a conversation and its threads don't care how a message arrived, and the schema never assumes SMTP. Chat/messaging arrives later as a second channel over the same engine (Supabase Realtime is the push transport; a "chat" is a conversation whose threads travel a faster wire), and an embeddable support widget — knowledge-base search, start a conversation, follow the replies, in the tradition of Help Scout's Beacon — is a planned first-party module built on the same public API. Live-chat trappings like presence and typing indicators layer onto that channel per-operator; they are staffing promises more than plumbing.
+### Conversation integrity
 
-The actor model is **AI-ready from day one**. Every thread records what kind of actor authored it — customer, human staff, or AI. AI-authored work supports draft-before-send states, human-approval handoffs, and a full audit trail. Like channels and modules, these are day-one schema shapes, not features: they cost a column now and a migration crisis later. Vocabulary, fixed here to prevent permanent confusion: **agents** are human support staff; **assistants** are AI actors.
+Helpthread preserves the fidelity, provenance, and durable history of conversations.
 
-The knowledge base ships as a first-party paid module — **content-as-code** (docs live in git, build to static output, search index generated at build time) as its initial form, a runtime editor later — not as core capability. (Reclassified 2026-07-19, HT-75, reversing the original day-one core commitment; see the licensing section above and `specs/modules/catalog.md`.)
+Every message records who or what authored it, how it arrived, and where it belongs. Threading authority derives from evidence Helpthread can verify. Changes to communication behavior require fixtures, reproducible proof, or an explicit written decision—not intuition alone.
 
-The founding public API surface is six conversation operations: list conversations by customer email, get a conversation with its threads, get a conversation's owner, create a conversation (with attachments), add a customer reply, and look up a customer — the customer-side contract, matching what a production integration already consumes. The agent-side API grows in lockstep with the inbox UI under the API-first rule: no UI capability ships without its public API underneath. Everything else — mailbox management, roles, workflows, reporting — gets built on top of and around this surface, not ahead of it.
+Email is the founding channel, so its mature semantics and accumulated edge cases deserve particular respect. The rule is broader than email: correctness follows the conversation across every channel.
 
-## 5. Roadmap
+The following are never traded for speed, convenience, or a convincing demonstration:
 
-No dates; phases are ordered by dependency, not calendar.
+1. Never lose or corrupt a message.
+2. Threading correctness outranks feature velocity.
+3. Authorship and provenance remain explicit.
+4. Communication semantics do not change silently.
 
-- **Phase 0 — Foundations.** Name, domains, GitHub org, and npm org secured (done). This charter. A public-ready engine repo with clean history.
-- **Phase 1 — Core engine, dogfooded.** Mail engine: event-driven ingestion (bounded reconciliation and intake fetches, never a long-running poller), parsing, threading, sending, signed reply tokens, auto-responder handling, bounce handling, HTML sanitization. The six-operation conversation API. An agent inbox UI. Gmail push for inbound. This runs as Resonant IQ's actual production support desk before it runs as anyone else's.
-- **Phase 2 — Production cutover.** Resonant IQ retires its FreeScout instance and switches to Helpthread at the config level — a clean cutover with no legacy data requiring migration.
-- **Phase 3 — Public launch.** Deploy-to-Vercel button, public docs site, and the start of a community — **with the marketplace live on day one**: license keys, module distribution, and the first paid modules (the knowledge base and AI-powered modules — draft-reply suggestions, auto-triage, KB-grounded auto-answers in the widget — lead the catalog), all having served as Resonant IQ's own install path through the dogfood phase. A helpdesk launched free with its commercial layer already real avoids the worse story: a community formed around ambiguity about how the project sustains itself.
+### Public APIs and events
 
-The full helpdesk surface — mailbox management, roles and permissions, workflows, SLAs, saved replies, reporting, admin, search, and the chat channel plus embeddable support widget described in the architecture section — gets built incrementally, prioritized by what real usage demands. The map of that territory is drawn from the helpdesks we know best — Help Scout's experience and FreeScout's feature surface — as a guide, not a contract; the measure Helpthread holds itself to is Help Scout's ease of use, for customers and operators alike. The mail engine, for all the care it gets, is only something like 10–15% of that eventual surface. This is a multi-month-plus endeavor, not a weekend rewrite, and nobody involved should pretend otherwise.
+Anything a first-party interface can do must also be possible through a documented public contract.
 
-## 6. Sacred invariants
+The operator inbox is a client. Automation is a client. AI is a client. Future interfaces are clients.
 
-Five things we do not trade away for speed, convenience, or a good demo:
+Meaningful state changes emit meaningful events. Public contracts expose enough context and provenance for operators and extensions to understand what happened without relying on private implementation details.
 
-1. Never lose or corrupt customer mail.
-2. Provenance purity — no copyleft-derived code enters the shipping tree.
-3. Threading correctness outranks feature velocity.
-4. Main stays releasable.
-5. No silent scope creep in mail semantics — see the equivalence rule in the principles.
+### Replaceable providers
 
-## 7. Governance
+External services are dependencies, not identities.
 
-Solo-maintainer, BDFL model for now — there is one project, one person accountable for it, and that's honestly where it is. Contributions are accepted under the DCO — every commit signed off, contributors keep their copyright — per the licensing section above. Conventional-commit conventions and PR review norms will get written down once there are contributors to write them down for; inventing process ahead of contributors is its own kind of scope creep, so this section stays short on purpose.
+Helpthread owns the interfaces at its platform boundaries. Providers implement those interfaces. A first-class provider may receive an excellent, deeply tested experience without becoming inseparable from the core.
 
----
+Replacement does not need to be effortless. It must remain architecturally possible.
 
-**Status:** Written 2026-07-09, prior to the first code commit. This charter is the founding document of the Helpthread project and precedes any implementation.
+### Extensibility without privilege
 
-**Amended 2026-07-10 (HT-21):** §3 and §7 — the CLA/consolidated-copyright model replaced with DCO-only contributions; the module boundary's plugin exception promoted to the load-bearing legal mechanism, its counsel deadline moved to before the first external contribution; dual-licensing of the core deliberately given up; trademark policy added to pre-launch counsel work.
+Meaningful ownership includes the ability to extend the system.
 
-**Amended 2026-07-19 (HT-79):** §3, §4, §5 — the marketplace moves from "a later phase, once demand justifies it" to a launch-day component of Phase 3, built now and proven as the project's own dogfood install path. Rationale: the original deferral assumed the module substrate and first modules would not exist until after launch; both shipped during the dogfood phase, so the remaining marketplace work is commerce plumbing, not speculation — and launching the free helpdesk with its sustainability model already visible is the more honest story. The §7 plugin exception's counsel deadline is unchanged (before first external contribution): every v1 marketplace module is out-of-process and needs no exception. New counsel items before the marketplace takes real money: the commercial module license text and terms of sale.
+First-party, community, and private extensions use the same public mechanisms. If a first-party module needs a new capability, that capability belongs in the public extension model. Commercial code receives no hidden privileges.
 
-**~~Amended 2026-07-19 (HT-79, managed hosting)~~ — RESCINDED 2026-07-20 (HT-100).** Same origin as the §3 amendment above: inferred by an assistant, never decided by TJ, merged in PR #98 twenty-six minutes after opening with zero human review. **Resonant IQ hosts no module runtimes.** Struck text follows for the record.
+Extension points exist because the platform needs them, not as private accommodations for particular modules.
 
-~~§4 — the marketplace's default install path becomes **managed hosting**: clicking Install in Manage → Modules provisions a Resonant IQ-hosted instance of the module, the realization of the "hosted convenience services" §3 already names. Decided after TJ walked the manual self-host install as customer #1 (HT-82 dogfood) and rejected its friction. The posture invariants are restated, not relaxed: (a) a license key stays a distribution credential only — no runtime license check exists in any module, hosted or self-hosted, and the hosted artifact is byte-identical to the self-host tarball; (b) a lapsed license never stops running software — a hosted instance keeps running at its entitled version, updates simply stop; (c) the AGPL core holds no license key and no marketplace credential and never calls the marketplace — the credential-bearing install/update orchestration lives entirely outside the core, in a Resonant IQ-operated hosting control plane, the only trust domain holding both license keys and per-desk provisioning grants. The self-host tarball path remains fully supported as the open-core escape hatch, and a refunded/revoked customer's already-held self-host copy keeps running with no DRM and no runtime check, ever — a consciously accepted residual exposure. Managed hosting is opt-in per operator; the core mail/data path is unchanged. Left to `specs/modules/marketplace-v1.md`, not settled by *this* amendment: the exact refund-window and config-export-grace figures, and the scoped per-desk provisioning-credential the substrate must add. The reconciliation of §2's own-your-data wording with a hosted module processing operator data on Resonant IQ infrastructure was flagged here as a data-residency call for TJ and **resolved the same day** by the own-your-data scoping amendment immediately below (HT-5/HT-82); the managed-hosting data-handling terms themselves remain on the §8 pre-revenue counsel gate.~~
+The boundary between the AGPL core and separately licensed modules must be explicit, documented, and equally available to everyone. Repository separation alone does not define that boundary.
 
-**~~Amended 2026-07-19 (HT-5/HT-82, own-your-data scoping)~~ — RESCINDED 2026-07-20 (HT-100).** This amendment existed only to carve out managed hosting from the own-your-data promise. With managed hosting rescinded above, the exception has nothing to except: §2 is restored to its absolute form and carries no carve-out. Leaving this amendment standing would have left the constitution contradicting itself — §2 promising no exception while the appendix asserted one. Struck text follows for the record.
+### Infrastructure before applications
 
-~~§2 — the "own your data" bullet's promise is stated as *conversation data never touches Resonant IQ-operated infrastructure — we don't sit in the data path*, with one explicit, opt-in exception: a module an operator enrolls in Resonant IQ's managed hosting processes that operator's conversation data (and holds the operator-supplied keys it needs) on Resonant IQ infrastructure, under disclosed data-handling terms consented to at enrollment. This also corrects a mis-scoped earlier phrasing that put "the core" out of the data path — the operator-run core *is* the data path; the promise that matters is that **Resonant IQ-operated** infrastructure stays out of it. Rationale: the managed-hosting amendment (same date, above) made an unqualified promise falsifiable for enrolled operators; a data promise that is precisely true beats one that is absolutely worded and false in an opt-in case. The mail engine and system of record remain on the operator's own accounts in every configuration, and the self-host path preserves the original absolute promise. Decided by TJ acting as counsel, 2026-07-19; the managed-hosting data-handling terms themselves remain on the §8 pre-revenue counsel gate (`specs/modules/marketplace-v1.md` §8).~~
+The core provides durable primitives. Optional applications compose them into particular experiences.
 
+Knowledge bases, AI assistants, analytics, reporting, and specialized workflows may integrate with or build upon Helpthread. They do not become part of the foundation merely because they are valuable.
 
-**Amended 2026-07-19 (HT-75):** §3 and §4 — the knowledge base reclassified from free-forever core to a paid first-party module. FreeScout's own reference instance runs its Knowledge Base as a paid purchase (`specs/ui/admin-ia.md`); keeping ours core was chosen 2026-07-18 as a marketed free-vs-FreeScout differentiator (`specs/modules/catalog.md` §1), and TJ reversed that call on review. Not a retroactive paywall under the §3 invariant — the knowledge base was never shipped (`specs/modules/catalog.md` §2.1's shipped list never included it). Full paid-module catalog: `specs/modules/catalog.md`.
+When a capability can reasonably live outside the foundation, it should. Extensibility is preferred over completeness.
 
-**Amended 2026-07-20 (HT-92, scheduled-fetch intake):** §2 — the "Serverless-native" bullet's prohibition is restated from *"no daemons, no polling loops"* to **"no daemons, no long-running processes."** Inbound mail may arrive either by push webhook or by a **bounded, stateless scheduled fetch** — a function that connects, fetches from a stored cursor, and exits. **Neither transport is designated primary.** The operator picks one at setup and trades latency against setup cost — push is near-instant but requires a GCP project and ~6 provisioning steps plus two known org-policy landmines (`specs/deploy/gmail-inbound-runbook.md` Part A); scheduled fetch costs up to a cron interval and requires an app password or OAuth. Consequential wording updated at §1's opening summary, the FreeScout comparison, the serverless positioning line, and §4's Phase 1 description.
+### Interfaces may change; contracts remain stable
 
-*Wording ratified by TJ, 2026-07-20.* He initiated the change — *"Wait, wait, wait - why would we forbit imap polling?"* and *"Wasn't the no polling clause just to say... we as Helpthread will never poll their code?"* — gated it on evidence (*"let's get this fully tested out before we change the charter. I want to see it in action first"*), and approved the §1 positioning line verbatim: *"push-based delivery where providers offer it, bounded scheduled fetches where they don't — and no resident process either way."* An earlier draft of this amendment elevated scheduled fetch to a *"first-class primary transport"*; that framing was the drafting assistant's, not TJ's, and was removed on review — the operator, not this charter, chooses the transport.
+No interface may become the only expression of a capability.
 
-Rationale: the original wording conflated two separable things — a *daemon* (a process that stays resident and holds an open connection, which is what makes FreeScout require a persistent PHP host) and a *scheduled fetch* (an invocation that ends). Only the first is incompatible with serverless. §4's Phase 1 language already permitted "bounded reconciliation fetches, never a long-running poller," and the daily watch-maintenance cron has always been exactly that — it enqueues the same reconcile job the push path enqueues, and that job reads the mailbox's *stored cursor*, never the push notification's `historyId`. The engine already did on a schedule what §2 appeared to forbid; this amendment removes an internal inconsistency rather than introducing a capability.
+Public schemas, APIs, events, and extension contracts evolve deliberately and compatibly. Internal implementations may change freely while their public meaning remains stable.
 
-What it unlocks: making Pub/Sub **optional rather than mandatory** — six setup steps an operator no longer has to complete, including the two that fail silently (the domain-restricted-sharing org-policy block and the missing `serviceAccountTokenCreator` grant). Gmail push itself remains fully supported and preferred where an operator wants sub-minute latency; only its status as a setup prerequisite changes. It also unlocks IMAP/SMTP mailbox connection via app password, which needs no DNS records, no MX change, no cloud console, and no third-party provider account. Measured against the ~26-step, 4-console setup an adopter faces today (HT-82 dogfood), this is the difference between Helpthread being evaluable and not being evaluated. §1's own standard — *operators should find running the thing dead easy* — was not being met.
+### Provenance must be defensible
 
-Verified before amending (2026-07-20, live against the dogfood desk): IMAP + app password authenticated `help@resonantiq.app` and returned raw RFC822 with a real reply's `ht.ht1.…` signed token intact in its `References` chain, connection closed on exit; SMTP + the same credential sent with our own `Message-ID` preserved verbatim through Gmail's submission path.
+Helpthread is an independent implementation.
 
-What does not change: no process may stay resident — no IMAP IDLE, no held connections, no worker loops; each fetch is a fresh bounded invocation. Threading authority stays on the outbound Message-ID (§2). Mail semantics remain sacred (§2) — any new transport ships with fixtures proving equivalence before it becomes a default. The data-path promise (§2, "Own your data") is untouched, and is strengthened: a direct mailbox connection puts fewer third parties in the path than a provider webhook would.
+Code entering the shipping tree must have a clear and compatible origin. Behavior may be learned from public standards, public documentation, permissively licensed references, and black-box observation—not by copying code under an incompatible license.
 
-Positioning consequence, accepted deliberately: §1 previously sold against FreeScout partly on this line. The honest differentiator survives and is restated — FreeScout requires a host running resident scheduler daemons; Helpthread runs the same logical work as stateless invocations on infrastructure the operator does not administer. The claim was never truthfully "we never fetch on a schedule," since the engine always did. It is "nothing of ours stays running." Decided by TJ, 2026-07-20.
+Defensible provenance protects users, contributors, the open-source license, and the commercial ecosystem.
+
+### Operational simplicity
+
+Organizations adopt Helpthread to support their customers, not to operate support software.
+
+The system should be understandable when inspected and unobtrusive when working. Added operational complexity must provide a clear benefit in reliability, capability, or operator choice.
+
+## Non-Goals
+
+Helpthread is not:
+
+- a CRM
+- a customer success platform
+- a marketing or sales platform
+- a business or customer intelligence platform
+- a team chat application
+- an all-in-one business suite
+
+These systems may integrate with or build upon Helpthread. They are not Helpthread.
+
+This boundary describes the product, not the conversations it may carry. Helpthread may support sales, onboarding, success, internal service, or other conversations without becoming the system that manages those business functions.
+
+Helpthread is also not defined by:
+
+- a particular industry or business model
+- the word “customer” as the only name for a person being served
+- a single communication channel
+- a single deployment provider
+- a single user interface
+- a single AI provider or model
+
+Support is Helpthread’s purpose and category. Its architecture must not confuse its first market, channel, or implementation with the permanent boundary of the system.
+
+## Architecture
+
+Architecture records today’s consequences of the charter. It may change as long as the first principles and project commitments remain intact.
+
+### Founding deployment posture
+
+Helpthread is serverless-native and optimized first for Vercel and Supabase because that is where it was created and first operated.
+
+Queueing, scheduled and durable work, object storage, inbound communication, and similar services sit behind Helpthread-owned provider interfaces when those interfaces preserve a meaningful boundary.
+
+Vercel and Supabase are the founding deployment target, not the definition of Helpthread. Every additional supported target becomes an enduring compatibility and testing commitment.
+
+### Conversation model
+
+The conversation model is channel-agnostic. Email is the founding channel, but storage and public contracts do not assume it is the only way a message can arrive.
+
+A conversation is composed of participants, messages, events, ownership, and history. Channel-specific behavior belongs at the boundary.
+
+### Actor model
+
+Authorship and provenance are explicit. Human staff, external participants, automated systems, and AI assistants are never silently conflated.
+
+AI may draft, summarize, route, or act through public contracts. Its work remains attributable, reviewable when policy requires it, and subject to the same operator choice as any other provider.
+
+### Application and module model
+
+Helpthread supports build-time modules and out-of-process integrations through documented public boundaries. Out-of-process composition is preferred when it provides a clean and sufficient contract.
+
+First-party paid modules may exist. They are distributed to and deployed by the operator; Resonant IQ, Inc., the company that develops and stewards Helpthread, does not host their runtime or process their conversation data. The knowledge base is one such application: the core may expose public knowledge interfaces and integration hooks, while authoring, publishing, presentation, and management remain module capabilities.
+
+Commercial licensing may govern access to downloads, updates, or support. It must not turn installed software into a remote-controlled runtime. A lapsed license may end access to future value; it does not disable software already in the operator’s possession.
+
+### Founding product surface
+
+The free core includes the conversation engine, threading, identity, assignment, durable history, an operator inbox, public APIs and events, and the infrastructure needed to operate them.
+
+The exact API surface and product roadmap belong in maintained specifications. They are not frozen by this charter.
+
+## Stewardship and Amendments
+
+The current governance model belongs in the project’s governance documentation. It may evolve without changing this charter.
+
+Resonant IQ, Inc. stewards the Helpthread name, official distribution channels, marketplace, and its own contributions. This stewardship does not grant it private capabilities within the open core or ownership of contributors’ work.
+
+Changes to implementation follow the normal development process. Changes to this charter require:
+
+1. a written proposal identifying the principle or rule affected;
+2. the reason the existing charter no longer produces the right decision;
+3. the alternatives considered;
+4. an explicit decision recorded in the amendment history.
+
+An amendment should clarify or deliberately change the project’s identity—not document a feature or ordinary architectural choice.
+
+The first principles may be amended only when the project deliberately chooses to become something materially different. Project commitments may evolve when experience shows that they no longer protect those principles. Architecture changes through ordinary design work.
+
+## Success
+
+Helpthread succeeds when organizations can build and operate the support systems they need without giving up meaningful choice or control.
+
+> **Technology will change. These principles should not.**
+
+## Amendment History
+
+### 2026-07-23 — Founding Charter v2 adopted
+
+This charter replaced the original founding document after the project clarified its identity as open-source support infrastructure. The original charter and its amendment history remain available at [`docs/history/CHARTER-v1.md`](docs/history/CHARTER-v1.md).
+
+Future entries record the date, scope, decision, and rationale for each adopted amendment. Superseded implementation decisions move to the [decision log](docs/decisions/README.md) rather than accumulate here.

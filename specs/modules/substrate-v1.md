@@ -5,10 +5,10 @@ in schema, code, docs, UI, and prose. The word "plugin" survives only inside the
 phrase *plugin exception* (the AGPL §7 additional permission, named in the
 Classpath-exception tradition) and in charter quotations.
 
-Status: **draft for TJ review** (HT-67). Governed by CHARTER.md §3/§4 (module boundary,
+Status: **draft for TJ review**. Governed by docs/history/CHARTER-v1.md §3/§4 (module boundary,
 out-of-process preference, zero privileged first-party access) and
-`specs/modules/catalog.md` (HT-66) §4's build sequence. This spec is also raw material
-for the §7 plugin-exception text (HT-5): the exception gets drafted against this real,
+`specs/modules/catalog.md`  §4's build sequence. This spec is also raw material
+for the §7 plugin-exception text: the exception gets drafted against this real,
 shipped API — before the first external contribution merges.
 
 ## 1. Purpose & scope
@@ -81,8 +81,7 @@ the delivery worker — must be impossible, not merely avoided):
 
 ```sql
 CHECK (draft_status IS NULL OR direction = 'outbound');
-CHECK (
-  (direction IN ('inbound','note') AND delivery_status IS NULL)
+CHECK (   (direction IN ('inbound','note') AND delivery_status IS NULL)
   OR (direction = 'outbound'
       AND draft_status IS NOT NULL
       AND draft_status IN ('awaiting_review','discarded')
@@ -98,7 +97,7 @@ The `IS NOT NULL` guards are load-bearing, not belt: without them, SQL's three-v
 logic lets the illegal row `(outbound, draft_status NULL, delivery_status NULL)` pass —
 each `IN` test evaluates to NULL, the OR-chain yields NULL, and a NULL CHECK is
 accepted. This is the same NULL-trap migration 002's doc comment warns about, and it
-was caught by a failing test during HT-68 implementation, not by review of this spec.
+was caught by a failing test during implementation, not by review of this spec.
 
 The deliverable-thread queries (`listDeliverableThreads`, `claimThreadForDelivery`)
 additionally gain an explicit `draft_status IS DISTINCT FROM 'awaiting_review'` guard —
@@ -109,7 +108,7 @@ means every insert path (ingestion, `sendReply`, notes) supplies it in the same 
 and `insertThread`'s outbound coercion `deliveryStatus ?? 'pending'` becomes
 draft-aware (today it would silently arm a draft for delivery). What stays untouched is
 **mail semantics**: parsing, threading, token verification, and the wire shape of sent
-mail are unchanged and remain fixture-proven (charter invariant #5). A draft is inert
+mail are unchanged and remain fixture-proven (the charter's "Conversation integrity" rule). A draft is inert
 rows until approval (§6).
 
 *Alternative considered*: a separate `drafts` table. Rejected — a draft is a
@@ -140,9 +139,9 @@ it), `token_hash`, `status ('active','disabled')`, `created_by_agent_id`, timest
 **Author identity going forward**: from this increment on, every new thread row carries
 `author_kind`, and authoring identity where the caller asserts one — assistant calls
 from the token itself; Agent-authored replies, notes, and draft resolutions from the
-`X-Helpthread-Agent-Id` acting-agent header (HT-54 §8), which the web client extends to
+`X-Helpthread-Agent-Id` acting-agent header ( §8), which the web client extends to
 these authoring calls. A service-token caller without the header still writes
-`author_kind='agent'` with NULL identity (the pre-HT-54 posture, preserved rather than
+`author_kind='agent'` with NULL identity (the pre- posture, preserved rather than
 broken).
 
 ## 4. Events — vocabulary and envelope
@@ -150,7 +149,7 @@ broken).
 **Thin events**: an event carries identifiers and small typed facts — never message
 bodies, subjects, or addresses. Consumers fetch full content through the API with their
 own credentials. This keeps webhook payloads free of message content and PII by
-construction and matches the own-your-data posture (charter §2).
+construction and matches the charter's "Operator ownership" rule.
 
 v1 vocabulary (closed list; additions are spec amendments):
 
@@ -250,8 +249,8 @@ machinery:
    (`specs/mail/threading.md` §2a — same mint, same key rotation).
 2. Derive the envelope exactly per agent-inbox-v1 §4a: recipient/subject from the
    conversation, `In-Reply-To`/`References` from the latest inbound thread, with the
-   minted id as the **final** `References` entry (the HT-49 rule).
-3. Apply open-tracking pixel injection before persist iff enabled (HT-32 semantics
+   minted id as the **final** `References` entry (the outbound-threading rule).
+3. Apply open-tracking pixel injection before persist iff enabled ( semantics
    unchanged — absent config, byte-identical mail).
 4. Write envelope snapshot + message id + `draft_status='approved'` +
    `delivery_status='pending'` + approving-Agent audit fields onto the row.
@@ -311,12 +310,12 @@ to land in `specs/api/agent-inbox-v1.md` alongside implementation:
    want truth, not intent.
 4. **Acting-agent header on authoring calls** (§3): the web client starts sending
    `X-Helpthread-Agent-Id` on replies/notes/draft actions so author identity is
-   recorded. Recommendation: yes — it's the HT-54 trust model applied to authorship;
+   recorded. Recommendation: yes — it applies the existing trust model to authorship;
    absent header degrades to NULL identity, never an error.
 
 ## 10. Changelog
 
-- **2026-07-18**: initial draft (HT-67), following the HT-66 catalog decision. Names
+- **2026-07-18**: initial draft, following the module-catalog decision. Names
   and resolves the charter-§4-vs-schema actor-model gap. Revised same day after
   adversarial review against the shipped code (13 findings applied: approval-path
   derivation specified instead of claiming `sendReply` reuse; draft/delivery CHECK made
@@ -325,6 +324,6 @@ to land in `specs/api/agent-inbox-v1.md` alongside implementation:
   wire amendments made explicit; idempotency namespace scoped; author-identity
   forward-carry specified). Same day: the additive-forward rule added (§1) with
   `module` attribution on webhook endpoints (§5) — marketplace attaches, never
-  retrofits (TJ). Same day, from HT-68 implementation: §2's CHECK predicate corrected
+  retrofits (TJ). Same day, during implementation: §2's CHECK predicate corrected
   for the three-valued-logic NULL trap (`IS NOT NULL` guards added; found by a failing
   store test).
