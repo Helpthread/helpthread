@@ -39,7 +39,8 @@ The operator inbox, automation, AI, and future interfaces are clients of public
 contracts. The maintained Agent Inbox contract lives in
 [specs/api/agent-inbox-v1.md](../../specs/api/agent-inbox-v1.md).
 
-The exact product surface and delivery state live in [STATUS.md](../../STATUS.md).
+The exact product surface and delivery state live in the
+[Helpthread OSS Roadmap](https://github.com/orgs/Helpthread/projects/1).
 
 ## Modules
 
