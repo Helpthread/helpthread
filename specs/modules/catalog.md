@@ -78,8 +78,8 @@ Icons · Twitter/X DM integration (API effectively dead).
 ## 3. Paid modules — four clusters
 
 Each entry is born proprietary (closed repo), integrates out-of-process unless noted, and
-ships through the marketplace when that phase opens (STATUS.md). Order within clusters is
-rough priority.
+ships through the marketplace when that phase opens. Order within clusters is rough
+priority.
 
 ### 3.1 AI & automation
 

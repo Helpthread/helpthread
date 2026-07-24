@@ -46,6 +46,7 @@ Before public launch or taking marketplace revenue, as applicable:
 - complete trademark and entity approvals;
 - finalize the commercial module license and terms of sale.
 
-Current delivery status and outstanding work belong in [STATUS.md](../STATUS.md).
+Current delivery status and outstanding work belong in the
+[Helpthread OSS Roadmap](https://github.com/orgs/Helpthread/projects/1).
 Historical rationale is indexed in
 [docs/decisions/README.md](../docs/decisions/README.md).

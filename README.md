@@ -11,14 +11,15 @@ platform services behind Helpthread-owned interfaces. Organizations deploy Helpt
 into infrastructure they choose and control.
 
 > **Status: pre-release and dogfooded in production.** Helpthread is developed by
-> Resonant IQ, Inc. and runs the company's support operation today, but it is not ready for general deployment. See
-> [STATUS.md](STATUS.md) for the current product surface and roadmap.
+> Resonant IQ, Inc. and runs the company's support operation today, but it is not ready
+> for general deployment. Current work is tracked in the
+> [Helpthread OSS Roadmap](https://github.com/orgs/Helpthread/projects/1).
 
 ## Start here
 
 - **[Founding Charter](CHARTER.md)** — identity, principles, and project commitments
 - **[Architecture](docs/architecture/README.md)** — the map to current technical contracts
-- **[Status](STATUS.md)** — what is live, underway, and deferred
+- **[Roadmap](https://github.com/orgs/Helpthread/projects/1)** — public delivery status and planned work
 - **[Governance](GOVERNANCE.md)** — how project decisions are made today
 - **[Legal and licensing](legal/README.md)** — the AGPL core and commercial-module boundary
 - **[`specs/`](specs/)** — the maintained behavioral and product contracts
