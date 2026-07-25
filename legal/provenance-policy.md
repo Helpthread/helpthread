@@ -1,17 +1,10 @@
-# Provenance & AI-Assisted Development Policy (DRAFT)
+# Provenance & AI-Assisted Development Policy
 
-> **Status: DRAFT — pending outside counsel review.** Drafted 2026-07-19. This is a
-> faithful first draft codifying practices already stated in the
-> [legal guide](README.md); it is not legal advice.
->
 > **This document states policy and process — the commitments and practices the project
 > works to — not warranties or factual guarantees, and it creates no rights in any third
 > party.** It describes how Helpthread is built and how contributions are handled; it is
 > not a representation to any user, contributor, or customer that any particular outcome is
-> assured.
->
-> **Gate:** **internal-facing** policy that may also be published as a statement of
-> practice — it documents existing process rather than gating a launch.
+> assured, and it is not legal advice.
 
 ---
 
@@ -132,22 +125,3 @@ practices above are intended to support the project's ability to:
 
 Helpthread is built with substantial AI assistance. The provenance risk specific to
 AI-assisted development is assessed and managed under internal counsel review.
-
----
-
-### Notes to counsel (not part of the policy)
-
-- **Faithful to the [legal guide](README.md).** Sections 2–7 restate practices the charter already
-  commits to (independent implementation; no copyleft-derived code; copyleft source never
-  opened; behavior from RFCs / public docs / black-box; permissive references —
-  postal-mime MIT-0, Chatwoot MIT core with `enterprise/` excluded; license verification
-  at adoption; human review as the copyrightability basis; DCO on every commit). No new
-  policy is invented.
-- **AI-training-data risk moved to a private counsel memo.** Per the adjudicated
-  Codex-review fixes (2026-07-19), the candid residual-risk analysis that was §8 is
-  no longer in this public file; §8 now states only that the risk is assessed and managed
-  under internal counsel review. The full analysis and mitigations live in a privileged
-  counsel memo held outside the repository.
-- **Reference-list scope.** The "look-only" posture for projects whose license does not
-  resolve is carried from the charter and CLAUDE.md. Specific such projects are not named
-  here to avoid dating the policy; counsel can add or omit names as desired.

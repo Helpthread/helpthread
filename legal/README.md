@@ -1,8 +1,7 @@
 # Helpthread Legal and Licensing
 
 This directory holds the legal instruments and policies that implement the
-[Founding Charter](../CHARTER.md). It is not legal advice; the marked drafts require
-counsel review before their stated gates.
+[Founding Charter](../CHARTER.md). It is not legal advice.
 
 ## Core and contributions
 
@@ -34,16 +33,14 @@ See:
 - [Trademark policy](trademark-policy.md) governs the Helpthread name and marks without
   restricting rights granted by the software license.
 
-## Review gates
+## What is and is not in force
 
-Before accepting external code contributions:
-
-- counsel-finalize the module API exception.
-
-Before public launch or taking marketplace revenue, as applicable:
-
-- complete trademark and entity approvals;
-- finalize the commercial module license and terms of sale.
+The AGPL-3.0 core license is in force today. The
+[module API exception](module-api-exception.md) is not: it takes effect only when
+appended to the repository's `LICENSE`, and it must be adopted before the first
+external code contribution is merged. The commercial module license applies to paid
+modules on adoption, and the terms of sale that it cross-references are not yet
+written.
 
 Current delivery status and outstanding work belong in the
 [Helpthread OSS Roadmap](https://github.com/orgs/Helpthread/projects/1).

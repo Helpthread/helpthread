@@ -1,13 +1,8 @@
-# Helpthread Commercial Module License v1.0 (DRAFT for counsel review)
+# Helpthread Commercial Module License v1.0
 
-> **Status: DRAFT — pending outside counsel review.** Drafted 2026-07-19. This is a
-> faithful first draft encoding already-made product decisions; it is not legal advice.
->
-> **Gate:** must clear review **before public launch** — specifically before Stripe is
-> switched to live mode and the marketplace takes real money. It does **not** gate
-> test-mode dogfood, where a placeholder license suffices. On adoption, this text
-> **replaces the `All rights reserved`
-> placeholder `LICENSE`** in each paid-module repository.
+> This License governs Helpthread commercial modules distributed by Resonant IQ, Inc.
+> On adoption it replaces the `All rights reserved` placeholder `LICENSE` in each paid
+> module's repository. It is not legal advice.
 
 ---
 
@@ -248,20 +243,3 @@ controls for that matter; no document is read to override another outside its ow
   which the Licensed Domain belongs, for continued use on that same Licensed Domain, on
   written notice to Resonant IQ. Any other purported assignment is void. Resonant IQ may
   assign this License in connection with a merger, acquisition, or sale of its business.
-
----
-
-### Notes to counsel (not part of the License)
-
-- **Governing law / incorporation — VERIFIED 2026-07-19.** Delaware confirmed against the
-  filed Certificate of Incorporation (Delaware SoS, filed May 19, 2026, file no. 10629316)
-  in the company's corporate records. Venue/forum-selection remains undrafted (outside the
-  decided scope) — add if desired.
-- **Cross-references left as pointers, by instruction.** The refund window (14 days)
-  and full-refund-only termination are referenced with their decided values, while
-  their full mechanics remain in the terms of sale rather than being restated here.
-- **Scope held to the decided space.** Multi-domain / bulk licensing is deliberately not
-  drafted (decision: "may exist later; do not draft it"). Severability, waiver, notices,
-  and assignment/change-of-control were added per the adjudicated Codex-review fixes
-  (2026-07-19); no arbitration clause and no venue/forum-selection clause beyond the
-  Delaware governing law in section 11 is included. Export-control remains undrafted.
