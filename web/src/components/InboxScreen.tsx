@@ -391,7 +391,7 @@ export function InboxScreen({
                 }}
               />
               {c.status === 'pending' && (
-                <span style={{ position: 'absolute', right: 14, top: 6 }}>
+                <span style={{ position: 'absolute', right: 24, top: 6 }}>
                   <StatusPill status="pending" style={{ fontSize: 9.5, padding: '1px 7px' }} />
                 </span>
               )}
