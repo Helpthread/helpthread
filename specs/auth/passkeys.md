@@ -30,7 +30,7 @@ agents-and-auth.md §1 states this as the one deliberate exception to the
 core/marketplace boundary: "Passkey login (WebAuthn) is the one
 exception — it is core, not a marketplace module... it ships as a second
 **core** auth provider on this same seam (catalog §2.2), never through the
-marketplace path." This matches the module catalog's own free-core line
+marketplace path." This matches the free-core line
 (accepted 2026-07-18):
 "Security hygiene is always free: passkey login (WebAuthn) is core,
 deliberately; baseline security hygiene belongs in core."

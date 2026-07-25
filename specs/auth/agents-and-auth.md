@@ -22,7 +22,7 @@ splitting them at a seam:
 - **Resonant IQ's own deployment, and paying customers:** want Google SSO, magic-link,
   SAML/enterprise SSO. These are **licensed marketplace modules**, not part of the free
   core. **Passkey login (WebAuthn) is the one exception — it is core, not a marketplace
-  module:** security hygiene is always free (module catalog §1,  2026-07-18); when
+  module:** security hygiene is always free (decided 2026-07-18); when
   built, it ships as a second **core** auth provider on this same seam (catalog §2.2),
   never through the marketplace path below. It is not yet built in this increment (§11).
 
@@ -513,7 +513,7 @@ is retired (§8).
 - **No marketplace providers** (Google SSO, magic-link, SAML/enterprise SSO) — only the seam
   + the free `password` provider. Premium modules wait on the §7 exception text.
 - **No passkey provider either** — passkey (WebAuthn) is core, not a marketplace module
-  (module catalog §1/§2.2), but it is not yet built in this increment. It lands later
+  (the free-core line, decided 2026-07-18), but it is not yet built in this increment. It lands later
   as a second **core** auth provider on the §4 seam, wired in `root.ts` alongside
   `PasswordAuthProvider`, not through the marketplace path.
 - **No entitlement/licensing machinery** — separate marketplace infrastructure.
