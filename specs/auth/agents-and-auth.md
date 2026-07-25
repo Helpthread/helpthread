@@ -547,8 +547,8 @@ is retired (§8).
 
 - **draft.6 (2026-07-19, catalog reconciliation):** flagged by CodeRabbit on PR #82 —
   this spec (written 2026-07-18, pre-dating the module catalog) classified passkey login as
-  a marketplace-only add-on; the catalog decision the same day (`specs/modules/catalog.md`
-  §1/§2.2) made passkey login core, security hygiene, never paid. Reclassified
+  a marketplace-only add-on; the catalog decision the same day made passkey login core,
+  security hygiene, never paid. Reclassified
   throughout (§1, §3.2, §11): passkey is core, just not yet built — it will land as a second
   **core** auth provider on the §4 seam, not a marketplace module. Google SSO, magic-link,
   and SAML/enterprise SSO remain marketplace, unchanged. The provider-abstraction

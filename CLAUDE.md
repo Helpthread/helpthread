@@ -2,12 +2,6 @@
 
 Helpthread is open-source support infrastructure (AGPL-3.0 core; a Resonant IQ, Inc. product). **CHARTER.md is the constitution** — read it before substantive work.
 
-## Delegation ladder
-
-Shared rule (mirrored from the resonantiq canonical doc) — imported so it loads in every session that reads this repo.
-
-@.claude/rules/delegation-ladder.md
-
 ## References & provenance
 
 - Helpthread is an independent implementation. No code copied or derived from copyleft-licensed projects, ever.
@@ -37,7 +31,6 @@ Adapted in our own words from Andrej Karpathy's observations on LLM coding pitfa
 
 - Branches: `<type>/<kebab-description>`. PRs to `main`; `main` stays releasable. No direct pushes to `main` after Phase 0.
 - Commit author email stays the noreply address already set in `.git/config` (GitHub email-privacy blocks the real one).
-- Delegate work to subagents on the cheapest capable model: Haiku for mechanical, Sonnet for standard implementation, top-tier only for correctness-critical reasoning.
 - Mail semantics are sacred under the charter's "Conversation integrity" rule: changes require fixture-proven equivalence or explicit written justification. Verify against reality before claiming done; put the evidence in the PR.
 
 ## Vocabulary

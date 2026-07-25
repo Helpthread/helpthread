@@ -24,9 +24,8 @@ does not do so. Out-of-process integrations generally do not need the exception.
 
 See:
 
-- [module API exception](module-api-exception.md);
-- [commercial module license](module-commercial-license.md); and
-- [module catalog](../specs/modules/catalog.md).
+- [module API exception](module-api-exception.md); and
+- [commercial module license](module-commercial-license.md).
 
 ## Provenance and trademarks
 

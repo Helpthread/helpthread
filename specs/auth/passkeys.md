@@ -31,7 +31,7 @@ core/marketplace boundary: "Passkey login (WebAuthn) is the one
 exception — it is core, not a marketplace module... it ships as a second
 **core** auth provider on this same seam (catalog §2.2), never through the
 marketplace path." This matches the module catalog's own free-core line
-(`specs/modules/catalog.md` §1, §2.2 — accepted 2026-07-18):
+(accepted 2026-07-18):
 "Security hygiene is always free: passkey login (WebAuthn) is core,
 deliberately; baseline security hygiene belongs in core."
 
@@ -1155,7 +1155,7 @@ recollection of the package's reputation.
 - **draft.4 (2026-07-19, engine-implementation review):** Corrects a
   core-vs-marketplace classification error that survived drafts 1–3
   unnoticed (§1, §12). Passkey login is core, not a licensed marketplace
-  module — `specs/modules/catalog.md` §1/§2.2 decided this on 2026-07-18
+  module — the module catalog decided this on 2026-07-18
   (the day before draft.1), and `agents-and-auth.md` §1 already
   carries the corrected framing as of PR #85 (merged 2026-07-19,
   the same day as draft.1–3 were written). This spec's own "licensed

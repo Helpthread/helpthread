@@ -6,8 +6,8 @@
 >
 > **Gate:** must clear review **before public launch** — specifically before Stripe is
 > switched to live mode and the marketplace takes real money. It does **not** gate
-> test-mode dogfood, where a placeholder license suffices (`specs/modules/
-> marketplace-v1.md` §8). On adoption, this text **replaces the `All rights reserved`
+> test-mode dogfood, where a placeholder license suffices. On adoption, this text
+> **replaces the `All rights reserved`
 > placeholder `LICENSE`** in each paid-module repository.
 
 ---

@@ -22,8 +22,7 @@ Top-bar utilities (scope-neutral): notifications bell (event feed), global searc
 ## 2. Surface index
 
 Observed 2026-07-18 and subsequently made Helpthread-specific. The module catalog—not
-another product's packaging—defines what belongs in core and what is paid. See
-`specs/modules/catalog.md`.
+another product's packaging—defines what belongs in core and what is paid.
 
 - **Dashboard (home)** — multi-mailbox card grid: one card per mailbox with folder counts
   (Unassigned/Mine/Starred/Drafts/Assigned + last-activity dates) and quick actions
@@ -74,5 +73,5 @@ another product's packaging—defines what belongs in core and what is paid. See
 
 - **2026-07-18**: initial version from TJ's fidelity review (screenshot index +
   three-scope rule + module caveat). Roadmap tickets for deferred surfaces filed under HT.
-- **2026-07-18**: §2's open core-vs-module calls resolved by
-  `specs/modules/catalog.md`; this doc keeps the observations, that one keeps the line.
+- **2026-07-18**: §2's open core-vs-module calls resolved by the module catalog; this
+  doc keeps the observations, the catalog keeps the line.

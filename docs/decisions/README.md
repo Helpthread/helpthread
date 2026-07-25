@@ -32,8 +32,8 @@ interfaces and integration hooks; authoring, publishing, presentation, search
 experiences, and management remain module capabilities.
 
 This was not a retroactive paywall because no knowledge-base capability had shipped in
-the free core. The maintained product boundary lives in
-[specs/modules/catalog.md](../../specs/modules/catalog.md).
+the free core. The charter's floor still governs: nothing already free in the core is
+paywalled later.
 
 ## 2026-07-19 — Marketplace moved to public launch
 
@@ -48,7 +48,9 @@ through Resonant IQ's own installation path. It remains additive: the AGPL core 
 marketplace credentials, licensing does not control runtime execution, and commercial
 modules receive no private core capabilities.
 
-See [specs/modules/marketplace-v1.md](../../specs/modules/marketplace-v1.md).
+The public contract module authors build against is the
+[module substrate](../../specs/modules/substrate-v1.md); commercial distribution
+mechanics are maintained by Resonant IQ outside this repository.
 
 ## 2026-07-23 — Managed-hosting proposal rejected
 

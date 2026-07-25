@@ -6,8 +6,8 @@ phrase *plugin exception* (the AGPL §7 additional permission, named in the
 Classpath-exception tradition) and in charter quotations.
 
 Status: **draft for TJ review**. Governed by docs/history/CHARTER-v1.md §3/§4 (module boundary,
-out-of-process preference, zero privileged first-party access) and
-`specs/modules/catalog.md`  §4's build sequence. This spec is also raw material
+out-of-process preference, zero privileged first-party access) and the module
+catalog's build sequence. This spec is also raw material
 for the §7 plugin-exception text: the exception gets drafted against this real,
 shipped API — before the first external contribution merges.
 
