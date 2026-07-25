@@ -1,0 +1,129 @@
+name: PR verdict
+
+# High-blast-radius changes — the constitution, legal text, licensing and pricing —
+# must carry a verdict and a decision-provenance table in the PR body.
+#
+# Why this is a CI check and not a documented convention: on 2026-07-20 an audit of
+# PRs #87-#100 found nine normative decisions merged that TJ never made, including two
+# amendments to CHARTER.md. Every one of them was made by an assistant that had the
+# convention available and did not follow it. Instructions drift; a required check
+# does not.
+#
+# The rule this enforces lives at ~/.claude/rules/pr-verdict.md.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verdict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Does this PR touch the high-risk tier?
+        id: tier
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || git diff --name-only "origin/${{ github.event.pull_request.base.ref }}...HEAD")
+          echo "Changed files:"; echo "$CHANGED"
+
+          # The tier: constitution, legal text, and the specs that carry licensing,
+          # pricing, and the free/paid line.
+          # Files that carry a promise, a licensing boundary, or money.
+          HIGH_RISK=$(echo "$CHANGED" | grep -E \
+            -e '^CHARTER\.md$' \
+            -e '^README\.md$' \
+            -e '^legal/' \
+            -e '^LICENSE' \
+            -e '^specs/modules/' \
+            || true)
+
+          if [ -n "$HIGH_RISK" ]; then
+            echo "high_risk=true" >> "$GITHUB_OUTPUT"
+            { echo 'files<<EOF'; echo "$HIGH_RISK"; echo 'EOF'; } >> "$GITHUB_OUTPUT"
+          else
+            echo "high_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require a verdict and decision provenance
+        if: steps.tier.outputs.high_risk == 'true'
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          FILES: ${{ steps.tier.outputs.files }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; FAILED=1; }
+          FAILED=0
+
+          echo "This PR touches the high-risk tier:"
+          echo "$FILES"
+          echo
+
+          # 1. A verdict marker, one of exactly three.
+          if ! grep -qE '(SAFE TO MERGE|NEEDS YOUR DECISION|DO NOT MERGE)' <<<"$BODY"; then
+            fail "No verdict found. The PR body must open with one of: 🟢 SAFE TO MERGE / 🟡 NEEDS YOUR DECISION / 🔴 DO NOT MERGE."
+          fi
+
+          # 2. A decision-provenance section.
+          if ! grep -qiE '^#+[[:space:]]*Decision provenance' <<<"$BODY"; then
+            fail "No '## Decision provenance' section. Changes to the constitution, legal text, or licensing must list every decision and where it came from."
+          fi
+
+          # 3. Every provenance row is either quoted to TJ or marked INFERRED.
+          #    A row citing TJ without quote marks is the exact failure this gate exists for.
+          #    sed form is BRE-portable (BSD and GNU) — `\+` is a GNU extension.
+          if grep -qiE '^#{1,}[[:space:]]*Decision provenance' <<<"$BODY"; then
+            # Stop at the next heading — reading to end-of-body swallows any later
+            # table (a test-results table, for instance) and parses it as provenance rows.
+            ROWS=$(awk '/^#+[[:space:]]*[Dd]ecision provenance/{f=1;next} f&&/^#+[[:space:]]/{exit} f' <<<"$BODY" \
+                   | grep -E '^\|' | grep -vE '^\|[[:space:]]*[-:[:space:]]+\|' | tail -n +2 || true)
+            if [ -z "$ROWS" ]; then
+              fail "The 'Decision provenance' section has no rows. If this PR encodes no decisions, say so in a row ('None — no new decisions')."
+            else
+              while IFS= read -r row; do
+                [ -z "$row" ] && continue
+                if grep -qiE 'INFERRED|no authorization|none —|no new decision' <<<"$row"; then continue; fi
+                # A sourced row must contain an actual quotation.
+                if ! grep -qE '["“”]' <<<"$row"; then
+                  fail "Provenance row has no quote and is not marked INFERRED: ${row}"
+                fi
+              done <<<"$ROWS"
+            fi
+          fi
+
+          # 4. Attribution without a quote, anywhere in the body.
+          #    "your decision" is deliberately NOT in this list — it matches the
+          #    "NEEDS YOUR DECISION" verdict marker itself.
+          while IFS= read -r line; do
+            grep -qE '["“”]' <<<"$line" && continue
+            grep -qiE 'INFERRED' <<<"$line" && continue
+            fail "Attributes a decision to TJ without quoting him: ${line}"
+          done < <(grep -iE "(per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ|CONFIRMED by TJ|SIGNED OFF by TJ|\(TJ,? [0-9]{4}-|, TJ [0-9]{4}-)" <<<"$BODY" || true)
+
+          # 5. A green verdict must show the review bots were adjudicated.
+          #    Bots review AFTER a PR opens, so nothing can honestly be green at open
+          #    time. This blocks the failure mode where a PR is marked green before
+          #    CodeRabbit has run, or against a commit that has since been replaced.
+          if grep -qE 'SAFE TO MERGE' <<<"$BODY"; then
+            if ! grep -qiE '(CodeRabbit|Codex|review bot)s?[[:space:]]*:' <<<"$BODY"; then
+              fail "Verdict is SAFE TO MERGE but no review-bot adjudication line is present. Add one line stating what the bots found and how each finding was resolved — e.g. 'CodeRabbit: 7 findings, 5 real and fixed, 2 wrong (misread the token scope).' If a bot has not run on the current head yet, the verdict cannot be green."
+            fi
+          fi
+
+          if [ "$FAILED" = "1" ]; then
+            echo
+            echo "See ~/.claude/rules/pr-verdict.md for the protocol."
+            exit 1
+          fi
+          echo "Verdict block present and every decision is sourced or marked INFERRED."
