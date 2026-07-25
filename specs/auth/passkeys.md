@@ -1011,7 +1011,7 @@ footgun someone has to remember to re-derive later.
   screen: the passkey add/rename/revoke controls on `AgentProfileScreen.tsx`
   (`/manage/agents/{id}`) and the login screen's conditional-UI/fallback-button
   treatment are new designed surfaces with no existing Claude Design
-  prototype, requiring TJ's sign-off before or alongside build, exactly as
+  prototype, requiring the maintainer's sign-off before or alongside build, exactly as
   agents-and-auth.md §7 already requires for its own new screens.
 - **Changing `HELPTHREAD_UI_BASE_URL`'s host silently invalidates every
   existing passkey.** `rpId` is derived from it (§3); WebAuthn credentials
@@ -1096,7 +1096,7 @@ performed against the actual published artifacts (npm registry, GitHub
 API, unpkg-hosted type declarations), not asserted from training-data
 recollection of the package's reputation.
 
-## 14. Decision points for TJ
+## 14. Decision points for the maintainer
 
 1. **Credential storage: new `webauthn_credentials` table**, not rows in
    `agent_auth_identities` — a deliberate departure from what agents-and-

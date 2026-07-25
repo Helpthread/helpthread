@@ -1,8 +1,7 @@
 # Helpthread Commercial Module License v1.0 (DRAFT for counsel review)
 
-> **Status: DRAFT for counsel review (TJ).** Drafted 2026-07-19. This is a faithful
-> first draft encoding already-made product decisions; it is not legal advice and has
-> not been reviewed by outside counsel — TJ is the reviewing counsel.
+> **Status: DRAFT — pending outside counsel review.** Drafted 2026-07-19. This is a
+> faithful first draft encoding already-made product decisions; it is not legal advice.
 >
 > **Gate:** must clear review **before public launch** — specifically before Stripe is
 > switched to live mode and the marketplace takes real money. It does **not** gate

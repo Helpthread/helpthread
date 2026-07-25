@@ -1,8 +1,8 @@
 # Provenance & AI-Assisted Development Policy (DRAFT)
 
-> **Status: DRAFT for counsel review (TJ).** Drafted 2026-07-19. This is a faithful
-> first draft codifying practices already stated in the [legal guide](README.md); it is not legal advice
-> and has not been reviewed by outside counsel — TJ is the reviewing counsel.
+> **Status: DRAFT — pending outside counsel review.** Drafted 2026-07-19. This is a
+> faithful first draft codifying practices already stated in the
+> [legal guide](README.md); it is not legal advice.
 >
 > **This document states policy and process — the commitments and practices the project
 > works to — not warranties or factual guarantees, and it creates no rights in any third

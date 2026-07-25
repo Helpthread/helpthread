@@ -1,8 +1,7 @@
 # Helpthread Trademark Policy (DRAFT)
 
-> **Status: DRAFT for counsel review (TJ).** Drafted 2026-07-19. This is a faithful
-> first draft encoding already-made decisions; it is not legal advice and has not been
-> reviewed by outside counsel — TJ is the reviewing counsel.
+> **Status: DRAFT — pending outside counsel review.** Drafted 2026-07-19. This is a
+> faithful first draft encoding already-made decisions; it is not legal advice.
 >
 > **Gate:** must clear review **before public launch** (the [legal guide](README.md) lists "the
 > trademark policy (before public launch)" among the counsel paperwork in deadline
@@ -172,7 +171,8 @@ beyond those described here. Write to **trademarks@resonantiq.app**.
   defaults, backports = not material).
 - **Placeholders.** The contact route (section 7) is set to **trademarks@resonantiq.app**
   (mailbox alias to be created in Workspace before launch — tracked as a launch-gate action). Any specific registered-mark
-  notices (®/™ status, registration numbers) are not in the repo and are left for TJ.
+  notices (®/™ status, registration numbers) are not in the repo and are left to the
+  maintainer.
 - **No new policy invented.** This encodes the allow/require list in the decided scope;
   it does not add a formal trademark-license program, logo-usage spec, or enforcement
   procedure beyond the "ask us" route.
