@@ -70,9 +70,12 @@ jobs:
           echo "$FILES"
           echo
 
-          # 1. A verdict marker, one of exactly three.
-          if ! grep -qE '(SAFE TO MERGE|NEEDS YOUR DECISION|DO NOT MERGE)' <<<"$BODY"; then
-            fail "No verdict found. The PR body must open with one of: 🟢 SAFE TO MERGE / 🟡 NEEDS YOUR DECISION / 🔴 DO NOT MERGE."
+          # 1. A verdict marker, one of exactly three, on the FIRST non-empty line.
+          #    Matching anywhere would let a PR bury the verdict under arbitrary prose —
+          #    the whole point is that it is the first thing read.
+          FIRST_LINE=$(grep -m1 -vE '^[[:space:]]*$' <<<"$BODY" || true)
+          if ! grep -qE '(SAFE TO MERGE|NEEDS YOUR DECISION|DO NOT MERGE)' <<<"$FIRST_LINE"; then
+            fail "The PR body's first line must be the verdict: 🟢 SAFE TO MERGE / 🟡 NEEDS YOUR DECISION / 🔴 DO NOT MERGE. Found: ${FIRST_LINE:0:80}"
           fi
 
           # 2. A decision-provenance section.
@@ -93,7 +96,10 @@ jobs:
             else
               while IFS= read -r row; do
                 [ -z "$row" ] && continue
-                if grep -qiE 'INFERRED|no authorization|none —|no new decision' <<<"$row"; then continue; fi
+                # Only an explicit INFERRED label, or an explicit no-decision row, excuses a
+                # missing quote. 'no authorization' alone does NOT — the protocol requires
+                # the INFERRED label itself so the disclosure is unmissable.
+                if grep -qiE 'INFERRED|none —|no new decision' <<<"$row"; then continue; fi
                 # A sourced row must contain an actual quotation.
                 if ! grep -qE '["“”]' <<<"$row"; then
                   fail "Provenance row has no quote and is not marked INFERRED: ${row}"
@@ -109,7 +115,7 @@ jobs:
             grep -qE '["“”]' <<<"$line" && continue
             grep -qiE 'INFERRED' <<<"$line" && continue
             fail "Attributes a decision to TJ without quoting him: ${line}"
-          done < <(grep -iE "(per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ|CONFIRMED by TJ|SIGNED OFF by TJ|\(TJ,? [0-9]{4}-|, TJ [0-9]{4}-)" <<<"$BODY" || true)
+          done < <(grep -iE "(TJ's (decision|call|choice)|per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ|CONFIRMED by TJ|SIGNED OFF by TJ|\(TJ,? [0-9]{4}-|, TJ [0-9]{4}-)" <<<"$BODY" || true)
 
           # 5. A green verdict must show the review bots were adjudicated.
           #    Bots review AFTER a PR opens, so nothing can honestly be green at open
