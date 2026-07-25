@@ -111,11 +111,18 @@ jobs:
           # 4. Attribution without a quote, anywhere in the body.
           #    "your decision" is deliberately NOT in this list — it matches the
           #    "NEEDS YOUR DECISION" verdict marker itself.
+          #
+          #    Backticked code spans are stripped before matching: a doc that
+          #    *discusses* these patterns (`TJ's decision` as a literal example, in a
+          #    checklist or an adjudication table) is not attributing anything. Without
+          #    this, any text explaining the rule trips the rule — which is exactly how
+          #    this gate first failed, on its own PR body.
+          BODY_NO_CODE=$(sed 's/`[^`]*`//g' <<<"$BODY")
           while IFS= read -r line; do
             grep -qE '["“”]' <<<"$line" && continue
             grep -qiE 'INFERRED' <<<"$line" && continue
             fail "Attributes a decision to TJ without quoting him: ${line}"
-          done < <(grep -iE "(TJ's (decision|call|choice)|per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ|CONFIRMED by TJ|SIGNED OFF by TJ|\(TJ,? [0-9]{4}-|, TJ [0-9]{4}-)" <<<"$BODY" || true)
+          done < <(grep -iE "(TJ's (decision|call|choice)|per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ|CONFIRMED by TJ|SIGNED OFF by TJ|\(TJ,? [0-9]{4}-|, TJ [0-9]{4}-)" <<<"$BODY_NO_CODE" || true)
 
           # 5. A green verdict must show the review bots were adjudicated.
           #    Bots review AFTER a PR opens, so nothing can honestly be green at open
