@@ -123,5 +123,8 @@ practices above are intended to support the project's ability to:
 
 ## 8. AI-assisted development
 
-Helpthread is built with substantial AI assistance. The provenance risk specific to
-AI-assisted development is assessed and managed under internal counsel review.
+Helpthread is built with substantial AI assistance. The provenance rules in this policy
+apply in full to AI-assisted work: the same prohibition on copyleft-derived code, the
+same license verification, the same human design and review before merge, and the same
+DCO sign-off. Provenance risk specific to AI assistance is assessed and managed as part
+of that practice.
