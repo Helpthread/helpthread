@@ -55,5 +55,5 @@ The invariant underneath both directions is that **a difference between the two 
 ## Ecosystem
 
 - **This repo**: engineering truth — charter, specs, ADRs, code.
-- **Confluence (Helpthread space)**: business layer — decision log, counsel checklist, status for stakeholders (Tito reads here).
+- **A private internal space**: business layer — decision log, counsel checklist, stakeholder status. Its location and contents are not recorded here.
 - A `CLAUDE.local.md` (gitignored) may carry machine-local working notes; it is never committed.

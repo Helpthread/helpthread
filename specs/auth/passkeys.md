@@ -225,12 +225,12 @@ anything the caller supplies would let an attacker simply assert the origin
 they want checked against, collapsing the protection to nothing.
 
 - **`rpId`** = the hostname (no scheme, no port) of `HELPTHREAD_UI_BASE_URL`
-  — e.g. `inbox.resonantiq.app`, the deployed Agent Inbox's own host.
-  **Not** `desk.resonantiq.app`, the ENGINE's host — draft.1's worked
+  — e.g. `inbox.example.com`, the deployed Agent Inbox's own host.
+  **Not** `desk.example.com`, the ENGINE's host — draft.1's worked
   example used the wrong one. This is not a cosmetic mistake: WebAuthn
   ceremonies run in whatever browser tab is actually showing the login
   page, so the real, browser-reported origin is always the UI's,
-  `inbox.resonantiq.app`, never the engine's — the engine is never loaded
+  `inbox.example.com`, never the engine's — the engine is never loaded
   in an Agent's browser at all. If `rpId`/`expectedOrigin` were ever
   misconfigured to the engine's host instead, `clientDataJSON.origin` would
   never match what the RP expects, and every single ceremony — registration
@@ -1203,8 +1203,8 @@ recollection of the package's reputation.
   patch. The challenge-row volume claim (§2.2) is corrected from "low,
   interactive-event-scale" (false — a row mints on every login-page mount)
   to an honest statement plus an opportunistic-purge fix, no cron. §3's
-  worked example corrected (`inbox.resonantiq.app`, the UI's own host — not
-  `desk.resonantiq.app`, the engine's), and a `localhost`-only,
+  worked example corrected (`inbox.example.com`, the UI's own host — not
+  `desk.example.com`, the engine's), and a `localhost`-only,
   no-IP-literal dev carve-out added. §2.1's justification corrected —
   cardinality was never a valid reason to avoid `agent_auth_identities`
   (nothing there restricts multiple `passkey` rows); the departure is now

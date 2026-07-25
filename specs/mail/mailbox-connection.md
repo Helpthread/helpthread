@@ -66,7 +66,7 @@ Note the field is a latent hazard rather than a clean equivalence: the webhook w
 
 Consequence: **push only makes the same job run sooner.** Making scheduled fetch a fully-supported intake path (rather than only a reconciliation backstop) is a scheduling change, not new fetch code. The lease around `history.list` (`claimReconcileLease`) already prevents concurrent runs from double-fetching.
 
-**IMAP + app password works.** Probed `help@resonantiq.app` directly: authenticated, `SELECT INBOX` (`UIDVALIDITY=1`, `UIDNEXT=32`, `EXISTS=29`), `UID FETCH BODY.PEEK[]` returned raw RFC822 for five messages in 1174 ms, connection closed on exit. A real reply's `References` chain carried the `ht.ht1.…` signed reply token intact — the CHARTER.md §2 threading anchor holds on this transport.
+**IMAP + app password works.** Probed a live Workspace mailbox directly: authenticated, `SELECT INBOX` (`UIDVALIDITY=1`, `UIDNEXT=32`, `EXISTS=29`), `UID FETCH BODY.PEEK[]` returned raw RFC822 for five messages in 1174 ms, connection closed on exit. A real reply's `References` chain carried the `ht.ht1.…` signed reply token intact — the CHARTER.md §2 threading anchor holds on this transport.
 
 **SMTP + app password works.** Same credential, `smtp.gmail.com:465`, `AUTH PLAIN`, 1833 ms. Our own `Message-ID` was preserved verbatim, confirmed by an `rfc822msgid:` lookup at the recipient.
 

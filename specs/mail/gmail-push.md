@@ -118,7 +118,7 @@ Then, from the resolved mailbox and its stored cursor:
 distinguish "a message that arrived" from "a message this mailbox just sent" — Gmail
 surfaces the mailbox's own outbound sends as `messagesAdded` entries exactly like a
 genuine inbound message. Reconcile ingested the desk's own just-sent reply as a brand-new
-`from help@resonantiq.app` conversation; every Agent reply was spawning a ghost
+`from <the connected mailbox>` conversation; every Agent reply was spawning a ghost
 conversation. This is a transport-level gap, not a mail-semantics one — it belongs here,
 not in inbound-ingestion.md's own (separate) loop-suppression rule (§5 there), which
 guards a different case (a verifiable Message-ID/reply-token correlation showing OUR mail
