@@ -66,12 +66,31 @@ export interface AppConfig {
   gmailOAuthClientId: string
   /** The Internal OAuth app's client secret. */
   gmailOAuthClientSecret: string
-  /** Cloud Pub/Sub topic `watch()` arms notifications to (`projects/{project}/topics/{topic}`). */
-  gmailPubsubTopic: string
-  /** The exact push subscription the webhook accepts (`projects/{project}/subscriptions/{name}`). */
-  gmailPubsubSubscription: string
-  /** The push subscription's OIDC service-account email (the JWT `email` claim the webhook matches). */
-  gmailPushServiceAccount: string
+  /**
+   * Gmail push configuration — OPTIONAL as of HT-94.
+   *
+   * Inbound mail reaches the engine either by push webhook or by the bounded
+   * scheduled fetch (CHARTER.md §2, amended 2026-07-20). Push is the
+   * lower-latency option; the scheduled sweep is the transport that always
+   * runs. An operator who has not stood up a Pub/Sub topic — which is the
+   * majority of the Google Cloud setup burden, and the half that fails
+   * silently — leaves all three vars unset and the engine runs on the sweep
+   * alone.
+   *
+   * All three travel as ONE object rather than three optional strings so a
+   * half-configured push is unrepresentable: you cannot arm `watch()` against
+   * a topic without also being able to authenticate the resulting push, and a
+   * config that permits that shape invites exactly the silent-failure mode
+   * this amendment set out to remove.
+   */
+  gmailPush?: {
+    /** Cloud Pub/Sub topic `watch()` arms notifications to (`projects/{project}/topics/{topic}`). */
+    topic: string
+    /** The exact push subscription the webhook accepts (`projects/{project}/subscriptions/{name}`). */
+    subscription: string
+    /** The push subscription's OIDC service-account email (the JWT `email` claim the webhook matches). */
+    serviceAccount: string
+  }
   /** The 32-byte AES-256 key decoded from `HELPTHREAD_TOKEN_ENC_KEY` — encrypts stored refresh tokens at rest. */
   tokenEncryptionKey: Buffer
   /** The Agent-inbox service Bearer token every API request is checked against. */
@@ -153,9 +172,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const blobBucket = errors.requireString(env, 'HELPTHREAD_BLOB_BUCKET')
   const gmailOAuthClientId = errors.requireString(env, 'GMAIL_OAUTH_CLIENT_ID')
   const gmailOAuthClientSecret = errors.requireString(env, 'GMAIL_OAUTH_CLIENT_SECRET')
-  const gmailPubsubTopic = errors.requireString(env, 'GMAIL_PUBSUB_TOPIC')
-  const gmailPubsubSubscription = errors.requireString(env, 'GMAIL_PUBSUB_SUBSCRIPTION')
-  const gmailPushServiceAccount = errors.requireString(env, 'GMAIL_PUSH_SERVICE_ACCOUNT')
+  const gmailPush = resolveGmailPush(env, errors)
   const apiToken = errors.requireMinLength(env, 'HELPTHREAD_API_TOKEN', MIN_API_TOKEN_LENGTH)
   const signingSecret = errors.requireMinLength(
     env,
@@ -182,9 +199,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     blobBucket: blobBucket as string,
     gmailOAuthClientId: gmailOAuthClientId as string,
     gmailOAuthClientSecret: gmailOAuthClientSecret as string,
-    gmailPubsubTopic: gmailPubsubTopic as string,
-    gmailPubsubSubscription: gmailPubsubSubscription as string,
-    gmailPushServiceAccount: gmailPushServiceAccount as string,
+    ...(gmailPush !== undefined ? { gmailPush } : {}),
     tokenEncryptionKey: tokenEncryptionKey as Buffer,
     apiToken: apiToken as string,
     signingSecret: signingSecret as string,
@@ -282,6 +297,55 @@ function isLoopbackHost(hostname: string): boolean {
     hostname === '[::1]' ||
     hostname === '::1'
   )
+}
+
+/**
+ * Resolve the OPTIONAL Gmail push trio, all-or-nothing (HT-94).
+ *
+ * Three outcomes, and only three:
+ * - all three unset  → `undefined`; the engine runs on the scheduled sweep
+ *   alone, and nothing in the Google Cloud Pub/Sub setup is required.
+ * - all three set    → the configured object; push is armed and the webhook
+ *   authenticates against it, exactly as before this change.
+ * - some subset set  → a config ERROR naming the missing vars. A partially
+ *   configured push is never silently treated as "off": an operator who set a
+ *   topic and forgot the service account has a broken push they believe works,
+ *   which is the precise failure this amendment exists to eliminate. Failing
+ *   at boot is the whole point of this module (see `loadConfig`'s aggregation).
+ */
+function resolveGmailPush(
+  env: NodeJS.ProcessEnv,
+  errors: ConfigErrors,
+): { topic: string; subscription: string; serviceAccount: string } | undefined {
+  const vars = {
+    topic: 'GMAIL_PUBSUB_TOPIC',
+    subscription: 'GMAIL_PUBSUB_SUBSCRIPTION',
+    serviceAccount: 'GMAIL_PUSH_SERVICE_ACCOUNT',
+  } as const
+
+  const present: Partial<Record<keyof typeof vars, string>> = {}
+  const missing: string[] = []
+  for (const [key, name] of Object.entries(vars) as [keyof typeof vars, string][]) {
+    const raw = env[name]
+    if (raw === undefined || raw.trim().length === 0) missing.push(name)
+    else present[key] = raw
+  }
+
+  if (missing.length === Object.keys(vars).length) return undefined
+  if (missing.length > 0) {
+    errors.add(
+      `Gmail push is partially configured: ${missing.join(', ')} ${
+        missing.length === 1 ? 'is' : 'are'
+      } unset. Set all of ${Object.values(vars).join(', ')} to enable push, or none of them to run on the scheduled fetch alone.`,
+    )
+    return undefined
+  }
+
+  return {
+    topic: present.topic as string,
+    subscription: present.subscription as string,
+    serviceAccount: present.serviceAccount as string,
+  }
 }
 
 function resolveUiBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | undefined {

@@ -59,6 +59,10 @@ import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
 import { createGmailOAuthTokenService } from '../mail/gmail-oauth.js'
 import { createGmailReconcileHandler } from '../mail/gmail-reconcile.js'
 import {
+  type GmailReconcileSweepDeps,
+  runGmailReconcileSweep,
+} from '../mail/gmail-reconcile-sweep.js'
+import {
   type GmailWatchMaintenanceDeps,
   runGmailWatchMaintenance,
 } from '../mail/gmail-watch-maintenance.js'
@@ -270,18 +274,26 @@ export async function buildApp(
   // --- Gmail push webhook deps. The JWKS key source is built ONCE here and
   // reused across every request (its fetch cache only caches if reused — see
   // createGooglePushKeySource's doc). ---
-  const gmailPush: GmailPushDeps = {
-    verifySignature: createGmailPushSignatureVerifier(
-      {
-        endpointUrl: `${config.publicBaseUrl}/api/v1/inbound/gmail`,
-        serviceAccountEmail: config.gmailPushServiceAccount,
-      },
-      createGooglePushKeySource(),
-    ),
-    subscription: config.gmailPubsubSubscription,
-    mailboxes: mailboxStore,
-    queue,
-  }
+  // Built ONLY when push is configured (HT-94). With `config.gmailPush`
+  // absent there is no subscription to authenticate against and no OIDC
+  // service account to match, so the webhook must not be routable at all —
+  // an endpoint that accepts deliveries it cannot verify is worse than one
+  // that isn't there.
+  const gmailPush: GmailPushDeps | undefined =
+    config.gmailPush === undefined
+      ? undefined
+      : {
+          verifySignature: createGmailPushSignatureVerifier(
+            {
+              endpointUrl: `${config.publicBaseUrl}/api/v1/inbound/gmail`,
+              serviceAccountEmail: config.gmailPush.serviceAccount,
+            },
+            createGooglePushKeySource(),
+          ),
+          subscription: config.gmailPush.subscription,
+          mailboxes: mailboxStore,
+          queue,
+        }
 
   // --- Gmail connect/consent service. ---
   const connectService = createGmailConnectService({
@@ -289,7 +301,9 @@ export async function buildApp(
     clientId: config.gmailOAuthClientId,
     clientSecret: config.gmailOAuthClientSecret,
     redirectUri: `${config.publicBaseUrl}/api/v1/inbound/gmail/callback`,
-    topicName: config.gmailPubsubTopic,
+    // Absent when push isn't configured: connect then skips the watch() arm
+    // and seeds the baseline from getProfile() (HT-94, gmail-connect.ts step 4).
+    ...(config.gmailPush !== undefined ? { topicName: config.gmailPush.topic } : {}),
     scopes: GMAIL_SCOPES,
     keyring,
     mailboxStore,
@@ -390,15 +404,29 @@ export async function buildApp(
       webhookDeliveryHandler(message as QueueMessage<WebhookDeliveryJob>),
   }
 
-  // --- Watch-maintenance deps (daily re-arm + sweep). ---
-  const watchMaintenanceDeps: GmailWatchMaintenanceDeps = {
-    tokenService,
+  // --- Reconciliation-sweep deps (HT-94). Deliberately NO tokenService and no
+  // watch client: the sweep reads a cursor and enqueues, making no Gmail call
+  // of its own, which is what makes every-minute cadence affordable. ---
+  const reconcileSweepDeps: GmailReconcileSweepDeps = {
     mailboxStore,
     watchStateStore,
     queue,
-    createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
-    topicName: config.gmailPubsubTopic,
   }
+
+  // --- Watch-maintenance deps (daily re-arm). Only meaningful when push is
+  // configured — with no topic there is no watch to re-arm. The reconciliation
+  // sweep is NOT part of this any more (HT-94): it runs on its own every-minute
+  // cron as the primary intake, independent of whether push exists. ---
+  const watchMaintenanceDeps: GmailWatchMaintenanceDeps | undefined =
+    config.gmailPush === undefined
+      ? undefined
+      : {
+          tokenService,
+          mailboxStore,
+          watchStateStore,
+          createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
+          topicName: config.gmailPush.topic,
+        }
 
   return createAppHandler({
     inboxApi,
@@ -438,7 +466,32 @@ export async function buildApp(
       }
       return report
     },
-    runWatchMaintenance: () => runGmailWatchMaintenance(watchMaintenanceDeps),
+    // The primary inbound transport (HT-94) — runs regardless of whether push
+    // is configured, since push only makes the SAME reconcile job run sooner.
+    // Quiet ticks are logged unlike the drains': a sweep that stops sweeping is
+    // an intake outage, and its every-minute silence is the only signal.
+    runReconcileSweep: async () => {
+      const report = await runGmailReconcileSweep(reconcileSweepDeps)
+      console.info(JSON.stringify({ event: 'reconcile_sweep', ...report }))
+      return report
+    },
+    // With push unconfigured there is no watch() to re-arm, so this cron has
+    // nothing to do. It stays ROUTED rather than 404-ing (HT-94): `vercel.json`
+    // is static, so a deployment without push would otherwise log a daily
+    // not-found that reads like a fault. Reporting a skip is the honest,
+    // greppable alternative — and it must never be silent, since a genuinely
+    // broken maintenance cron is the failure mode the runbook's external
+    // monitor exists to catch.
+    runWatchMaintenance: async () => {
+      if (watchMaintenanceDeps === undefined) {
+        const report = { skipped: 'push-not-configured' as const }
+        // Same event name the module itself logs under — one endpoint must not
+        // produce two event names, or a log filter finds half its own history.
+        console.info(JSON.stringify({ event: 'gmail_watch_maintenance', ...report }))
+        return report
+      }
+      return runGmailWatchMaintenance(watchMaintenanceDeps)
+    },
     // Snooze wake pass (HT-77) — a SEPARATE cron tick from the two drains
     // above: flips due `pending`+snoozed conversations back to `active`
     // (`runSnoozeWake`, `src/mail/snooze-wake.ts`) via the SAME
@@ -453,7 +506,8 @@ export async function buildApp(
       }
       return report
     },
-    runHealthCheck: () => runHealthCheck({ db, queue }),
+    runHealthCheck: () =>
+      runHealthCheck({ db, queue, pushConfigured: config.gmailPush !== undefined }),
   })
 }
 
