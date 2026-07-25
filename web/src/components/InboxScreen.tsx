@@ -283,7 +283,7 @@ export function InboxScreen({
         flexDirection: 'column',
       }}
     >
-      <ToolbarBand>
+      <ToolbarBand style={{ paddingRight: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, width: '100%' }}>
           {selected.size > 0 ? (
             <>

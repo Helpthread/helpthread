@@ -8,7 +8,7 @@ export function ConversationRow({ customerName, customerEmail, subject, preview,
   selected = false, onClick }) {
   return (
     <div onClick={onClick}
-      style={{ display: "flex", alignItems: "center", gap: 14, padding: "9px 14px",
+      style={{ display: "flex", alignItems: "center", gap: 14, padding: "9px 24px 9px 14px",
         borderBottom: "1px solid var(--ht-divider)", cursor: "pointer",
         background: selected ? "var(--ht-surface-2)" : "transparent",
         boxShadow: selected ? "inset 2.5px 0 0 var(--ht-accent)" : "none" }}
@@ -40,7 +40,9 @@ export function ConversationRow({ customerName, customerEmail, subject, preview,
           <span style={{ color: "var(--ht-ink-dim)", fontSize: 11 }}>#</span>
           <span style={{ fontWeight: 600, color: "var(--ht-ink-muted)" }}>{number}</span>
         </span>
-        <span style={{ fontSize: 12.5, color: "var(--ht-ink-dim)", fontVariantNumeric: "tabular-nums", minWidth: 96, textAlign: "right" }}>{time}</span>
+        <span style={{ minWidth: 96, textAlign: "right" }}>
+          {time && <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--ht-ink-muted)", background: "var(--ht-surface-2)", borderRadius: 999, padding: "2px 8px", fontVariantNumeric: "tabular-nums" }}>{time}</span>}
+        </span>
       </div>
     </div>
   );
