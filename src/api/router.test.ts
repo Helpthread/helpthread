@@ -283,6 +283,26 @@ describe('matchRoute', () => {
     })
   })
 
+  // --- IMAP/SMTP read-only config (HT-101 Stage 2b) ---------------------------
+
+  it('matches GET /api/v1/mailboxes/{id}/imap-config, extracting mailboxId', () => {
+    expect(matchRoute('GET', '/api/v1/mailboxes/mb-1/imap-config')).toEqual({
+      kind: 'mailbox-imap-config',
+      mailboxId: 'mb-1',
+    })
+    expect(matchRoute('POST', '/api/v1/mailboxes/mb-1/imap-config')).toEqual({
+      kind: 'method-not-allowed',
+      allow: ['GET'],
+    })
+  })
+
+  it('/imap-config never collides with /saved-replies on the same mailbox id', () => {
+    expect(matchRoute('GET', '/api/v1/mailboxes/mb-1/imap-config')).not.toEqual({
+      kind: 'saved-replies-list',
+      mailboxId: 'mb-1',
+    })
+  })
+
   // --- Assistants (HT-70) -----------------------------------------------
 
   it('matches GET/POST /api/v1/assistants', () => {

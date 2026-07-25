@@ -47,6 +47,7 @@ import type {
   ConversationSummary,
   ImapCheckResult,
   ImapConnectionInput,
+  ImapMailboxConfigView,
   MailboxSummary,
   SelfAgent,
   ThreadView,
@@ -388,4 +389,16 @@ export function imapCheckConnection(input: ImapConnectionInput): Promise<ImapChe
 /** `POST /api/v1/inbound/imap/connect` — verify both legs (aborting on the first failure), then persist the mailbox atomically. `422` (`imap_failed`/`smtp_failed`) on a connectivity failure — never echoes the password (module doc). */
 export function imapConnect(input: ImapConnectionInput): Promise<ConnectedMailbox> {
   return request('/api/v1/inbound/imap/connect', { method: 'POST', body: input })
+}
+
+/**
+ * `GET /api/v1/mailboxes/{id}/imap-config` (HT-101 Stage 2b) — the
+ * mailbox-scoped Connection section's read-only view. Admin-only,
+ * acting-Agent header required (same posture as `listMailboxes`). `404`
+ * when the mailbox has no IMAP/SMTP config on file (e.g. a Gmail-connected
+ * mailbox) — callers render the "not connected over IMAP/SMTP" state for
+ * that case, same "not found ≠ error" split `getAgent` etc. already use.
+ */
+export function getMailboxImapConfig(mailboxId: string): Promise<ImapMailboxConfigView> {
+  return request(`/api/v1/mailboxes/${mailboxId}/imap-config`, { actingAgent: true })
 }

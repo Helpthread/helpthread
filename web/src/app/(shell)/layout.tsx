@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { FolderNav } from '../../components/FolderNav'
-import { getMe } from '../../lib/api'
+import { getMe, listMailboxes } from '../../lib/api'
 import { loadFolderCounts } from '../../lib/folder-counts'
 
 /**
@@ -14,15 +14,33 @@ import { loadFolderCounts } from '../../lib/folder-counts'
  * nearest error boundary ABOVE this segment (`app/error.tsx` — a segment's
  * own `error.tsx` never catches its own layout's errors), which routes the
  * SESSION_ERROR digest to a re-login redirect, exactly as intended.
+ *
+ * `mailbox` (HT-101 admin-IA correction) resolves THIS deployment's mailbox
+ * for `FolderNav`'s gear menu: match `HELPTHREAD_SUPPORT_ADDRESS`, falling
+ * back to the first connected mailbox — same "one primary inbox, several
+ * connected mailboxes" posture `supportAddress` below already assumes.
+ * `GET /api/v1/mailboxes` is admin-only (`handleListMailboxes`,
+ * `src/api/agents.ts` — 403 for a non-admin caller), same gate the
+ * mailbox-settings routes themselves enforce (`app/mailbox/[id]/settings/
+ * [section]/page.tsx`), so it's only fetched for an admin viewer — a
+ * non-admin gets `mailbox: null` and an inert gear, never a 403.
  */
 export default async function ShellLayout({ children }: { children: ReactNode }) {
   const me = await getMe()
   const counts = await loadFolderCounts(me.id)
   const supportAddress = process.env.HELPTHREAD_SUPPORT_ADDRESS ?? 'support@dev.localhost'
 
+  const mailboxes = me.role === 'admin' ? await listMailboxes() : []
+  const resolvedMailbox =
+    mailboxes.find((entry) => entry.address === supportAddress) ?? mailboxes[0]
+  const mailbox =
+    resolvedMailbox !== undefined
+      ? { id: resolvedMailbox.id, address: resolvedMailbox.address }
+      : null
+
   return (
     <div style={{ display: 'flex', minHeight: 0, flex: 1 }}>
-      <FolderNav supportAddress={supportAddress} counts={counts} />
+      <FolderNav supportAddress={supportAddress} counts={counts} mailbox={mailbox} />
       {children}
     </div>
   )

@@ -33,11 +33,26 @@ import {
   type ImapConnectInput,
   type ImapConnectService,
 } from '../mail/imap-connect.js'
+import type { AgentRecord } from '../store/agents.js'
+import type { ImapConfigStore } from '../store/imap-config.js'
+import type { MailboxStore } from '../store/mailboxes.js'
 import { apiError, json } from './responses.js'
+import { isUuid } from './uuid.js'
 
-/** Dependencies both handlers need. ABSENT BY DEFAULT on `InboxApiDeps` (`src/api/index.ts`) — a deployment that hasn't wired the IMAP/SMTP connect service simply never configures this. */
+/**
+ * Dependencies both handlers need. ABSENT BY DEFAULT on `InboxApiDeps`
+ * (`src/api/index.ts`) — a deployment that hasn't wired the IMAP/SMTP
+ * connect service simply never configures this.
+ *
+ * `configStore`/`mailboxStore` (HT-101 Stage 2b) back the read-only
+ * `GET .../mailboxes/{id}/imap-config` handler below — the SAME
+ * `ImapConfigStore`/`MailboxStore` instances the composition root already
+ * builds `service` from (`src/composition/root.ts`), not a second copy.
+ */
 export interface ImapConnectDeps {
   service: ImapConnectService
+  configStore: ImapConfigStore
+  mailboxStore: MailboxStore
 }
 
 /** Best-effort parse of a request body as a JSON object. Mirrors `src/api/gmail-disconnect.ts`'s `parseJsonBody` convention. */
@@ -199,4 +214,57 @@ export async function handleImapCheck(request: Request, deps: ImapConnectDeps): 
     console.error('[imap-connect] unhandled error checking mailbox connection', err)
     return apiError(500, 'server_error', 'Internal server error.')
   }
+}
+
+/**
+ * Handle `GET /api/v1/mailboxes/{id}/imap-config` (HT-101 Stage 2b; the
+ * mailbox-settings "Connection" section's read-only view). Admin only —
+ * same posture as `handleListMailboxes`/the other mailbox-scoped endpoints
+ * in `src/api/agents.ts`.
+ *
+ * Returns `imap_mailbox_config`'s non-secret columns via
+ * `ImapConfigStore.getConfig` — {@link ImapConnectionConfig} carries no
+ * password field at all (the credential lives in the sibling
+ * `imap_mailbox_credentials` table, `../store/imap-credentials.ts`), so
+ * there is nothing to accidentally serialize here; the UI renders a
+ * "configured" state instead of a value (spec's "never a value" rule).
+ *
+ * - Unknown/malformed id, or a mailbox with no IMAP/SMTP config on file
+ *   (e.g. a Gmail-connected mailbox) → `404 not_found`.
+ * - Non-admin acting Agent → `403 forbidden`. No acting Agent → `401
+ *   unauthorized`.
+ */
+export async function handleGetMailboxImapConfig(
+  mailboxId: string,
+  actingAgent: AgentRecord | null,
+  deps: ImapConnectDeps,
+): Promise<Response> {
+  if (actingAgent === null) {
+    return apiError(401, 'unauthorized', 'Missing or invalid Agent identity.')
+  }
+  if (actingAgent.role !== 'admin') {
+    return apiError(403, 'forbidden', 'Admin role required.')
+  }
+  if (!isUuid(mailboxId)) {
+    return apiError(404, 'not_found', 'No mailbox with that id.')
+  }
+
+  const mailbox = await deps.mailboxStore.getMailboxById(mailboxId)
+  if (mailbox === null) {
+    return apiError(404, 'not_found', 'No mailbox with that id.')
+  }
+
+  const config = await deps.configStore.getConfig(mailboxId)
+  if (config === null) {
+    return apiError(404, 'not_found', 'This mailbox has no IMAP/SMTP configuration.')
+  }
+
+  return json(200, {
+    imapHost: config.imapHost,
+    imapPort: config.imapPort,
+    smtpHost: config.smtpHost,
+    smtpPort: config.smtpPort,
+    username: config.username,
+    secure: config.secure,
+  })
 }

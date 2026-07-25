@@ -3,18 +3,27 @@
 /**
  * The "Connect an inbox" form (HT-101) — one flow, not a two-step
  * create-then-configure (TJ's fixed decision): address, IMAP/SMTP
- * connection, and the app-password credential all live in this single
- * `SettingsScreen` "Inboxes" section card. Composed entirely from `ds/core`
- * primitives, same conventions `NewAgentScreen` already established for a
- * CLIENT form backed by a `server-only` API client — see `mailbox-
- * actions.ts`'s module doc for why the calls go through a server action
- * rather than `lib/api.ts` directly.
+ * connection, and the app-password credential all live in one card.
+ * Composed entirely from `ds/core` primitives, same conventions
+ * `NewAgentScreen` already established for a CLIENT form backed by a
+ * `server-only` API client — see `mailbox-actions.ts`'s module doc for why
+ * the calls go through a server action rather than `lib/api.ts` directly.
+ *
+ * Two homes (HT-101 admin-IA correction, specs/ui/admin-ia.md §1): the
+ * plain "New inbox" flow at `/manage/mailboxes/new` (Global-admin scope,
+ * `NewMailboxScreen`) with no `initialConfig`, and the "Reconnect / update
+ * settings" flow inside the mailbox-scoped Connection section
+ * (`MailboxConnectionSection`) with `initialConfig` + `lockAddress` set —
+ * see those props' own docs. Both render the SAME form; only the
+ * surrounding chrome and prefill differ.
  *
  * Address-first with presets: typing a recognized domain prefills
  * host/port/TLS from {@link PROVIDER_PRESETS}; an unrecognized domain
  * expands "Advanced" for manual entry. The preset is applied once per
  * newly-recognized domain (`appliedPresetDomain`) so it never clobbers a
- * manual edit the operator makes afterward.
+ * manual edit the operator makes afterward. Reconnect (`initialConfig` set)
+ * starts with Advanced already open and skips preset auto-fill entirely
+ * (the existing config IS the source of truth there, not a domain guess).
  *
  * The app password is write-only (never rendered back) and, like
  * `NewAgentScreen`'s own password field, a plain styled `<input
@@ -185,27 +194,52 @@ function ChevronDownIcon() {
   )
 }
 
+/** Prefill for the reconnect path (`MailboxConnectionSection`, HT-101 Stage 2b) — every field the read-only Connection view already knows EXCEPT the password, which is write-only and never comes back from the engine (module doc). */
+export interface ConnectInboxFormInitialConfig {
+  address: string
+  imapHost: string
+  imapPort: number
+  smtpHost: string
+  smtpPort: number
+  secure: boolean
+}
+
 export function ConnectInboxForm({
   onConnected,
   onCancel,
+  initialConfig,
+  lockAddress = false,
 }: {
   onConnected: () => void
   onCancel: () => void
+  /** Reconnect prefill — same shape a fresh connect ends with, minus the password (module doc). Omitted for the ordinary "New inbox" flow. */
+  initialConfig?: ConnectInboxFormInitialConfig
+  /** Reconnect locks the address field: `POST /imap/connect` upserts BY address (module doc's "re-submitting IS the update path"), so an editable address here could silently create a second mailbox instead of updating this one. */
+  lockAddress?: boolean
 }) {
   const router = useRouter()
   const showToast = useToast()
   const [isChecking, startChecking] = useTransition()
   const [isConnecting, startConnecting] = useTransition()
 
-  const [address, setAddress] = useState('')
+  const [address, setAddress] = useState(initialConfig?.address ?? '')
   const [password, setPassword] = useState('')
-  const [imapHost, setImapHost] = useState('')
-  const [imapPort, setImapPort] = useState('')
-  const [smtpHost, setSmtpHost] = useState('')
-  const [smtpPort, setSmtpPort] = useState('')
-  const [secure, setSecure] = useState(true)
+  const [imapHost, setImapHost] = useState(initialConfig?.imapHost ?? '')
+  const [imapPort, setImapPort] = useState(
+    initialConfig !== undefined ? String(initialConfig.imapPort) : '',
+  )
+  const [smtpHost, setSmtpHost] = useState(initialConfig?.smtpHost ?? '')
+  const [smtpPort, setSmtpPort] = useState(
+    initialConfig !== undefined ? String(initialConfig.smtpPort) : '',
+  )
+  const [secure, setSecure] = useState(initialConfig?.secure ?? true)
   const [appliedPresetDomain, setAppliedPresetDomain] = useState<string | null>(null)
-  const [manualAdvancedOverride, setManualAdvancedOverride] = useState<boolean | null>(null)
+  // Reconnect starts with Advanced already open — the whole point is
+  // reviewing/editing the current host/port values, never a fresh preset
+  // guess overriding them.
+  const [manualAdvancedOverride, setManualAdvancedOverride] = useState<boolean | null>(
+    initialConfig !== undefined ? true : null,
+  )
   const [checkResult, setCheckResult] = useState<Awaited<
     ReturnType<typeof checkMailboxConnection>
   > | null>(null)
@@ -333,19 +367,43 @@ export function ConnectInboxForm({
         gap: 14,
       }}
     >
-      <div style={{ fontSize: 13, fontWeight: 700 }}>Connect an inbox</div>
+      <div style={{ fontSize: 13, fontWeight: 700 }}>
+        {lockAddress ? 'Reconnect this inbox' : 'Connect an inbox'}
+      </div>
 
       <div>
         <FieldLabel htmlFor="ht-connect-inbox-address">Email address</FieldLabel>
-        <TextInput
-          id="ht-connect-inbox-address"
-          value={address}
-          onChange={(event: { target: { value: string } }) =>
-            handleAddressChange(event.target.value)
-          }
-          placeholder="support@yourcompany.com"
-        />
-        {preset !== undefined && (
+        {lockAddress ? (
+          // Locked, not disabled — `ds/core/TextInput` has no disabled
+          // variant, and rendering a plain (read-only) value here is more
+          // honest than a fake-disabled input anyway. `POST /imap/connect`
+          // upserts BY address (module doc): an editable address on
+          // reconnect could silently create a second mailbox instead of
+          // updating this one.
+          <div
+            style={{
+              fontSize: 12.5,
+              color: 'var(--ht-ink)',
+              background: 'var(--ht-surface-2)',
+              border: '1px solid var(--ht-divider)',
+              borderRadius: 'var(--ht-radius-sm)',
+              padding: '6px 10px',
+              fontFamily: 'var(--ht-mono)',
+            }}
+          >
+            {address}
+          </div>
+        ) : (
+          <TextInput
+            id="ht-connect-inbox-address"
+            value={address}
+            onChange={(event: { target: { value: string } }) =>
+              handleAddressChange(event.target.value)
+            }
+            placeholder="support@yourcompany.com"
+          />
+        )}
+        {preset !== undefined && !lockAddress && (
           <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--ht-ink-dim)' }}>
             {preset.label} recognized — using {preset.imapHost} / {preset.smtpHost}.
           </p>
@@ -378,7 +436,9 @@ export function ConnectInboxForm({
           }}
         />
         <p style={{ margin: '6px 0 0', fontSize: 11.5, color: 'var(--ht-ink-dim)' }}>
-          Generated in your provider's security settings — not your account's main password.
+          {lockAddress
+            ? "The engine never returns a stored password — re-enter it to reconnect, even if it hasn't changed."
+            : "Generated in your provider's security settings — not your account's main password."}
         </p>
       </div>
 

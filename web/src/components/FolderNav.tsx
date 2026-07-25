@@ -9,9 +9,24 @@
  * Counts: the five API-backed folders arrive as server-fetched props
  * (`(shell)/layout.tsx`, via `lib/folder-counts.ts`); Starred and Drafts are
  * localStorage-only and merged in here client-side (`mergeFolderCounts`).
+ *
+ * The gear button (HT-101 admin-IA correction; specs/ui/admin-ia.md §1) is
+ * THIS mailbox's Mailbox-scoped settings entry point, not a plain link to
+ * the old app-level `/settings` — it opens a dropdown of
+ * `resolveInboxSettingsSections()` (`../lib/inbox-settings-sections.ts`,
+ * the SAME registry `InboxSettingsShell`'s nav renders from — the module
+ * injection point, Rule 2), deep-linking into
+ * `/mailbox/{id}/settings/{section}`. `planned` entries render disabled
+ * (no `onClick`, a muted "Not yet available" hint) — an honest menu, never
+ * a fake link (Rule 6). The app-level `Manage → Settings` link is
+ * deliberately NOT here — that's Global-admin scope and lives in `Manage
+ * ▾` (`TopBar`) instead. `mailbox` is `null` only when the layout found no
+ * connected mailbox to resolve (`(shell)/layout.tsx`'s doc) — the gear is
+ * inert in that case, since there's no mailbox id to link into.
  */
 
 import { usePathname, useRouter } from 'next/navigation'
+import { useState } from 'react'
 import { useDrafts } from '../lib/drafts'
 import {
   FOLDER_ICON_PATHS,
@@ -20,7 +35,10 @@ import {
   mergeFolderCounts,
   type ServerFolderCounts,
 } from '../lib/folders'
+import { resolveInboxSettingsSections } from '../lib/inbox-settings-sections'
 import { useStarred } from '../lib/starred'
+import { DropdownMenu } from './ds/core/DropdownMenu'
+import { MenuItem } from './ds/core/MenuItem'
 import { FolderItem } from './ds/inbox/FolderItem'
 import { useToast } from './Toaster'
 
@@ -54,18 +72,38 @@ function MailIcon() {
   )
 }
 
+function ChevronDownIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 24 24" aria-hidden="true" style={{ opacity: 0.75 }}>
+      <polyline
+        points="6 9 12 15 18 9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export function FolderNav({
   supportAddress,
   counts,
+  mailbox,
 }: {
   supportAddress: string
   counts: ServerFolderCounts
+  /** THIS mailbox's id/address, resolved server-side (`(shell)/layout.tsx`). `null` when no mailbox could be resolved — the gear menu is inert. */
+  mailbox: { id: string; address: string } | null
 }) {
   const router = useRouter()
   const pathname = usePathname()
   const showToast = useToast()
   const { starredIds } = useStarred()
   const drafts = useDrafts()
+  const [gearOpen, setGearOpen] = useState(false)
+  const sections = resolveInboxSettingsSections()
 
   const merged = mergeFolderCounts(counts, {
     starred: starredIds.length,
@@ -129,31 +167,63 @@ export function FolderNav({
           overflow: 'hidden',
         }}
       >
-        <button
-          type="button"
-          title="Settings"
-          onClick={() => router.push('/settings')}
-          style={{
-            flex: 1,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            border: 'none',
-            borderRight: '1px solid var(--ht-border)',
-            background: 'none',
-            padding: '9px 0',
-            color: 'var(--ht-ink-muted)',
-            cursor: 'pointer',
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'var(--ht-surface-2)'
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'none'
-          }}
-        >
-          <SettingsIcon />
-        </button>
+        <div style={{ position: 'relative', flex: 1 }}>
+          <button
+            type="button"
+            title="Mailbox settings"
+            disabled={mailbox === null}
+            onClick={() => setGearOpen((current) => !current)}
+            style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 3,
+              border: 'none',
+              borderRight: '1px solid var(--ht-border)',
+              background: 'none',
+              padding: '9px 0',
+              color: 'var(--ht-ink-muted)',
+              cursor: mailbox === null ? 'default' : 'pointer',
+              opacity: mailbox === null ? 0.5 : 1,
+            }}
+            onMouseEnter={(e) => {
+              if (mailbox !== null) e.currentTarget.style.background = 'var(--ht-surface-2)'
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'none'
+            }}
+          >
+            <SettingsIcon />
+            <ChevronDownIcon />
+          </button>
+          {mailbox !== null && (
+            <DropdownMenu open={gearOpen} onClose={() => setGearOpen(false)} minWidth={210}>
+              {sections.map((section) => (
+                <MenuItem
+                  key={section.key}
+                  shortcut={
+                    section.status === 'planned' ? (
+                      <span style={{ fontSize: 11, color: 'var(--ht-ink-dim)' }}>
+                        Not yet available
+                      </span>
+                    ) : undefined
+                  }
+                  onClick={
+                    section.status === 'available'
+                      ? () => {
+                          setGearOpen(false)
+                          router.push(section.href(mailbox.id))
+                        }
+                      : undefined
+                  }
+                >
+                  {section.label}
+                </MenuItem>
+              ))}
+            </DropdownMenu>
+          )}
+        </div>
         <button
           type="button"
           title="New message"

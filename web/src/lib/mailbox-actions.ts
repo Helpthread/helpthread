@@ -9,6 +9,12 @@
  * and `imapConnect`'s own responses never carry it either (see
  * `src/api/imap-connect.ts`'s module doc), so there is nothing to
  * accidentally forward.
+ *
+ * `connectMailbox` revalidates both the mailboxes list (`/manage/mailboxes`,
+ * Global-admin scope) and the mailbox-scoped Connection section
+ * (`/mailbox/[id]/settings/connection`) — the two admin-IA-correct homes
+ * this ticket moved "New inbox"/"Reconnect" into (specs/ui/admin-ia.md §1),
+ * replacing the old single `/settings` revalidation.
  */
 
 import { revalidatePath } from 'next/cache'
@@ -54,7 +60,8 @@ export async function connectMailbox(
 ): Promise<ConnectMailboxActionResult> {
   try {
     const mailbox = await imapConnect(config)
-    revalidatePath('/settings')
+    revalidatePath('/manage/mailboxes')
+    revalidatePath(`/mailbox/${mailbox.id}/settings/connection`)
     return { ok: true, mailbox }
   } catch (error) {
     return toActionResult(error)

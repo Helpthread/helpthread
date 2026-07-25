@@ -257,6 +257,12 @@ const SAVED_REPLY_ITEM: RouteDef = {
   methods: ['PATCH', 'DELETE'],
 }
 
+/** `/api/v1/mailboxes/{id}/imap-config` — read-only IMAP/SMTP connection config, no credential (admin only) — HT-101 Stage 2b, GET only. Distinct suffix from `SAVED_REPLIES_LIST`, never contends for the same pathname. */
+const MAILBOX_IMAP_CONFIG: RouteDef = {
+  pattern: /^\/api\/v1\/mailboxes\/(?<mailboxId>[^/]+)\/imap-config$/,
+  methods: ['GET'],
+}
+
 // --- Webhooks admin API (HT-69; specs/modules/substrate-v1.md §5) -----------
 //
 // Admin-only, acting-Agent header REQUIRED on every route (`src/api/
@@ -364,6 +370,7 @@ const ROUTES: readonly RouteDef[] = [
   AGENT_WEBAUTHN_CREDENTIALS,
   SAVED_REPLY_ITEM,
   SAVED_REPLIES_LIST,
+  MAILBOX_IMAP_CONFIG,
   AGENT_ITEM,
   WEBHOOKS_LIST,
   WEBHOOK_TEST,
@@ -418,6 +425,7 @@ export type RouteMatch =
   | { kind: 'saved-replies-create'; mailboxId: string }
   | { kind: 'saved-reply-patch'; mailboxId: string; replyId: string }
   | { kind: 'saved-reply-delete'; mailboxId: string; replyId: string }
+  | { kind: 'mailbox-imap-config'; mailboxId: string }
   | { kind: 'webhooks-list' }
   | { kind: 'webhooks-create' }
   | { kind: 'webhook-patch'; id: string }
@@ -615,6 +623,10 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
       return method === 'DELETE'
         ? { kind: 'saved-reply-delete', mailboxId, replyId }
         : { kind: 'saved-reply-patch', mailboxId, replyId }
+    }
+    if (route === MAILBOX_IMAP_CONFIG) {
+      const mailboxId = match.groups?.mailboxId as string
+      return { kind: 'mailbox-imap-config', mailboxId }
     }
 
     // Every remaining route guarantees a present, non-empty `id` group (per

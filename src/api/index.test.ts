@@ -2900,7 +2900,25 @@ describe('createInboxApi', () => {
         checkConnection:
           overrides.checkConnection ?? (async () => ({ imap: { ok: true }, smtp: { ok: true } })),
       }
-      return { service }
+      return {
+        service,
+        configStore: { upsertConfig: async () => {}, getConfig: async () => null },
+        mailboxStore: {
+          getMailboxByAddress: async () => null,
+          getMailboxById: async () => null,
+          markNeedsReconnect: async () => {},
+          markPaused: async () => {},
+          markDisconnected: async () => {},
+          upsertConnectedMailbox: async (input) => ({
+            id: 'mb-1',
+            address: input.address,
+            provider: input.provider,
+            status: 'active',
+          }),
+          listActiveMailboxes: async () => [],
+          listMailboxes: async () => [],
+        },
+      }
     }
 
     /** Build a full `createInboxApi` instance wired to `db`, with `imapConnect` present (or, if omitted, absent entirely — for the "not configured" tests). */

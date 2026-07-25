@@ -90,7 +90,12 @@ import {
 } from './gmail-connect.js'
 import { type GmailDisconnectDeps, handleGmailDisconnect } from './gmail-disconnect.js'
 import { type GmailPushDeps, gmailPushRejected, handleGmailPushWebhook } from './gmail-webhook.js'
-import { handleImapCheck, handleImapConnect, type ImapConnectDeps } from './imap-connect.js'
+import {
+  handleGetMailboxImapConfig,
+  handleImapCheck,
+  handleImapConnect,
+  type ImapConnectDeps,
+} from './imap-connect.js'
 import type { ApiError } from './responses.js'
 import { apiError } from './responses.js'
 import {
@@ -598,6 +603,15 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
         case 'imap-check':
           return deps.imapConnect !== undefined
             ? await handleImapCheck(request, deps.imapConnect)
+            : apiError(404, 'not_found', 'No such route.')
+
+        case 'mailbox-imap-config':
+          return deps.imapConnect !== undefined
+            ? await handleGetMailboxImapConfig(
+                route.mailboxId,
+                await resolveActingAgent(request, deps.agents.store),
+                deps.imapConnect,
+              )
             : apiError(404, 'not_found', 'No such route.')
 
         // --- Agents & Authentication (HT-54) --------------------------------

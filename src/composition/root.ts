@@ -380,7 +380,14 @@ export async function buildApp(
     createImapClient,
     verifySmtp: verifySmtpConnection,
   })
-  const imapConnect: ImapConnectDeps = { service: imapConnectService }
+  // configStore/mailboxStore (HT-101 Stage 2b) back the read-only
+  // `GET .../mailboxes/{id}/imap-config` handler — the SAME instances
+  // `imapConnectService` above was built from, not a second copy.
+  const imapConnect: ImapConnectDeps = {
+    service: imapConnectService,
+    configStore: imapConfigStore,
+    mailboxStore,
+  }
 
   // --- The Agent Inbox API, with gmailPush + gmailConnect + gmailDisconnect +
   // imapConnect PRESENT (the engine leaves them absent by default; this root

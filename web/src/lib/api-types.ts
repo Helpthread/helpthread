@@ -123,6 +123,23 @@ export interface ConnectedMailbox {
   status: MailboxStatus
 }
 
+/**
+ * `GET /api/v1/mailboxes/{id}/imap-config`'s response (HT-101 Stage 2b) —
+ * the mailbox-scoped Connection section's read-only view
+ * (`MailboxConnectionSection`). Mirrors the engine's
+ * `ImapConnectionConfig` (`src/store/imap-config.ts`) — deliberately no
+ * password field; the credential lives in a separate table the engine
+ * never reads back over this route (see that store's module doc).
+ */
+export interface ImapMailboxConfigView {
+  imapHost: string
+  imapPort: number
+  smtpHost: string
+  smtpPort: number
+  username: string
+  secure: boolean
+}
+
 /** v1.1 (HT-46) — one inbound attachment's metadata plus a time-limited
  *  signed `BlobStore` URL (never a stable/public path; it expires). */
 export interface AttachmentView {

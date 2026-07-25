@@ -7,7 +7,15 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { ImapConnectError, type ImapConnectService } from '../mail/imap-connect.js'
-import { handleImapCheck, handleImapConnect } from './imap-connect.js'
+import type { AgentRecord } from '../store/agents.js'
+import type { ImapConfigStore } from '../store/imap-config.js'
+import type { MailboxStore } from '../store/mailboxes.js'
+import {
+  handleGetMailboxImapConfig,
+  handleImapCheck,
+  handleImapConnect,
+  type ImapConnectDeps,
+} from './imap-connect.js'
 
 const CONNECT_URL = 'https://desk.example.test/api/v1/inbound/imap/connect'
 const CHECK_URL = 'https://desk.example.test/api/v1/inbound/imap/check'
@@ -37,6 +45,15 @@ function fakeService(overrides: Partial<ImapConnectService> = {}): ImapConnectSe
   }
 }
 
+/** Not exercised by `handleImapConnect`/`handleImapCheck` — only `handleGetMailboxImapConfig` (see its own describe block below) touches `configStore`/`mailboxStore`. Present here only because `ImapConnectDeps` requires them. */
+function deps(service: ImapConnectService): ImapConnectDeps {
+  return {
+    service,
+    configStore: { upsertConfig: vi.fn(), getConfig: vi.fn(async () => null) } as ImapConfigStore,
+    mailboxStore: { getMailboxById: vi.fn(async () => null) } as unknown as MailboxStore,
+  }
+}
+
 function postJson(url: string, body: unknown): Request {
   return new Request(url, {
     method: 'POST',
@@ -48,7 +65,7 @@ function postJson(url: string, body: unknown): Request {
 describe('handleImapConnect', () => {
   it('200s with the persisted mailbox on success', async () => {
     const service = fakeService()
-    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), { service })
+    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), deps(service))
 
     expect(res.status).toBe(200)
     expect(res.headers.get('Content-Type')).toBe('application/json')
@@ -71,14 +88,14 @@ describe('handleImapConnect', () => {
     }))
     const service = fakeService({ connect })
 
-    await handleImapConnect(postJson(CONNECT_URL, { ...VALID_BODY, secure: false }), { service })
+    await handleImapConnect(postJson(CONNECT_URL, { ...VALID_BODY, secure: false }), deps(service))
 
     expect(connect).toHaveBeenCalledWith({ ...VALID_BODY, secure: false })
   })
 
   it('never echoes the password in the success response body', async () => {
     const service = fakeService()
-    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), { service })
+    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), deps(service))
     const text = await res.text()
     expect(text).not.toContain(VALID_BODY.password)
   })
@@ -88,7 +105,7 @@ describe('handleImapConnect', () => {
     const service = fakeService({ connect: connect as never })
     const res = await handleImapConnect(
       new Request(CONNECT_URL, { method: 'POST', body: 'not json' }),
-      { service },
+      deps(service),
     )
 
     expect(res.status).toBe(400)
@@ -110,7 +127,7 @@ describe('handleImapConnect', () => {
   ])('400s when %s is invalid, without calling the service', async (_label, body) => {
     const connect = vi.fn()
     const service = fakeService({ connect: connect as never })
-    const res = await handleImapConnect(postJson(CONNECT_URL, body), { service })
+    const res = await handleImapConnect(postJson(CONNECT_URL, body), deps(service))
 
     expect(res.status).toBe(400)
     expect((await res.json()).error.code).toBe('validation_failed')
@@ -120,7 +137,7 @@ describe('handleImapConnect', () => {
   it('400s when a required field is missing entirely', async () => {
     const { password: _password, ...withoutPassword } = VALID_BODY
     const service = fakeService()
-    const res = await handleImapConnect(postJson(CONNECT_URL, withoutPassword), { service })
+    const res = await handleImapConnect(postJson(CONNECT_URL, withoutPassword), deps(service))
     expect(res.status).toBe(400)
   })
 
@@ -133,7 +150,7 @@ describe('handleImapConnect', () => {
         },
       })
 
-      const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), { service })
+      const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), deps(service))
 
       expect(res.status).toBe(422)
       const body = await res.json()
@@ -149,7 +166,7 @@ describe('handleImapConnect', () => {
       },
     })
 
-    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), { service })
+    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), deps(service))
 
     expect(res.status).toBe(500)
     const body = await res.json()
@@ -167,7 +184,7 @@ describe('handleImapCheck', () => {
     }))
     const service = fakeService({ checkConnection })
 
-    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), { service })
+    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), deps(service))
 
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
@@ -178,7 +195,7 @@ describe('handleImapCheck', () => {
 
   it('never echoes the password in the response body', async () => {
     const service = fakeService()
-    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), { service })
+    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), deps(service))
     const text = await res.text()
     expect(text).not.toContain(VALID_BODY.password)
   })
@@ -186,9 +203,10 @@ describe('handleImapCheck', () => {
   it('400s on an invalid body, without calling the service', async () => {
     const checkConnection = vi.fn()
     const service = fakeService({ checkConnection: checkConnection as never })
-    const res = await handleImapCheck(postJson(CHECK_URL, { ...VALID_BODY, imapPort: 0 }), {
-      service,
-    })
+    const res = await handleImapCheck(
+      postJson(CHECK_URL, { ...VALID_BODY, imapPort: 0 }),
+      deps(service),
+    )
 
     expect(res.status).toBe(400)
     expect(checkConnection).not.toHaveBeenCalled()
@@ -202,11 +220,100 @@ describe('handleImapCheck', () => {
       },
     })
 
-    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), { service })
+    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), deps(service))
 
     expect(res.status).toBe(500)
     const body = await res.json()
     expect(JSON.stringify(body)).not.toContain('unexpected failure')
     errorSpy.mockRestore()
+  })
+})
+
+const MAILBOX_ID = '11111111-1111-4111-8111-111111111111'
+
+const ADMIN: AgentRecord = {
+  id: '22222222-2222-4222-8222-222222222222',
+  email: 'admin@example.test',
+  name: 'Admin Agent',
+  role: 'admin',
+  status: 'active',
+  timezone: 'UTC',
+  createdAt: new Date(),
+  updatedAt: new Date(),
+}
+
+const NON_ADMIN: AgentRecord = { ...ADMIN, id: 'agent-2', role: 'agent' }
+
+const CONFIG = {
+  imapHost: 'imap.example.test',
+  imapPort: 993,
+  smtpHost: 'smtp.example.test',
+  smtpPort: 465,
+  username: 'support@example.test',
+  secure: true,
+}
+
+function configDeps(overrides: {
+  getConfig?: ImapConfigStore['getConfig']
+  getMailboxById?: MailboxStore['getMailboxById']
+}): ImapConnectDeps {
+  return {
+    service: fakeService(),
+    configStore: {
+      upsertConfig: vi.fn(),
+      getConfig: overrides.getConfig ?? (async () => CONFIG),
+    },
+    mailboxStore: {
+      getMailboxById:
+        overrides.getMailboxById ??
+        (async () => ({
+          id: MAILBOX_ID,
+          address: 'support@example.test',
+          provider: 'imap',
+          status: 'active',
+        })),
+    } as unknown as MailboxStore,
+  }
+}
+
+describe('handleGetMailboxImapConfig', () => {
+  it("200s with the non-secret config — never the password (the field doesn't even exist on ImapConnectionConfig)", async () => {
+    const res = await handleGetMailboxImapConfig(MAILBOX_ID, ADMIN, configDeps({}))
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual(CONFIG)
+  })
+
+  it('401s with no acting Agent', async () => {
+    const res = await handleGetMailboxImapConfig(MAILBOX_ID, null, configDeps({}))
+    expect(res.status).toBe(401)
+  })
+
+  it('403s for a non-admin acting Agent', async () => {
+    const res = await handleGetMailboxImapConfig(MAILBOX_ID, NON_ADMIN, configDeps({}))
+    expect(res.status).toBe(403)
+  })
+
+  it('404s on a malformed (non-UUID) id', async () => {
+    const res = await handleGetMailboxImapConfig('not-a-uuid', ADMIN, configDeps({}))
+    expect(res.status).toBe(404)
+  })
+
+  it('404s when no mailbox has this id', async () => {
+    const res = await handleGetMailboxImapConfig(
+      MAILBOX_ID,
+      ADMIN,
+      configDeps({ getMailboxById: async () => null }),
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('404s when the mailbox exists but has no IMAP/SMTP config (e.g. a Gmail-connected mailbox)', async () => {
+    const res = await handleGetMailboxImapConfig(
+      MAILBOX_ID,
+      ADMIN,
+      configDeps({ getConfig: async () => null }),
+    )
+    expect(res.status).toBe(404)
   })
 })
