@@ -595,7 +595,14 @@ export async function buildApp(
         createImapClient,
         ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
       })
-      if (report.fetched > 0 || report.paused > 0 || report.failed > 0) {
+      // `skipped` counts too (review, 2026-07-25). A mailbox skipped on every
+      // tick — a lease stuck by a crashed run, a missing config, credential,
+      // or baseline cursor — is an intake OUTAGE, not a quiet tick: mail is
+      // arriving and nothing is collecting it. Gating the summary on
+      // fetched/paused/failed alone made that state indistinguishable from
+      // "no mailboxes configured," which is the one case worth staying silent
+      // for. Only a run that touched nothing at all logs nothing.
+      if (report.fetched > 0 || report.paused > 0 || report.failed > 0 || report.skipped > 0) {
         console.info(JSON.stringify({ event: 'imap_fetch', ...report }))
       }
       return report

@@ -372,7 +372,15 @@ export function ConnectInboxForm({
       </div>
 
       <div>
-        <FieldLabel htmlFor="ht-connect-inbox-address">Email address</FieldLabel>
+        {/* `htmlFor` only when the id it names actually exists — the locked
+            (reconnect) branch renders a plain div, so an unconditional
+            `htmlFor` pointed at nothing, breaking the label association for
+            screen readers and click-to-focus (review, 2026-07-25). */}
+        {lockAddress ? (
+          <FieldLabel>Email address</FieldLabel>
+        ) : (
+          <FieldLabel htmlFor="ht-connect-inbox-address">Email address</FieldLabel>
+        )}
         {lockAddress ? (
           // Locked, not disabled — `ds/core/TextInput` has no disabled
           // variant, and rendering a plain (read-only) value here is more

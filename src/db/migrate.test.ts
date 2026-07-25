@@ -1527,7 +1527,7 @@ describe('migrate', () => {
     ).rejects.toThrow()
   })
 
-  it('migration 028 adds conversations.mailbox_id: no backfill for pre-existing rows, real FK to mailboxes, ON DELETE SET NULL', async () => {
+  it('migration 028 adds conversations.mailbox_id: no backfill for pre-existing rows, real FK to mailboxes, ON DELETE RESTRICT', async () => {
     const database = await createPgliteDb()
     db = database
 
@@ -1549,8 +1549,7 @@ describe('migrate', () => {
     )
     expect(row.mailbox_id).toBeNull()
 
-    // Setting a real mailbox works; deleting that mailbox un-sets it (SET
-    // NULL) rather than deleting the conversation.
+    // Setting a real mailbox works.
     const [mailbox] = await database.query<{ id: string }>(
       `INSERT INTO mailboxes (address, provider) VALUES ('support@example.test', 'gmail') RETURNING id`,
     )
@@ -1558,12 +1557,22 @@ describe('migrate', () => {
       mailbox.id,
       existing.id,
     ])
-    await database.query('DELETE FROM mailboxes WHERE id = $1', [mailbox.id])
+
+    // Deleting that mailbox is REFUSED, not silently un-set. `SET NULL` would
+    // overload NULL's existing "predates the column, use the deployment
+    // default" meaning with "had an inbox, it was deleted" — indistinguishable
+    // afterwards, so every in-flight reply on this conversation would go out
+    // from a different From: address with no error. See the migration's doc.
+    await expect(
+      database.query('DELETE FROM mailboxes WHERE id = $1', [mailbox.id]),
+    ).rejects.toThrow()
+
+    // ...and the conversation still points at its own inbox.
     const [afterDelete] = await database.query<{ mailbox_id: string | null }>(
       'SELECT mailbox_id FROM conversations WHERE id = $1',
       [existing.id],
     )
-    expect(afterDelete.mailbox_id).toBeNull()
+    expect(afterDelete.mailbox_id).toBe(mailbox.id)
 
     // A nonexistent mailbox id violates the FK.
     await expect(

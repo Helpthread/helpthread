@@ -71,6 +71,38 @@ export interface VerifySmtpConnectionOptions {
 const DEFAULT_TIMEOUT_MS = 30_000
 
 /**
+ * Race `promise` against a rejecting timer — the same outer backstop
+ * `./sender.ts` applies to `sendMail`, for the same reason its doc gives:
+ * nodemailer exposes no cancellation token, so the socket-level
+ * `connectionTimeout`/`greetingTimeout`/`socketTimeout` are the only bounds,
+ * and this guarantees the call settles even in the pathological case those
+ * fail to fire.
+ *
+ * `verify()` needed it MORE than `sendMail` did, not less (found by review,
+ * 2026-07-25): sending happens on a cron tick, where a hang costs one wasted
+ * invocation, but `verifySmtpConnection` runs synchronously inside the
+ * connect/check HTTP request, where a hang holds an operator's request open
+ * indefinitely.
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`verifySmtpConnection: verify timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
+
+/**
  * Verify an SMTP connection: handshake + AUTH, no message sent. See the
  * module doc for the full contract. Throws the provider's own error,
  * unwrapped, on any failure.
@@ -90,5 +122,5 @@ export async function verifySmtpConnection(options: VerifySmtpConnectionOptions)
       socketTimeout: timeoutMs,
     })
 
-  await transporter.verify()
+  await withTimeout(Promise.resolve(transporter.verify()), timeoutMs)
 }

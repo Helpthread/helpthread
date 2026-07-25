@@ -284,7 +284,26 @@ async function fetchOneMailbox(
       return
     }
 
-    await watchStateStore.setCursor(mailboxId, result.newCursor)
+    // Fenced on the lease we still believe we hold. A `false` here means a
+    // successor reclaimed the expired lease while we were ingesting — its view
+    // of the mailbox (possibly a UIDVALIDITY-reset pause) is the current one,
+    // and ours is stale. Messages already ingested stay ingested; they are
+    // real mail and the ledger keeps them deduped. Only the cursor claim is
+    // dropped. See `ImapWatchStateStore.setCursor`'s SACRED section.
+    const advanced = await watchStateStore.setCursor(mailboxId, result.newCursor, leaseToken)
+    if (!advanced) {
+      counts.failed++
+      logFetchEvent('warn', {
+        mailboxId,
+        outcome: 'blocked',
+        reason: 'lease-superseded-before-cursor-write',
+        previousCursor: cursor,
+        attemptedCursor: result.newCursor,
+        messageCount: outcomes.length,
+        note: 'ingest completed but our fetch lease had already expired and been reclaimed — cursor left to the live holder',
+      })
+      return
+    }
     counts.fetched++
     counts.messagesIngested += outcomes.length
     logFetchEvent('info', {

@@ -139,14 +139,46 @@ function validateConnectInput(
 }
 
 /**
- * Handle `POST /api/v1/inbound/imap/connect`. Validates the body, calls
- * `ImapConnectService.connect`, and returns the persisted `MailboxRecord` —
- * never the password (module doc).
+ * Admin-only, for every endpoint in this module. Returns the refusal
+ * `Response` to send, or `null` when the caller may proceed.
+ *
+ * Both write endpoints take an operator-supplied `host`/`port` and make the
+ * server open a connection to it. Left at service-Bearer-only — as an earlier
+ * revision was, until an adversarial review caught it (2026-07-25) — any
+ * holder of the deployment's API token could use `/imap/check` as a network
+ * probe against hosts and ports it can reach but the caller cannot,
+ * distinguishing open from closed from filtered by the leg outcomes this
+ * module returns. The sibling read endpoint
+ * ({@link handleGetMailboxImapConfig}) already required admin; the two
+ * endpoints that actually *dial* did not, which is the wrong way round.
+ *
+ * This is authorization, not a full SSRF defence: it bounds *who* can name a
+ * target, not *which* targets are nameable. Host/port allowlisting for
+ * outbound mail connections — the equivalent of `src/webhooks/ssrf.ts` for
+ * webhook URLs — is deliberately NOT attempted here and is filed separately.
+ */
+function requireAdmin(actingAgent: AgentRecord | null): Response | null {
+  if (actingAgent === null) {
+    return apiError(401, 'unauthorized', 'Missing or invalid Agent identity.')
+  }
+  if (actingAgent.role !== 'admin') {
+    return apiError(403, 'forbidden', 'Admin role required.')
+  }
+  return null
+}
+
+/**
+ * Handle `POST /api/v1/inbound/imap/connect`. Admin only. Validates the body,
+ * calls `ImapConnectService.connect`, and returns the persisted
+ * `MailboxRecord` — never the password (module doc).
  *
  * - Missing/invalid JSON body, or an invalid/missing field → `400
  *   validation_failed`.
  * - A caught {@link ImapConnectError} (`imap_failed` / `smtp_failed`) → `422`
  *   with the error's own code and (already secret-free) message.
+ * - `provider_conflict` → `409` instead: the address is already connected over
+ *   another transport, so nothing about the submitted credentials is wrong —
+ *   the conflict is with existing state the operator must clear first.
  * - Any other error (a DB blip — genuinely unexpected) → `500 server_error`.
  * - Success → `200` with the mailbox.
  *
@@ -155,9 +187,14 @@ function validateConnectInput(
  */
 export async function handleImapConnect(
   request: Request,
+  actingAgent: AgentRecord | null,
   deps: ImapConnectDeps,
 ): Promise<Response> {
   try {
+    const denied = requireAdmin(actingAgent)
+    if (denied !== null) {
+      return denied
+    }
     const parsedBody = await parseJsonBody(request)
     if (!parsedBody.ok) {
       return apiError(400, 'validation_failed', 'Request body must be valid JSON.')
@@ -172,7 +209,8 @@ export async function handleImapConnect(
       return json(200, mailbox)
     } catch (err) {
       if (err instanceof ImapConnectError) {
-        return apiError(422, err.code, err.message)
+        // 409, not 422: the submitted credentials are not what is wrong.
+        return apiError(err.code === 'provider_conflict' ? 409 : 422, err.code, err.message)
       }
       throw err
     }
@@ -197,8 +235,16 @@ export async function handleImapConnect(
  *   reported IN the 200 body, not a non-2xx status) → `200` with `{ imap,
  *   smtp }`.
  */
-export async function handleImapCheck(request: Request, deps: ImapConnectDeps): Promise<Response> {
+export async function handleImapCheck(
+  request: Request,
+  actingAgent: AgentRecord | null,
+  deps: ImapConnectDeps,
+): Promise<Response> {
   try {
+    const denied = requireAdmin(actingAgent)
+    if (denied !== null) {
+      return denied
+    }
     const parsedBody = await parseJsonBody(request)
     if (!parsedBody.ok) {
       return apiError(400, 'validation_failed', 'Request body must be valid JSON.')

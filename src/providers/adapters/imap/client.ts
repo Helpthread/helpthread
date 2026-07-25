@@ -299,6 +299,12 @@ export function createImapClient(
       return results
     },
 
+    // NEVER throws. Callers use this in a `finally` (`./fetch.ts`) and in a
+    // catch-all cleanup (`../../../mail/imap-connect.ts`), so a throw here
+    // would replace a real outcome — including a SUCCESSFUL fetch — with a
+    // cleanup error, discarding a batch that was already ingested. imapflow's
+    // own `close()` can throw synchronously on an already-broken connection,
+    // which the previous revision left unguarded (review, 2026-07-25).
     async close() {
       if (!flow) return
       try {
@@ -306,7 +312,13 @@ export function createImapClient(
         // the server doesn't cooperate (e.g. already-broken connection).
         await flow.logout()
       } catch {
-        flow.close()
+        try {
+          flow.close()
+        } catch {
+          // Both paths failed: the connection is already gone in some way this
+          // library reports by throwing. There is nothing further to release
+          // and nothing a caller could do with the error.
+        }
       }
     },
   }

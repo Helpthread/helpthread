@@ -47,13 +47,17 @@ import { createImapConnectService } from '../src/mail/imap-connect.js'
 import type { Keyring } from '../src/mail/reply-token.js'
 import type { SenderResolver } from '../src/mail/sender-resolver.js'
 import { createImapClient } from '../src/providers/adapters/imap/index.js'
+import { createPostgresQueue } from '../src/providers/adapters/postgres-queue/index.js'
 import { verifySmtpConnection } from '../src/providers/adapters/smtp/index.js'
 import { createAgentStore } from '../src/store/agents.js'
+import { createAssistantStore } from '../src/store/assistants.js'
 import { createConversationStore } from '../src/store/conversations.js'
 import { createImapConfigStore } from '../src/store/imap-config.js'
 import { createImapCredentialStore } from '../src/store/imap-credentials.js'
 import { createImapWatchStateStore } from '../src/store/imap-watch-state.js'
 import { createMailboxStore } from '../src/store/mailboxes.js'
+import { createSavedReplyStore } from '../src/store/saved-replies.js'
+import { createWebhookEndpointStore } from '../src/store/webhook-endpoints.js'
 
 const PORT = Number(process.env.HT_DEV_PORT ?? 8787)
 const API_TOKEN = process.env.HT_DEV_TOKEN ?? 'helpthread-dev-token'
@@ -132,6 +136,12 @@ async function main(): Promise<void> {
     },
   }
 
+  // `assistants`, `webhooks`, and `savedReplies` are REQUIRED on
+  // `InboxApiDeps`, and this file sits outside `tsconfig.json`'s `include`
+  // (only `scripts/migrate.ts` is listed), so `npm run typecheck` never
+  // catches their absence — the harness compiles under `tsx` and then fails
+  // at `deps.assistants.store` the moment one of those routes is hit
+  // (review, 2026-07-25). Wired with the real stores over the same dev `db`.
   const api = createInboxApi({
     store,
     apiToken: API_TOKEN,
@@ -141,6 +151,14 @@ async function main(): Promise<void> {
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,
     agents: { store: agentStore, providers: authProviders, mailboxStore },
+    assistants: { store: createAssistantStore(db) },
+    webhooks: {
+      // Same throwaway dev key as the IMAP credential store above — webhook
+      // secrets are encrypted at rest by the same AES-256-GCM path.
+      store: createWebhookEndpointStore(db, DEV_TOKEN_ENC_KEY),
+      queue: createPostgresQueue(db),
+    },
+    savedReplies: { store: createSavedReplyStore(db), mailboxStore },
     imapConnect: {
       service: imapConnectService,
       configStore: imapConfigStore,

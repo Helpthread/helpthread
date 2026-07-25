@@ -65,7 +65,7 @@ function postJson(url: string, body: unknown): Request {
 describe('handleImapConnect', () => {
   it('200s with the persisted mailbox on success', async () => {
     const service = fakeService()
-    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), deps(service))
+    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), ADMIN, deps(service))
 
     expect(res.status).toBe(200)
     expect(res.headers.get('Content-Type')).toBe('application/json')
@@ -88,14 +88,18 @@ describe('handleImapConnect', () => {
     }))
     const service = fakeService({ connect })
 
-    await handleImapConnect(postJson(CONNECT_URL, { ...VALID_BODY, secure: false }), deps(service))
+    await handleImapConnect(
+      postJson(CONNECT_URL, { ...VALID_BODY, secure: false }),
+      ADMIN,
+      deps(service),
+    )
 
     expect(connect).toHaveBeenCalledWith({ ...VALID_BODY, secure: false })
   })
 
   it('never echoes the password in the success response body', async () => {
     const service = fakeService()
-    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), deps(service))
+    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), ADMIN, deps(service))
     const text = await res.text()
     expect(text).not.toContain(VALID_BODY.password)
   })
@@ -105,6 +109,7 @@ describe('handleImapConnect', () => {
     const service = fakeService({ connect: connect as never })
     const res = await handleImapConnect(
       new Request(CONNECT_URL, { method: 'POST', body: 'not json' }),
+      ADMIN,
       deps(service),
     )
 
@@ -127,7 +132,7 @@ describe('handleImapConnect', () => {
   ])('400s when %s is invalid, without calling the service', async (_label, body) => {
     const connect = vi.fn()
     const service = fakeService({ connect: connect as never })
-    const res = await handleImapConnect(postJson(CONNECT_URL, body), deps(service))
+    const res = await handleImapConnect(postJson(CONNECT_URL, body), ADMIN, deps(service))
 
     expect(res.status).toBe(400)
     expect((await res.json()).error.code).toBe('validation_failed')
@@ -137,7 +142,11 @@ describe('handleImapConnect', () => {
   it('400s when a required field is missing entirely', async () => {
     const { password: _password, ...withoutPassword } = VALID_BODY
     const service = fakeService()
-    const res = await handleImapConnect(postJson(CONNECT_URL, withoutPassword), deps(service))
+    const res = await handleImapConnect(
+      postJson(CONNECT_URL, withoutPassword),
+      ADMIN,
+      deps(service),
+    )
     expect(res.status).toBe(400)
   })
 
@@ -150,7 +159,7 @@ describe('handleImapConnect', () => {
         },
       })
 
-      const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), deps(service))
+      const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), ADMIN, deps(service))
 
       expect(res.status).toBe(422)
       const body = await res.json()
@@ -166,7 +175,7 @@ describe('handleImapConnect', () => {
       },
     })
 
-    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), deps(service))
+    const res = await handleImapConnect(postJson(CONNECT_URL, VALID_BODY), ADMIN, deps(service))
 
     expect(res.status).toBe(500)
     const body = await res.json()
@@ -184,7 +193,7 @@ describe('handleImapCheck', () => {
     }))
     const service = fakeService({ checkConnection })
 
-    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), deps(service))
+    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), ADMIN, deps(service))
 
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
@@ -195,7 +204,7 @@ describe('handleImapCheck', () => {
 
   it('never echoes the password in the response body', async () => {
     const service = fakeService()
-    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), deps(service))
+    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), ADMIN, deps(service))
     const text = await res.text()
     expect(text).not.toContain(VALID_BODY.password)
   })
@@ -205,6 +214,7 @@ describe('handleImapCheck', () => {
     const service = fakeService({ checkConnection: checkConnection as never })
     const res = await handleImapCheck(
       postJson(CHECK_URL, { ...VALID_BODY, imapPort: 0 }),
+      ADMIN,
       deps(service),
     )
 
@@ -220,12 +230,68 @@ describe('handleImapCheck', () => {
       },
     })
 
-    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), deps(service))
+    const res = await handleImapCheck(postJson(CHECK_URL, VALID_BODY), ADMIN, deps(service))
 
     expect(res.status).toBe(500)
     const body = await res.json()
     expect(JSON.stringify(body)).not.toContain('unexpected failure')
     errorSpy.mockRestore()
+  })
+})
+
+// HT-101 review fix (CodeRabbit, 2026-07-25). Both endpoints make the server
+// dial an operator-supplied host:port. They were service-Bearer-only, so any
+// API-token holder could use /imap/check as a network probe. The sibling READ
+// endpoint already required admin; the two that actually dial did not.
+describe('handleImapConnect / handleImapCheck — admin authorization', () => {
+  /** A service whose two methods are spies, so "never dialed" is assertable. */
+  function spyingService() {
+    const connect = vi.fn(async () => ({
+      id: MAILBOX_ID,
+      address: VALID_BODY.address,
+      provider: 'imap',
+      status: 'active' as const,
+    }))
+    const checkConnection = vi.fn(async () => ({
+      imap: { ok: true as const },
+      smtp: { ok: true as const },
+    }))
+    return { service: { connect, checkConnection }, connect, checkConnection }
+  }
+
+  it.each([
+    ['handleImapConnect', handleImapConnect, CONNECT_URL],
+    ['handleImapCheck', handleImapCheck, CHECK_URL],
+  ] as const)('%s: 401s with no acting Agent, and never dials', async (_name, handler, url) => {
+    const { service, connect, checkConnection } = spyingService()
+    const res = await handler(postJson(url, VALID_BODY), null, deps(service))
+
+    expect(res.status).toBe(401)
+    expect(connect).not.toHaveBeenCalled()
+    expect(checkConnection).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['handleImapConnect', handleImapConnect, CONNECT_URL],
+    ['handleImapCheck', handleImapCheck, CHECK_URL],
+  ] as const)('%s: 403s for a non-admin Agent, and never dials', async (_name, handler, url) => {
+    const { service, connect, checkConnection } = spyingService()
+    const res = await handler(postJson(url, VALID_BODY), NON_ADMIN, deps(service))
+
+    expect(res.status).toBe(403)
+    expect(connect).not.toHaveBeenCalled()
+    expect(checkConnection).not.toHaveBeenCalled()
+  })
+
+  it('checks authorization BEFORE parsing the body — a non-admin sending garbage gets 403, not 400 (no validation oracle)', async () => {
+    const service = fakeService()
+    const res = await handleImapCheck(
+      postJson(CHECK_URL, { nonsense: true }),
+      NON_ADMIN,
+      deps(service),
+    )
+
+    expect(res.status).toBe(403)
   })
 })
 

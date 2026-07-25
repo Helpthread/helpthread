@@ -84,13 +84,37 @@ export interface ImapWatchStateStore {
   getCursor(mailboxId: string): Promise<ImapCursor | null>
 
   /**
-   * Advance `mailboxId`'s cursor to `cursor` — an upsert (module doc), so
-   * this is safe to call whether or not a baseline row already exists.
-   * Called after a fetch invocation's messages have been durably committed
-   * by the ingest pipeline, with the `newCursor`
-   * {@link fetchImapInboundMessages} returned.
+   * Advance `mailboxId`'s cursor to `cursor`, **only if `leaseToken` is still
+   * the live lease**. Called after a fetch invocation's messages have been
+   * durably committed by the ingest pipeline, with the `newCursor`
+   * {@link fetchImapInboundMessages} returned. Returns `true` when the write
+   * landed, `false` when the lease had already been superseded.
+   *
+   * ## SACRED — a stale holder must not write a cursor
+   *
+   * Fencing here is not defensive tidiness; without it the UIDVALIDITY-reset
+   * quarantine is escapable (found by an adversarial review, 2026-07-25).
+   * Run A claims a lease and fetches under `uidValidity: 7`, then spends
+   * longer than `leaseMs` ingesting. Run B reclaims the expired lease,
+   * observes `uidValidity: 8`, and pauses the mailbox — the SACRED "pause,
+   * never ingest, never advance" path in `../mail/imap-fetch.ts`. Run A is
+   * still alive, finishes its batch, and writes `{uidValidity: 7, lastUid:
+   * 150}` over the paused mailbox's state. `releaseFetchLease` is already
+   * token-scoped so A cannot clear B's lease, but that alone never fenced
+   * A's *cursor write*.
+   *
+   * The condition is part of the `UPDATE`'s `WHERE`, never a read-then-write:
+   * a separate ownership check would reopen the same race one statement
+   * lower. An `UPDATE` rather than the upsert used elsewhere in this store —
+   * {@link claimFetchLease} returns `null` when no row exists, so a caller
+   * holding a token is guaranteed a row to update.
    */
-  setCursor(mailboxId: string, cursor: ImapCursor, tx?: Queryable): Promise<void>
+  setCursor(
+    mailboxId: string,
+    cursor: ImapCursor,
+    leaseToken: string,
+    tx?: Queryable,
+  ): Promise<boolean>
 
   /**
    * Seed `mailboxId`'s BASELINE cursor at connect time — module doc's
@@ -189,8 +213,20 @@ export function createImapWatchStateStore(db: Db): ImapWatchStateStore {
       }
     },
 
-    async setCursor(mailboxId, cursor, tx) {
-      await upsertCursor(mailboxId, cursor, tx)
+    async setCursor(mailboxId, cursor, leaseToken, tx) {
+      // `claimed_until = $4::timestamptz` is the fence (interface doc's SACRED
+      // section) — the same token-scoped predicate `releaseFetchLease` uses,
+      // applied to the write that actually matters. Zero rows means our lease
+      // was superseded while we were ingesting; the caller reports it and
+      // leaves the cursor where the live holder put it.
+      const rows = await (tx ?? db).query<{ mailbox_id: string }>(
+        `UPDATE imap_watch_state
+         SET uid_validity = $2, last_uid = $3, updated_at = now()
+         WHERE mailbox_id = $1 AND lease_token = $4::uuid
+         RETURNING mailbox_id`,
+        [mailboxId, cursor.uidValidity, cursor.lastUid, leaseToken],
+      )
+      return rows.length > 0
     },
 
     async seedBaseline(mailboxId, cursor, tx) {
@@ -218,17 +254,21 @@ export function createImapWatchStateStore(db: Db): ImapWatchStateStore {
           `createImapWatchStateStore.claimFetchLease: leaseMs must be a positive integer (got ${leaseMs})`,
         )
       }
-      // Identical shape to GmailWatchStateStore.claimReconcileLease — see
-      // this module's doc for the full "why ::text, not a Date" rationale.
-      const rows = await db.query<{ claimed_until: string }>(
+      // The token is a FRESH uuid per claim, not the rendered `claimed_until`
+      // Gmail's lease uses: two claims inside one clock tick mint the same
+      // timestamp, so a timestamp token cannot distinguish a stale holder from
+      // the live one (migration 027's doc records the collision a test forced).
+      // `claimed_until` still decides expiry; `lease_token` decides ownership.
+      const rows = await db.query<{ lease_token: string }>(
         `UPDATE imap_watch_state
-         SET claimed_until = now() + ($2::double precision * interval '1 millisecond')
+         SET claimed_until = now() + ($2::double precision * interval '1 millisecond'),
+             lease_token = gen_random_uuid()
          WHERE mailbox_id = $1
            AND (claimed_until IS NULL OR claimed_until < now())
-         RETURNING claimed_until::text AS claimed_until`,
+         RETURNING lease_token`,
         [mailboxId, leaseMs],
       )
-      return rows.length > 0 ? rows[0].claimed_until : null
+      return rows.length > 0 ? rows[0].lease_token : null
     },
 
     async releaseFetchLease(mailboxId, leaseToken) {
@@ -238,7 +278,7 @@ export function createImapWatchStateStore(db: Db): ImapWatchStateStore {
       // never a throw. See GmailWatchStateStore.releaseReconcileLease's doc
       // for the full stale-holder rationale this mirrors exactly.
       await db.query(
-        'UPDATE imap_watch_state SET claimed_until = NULL WHERE mailbox_id = $1 AND claimed_until = $2::timestamptz',
+        'UPDATE imap_watch_state SET claimed_until = NULL, lease_token = NULL WHERE mailbox_id = $1 AND lease_token = $2::uuid',
         [mailboxId, leaseToken],
       )
     },

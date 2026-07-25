@@ -1524,14 +1524,25 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
  * as the cursor rather than as a later patch. Nullable, `NULL` meaning
  * "unclaimed" — same convention as `gmail_watch_state.claimed_until`
  * (migration 016) and `threads.claimed_until` (migration 003).
- * `ImapWatchStateStore.claimFetchLease`/`releaseFetchLease`
- * (`src/store/imap-watch-state.ts`) mirror `GmailWatchStateStore
- * .claimReconcileLease`/`releaseReconcileLease` (`src/store/gmail-watch-
- * state.ts`) statement-for-statement, INCLUDING that store's `::text`
- * lease-token rendering — see that module's doc for why a `Date`
- * round-trip through the wire driver would silently truncate
- * `claimed_until`'s microsecond precision and reintroduce the exact
- * stale-release hole the token exists to prevent.
+ * `lease_token` is a per-claim `uuid`, and it — not `claimed_until` — is the
+ * value a holder proves ownership with. Gmail's lease
+ * (`GmailWatchStateStore.claimReconcileLease`) uses the rendered
+ * `claimed_until::text` as its token, and an adversarial review of HT-101
+ * (2026-07-25) showed why that is too weak to fence a *write*: two successive
+ * claims that land within one clock tick mint the SAME token, so a stale
+ * holder's token compares equal to the live holder's and passes the check.
+ * A test forced exactly that collision. A fresh `gen_random_uuid()` per claim
+ * cannot collide regardless of clock resolution.
+ *
+ * `claimed_until` is retained for expiry (`WHERE claimed_until IS NULL OR
+ * claimed_until < now()`); the token is retained for ownership. The two
+ * answer different questions and both are needed.
+ *
+ * NOTE — the same weakness remains in `gmail_watch_state`'s timestamp-derived
+ * token. It is NOT fixed here (out of HT-101's scope) and is filed as a
+ * follow-up; Gmail's token guards only `releaseReconcileLease`, never a
+ * cursor advance, so the blast radius there is a prematurely-cleared lease
+ * rather than a corrupted cursor.
  *
  * No index beyond each table's PRIMARY KEY: every lookup across all three
  * tables is a single-row fetch by `mailbox_id`, which the PK already serves
@@ -1559,6 +1570,7 @@ CREATE TABLE imap_watch_state (
   uid_validity bigint NOT NULL CHECK (uid_validity BETWEEN 0 AND 4294967295),
   last_uid bigint NOT NULL CHECK (last_uid BETWEEN 0 AND 4294967295),
   claimed_until timestamptz,
+  lease_token uuid,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 `
@@ -1594,9 +1606,32 @@ CREATE TABLE imap_watch_state (
  * "no index needed, this is only ever read via a single-row fetch"
  * reasoning migration 027's doc comment applies to its own `mailbox_id`
  * columns.
+ *
+ * ## `ON DELETE RESTRICT`, not `SET NULL`
+ *
+ * An earlier revision used `ON DELETE SET NULL`, which an adversarial review
+ * (2026-07-25) showed silently violates provenance. `NULL` already has a
+ * meaning here — "this conversation predates the column, so send from the
+ * deployment default" (`../mail/sender-resolver.ts`'s `resolve(null)`).
+ * `SET NULL` overloads that same value with a second, incompatible meaning:
+ * "this conversation HAD an inbox and it was deleted." The two are
+ * indistinguishable afterwards, so deleting a mailbox would silently reroute
+ * every one of its in-flight replies through the default inbox — changing the
+ * `From:` address a customer sees mid-thread, with no error anywhere.
+ * CHARTER.md §2 makes authorship explicit; a transport that quietly re-signs
+ * a reply as somebody else is exactly what that forbids.
+ *
+ * `RESTRICT` makes the ambiguous state unrepresentable rather than handling
+ * it: a mailbox that still owns conversations cannot be deleted, so `NULL`
+ * keeps its single original meaning forever. No product code path deletes a
+ * `mailboxes` row today (disconnect sets `status`, it does not delete), so
+ * this constrains nothing that currently happens — it closes the door before
+ * something walks through it. A future "delete a mailbox" feature must decide
+ * deliberately what happens to its conversations; that is a product decision,
+ * not something a foreign-key action should answer by default.
  */
 const MIGRATION_028_CONVERSATION_MAILBOX_ID = `
-ALTER TABLE conversations ADD COLUMN mailbox_id uuid REFERENCES mailboxes(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN mailbox_id uuid REFERENCES mailboxes(id) ON DELETE RESTRICT;
 `
 
 /**

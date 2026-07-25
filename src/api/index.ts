@@ -597,12 +597,20 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
 
         case 'imap-connect':
           return deps.imapConnect !== undefined
-            ? await handleImapConnect(request, deps.imapConnect)
+            ? await handleImapConnect(
+                request,
+                await resolveActingAgent(request, deps.agents.store),
+                deps.imapConnect,
+              )
             : apiError(404, 'not_found', 'No such route.')
 
         case 'imap-check':
           return deps.imapConnect !== undefined
-            ? await handleImapCheck(request, deps.imapConnect)
+            ? await handleImapCheck(
+                request,
+                await resolveActingAgent(request, deps.agents.store),
+                deps.imapConnect,
+              )
             : apiError(404, 'not_found', 'No such route.')
 
         case 'mailbox-imap-config':

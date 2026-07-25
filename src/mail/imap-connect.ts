@@ -97,7 +97,11 @@ import type { VerifySmtpConnectionOptions } from '../providers/adapters/smtp/ind
 import type { ImapConfigStore } from '../store/imap-config.js'
 import type { ImapCredentialStore } from '../store/imap-credentials.js'
 import type { ImapWatchStateStore } from '../store/imap-watch-state.js'
-import type { MailboxRecord, MailboxStore } from '../store/mailboxes.js'
+import {
+  MailboxProviderConflictError,
+  type MailboxRecord,
+  type MailboxStore,
+} from '../store/mailboxes.js'
 
 /** Longest a sanitized connection-error message is allowed to be (module doc). */
 const MAX_ERROR_MESSAGE_LENGTH = 500
@@ -121,8 +125,15 @@ export interface ImapConnectInput {
 /** The outcome of one connectivity leg (IMAP or SMTP) — `checkConnection` reports one of these per leg, independently. */
 export type LegResult = { ok: true } | { ok: false; error: string }
 
-/** The two operator-fixable outcomes {@link ImapConnectService.connect} can fail with — which leg failed, so the API layer can map each to a clean, secret-free response. */
-export type ImapConnectErrorCode = 'imap_failed' | 'smtp_failed'
+/**
+ * The operator-fixable outcomes {@link ImapConnectService.connect} can fail
+ * with, so the API layer can map each to a clean, secret-free response.
+ * `imap_failed`/`smtp_failed` say which connectivity leg failed;
+ * `provider_conflict` says the address is already connected under another
+ * transport and must be disconnected first
+ * (`MailboxStore.upsertConnectedMailbox`'s SACRED section).
+ */
+export type ImapConnectErrorCode = 'imap_failed' | 'smtp_failed' | 'provider_conflict'
 
 /**
  * A `connect` failure the API layer (`src/api/imap-connect.ts`) maps to a
@@ -335,10 +346,23 @@ export function createImapConnectService(deps: ImapConnectServiceDeps): ImapConn
       // atomic transaction (module doc). ---
       const secure = input.secure ?? true
       return db.transaction(async (tx) => {
-        const mailbox = await mailboxStore.upsertConnectedMailbox(
-          { address: input.address, provider: 'imap' },
-          tx,
-        )
+        let mailbox: MailboxRecord
+        try {
+          mailbox = await mailboxStore.upsertConnectedMailbox(
+            { address: input.address, provider: 'imap' },
+            tx,
+          )
+        } catch (err) {
+          // The address is already connected over another transport (Gmail).
+          // Converting it in place would leave that transport's token and
+          // cursor behind and double-ingest every message — see the store
+          // method's SACRED section. Surface it as an operator-fixable 409,
+          // never a 500: "disconnect it first" is an action they can take.
+          if (err instanceof MailboxProviderConflictError) {
+            throw new ImapConnectError('provider_conflict', err.message)
+          }
+          throw err
+        }
         await configStore.upsertConfig(
           mailbox.id,
           {

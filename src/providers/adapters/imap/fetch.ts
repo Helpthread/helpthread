@@ -130,8 +130,13 @@ export async function fetchImapInboundMessages(
   maxPerInvocation: number = DEFAULT_MAX_PER_INVOCATION,
 ): Promise<ImapFetchResult> {
   const client = createClient()
-  await client.connect()
+  // `connect()` is INSIDE the try, so a failure part-way through the handshake
+  // (TLS up, AUTH rejected) still reaches the `finally` and releases whatever
+  // socket was allocated. Outside it — as an earlier revision had it (review,
+  // 2026-07-25) — a rejected login leaked the connection, and the cron retries
+  // every 2 minutes forever.
   try {
+    await client.connect()
     const mailbox = await client.selectInbox()
 
     const uidValidityReset = cursor !== null && cursor.uidValidity !== mailbox.uidValidity

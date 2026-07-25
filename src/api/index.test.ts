@@ -2944,16 +2944,63 @@ describe('createInboxApi', () => {
       })
     }
 
-    it('POST .../imap/connect with a valid Bearer token dispatches to the service: 200 with the mailbox', async () => {
+    /**
+     * Create a real, active ADMIN Agent — both IMAP routes are admin-gated
+     * (HT-101 review fix, 2026-07-25), so the Bearer token alone no longer
+     * reaches the handler.
+     */
+    async function adminAgentId(db: Db): Promise<string> {
+      const result = await createAgentStore(db).createAgent({
+        name: 'IMAP Admin',
+        email: 'imap-admin@example.test',
+        role: 'admin',
+        status: 'active',
+        passwordHash: 'scrypt$unused',
+      })
+      if (!result.ok) throw new Error('expected ok')
+      return result.agent.id
+    }
+
+    /** Like {@link post}, additionally acting as `agentId`. */
+    function postAsAgent(path: string, body: unknown, agentId: string): Request {
+      const request = post(path, body)
+      const headers = new Headers(request.headers)
+      headers.set('X-Helpthread-Agent-Id', agentId)
+      return new Request(request.url, {
+        method: request.method,
+        headers,
+        body: JSON.stringify(body),
+      })
+    }
+
+    it('POST .../imap/connect with a valid Bearer token AND an admin acting Agent dispatches to the service: 200 with the mailbox', async () => {
       const { db } = await freshApi()
       const api = apiWithImapConnect(db, fakeImapConnect())
 
-      const res = await api(post(CONNECT_PATH, VALID_BODY))
+      const res = await api(postAsAgent(CONNECT_PATH, VALID_BODY, await adminAgentId(db)))
 
       expect(res.status).toBe(200)
       const body = (await res.json()) as { address: string }
       expect(body.address).toBe(VALID_BODY.address)
     })
+
+    // The Bearer token alone is NOT sufficient for either route: both make the
+    // server dial an operator-supplied host:port, so they require an admin
+    // acting Agent on top of service authentication.
+    it.each([
+      ['connect', CONNECT_PATH],
+      ['check', CHECK_PATH],
+    ])(
+      'POST .../imap/%s with a valid Bearer token but NO acting Agent → 401',
+      async (_name, path) => {
+        const { db } = await freshApi()
+        const api = apiWithImapConnect(db, fakeImapConnect())
+
+        const res = await api(post(path, VALID_BODY))
+
+        expect(res.status).toBe(401)
+      },
+    )
 
     it('POST .../imap/connect WITHOUT a Bearer token → 401, before the handler ever runs', async () => {
       const { db } = await freshApi()
@@ -2971,11 +3018,11 @@ describe('createInboxApi', () => {
       expect(res.status).toBe(404)
     })
 
-    it('POST .../imap/check with a valid Bearer token dispatches to the service: 200 with per-leg results', async () => {
+    it('POST .../imap/check with a valid Bearer token AND an admin acting Agent dispatches to the service: 200 with per-leg results', async () => {
       const { db } = await freshApi()
       const api = apiWithImapConnect(db, fakeImapConnect())
 
-      const res = await api(post(CHECK_PATH, VALID_BODY))
+      const res = await api(postAsAgent(CHECK_PATH, VALID_BODY, await adminAgentId(db)))
 
       expect(res.status).toBe(200)
       expect(await res.json()).toEqual({ imap: { ok: true }, smtp: { ok: true } })
