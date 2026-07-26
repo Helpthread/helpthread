@@ -1594,11 +1594,11 @@ CREATE TABLE imap_watch_state (
  * first inbound message, never overwritten by a later reply that happens to
  * arrive at a different connected mailbox.
  *
- * `ON DELETE SET NULL`, not `CASCADE` — the same "the record outlives the
- * pointer" policy migration 018 already applies to this same table's
- * `assignee_agent_id`: a mailbox being disconnected/deleted must never
- * delete customer conversations, it only forgets which mailbox they came in
- * on.
+ * Not `CASCADE`: the same "the record outlives the pointer" policy migration
+ * 018 already applies to this table's `assignee_agent_id` — deleting a mailbox
+ * must never delete customer conversations. The exact action is `RESTRICT`,
+ * for the reasons in the section below; an earlier revision of this comment
+ * said `SET NULL`, which is no longer what ships.
  *
  * No index: nothing yet queries "every conversation for mailbox X" — the
  * one planned reader (Stage 2b-ii's send path) looks up ONE conversation's

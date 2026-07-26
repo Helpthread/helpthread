@@ -362,11 +362,18 @@ export interface StoredConversation {
   updatedAt: Date
   /**
    * The mailbox that took inbound delivery of this conversation's FIRST
-   * message (HT-101 Stage 2b-i; migration 028) — `null` for a conversation
-   * created before this column existed, or one whose recorded mailbox was
-   * later disconnected/deleted (`ON DELETE SET NULL`). Set once, at
-   * creation, by {@link NewConversation.mailboxId}; never changed by a later
-   * reply, even one that arrives at a different connected mailbox.
+   * message (HT-101 Stage 2b-i; migration 028). Set once, at creation, by
+   * {@link NewConversation.mailboxId}; never changed by a later reply, even
+   * one that arrives at a different connected mailbox.
+   *
+   * `null` has exactly ONE meaning: no mailbox was recorded at ingest —
+   * a conversation created before this column existed. It never means "the
+   * mailbox was deleted": migration 028's FK is `ON DELETE RESTRICT`, so a
+   * mailbox that still owns conversations cannot be deleted at all. That is
+   * deliberate — `SET NULL` would have overloaded this one value with a
+   * second, indistinguishable meaning, and `../mail/sender-resolver.ts`
+   * treats `null` as "send from the deployment default", which would have
+   * silently changed the `From:` address on an existing thread.
    */
   mailboxId: string | null
 }

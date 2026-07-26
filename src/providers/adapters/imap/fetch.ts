@@ -55,9 +55,14 @@
  * ## Bounding (§5 "Bound the batch, and bound the clock")
  *
  * `maxPerInvocation` caps how many messages one call fetches — passed
- * straight through to {@link ImapClient.uidFetchRawSince}, which bounds via
- * the UID range's upper bound rather than fetching-then-discarding (see
- * `./client.ts`'s implementation doc). The full remaining-invocation-budget
+ * straight through to {@link ImapClient.uidFetchRawSince}, which bounds by
+ * message COUNT: it asks the server which UIDs above `sinceUid` actually
+ * exist (`SEARCH`), takes the lowest `max`, and fetches exactly those. NOT by
+ * UID arithmetic — a `sinceUid+1 : sinceUid+max` range can span zero real
+ * messages while mail waits just above it, since UIDs are not dense (RFC 3501
+ * §2.3.1.1). That range shape is the stall bug `./client.ts`'s module doc
+ * records; this comment described it as the intended design until 2026-07-25.
+ * The full remaining-invocation-budget
  * scheme (§5: "every network operation... carries its own timeout derived
  * from the remaining invocation budget") is Stage 2/3 cron-wiring, not this
  * function — see `./client.ts`'s `ImapClientOptions.timeoutMs` doc for the

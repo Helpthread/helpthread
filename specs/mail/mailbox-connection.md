@@ -211,7 +211,7 @@ That is a configuration detail on the mailbox record, not a transport concern.
 ## 7. Build order
 
 1. **Make Pub/Sub optional — not unsupported.** Reschedule the existing Gmail reconcile sweep so it can carry intake on its own, and let the engine boot with no `GMAIL_PUBSUB_*` vars. Neither transport is designated primary — per CHARTER §2, the operator chooses at setup. The Gmail push adapter, the webhook, and the `watch()` renewal all remain fully supported for operators who want sub-minute latency; what changes is that they stop being *mandatory setup*. This removes both silent-failure traps and the billing requirement (Pub/Sub is what forced it). Least new code of any item here — and note this is Gmail-only, per §2: it does nothing for IMAP.
-2. **IMAP provider adapter** behind the existing `InboundEmailProvider` seam, with fixtures proving equivalence against the Gmail path.
+2. **IMAP provider adapter** as a cron-shaped *data-contract* function (`fetchImapInboundMessages`), **not** behind the `InboundEmailProvider` seam — that interface is webhook-shaped (`verifySignature(request)` / `receiveDelivery(request)`) and a scheduled fetch has no `Request` to give it. What is shared with the Gmail path is the *data* contract (`RawInboundMessage`, raw bytes, one `parseInboundEmail`) and the ingest pipeline below it; equivalence fixtures prove that shared path, not a shared interface. Corrected 2026-07-25 — this step previously named the seam, which is blocking question #3 at the top of this document.
 3. **Migrations** — UID cursor + `UIDVALIDITY`; encrypted mailbox credential.
 4. **SMTP sender** behind the existing `EmailSender` seam.
 5. **The connection screen** — design session first, then implementation.

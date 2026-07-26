@@ -7,35 +7,27 @@
  * `../providers/adapters/imap/fetch.ts` — no second cursor type is defined
  * here) plus `claimed_until` (the fetch lease).
  *
- * ## `setCursor` vs `seedBaseline` — same SQL, different intent
- *
- * Both write the full `{ uidValidity, lastUid }` pair via the identical
- * `INSERT ... ON CONFLICT (mailbox_id) DO UPDATE` upsert — unlike
- * `GmailWatchStateStore`, where `setCursor` and `seedBaseline` genuinely
- * touch different column sets (`setCursor` advances only `history_id`;
- * `seedBaseline` also writes `watch_expiration`), this table has no second,
- * independently-updated column for `seedBaseline` to own alone. The two
- * methods exist as distinct names purely to keep each call site's INTENT
- * legible, matching how `../providers/adapters/imap/fetch.ts`'s own module
- * doc frames the connect-time write ("so the first fetch starts from 'now',
- * not the whole history") as a different event from an ordinary per-tick
- * advance, even though the underlying write is the same statement:
+ * ## `setCursor` vs `seedBaseline` — different SQL, different intent
  *
  * - {@link ImapWatchStateStore.seedBaseline} is called ONCE, at connect
  *   time, with the `uidValidity`/`lastUid` an initial `selectInbox` call
  *   reports — establishing "start fetching new mail from here forward,"
- *   never a resync of the mailbox's entire history.
+ *   never a resync of the mailbox's entire history. It is an `INSERT ... ON
+ *   CONFLICT (mailbox_id) DO UPDATE` upsert: at connect time there may be no
+ *   row yet, and creating one is exactly the point.
  * - {@link ImapWatchStateStore.setCursor} is called after every subsequent
  *   fetch invocation commits, advancing the same row to the `newCursor`
  *   {@link fetchImapInboundMessages} (`../providers/adapters/imap/fetch.ts`)
- *   returned — mirroring `GmailWatchStateStore.setCursor`'s own "advances
- *   only as far as the highest UID actually fetched" contract.
+ *   returned. It is a lease-fenced plain `UPDATE`, and it returns whether the
+ *   write landed.
  *
- * `INSERT ... ON CONFLICT` (rather than a plain `UPDATE`) on BOTH methods
- * for the same reason `GmailWatchStateStore.setCursor`'s module doc gives:
- * it handles "no row yet" and "row exists" with one statement, so advancing
- * never silently no-ops the way a plain `UPDATE ... WHERE mailbox_id = $1`
- * would if it matched zero rows.
+ * That asymmetry is deliberate and is the opposite of what an earlier
+ * revision did. `setCursor` matching zero rows is not a bug to be papered
+ * over by an upsert — it is the FENCE WORKING: either the caller's lease was
+ * superseded while it was ingesting, or there is no cursor row to advance.
+ * Both cases must leave the stored cursor exactly where the live holder put
+ * it. See {@link ImapWatchStateStore.setCursor}'s own SACRED section for the
+ * quarantine escape this closes.
  *
  * ## `uid_validity`/`last_uid` are `bigint` — read back via `Number()`
  *
@@ -46,26 +38,29 @@
  * per RFC 3501 §2.3.1 — always well within `Number.MAX_SAFE_INTEGER`, so a
  * plain `Number()` conversion is exact.
  *
- * ## The fetch lease — mirrors `GmailWatchStateStore`'s reconcile lease EXACTLY
+ * ## The fetch lease — a uuid token, NOT Gmail's timestamp token
  *
  * {@link ImapWatchStateStore.claimFetchLease}/{@link
  * ImapWatchStateStore.releaseFetchLease} are the never-double-fetch guard: an
  * atomic `UPDATE ... WHERE claimed_until IS NULL OR claimed_until < now()`
- * claim, and a token-conditioned release, statement-for-statement identical
- * to `GmailWatchStateStore.claimReconcileLease`/`.releaseReconcileLease`
- * (`./gmail-watch-state.ts`) — INCLUDING that store's `claimed_until::text`
- * rendering. See that module's doc for the full "why text, not a `Date`"
- * rationale: a `pg`-wire-protocol driver parses `timestamptz` into a JS
- * `Date`, which only carries millisecond precision, while `claimed_until` is
- * stored with microsecond precision — comparing a truncated `Date`
- * round-trip against the column in {@link releaseFetchLease}'s `WHERE`
- * clause would make a legitimate release silently fail to match almost
- * every time, permanently stranding the lease until natural expiry. Casting
- * to `::text` in `RETURNING` and back to `::timestamptz` in the release
- * `WHERE` clause compares Postgres's own full-precision textual rendering
- * against itself, with no lossy `Date` round-trip in between. Callers must
- * treat the returned token as opaque — never parse it as a `Date` or do
- * arithmetic on it.
+ * claim, and a token-conditioned release.
+ *
+ * The claim mints a fresh `gen_random_uuid()` into `lease_token` and returns
+ * THAT as the token. `claimed_until` answers "has this lease expired?";
+ * `lease_token` answers "is this lease still mine?" — two different questions
+ * that a single column cannot answer.
+ *
+ * This deliberately DIVERGES from `GmailWatchStateStore
+ * .claimReconcileLease`, which returns the rendered `claimed_until::text`.
+ * An earlier revision mirrored that statement-for-statement, and an
+ * adversarial review (2026-07-25) showed it too weak: two claims landing in
+ * the same clock tick mint the SAME timestamp, so a stale holder's token
+ * compares equal to the live holder's and passes the check. A test written
+ * to prove the fence instead reproduced the collision. Gmail's lease has the
+ * same weakness (filed separately) but a smaller blast radius — its token
+ * guards only release, never a cursor advance.
+ *
+ * Callers must treat the token as opaque.
  */
 
 import type { Db, Queryable } from '../db/client.js'

@@ -16,15 +16,20 @@
  *
  * ## `null` means "the deployment's default" (pre-2b-i conversations)
  *
- * A conversation created before Stage 2b-i (or one whose recorded mailbox was
- * later hard-deleted, `ON DELETE SET NULL` — see `StoredConversation
- * .mailboxId`'s doc comment) carries `mailboxId: null`. {@link
+ * A conversation created before Stage 2b-i carries `mailboxId: null`. {@link
  * SenderResolver.resolve} treats `null` as "resolve the deployment's default
  * mailbox" — the mailbox whose address is {@link SenderResolverDeps
  * .defaultAddress} (`config.supportAddress`) — and then resolves THAT
  * mailbox by the exact same provider-branch logic below. This preserves
  * today's pre-2b-i behavior byte-for-byte: every reply on an unstamped
  * conversation keeps going out through the same mailbox it always did.
+ *
+ * That is the ONLY way `null` arises. A stamped conversation can never
+ * decay to `null`: migration 028's FK is `ON DELETE RESTRICT`, so a mailbox
+ * with conversations cannot be deleted. This matters here specifically —
+ * if a delete could null the column, this function would silently start
+ * sending an existing thread's replies from a different address, which is
+ * the authorship guarantee CHARTER.md §2 makes explicit.
  *
  * ## Never imports an adapter directly
  *

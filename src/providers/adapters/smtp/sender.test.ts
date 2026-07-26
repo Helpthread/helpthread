@@ -88,7 +88,7 @@ describe('createSmtpEmailSender', () => {
     expect(sendMail).not.toHaveBeenCalled()
   })
 
-  it.each(['\r', '\n', '\r\n', ''])(
+  it.each(['\r', '\n', '\r\n', '\u0007'])(
     'refuses to send when messageId contains a control/newline character (%j) — the verbatim contract guard',
     async (badChar) => {
       const sendMail = vi.fn(async () => ({ messageId: 'x' }))
