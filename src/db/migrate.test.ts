@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from './client.js'
-import { migrate } from './migrate.js'
+import { migrate, splitStatements } from './migrate.js'
 
 describe('migrate', () => {
   let db: Db | undefined
@@ -1569,12 +1569,131 @@ describe('migrate', () => {
     expect(applied.name).toBe('lock_down_data_api')
   })
 
-  it("splits statements without breaking migration 027's dollar-quoted DO block", async () => {
+  it("migration 027 actually revokes the grants when anon/authenticated DO exist — the guard's other branch", async () => {
     db = await createPgliteDb()
 
-    // The DO block's body is full of semicolons. A naive `split(';')` tears
-    // it into fragments that are not valid SQL on their own, so this run
-    // failing is the regression signal for splitStatements().
-    await expect(migrate(db)).resolves.toBeUndefined()
+    // The role-present branch is the one that runs in production and the one
+    // no other test reaches: PGlite has no Supabase roles, so without this
+    // setup every assertion about REVOKE would pass vacuously. Creating the
+    // roles first is what makes the DO block's body execute at all.
+    await db.query('CREATE ROLE anon NOLOGIN')
+    await db.query('CREATE ROLE authenticated NOLOGIN')
+
+    await migrate(db)
+
+    // Stock-Supabase shape: grant the roles everything on every table, the
+    // exact state migration 027 exists to undo. Applied AFTER migrate() so
+    // it models a re-grant, then re-run the migration over it.
+    await db.query('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated')
+    const [{ n: granted }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.role_table_grants
+        WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
+    )
+    expect(granted).toBeGreaterThan(0)
+
+    // Re-running 027's body must strip them back off.
+    await db.query('DELETE FROM _migrations WHERE id = 27')
+    await migrate(db)
+
+    const [{ n: remaining }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.role_table_grants
+        WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
+    )
+    expect(remaining).toBe(0)
+
+    // And the roles genuinely cannot reach the sensitive tables.
+    const [privs] = await db.query<{ sel: boolean; ins: boolean }>(
+      `SELECT has_table_privilege('anon', 'public.mailbox_oauth_tokens', 'SELECT') AS sel,
+              has_table_privilege('anon', 'public.agents', 'INSERT') AS ins`,
+    )
+    expect(privs).toEqual({ sel: false, ins: false })
+  })
+})
+
+describe('splitStatements', () => {
+  // The scanner replaced a naive `sql.split(';')`. Every case below is a
+  // string where the two disagree, or where a plausible scanner bug would
+  // show up — the old implementation is not a safety net here.
+
+  it('splits on semicolons outside any quoting context, trimming and dropping empties', () => {
+    expect(splitStatements('SELECT 1; SELECT 2;')).toEqual(['SELECT 1', 'SELECT 2'])
+    expect(splitStatements('  ;;  SELECT 1 ;; ')).toEqual(['SELECT 1'])
+    expect(splitStatements('')).toEqual([])
+    // A trailing statement with no terminating semicolon still comes back.
+    expect(splitStatements('SELECT 1')).toEqual(['SELECT 1'])
+  })
+
+  it('does not split on a semicolon inside a dollar-quoted body', () => {
+    expect(splitStatements('DO $$ BEGIN a; b; END $$; SELECT 1;')).toEqual([
+      'DO $$ BEGIN a; b; END $$',
+      'SELECT 1',
+    ])
+  })
+
+  it('closes a dollar-quoted body only on its exact tag, so a nested $$ does not end it', () => {
+    expect(splitStatements('DO $outer$ x $$ y; z $$ w $outer$; SELECT 1;')).toEqual([
+      'DO $outer$ x $$ y; z $$ w $outer$',
+      'SELECT 1',
+    ])
+  })
+
+  it('treats $1 placeholders as ordinary text, not as a dollar-quote tag', () => {
+    // A tag may not start with a digit. If it did, everything after `$1`
+    // would be swallowed as a quoted body and the split would be lost.
+    expect(splitStatements('SELECT $1; SELECT $2;')).toEqual(['SELECT $1', 'SELECT $2'])
+  })
+
+  it('does not split on a semicolon inside a string literal or a quoted identifier', () => {
+    expect(splitStatements("SELECT 'a;b'; SELECT 2;")).toEqual(["SELECT 'a;b'", 'SELECT 2'])
+    expect(splitStatements('SELECT "we;ird"; SELECT 2;')).toEqual(['SELECT "we;ird"', 'SELECT 2'])
+  })
+
+  it("treats a doubled '' as an escaped quote rather than a close", () => {
+    expect(splitStatements("SELECT 'it''s; fine'; SELECT 2;")).toEqual([
+      "SELECT 'it''s; fine'",
+      'SELECT 2',
+    ])
+  })
+
+  it('honours backslash escapes inside an E-string, so an escaped quote does not close it', () => {
+    // The regression this guards: the plain-quote branch would stop at the
+    // backslash-escaped quote and split mid-literal into invalid fragments.
+    expect(splitStatements("SELECT E'a\\';b'; SELECT 2;")).toEqual(["SELECT E'a\\';b'", 'SELECT 2'])
+  })
+
+  it('does not mistake an identifier ending in e for the start of an E-string', () => {
+    // `table'...'` is not an escape string; firing there would swallow the
+    // following semicolon and merge two statements into one.
+    expect(splitStatements("SELECT nappe'x;y'; SELECT 2;")).toEqual([
+      "SELECT nappe'x;y'",
+      'SELECT 2',
+    ])
+  })
+
+  it('ignores a semicolon inside a line comment, and a -- inside a string literal', () => {
+    expect(splitStatements('SELECT 1 -- a; b\n; SELECT 2;')).toEqual([
+      'SELECT 1 -- a; b',
+      'SELECT 2',
+    ])
+    expect(splitStatements("SELECT 'a -- b'; SELECT 2;")).toEqual(["SELECT 'a -- b'", 'SELECT 2'])
+  })
+
+  it('counts nested block comments, so an inner close does not end the outer one', () => {
+    expect(splitStatements('SELECT 1 /* a /* b; */ c; */ ; SELECT 2;')).toEqual([
+      'SELECT 1 /* a /* b; */ c; */',
+      'SELECT 2',
+    ])
+  })
+
+  it('consumes to end of input on an unterminated quote or comment rather than looping', () => {
+    expect(splitStatements("SELECT 'unterminated; still going")).toEqual([
+      "SELECT 'unterminated; still going",
+    ])
+    expect(splitStatements('SELECT 1 /* unterminated; still going')).toEqual([
+      'SELECT 1 /* unterminated; still going',
+    ])
+    expect(splitStatements('DO $x$ unterminated; still going')).toEqual([
+      'DO $x$ unterminated; still going',
+    ])
   })
 })

@@ -1474,10 +1474,21 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
  *
  * ## Defence in depth, not either/or
  *
- * Both halves below are applied because they fail independently. RLS alone
- * would be undone by a future `GRANT` plus a permissive policy; revoking
- * grants alone would be undone by Supabase re-running its stock
- * bootstrap. Together, a single mistake does not reopen the hole.
+ * Both halves below are applied because they fail independently: RLS alone
+ * would be undone by a future `GRANT` plus a permissive policy, and
+ * revoked grants alone would be undone by anything that re-grants. Neither
+ * layer is load-bearing on its own.
+ *
+ * Be precise about what the `ALTER DEFAULT PRIVILEGES` calls do and do
+ * NOT buy, because it is easy to overrate them. `ALTER DEFAULT PRIVILEGES
+ * ... REVOKE` *deletes a default-ACL entry*; it does not install a
+ * standing deny. And without `FOR ROLE` it applies only to the role that
+ * executes it — the one running this migration. So it stops tables
+ * created by THIS role from arriving pre-granted, and nothing more. It
+ * does not survive Supabase re-running its stock bootstrap (which simply
+ * re-creates the entry), and it does not touch default privileges defined
+ * for other roles such as `supabase_admin`. The durable protection is the
+ * standing rule below, not this statement.
  *
  * 1. **RLS on every table**, spelled out one `ALTER TABLE` per table rather
  *    than looped, so the set is reviewable in the diff and a table added
@@ -1486,8 +1497,20 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
  *    the application: these tables are owned by `postgres`, and a table
  *    owner bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set (which we
  *    deliberately do not set).
- * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` so tables
- *    created by future migrations do not silently arrive pre-granted.
+ * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` (subject
+ *    to the limits spelled out above) so tables created by future
+ *    migrations do not silently arrive pre-granted. Note that `REVOKE
+ *    ... FROM anon` removes only that role's own ACL entry — privileges
+ *    held via the `PUBLIC` pseudo-role are unaffected, which is why
+ *    `anon` still reports schema `USAGE` afterwards. The table-level
+ *    grants are the gate that matters; schema `USAGE` alone conveys no
+ *    access to any table.
+ *
+ * Both are written against `current_schema()` rather than a hardcoded
+ * `public`, because `PostgresDb` supports a `schema` option
+ * (`src/db/postgres.ts`) that puts every table in a named schema instead.
+ * `migrate()` runs inside that schema's search_path, so the `ALTER TABLE`
+ * statements and the revokes below target the same place in both modes.
  *
  * ## Why the `DO` block
  *
@@ -1528,27 +1551,32 @@ ALTER TABLE webauthn_challenges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webauthn_stepup_tokens ENABLE ROW LEVEL SECURITY;
 DO $migration027$
 DECLARE
-  missing text;
+  target_schema text := current_schema();
+  role_name text;
 BEGIN
-  FOREACH missing IN ARRAY ARRAY['anon', 'authenticated'] LOOP
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = missing) THEN
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
       CONTINUE;
     END IF;
-    EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', missing);
-    EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', missing);
-    EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM %I', missing);
-    EXECUTE format('REVOKE USAGE ON SCHEMA public FROM %I', missing);
+    EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM %I', target_schema, role_name);
     EXECUTE format(
-      'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM %I',
-      missing
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TABLES FROM %I',
+      target_schema, role_name
     );
     EXECUTE format(
-      'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %I',
-      missing
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM %I',
+      target_schema, role_name
     );
     EXECUTE format(
-      'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM %I',
-      missing
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON FUNCTIONS FROM %I',
+      target_schema, role_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TYPES FROM %I',
+      target_schema, role_name
     );
   END LOOP;
 END
@@ -1724,6 +1752,8 @@ const MIGRATIONS: Migration[] = [
  * statement terminator:
  *
  * - `'...'` single-quoted literals (with `''` escaping),
+ * - `E'...'` escape strings, where a backslash escapes the next character
+ *   (so `E'a\';b'` is ONE literal, not a literal followed by `;b`),
  * - `"..."` quoted identifiers,
  * - `$tag$ ... $tag$` dollar-quoted bodies (tag matched exactly, so a
  *   nested `$$` inside a `$body$` does not close it),
@@ -1731,9 +1761,15 @@ const MIGRATIONS: Migration[] = [
  *   Postgres, so the scanner counts depth).
  *
  * Everything outside those contexts splits on `;` exactly as before, so
- * migrations 001–026 tokenize identically to the old implementation.
+ * migrations 001–026 tokenize identically to the old implementation —
+ * verified by `splitStatements` tests in `./migrate.test.ts`, which is
+ * also why this is exported despite having no non-test caller.
+ *
+ * Deliberately NOT handled: `standard_conforming_strings = off`, under
+ * which a plain `'...'` would also honour backslash escapes. Postgres has
+ * defaulted that to `on` since 9.1 and no migration here depends on it.
  */
-function splitStatements(sql: string): string[] {
+export function splitStatements(sql: string): string[] {
   const statements: string[] = []
   let current = ''
   let index = 0
@@ -1781,6 +1817,35 @@ function splitStatements(sql: string): string[] {
       const stop = close === -1 ? sql.length : close + tag.length
       current += sql.slice(index, stop)
       index = stop
+      continue
+    }
+
+    // Escape string (`E'...'` / `e'...'`) — a backslash escapes the next
+    // character, so the closing quote must be found by scanning rather than
+    // by indexOf. Handled before the plain-quote branch below, which would
+    // otherwise stop at the backslash-escaped quote in `E'a\';b'`.
+    // The `[A-Za-z0-9_$]` look-behind keeps this from firing on the tail of
+    // an identifier that happens to end in `e` (Postgres only lexes `E'` as
+    // an escape string at a token boundary).
+    const escapeString = /^[Ee]'/.exec(rest)
+    if (escapeString !== null && !/[A-Za-z0-9_$]/.test(sql[index - 1] ?? '')) {
+      let scan = index + 2
+      while (scan < sql.length) {
+        if (sql[scan] === '\\') {
+          scan += 2
+        } else if (sql[scan] === "'") {
+          // A doubled '' is an escaped quote here too, not a close.
+          if (sql[scan + 1] === "'") scan += 2
+          else {
+            scan += 1
+            break
+          }
+        } else {
+          scan += 1
+        }
+      }
+      current += sql.slice(index, Math.min(scan, sql.length))
+      index = scan
       continue
     }
 

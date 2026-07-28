@@ -81,15 +81,24 @@ not access logs, so it is not proof of non-access.
 **Decision.** The PostgREST Data API is not part of Helpthread's architecture. The
 application reaches Postgres directly over the pooler (`DATABASE_URL`) and uses Supabase
 Storage with the `service_role` key; no anon-key client exists anywhere in the codebase.
-Migration 027 therefore enables RLS on every table in `public` and revokes the
-`anon`/`authenticated` grants, including via `ALTER DEFAULT PRIVILEGES` so future tables
-do not arrive pre-granted. The same lockdown was applied directly to the production
-project ahead of the migration landing, to close live exposure rather than wait on review.
+Migration 027 therefore enables RLS on every table and revokes the `anon`/`authenticated`
+grants, including via `ALTER DEFAULT PRIVILEGES` so future tables created by the migrating
+role do not arrive pre-granted. Both halves are written against `current_schema()` rather
+than a hardcoded `public`, because `PostgresDb` supports a `schema` option. The same
+lockdown was applied directly to the production project ahead of the migration landing, to
+close live exposure rather than wait on review.
+
+Be precise about the limits of the `ALTER DEFAULT PRIVILEGES` layer, which is easy to
+overrate: it *deletes a default-ACL entry* rather than installing a standing deny, and
+without `FOR ROLE` it binds only to the role that ran the migration. It does not survive
+Supabase re-running its stock bootstrap, and it does not touch defaults defined for other
+roles such as `supabase_admin`. The durable protection is the standing rule below.
 
 **Alternatives considered.** Enabling RLS alone was rejected: the grants would remain, so
 a single future permissive policy would reopen everything. Revoking grants alone was
-rejected for the mirror-image reason — Supabase re-running its stock bootstrap restores
-them. Writing real per-tenant RLS policies was rejected as solving a problem Helpthread
+rejected for the mirror-image reason — anything that re-grants, including Supabase
+re-running its stock bootstrap, restores them, and as noted above the default-privileges
+layer does not prevent that. Writing real per-tenant RLS policies was rejected as solving a problem Helpthread
 does not have: policies exist to make anon access safe, and there is no anon access to
 make safe. Deny-by-default with no policies is the honest expression of that.
 
@@ -97,7 +106,16 @@ make safe. Deny-by-default with no policies is the honest expression of that.
 INFO level for every table. That is the intended end state, not an outstanding item.
 Tables are owned by `postgres`, which bypasses RLS unless `FORCE ROW LEVEL SECURITY` is
 set — deliberately not set — so the application is unaffected. A standing rule follows:
-any migration adding a table to `public` must also enable RLS on it. Separately,
+any migration adding a table must also enable RLS on it.
+
+**This promotes an implicit deployment detail into an invariant: `DATABASE_URL` must
+connect as the role that owns the tables.** It does today — the runbook has the operator
+use the Supabase pooler string (role `postgres`) for both the app and `scripts/migrate.ts`,
+so connecting role and owning role coincide by construction. But pointing `DATABASE_URL` at
+a dedicated least-privilege role — a supported Supabase pattern — would now fail *silently*
+rather than loudly: RLS with no policies returns zero rows instead of raising, so the
+symptom is an empty inbox, not a database error. No test can catch this, because PGlite
+also runs as the owner. Separately,
 `splitStatements` in `src/db/migrate.ts` had to learn about dollar quoting, since
 migration 027's role guard is a `DO $$ ... $$` block whose body contains semicolons.
 
