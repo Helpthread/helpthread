@@ -116,9 +116,11 @@ any migration adding a table must also enable RLS on it.
 connect as the role that owns the tables.** It does today — the runbook has the operator
 use the Supabase pooler string (role `postgres`) for both the app and `scripts/migrate.ts`,
 so connecting role and owning role coincide by construction. But pointing `DATABASE_URL` at
-a dedicated least-privilege role — a supported Supabase pattern — would now fail *silently*
-rather than loudly: RLS with no policies returns zero rows instead of raising, so the
-symptom is an empty inbox, not a database error. No test can catch this, because PGlite
+a dedicated least-privilege role — a supported Supabase pattern — now breaks the engine, and
+the two halves break differently: reads go quiet (RLS with no policies returns zero rows
+instead of raising, so the symptom is an empty inbox rather than a database error) while
+every write hard-errors with `new row violates row-level security policy`. The loud signal
+arrives first, via inbound ingest. No test can catch the misconfiguration, because PGlite
 also runs as the owner. Separately,
 `splitStatements` in `src/db/migrate.ts` had to learn about dollar quoting, since
 migration 027's role guard is a `DO $$ ... $$` block whose body contains semicolons.

@@ -1589,11 +1589,21 @@ describe('migrate', () => {
     // exact state migration 027 exists to undo. Applied AFTER migrate() so
     // it models a re-grant, then re-run the migration over it.
     await db.query('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated')
+    // A default-ACL entry too, so the ALTER DEFAULT PRIVILEGES half has
+    // something to undo — `GRANT ALL ON ALL TABLES` does not create one, and
+    // without this the pg_default_acl assertion below counts 0 out of an
+    // empty table and would pass with every ALTER DEFAULT PRIVILEGES
+    // statement deleted from the migration.
+    await db.query('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon')
     const [{ n: granted }] = await db.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM information_schema.role_table_grants
         WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
     )
     expect(granted).toBeGreaterThan(0)
+    const [{ n: seededDefaults }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_default_acl`,
+    )
+    expect(seededDefaults).toBeGreaterThan(0)
 
     // Re-running 027's body must strip them back off.
     await db.query('DELETE FROM _migrations WHERE id = 27')
@@ -1613,7 +1623,7 @@ describe('migrate', () => {
     expect(privs).toEqual({ sel: false, ins: false })
 
     // The ALTER DEFAULT PRIVILEGES half leaves no table grant to count, so
-    // assert it directly: no default-ACL entry may remain for either role.
+    // assert it directly against the entry seeded above.
     const [{ n: defaults }] = await db.query<{ n: number }>(
       `SELECT count(*)::int AS n
          FROM pg_default_acl d
@@ -1630,19 +1640,28 @@ describe('migrate', () => {
     await db.query('CREATE ROLE authenticated NOLOGIN')
     await migrate(db)
     await db.query('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated')
+    const [{ n: granted }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.role_table_grants
+        WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
+    )
+    expect(granted).toBeGreaterThan(0)
 
-    // The regression this guards is INSIDE migration 027's body, so it is
-    // exercised by replaying that body rather than by calling migrate():
-    // putting a decoy schema on the search_path ahead of `public` and then
-    // re-running migrate() would make its own `CREATE TABLE IF NOT EXISTS
-    // _migrations` land in the decoy and re-bootstrap every table there,
-    // which tests schema bootstrapping rather than schema resolution.
+    // What this pins down: the revokes must target the schema HOLDING the
+    // tables, which is what the unqualified `ALTER TABLE`s above resolve to
+    // (search_path scanned for a schema containing the name) — not
+    // `current_schema()`, merely search_path's first existing entry.
     //
-    // The divergence: the unqualified `ALTER TABLE`s resolve by scanning
-    // search_path for a schema that CONTAINS the table (→ public), while
-    // `current_schema()` is just the first existing entry (→ decoy). Under
-    // the latter, RLS lands on public while the revokes hit the empty decoy
-    // and the migration reports success with every grant still in place.
+    // Scope honestly: this is defence, not a reproduction of a live bug.
+    // Reaching the divergent state through `migrate()` is not possible today,
+    // because `migrate()`'s own `CREATE TABLE IF NOT EXISTS _migrations` uses
+    // creation semantics (current_schema()), so a shadowed search_path makes
+    // it land in the decoy, read zero applied rows, and re-bootstrap every
+    // table there — after which both rules agree on the decoy. The divergence
+    // needs `_migrations` in one schema and the app tables in another, which
+    // no code path here produces. So the body is replayed directly: this
+    // guards the migration's own resolution rule against a future caller that
+    // does create that state, and it is the shape an earlier revision of this
+    // change got wrong.
     await db.query('CREATE SCHEMA decoy')
     await db.query('SET search_path TO decoy, public')
     const [{ first }] = await db.query<{ first: string }>('SELECT current_schema() AS first')
@@ -1660,6 +1679,35 @@ describe('migrate', () => {
         WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
     )
     expect(remaining).toBe(0)
+  })
+
+  it('migration 027 closes privileges held via the PUBLIC pseudo-role, not just those granted to anon by name', async () => {
+    db = await createPgliteDb()
+    await db.query('CREATE ROLE anon NOLOGIN')
+    await db.query('CREATE ROLE authenticated NOLOGIN')
+    await migrate(db)
+
+    // A PUBLIC grant is held by every role, so `REVOKE ... FROM anon` has no
+    // ACL entry to strip and anon keeps the privilege regardless. Counting
+    // only direct grants therefore reports a lockdown that did not happen.
+    await db.query('GRANT SELECT ON public.conversations TO PUBLIC')
+    const [before] = await db.query<{ reachable: boolean; direct: number }>(
+      `SELECT has_table_privilege('anon', 'public.conversations', 'SELECT') AS reachable,
+              (SELECT count(*)::int FROM information_schema.role_table_grants
+                WHERE table_schema = 'public' AND grantee = 'anon') AS direct`,
+    )
+    // The precondition that makes this test meaningful: reachable by anon,
+    // yet invisible to a direct-grants-only check.
+    expect(before).toEqual({ reachable: true, direct: 0 })
+
+    const doBlockStart = MIGRATION_027_SQL.indexOf('DO $migration027$')
+    expect(doBlockStart).toBeGreaterThan(-1)
+    await db.query(MIGRATION_027_SQL.slice(doBlockStart))
+
+    const [after] = await db.query<{ reachable: boolean }>(
+      `SELECT has_table_privilege('anon', 'public.conversations', 'SELECT') AS reachable`,
+    )
+    expect(after.reachable).toBe(false)
   })
 })
 

@@ -1561,14 +1561,23 @@ DECLARE
 BEGIN
   -- Resolve the target schema the SAME way the unqualified ALTER TABLEs
   -- above did: by asking where an actual application table landed, not via
-  -- current_schema(). Those two rules DIVERGE — an unqualified name scans
+  -- current_schema(). Those two rules can DIVERGE — an unqualified name scans
   -- search_path for a schema that CONTAINS the table, while current_schema()
-  -- is just the first existing entry on the path. With
-  -- search_path = 'helpthread, public' and the tables in public, RLS would
-  -- be enabled on public while the revokes hit helpthread, and the migration
-  -- would report success with the grants still in place. Anchoring to
-  -- 'conversations'::regclass (migration 001, so always present here) makes
-  -- both halves land in the same schema by construction.
+  -- is just the first existing entry on the path — and the failure is silent:
+  -- RLS would be enabled in one schema while the revokes hit another, with
+  -- the migration reporting success and the grants still in place. Anchoring
+  -- to 'conversations'::regclass (migration 001, so always present here)
+  -- makes both halves land in the same schema by construction.
+  --
+  -- Scope this honestly: it is defence, not a fix for a reachable bug. Via
+  -- migrate() the divergent state cannot arise today, because migrate()'s own
+  -- CREATE TABLE IF NOT EXISTS _migrations uses creation semantics
+  -- (current_schema()) — a shadowed search_path makes it land in the leading
+  -- schema, find no applied rows, and re-bootstrap every table there, after
+  -- which both rules agree. Divergence needs _migrations in one schema and
+  -- the app tables in another, which no path here produces. An earlier
+  -- revision used current_schema() and was caught in review; this keeps the
+  -- migration correct on its own terms rather than relying on that caller.
   SELECT n.nspname INTO STRICT target_schema
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -1602,25 +1611,37 @@ BEGIN
     );
   END LOOP;
 
+  -- Revoking from anon/authenticated by name is not sufficient: a privilege
+  -- granted to the PUBLIC pseudo-role is held by EVERY role, so a lone
+  -- 'GRANT SELECT ... TO PUBLIC' leaves both of them able to read the table
+  -- with no ACL entry of their own to revoke. Relations only — deliberately
+  -- NOT routines, where Postgres grants EXECUTE to PUBLIC by default and
+  -- stripping it could break an extension living in this schema. Table data
+  -- is what the PostgREST surface exposes and what this migration is about.
+  EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM PUBLIC', target_schema);
+  EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM PUBLIC', target_schema);
+
   -- Verify rather than assume. REVOKE only strips ACL entries whose GRANTOR is
   -- the executing role (or a role it can act as); against entries granted by
   -- someone else — Supabase's bootstrap runs as supabase_admin — it emits a
   -- warning and completes successfully, leaving the privileges in place. That
-  -- is the same silent-success shape as the search_path divergence above, and
-  -- this migration exists precisely to close a hole that nobody noticed, so it
-  -- fails loudly instead of reporting a lockdown it did not achieve.
+  -- is the same silent-success shape the schema resolution above guards
+  -- against, and this migration exists precisely to close a hole that nobody
+  -- noticed, so it fails loudly rather than reporting a lockdown it did not
+  -- achieve. grantee = 0 is PUBLIC, which has no pg_roles row — hence the
+  -- LEFT JOIN, so an effective privilege held that way is counted too.
   SELECT count(*) INTO leftover
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
    CROSS JOIN LATERAL aclexplode(c.relacl) acl
-    JOIN pg_roles r ON r.oid = acl.grantee
+    LEFT JOIN pg_roles r ON r.oid = acl.grantee
    WHERE n.nspname = target_schema
      AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
-     AND r.rolname IN ('anon', 'authenticated');
+     AND (acl.grantee = 0 OR r.rolname IN ('anon', 'authenticated'));
 
   IF leftover > 0 THEN
     RAISE EXCEPTION
-      'migration 027: % privilege(s) for anon/authenticated remain on relations in schema % after REVOKE. The migrating role is probably not the grantor of those grants, so REVOKE only warned. Re-run as the grantor (or a role that is a member of it).',
+      'migration 027: % privilege(s) reachable by anon/authenticated (directly or via PUBLIC) remain on relations in schema % after REVOKE. The migrating role is probably not the grantor of those grants, so REVOKE only warned. Re-run as the grantor, or as a role that is a member of it.',
       leftover, target_schema;
   END IF;
 END
@@ -1807,7 +1828,7 @@ const MIGRATIONS: Migration[] = [
  * Everything outside those contexts splits on `;` exactly as before, so
  * migrations 001–026 tokenize identically to the old implementation —
  * verified by `splitStatements` tests in `./migrate.test.ts`, which is
- * also why this is exported despite having no caller outside this module.
+ * also why this is exported despite having no non-test caller.
  *
  * Deliberately NOT handled, both latent and unreachable from any migration
  * in this file:
