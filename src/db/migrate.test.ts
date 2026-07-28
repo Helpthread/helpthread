@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from './client.js'
-import { migrate, splitStatements } from './migrate.js'
+import {
+  MIGRATION_027_LOCK_DOWN_DATA_API as MIGRATION_027_SQL,
+  migrate,
+  splitStatements,
+} from './migrate.js'
 
 describe('migrate', () => {
   let db: Db | undefined
@@ -1607,6 +1611,53 @@ describe('migrate', () => {
               has_table_privilege('anon', 'public.agents', 'INSERT') AS ins`,
     )
     expect(privs).toEqual({ sel: false, ins: false })
+
+    // The ALTER DEFAULT PRIVILEGES half leaves no table grant to count, so
+    // assert it directly: no default-ACL entry may remain for either role.
+    const [{ n: defaults }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM pg_default_acl d
+         JOIN pg_namespace n ON n.oid = d.defaclnamespace
+        WHERE n.nspname = 'public'
+          AND array_to_string(d.defaclacl, ',') ~ '(^|,)(anon|authenticated)='`,
+    )
+    expect(defaults).toBe(0)
+  })
+
+  it("migration 027 revokes where the tables actually are, not merely at search_path's first entry", async () => {
+    db = await createPgliteDb()
+    await db.query('CREATE ROLE anon NOLOGIN')
+    await db.query('CREATE ROLE authenticated NOLOGIN')
+    await migrate(db)
+    await db.query('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated')
+
+    // The regression this guards is INSIDE migration 027's body, so it is
+    // exercised by replaying that body rather than by calling migrate():
+    // putting a decoy schema on the search_path ahead of `public` and then
+    // re-running migrate() would make its own `CREATE TABLE IF NOT EXISTS
+    // _migrations` land in the decoy and re-bootstrap every table there,
+    // which tests schema bootstrapping rather than schema resolution.
+    //
+    // The divergence: the unqualified `ALTER TABLE`s resolve by scanning
+    // search_path for a schema that CONTAINS the table (→ public), while
+    // `current_schema()` is just the first existing entry (→ decoy). Under
+    // the latter, RLS lands on public while the revokes hit the empty decoy
+    // and the migration reports success with every grant still in place.
+    await db.query('CREATE SCHEMA decoy')
+    await db.query('SET search_path TO decoy, public')
+    const [{ first }] = await db.query<{ first: string }>('SELECT current_schema() AS first')
+    expect(first).toBe('decoy')
+
+    const roleGuardedRevokes = MIGRATION_027_SQL.slice(
+      MIGRATION_027_SQL.indexOf('DO $migration027$'),
+    )
+    await db.query(roleGuardedRevokes)
+
+    const [{ n: remaining }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.role_table_grants
+        WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
+    )
+    expect(remaining).toBe(0)
   })
 })
 

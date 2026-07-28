@@ -1506,11 +1506,15 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
  *    grants are the gate that matters; schema `USAGE` alone conveys no
  *    access to any table.
  *
- * Both are written against `current_schema()` rather than a hardcoded
- * `public`, because `PostgresDb` supports a `schema` option
- * (`src/db/postgres.ts`) that puts every table in a named schema instead.
- * `migrate()` runs inside that schema's search_path, so the `ALTER TABLE`
- * statements and the revokes below target the same place in both modes.
+ * Neither half hardcodes `public`, because `PostgresDb` supports a `schema`
+ * option (`src/db/postgres.ts`) that puts every table in a named schema
+ * instead. The `ALTER TABLE`s are unqualified, so they resolve wherever
+ * search_path finds the table; the revokes then derive that SAME schema
+ * from `'conversations'::regclass` rather than from `current_schema()`.
+ * That distinction is load-bearing and the reason for the comment in the
+ * `DO` block below — the two rules disagree whenever the first entry on
+ * search_path is not the schema holding the tables, and picking the wrong
+ * one fails silently, leaving the grants in place while reporting success.
  *
  * ## Why the `DO` block
  *
@@ -1524,12 +1528,12 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
  *
  * ## Standing rule for future migrations
  *
- * A migration that adds a table to `public` MUST also `ENABLE ROW LEVEL
- * SECURITY` on it. The `ALTER DEFAULT PRIVILEGES` above means such a table
+ * A migration that adds a table MUST also `ENABLE ROW LEVEL SECURITY` on
+ * it. The `ALTER DEFAULT PRIVILEGES` above means such a table
  * arrives without anon grants, so RLS is the second layer rather than the
  * only one — but the rule stands so the two layers stay in step.
  */
-const MIGRATION_027_LOCK_DOWN_DATA_API = `
+export const MIGRATION_027_LOCK_DOWN_DATA_API = `
 ALTER TABLE _migrations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE threads ENABLE ROW LEVEL SECURITY;
@@ -1551,9 +1555,24 @@ ALTER TABLE webauthn_challenges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webauthn_stepup_tokens ENABLE ROW LEVEL SECURITY;
 DO $migration027$
 DECLARE
-  target_schema text := current_schema();
+  target_schema name;
   role_name text;
 BEGIN
+  -- Resolve the target schema the SAME way the unqualified ALTER TABLEs
+  -- above did: by asking where an actual application table landed, not via
+  -- current_schema(). Those two rules DIVERGE — an unqualified name scans
+  -- search_path for a schema that CONTAINS the table, while current_schema()
+  -- is just the first existing entry on the path. With
+  -- search_path = 'helpthread, public' and the tables in public, RLS would
+  -- be enabled on public while the revokes hit helpthread, and the migration
+  -- would report success with the grants still in place. Anchoring to
+  -- 'conversations'::regclass (migration 001, so always present here) makes
+  -- both halves land in the same schema by construction.
+  SELECT n.nspname INTO STRICT target_schema
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.oid = 'conversations'::regclass;
+
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
       CONTINUE;
@@ -1763,11 +1782,21 @@ const MIGRATIONS: Migration[] = [
  * Everything outside those contexts splits on `;` exactly as before, so
  * migrations 001–026 tokenize identically to the old implementation —
  * verified by `splitStatements` tests in `./migrate.test.ts`, which is
- * also why this is exported despite having no non-test caller.
+ * also why this is exported despite having no caller outside this module.
  *
- * Deliberately NOT handled: `standard_conforming_strings = off`, under
- * which a plain `'...'` would also honour backslash escapes. Postgres has
- * defaulted that to `on` since 9.1 and no migration here depends on it.
+ * Deliberately NOT handled, both latent and unreachable from any migration
+ * in this file:
+ *
+ * - `standard_conforming_strings = off`, under which a plain `'...'` would
+ *   also honour backslash escapes. Postgres has defaulted it to `on` since
+ *   9.1 and nothing here depends on it.
+ * - An `E'...'` immediately following a dollar-quote terminator
+ *   (`$e$x$e$E'a\';b'`). The token-boundary guard includes `$` in its
+ *   look-behind because Postgres identifiers may contain `$` and
+ *   `foo$e'x'` must NOT be read as an escape string — which makes the two
+ *   cases genuinely ambiguous to a scanner this size. Postgres resolves it
+ *   by longest-match; we accept the false negative, since the alternative
+ *   breaks the commoner case.
  */
 export function splitStatements(sql: string): string[] {
   const statements: string[] = []
