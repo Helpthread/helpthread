@@ -83,10 +83,14 @@ application reaches Postgres directly over the pooler (`DATABASE_URL`) and uses 
 Storage with the `service_role` key; no anon-key client exists anywhere in the codebase.
 Migration 027 therefore enables RLS on every table and revokes the `anon`/`authenticated`
 grants, including via `ALTER DEFAULT PRIVILEGES` so future tables created by the migrating
-role do not arrive pre-granted. Both halves are written against `current_schema()` rather
-than a hardcoded `public`, because `PostgresDb` supports a `schema` option. The same
-lockdown was applied directly to the production project ahead of the migration landing, to
-close live exposure rather than wait on review.
+role do not arrive pre-granted. Neither half hardcodes `public`, because `PostgresDb`
+supports a `schema` option; the revokes derive the schema from `'conversations'::regclass`
+— deliberately *not* `current_schema()`, which resolves to search_path's first entry rather
+than to the schema actually holding the tables, and so can diverge from the unqualified
+`ALTER TABLE`s. (An earlier revision of this change used `current_schema()` and was caught
+in review; the divergence fails silently, leaving the grants in place while the migration
+reports success.) The same lockdown was applied directly to the production project ahead of
+the migration landing, to close live exposure rather than wait on review.
 
 Be precise about the limits of the `ALTER DEFAULT PRIVILEGES` layer, which is easy to
 overrate: it *deletes a default-ACL entry* rather than installing a standing deny, and

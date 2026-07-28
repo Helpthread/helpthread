@@ -1557,6 +1557,7 @@ DO $migration027$
 DECLARE
   target_schema name;
   role_name text;
+  leftover integer;
 BEGIN
   -- Resolve the target schema the SAME way the unqualified ALTER TABLEs
   -- above did: by asking where an actual application table landed, not via
@@ -1579,7 +1580,9 @@ BEGIN
     END IF;
     EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM %I', target_schema, role_name);
     EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM %I', target_schema, role_name);
-    EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA %I FROM %I', target_schema, role_name);
+    -- ROUTINES, not FUNCTIONS: ALL FUNCTIONS IN SCHEMA covers functions and
+    -- aggregates but NOT procedures, which would leave those grants standing.
+    EXECUTE format('REVOKE ALL ON ALL ROUTINES IN SCHEMA %I FROM %I', target_schema, role_name);
     EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM %I', target_schema, role_name);
     EXECUTE format(
       'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TABLES FROM %I',
@@ -1598,6 +1601,28 @@ BEGIN
       target_schema, role_name
     );
   END LOOP;
+
+  -- Verify rather than assume. REVOKE only strips ACL entries whose GRANTOR is
+  -- the executing role (or a role it can act as); against entries granted by
+  -- someone else — Supabase's bootstrap runs as supabase_admin — it emits a
+  -- warning and completes successfully, leaving the privileges in place. That
+  -- is the same silent-success shape as the search_path divergence above, and
+  -- this migration exists precisely to close a hole that nobody noticed, so it
+  -- fails loudly instead of reporting a lockdown it did not achieve.
+  SELECT count(*) INTO leftover
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   CROSS JOIN LATERAL aclexplode(c.relacl) acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE n.nspname = target_schema
+     AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+     AND r.rolname IN ('anon', 'authenticated');
+
+  IF leftover > 0 THEN
+    RAISE EXCEPTION
+      'migration 027: % privilege(s) for anon/authenticated remain on relations in schema % after REVOKE. The migrating role is probably not the grantor of those grants, so REVOKE only warned. Re-run as the grantor (or a role that is a member of it).',
+      leftover, target_schema;
+  END IF;
 END
 $migration027$;
 `

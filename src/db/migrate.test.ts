@@ -1648,10 +1648,12 @@ describe('migrate', () => {
     const [{ first }] = await db.query<{ first: string }>('SELECT current_schema() AS first')
     expect(first).toBe('decoy')
 
-    const roleGuardedRevokes = MIGRATION_027_SQL.slice(
-      MIGRATION_027_SQL.indexOf('DO $migration027$'),
-    )
-    await db.query(roleGuardedRevokes)
+    // Assert the anchor before slicing: `indexOf` returning -1 would make
+    // `slice(-1)` yield the last character of the migration, quietly turning
+    // this into a test of a stray newline.
+    const doBlockStart = MIGRATION_027_SQL.indexOf('DO $migration027$')
+    expect(doBlockStart).toBeGreaterThan(-1)
+    await db.query(MIGRATION_027_SQL.slice(doBlockStart))
 
     const [{ n: remaining }] = await db.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM information_schema.role_table_grants
