@@ -1447,6 +1447,115 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
 `
 
 /**
+ * Migration 027 — close the PostgREST Data API surface.
+ *
+ * ## What was wrong
+ *
+ * Supabase exposes the `public` schema through PostgREST, and its stock
+ * setup grants `anon` and `authenticated` full `SELECT/INSERT/UPDATE/
+ * DELETE/TRUNCATE` on tables in that schema. Row-Level Security is what is
+ * normally supposed to make those grants safe — but no migration up to 026
+ * ever enabled RLS, so every table stood fully open to anyone holding the
+ * project's anon key. The anon key is public by design (it ships to
+ * browsers), so that is effectively unauthenticated read AND write:
+ * dumping `conversations`/`threads`, but also INSERTing into `agents`,
+ * `agent_auth_identities`, `agent_mailbox_access` and
+ * `webauthn_credentials` to self-provision an authenticated Agent, or
+ * TRUNCATEing the lot. `mailbox_oauth_tokens` is the one partial mercy —
+ * its token columns are AES-256-GCM ciphertext (`src/store/token-crypto.
+ * ts`) keyed outside the database, so a dump yields ciphertext.
+ *
+ * Nothing in this codebase uses that surface: the app reaches Postgres
+ * directly over the pooler (`DATABASE_URL`, `src/db/postgres.ts`) and
+ * Supabase Storage with the `service_role` key
+ * (`src/providers/adapters/supabase-storage/`). There is no anon-key
+ * client anywhere in the repo. The Data API was pure attack surface with
+ * zero application value, which is what makes closing it entirely safe.
+ *
+ * ## Defence in depth, not either/or
+ *
+ * Both halves below are applied because they fail independently. RLS alone
+ * would be undone by a future `GRANT` plus a permissive policy; revoking
+ * grants alone would be undone by Supabase re-running its stock
+ * bootstrap. Together, a single mistake does not reopen the hole.
+ *
+ * 1. **RLS on every table**, spelled out one `ALTER TABLE` per table rather
+ *    than looped, so the set is reviewable in the diff and a table added
+ *    later fails loudly by omission instead of being silently swept in.
+ *    With no policies attached this is deny-by-default. It does not affect
+ *    the application: these tables are owned by `postgres`, and a table
+ *    owner bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set (which we
+ *    deliberately do not set).
+ * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` so tables
+ *    created by future migrations do not silently arrive pre-granted.
+ *
+ * ## Why the `DO` block
+ *
+ * `anon`/`authenticated` are Supabase-created roles. They do not exist in
+ * PGlite, which is what the test suite runs `migrate()` against
+ * (`createPgliteDb`, `src/db/client.ts`), and an unguarded `REVOKE ... FROM
+ * anon` is a hard error when the role is missing — it would fail every
+ * test that migrates. The `pg_roles` guard makes the revokes a no-op off
+ * Supabase while still applying in production. This block is also why
+ * {@link splitStatements} had to learn about dollar quoting.
+ *
+ * ## Standing rule for future migrations
+ *
+ * A migration that adds a table to `public` MUST also `ENABLE ROW LEVEL
+ * SECURITY` on it. The `ALTER DEFAULT PRIVILEGES` above means such a table
+ * arrives without anon grants, so RLS is the second layer rather than the
+ * only one — but the rule stands so the two layers stay in step.
+ */
+const MIGRATION_027_LOCK_DOWN_DATA_API = `
+ALTER TABLE _migrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE threads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mailboxes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mailbox_oauth_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gmail_watch_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inbound_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE queue_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE thread_attachments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_auth_identities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_mailbox_access ENABLE ROW LEVEL SECURITY;
+ALTER TABLE assistants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_endpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE saved_replies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_challenges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_stepup_tokens ENABLE ROW LEVEL SECURITY;
+DO $migration027$
+DECLARE
+  missing text;
+BEGIN
+  FOREACH missing IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = missing) THEN
+      CONTINUE;
+    END IF;
+    EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', missing);
+    EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', missing);
+    EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM %I', missing);
+    EXECUTE format('REVOKE USAGE ON SCHEMA public FROM %I', missing);
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM %I',
+      missing
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %I',
+      missing
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM %I',
+      missing
+    );
+  END LOOP;
+END
+$migration027$;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1578,6 +1687,11 @@ const MIGRATIONS: Migration[] = [
     name: 'webauthn',
     sql: MIGRATION_026_WEBAUTHN,
   },
+  {
+    id: 27,
+    name: 'lock_down_data_api',
+    sql: MIGRATION_027_LOCK_DOWN_DATA_API,
+  },
 ]
 
 /**
@@ -1594,18 +1708,109 @@ const MIGRATIONS: Migration[] = [
  * multi-statement-capable method just for this one caller, `migrate` stays
  * inside the same thin `query`-only seam every other module uses, and
  * splits the (fully first-party, never user-controlled) migration SQL into
- * individual statements itself. This is safe specifically because
- * migration bodies are our own embedded string constants — never data —
- * and none of them contain a semicolon inside a string literal or a
- * dollar-quoted body; that invariant is worth re-checking if a future
- * migration ever needs one (e.g. a function body), at which point a
- * smarter splitter would be warranted.
+ * individual statements itself.
+ *
+ * ## Why this is no longer a plain `split(';')`
+ *
+ * The original splitter split on every semicolon, resting on the invariant
+ * that no migration body contained one inside a string literal or a
+ * dollar-quoted block — with a note that a smarter splitter would be
+ * warranted the first time one did. Migration 027 is that first time: its
+ * role-guarded `REVOKE`s live in a `DO $$ ... $$` block whose body is full
+ * of semicolons, and a naive split would tear it into fragments that are
+ * not valid SQL on their own.
+ *
+ * So this scanner tracks the lexical contexts in which a `;` is NOT a
+ * statement terminator:
+ *
+ * - `'...'` single-quoted literals (with `''` escaping),
+ * - `"..."` quoted identifiers,
+ * - `$tag$ ... $tag$` dollar-quoted bodies (tag matched exactly, so a
+ *   nested `$$` inside a `$body$` does not close it),
+ * - `-- ...` line comments and `/* ... *\/` block comments (which nest in
+ *   Postgres, so the scanner counts depth).
+ *
+ * Everything outside those contexts splits on `;` exactly as before, so
+ * migrations 001–026 tokenize identically to the old implementation.
  */
 function splitStatements(sql: string): string[] {
-  return sql
-    .split(';')
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0)
+  const statements: string[] = []
+  let current = ''
+  let index = 0
+
+  while (index < sql.length) {
+    const rest = sql.slice(index)
+
+    // Line comment — consume through end of line (or end of input).
+    if (rest.startsWith('--')) {
+      const newline = sql.indexOf('\n', index)
+      const stop = newline === -1 ? sql.length : newline
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    // Block comment — Postgres nests these, so track depth.
+    if (rest.startsWith('/*')) {
+      let depth = 0
+      let scan = index
+      while (scan < sql.length) {
+        if (sql.startsWith('/*', scan)) {
+          depth += 1
+          scan += 2
+        } else if (sql.startsWith('*/', scan)) {
+          depth -= 1
+          scan += 2
+          if (depth === 0) break
+        } else {
+          scan += 1
+        }
+      }
+      current += sql.slice(index, scan)
+      index = scan
+      continue
+    }
+
+    // Dollar-quoted body — the tag must match exactly to close it.
+    // Tag grammar per Postgres: `$$`, or `$tag$` where tag starts with a
+    // letter/underscore and may then contain digits (`$migration027$`).
+    const dollarTag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(rest)
+    if (dollarTag !== null) {
+      const tag = dollarTag[0]
+      const close = sql.indexOf(tag, index + tag.length)
+      const stop = close === -1 ? sql.length : close + tag.length
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    const char = sql[index]
+
+    // Single-quoted literal or double-quoted identifier. A doubled quote
+    // ('' / "") is an escaped quote, not a close, and falls out naturally:
+    // the close is consumed, then the next iteration re-opens on the second.
+    if (char === "'" || char === '"') {
+      const close = sql.indexOf(char, index + 1)
+      const stop = close === -1 ? sql.length : close + 1
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    if (char === ';') {
+      statements.push(current)
+      current = ''
+      index += 1
+      continue
+    }
+
+    current += char
+    index += 1
+  }
+
+  statements.push(current)
+
+  return statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0)
 }
 
 /**

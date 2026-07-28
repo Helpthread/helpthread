@@ -66,6 +66,7 @@ describe('migrate', () => {
       { id: 24, name: 'saved_replies' },
       { id: 25, name: 'conversation_snooze' },
       { id: 26, name: 'webauthn' },
+      { id: 27, name: 'lock_down_data_api' },
     ])
   })
 
@@ -102,6 +103,7 @@ describe('migrate', () => {
       { id: 24 },
       { id: 25 },
       { id: 26 },
+      { id: 27 },
     ])
   })
 
@@ -1521,5 +1523,58 @@ describe('migrate', () => {
     await expect(
       db.query(`UPDATE conversations SET status = 'active' WHERE id = $1`, [row.id]),
     ).rejects.toThrow()
+  })
+
+  it('migration 027 enables RLS on every table in public — no table is left open to the PostgREST anon role', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const open = await db.query<{ relname: string }>(
+      `SELECT c.relname
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity
+        ORDER BY c.relname`,
+    )
+
+    // Named rather than counted: a future migration that adds a table and
+    // forgets `ENABLE ROW LEVEL SECURITY` shows up here by name.
+    expect(open.map((row) => row.relname)).toEqual([])
+
+    // And the set is non-empty, so the assertion above cannot pass vacuously
+    // by matching zero tables.
+    const [{ n }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity`,
+    )
+    expect(n).toBeGreaterThan(0)
+  })
+
+  it("migration 027's role-guarded revokes are a no-op where anon/authenticated do not exist — migrate() succeeds on PGlite", async () => {
+    db = await createPgliteDb()
+
+    // PGlite has no Supabase roles, so an UNGUARDED `REVOKE ... FROM anon`
+    // would abort the whole migration transaction. Proving the premise
+    // first keeps this test honest if PGlite ever ships those roles.
+    const roles = await db.query<{ rolname: string }>(
+      `SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')`,
+    )
+    expect(roles).toEqual([])
+
+    await expect(migrate(db)).resolves.toBeUndefined()
+
+    const [applied] = await db.query<{ name: string }>('SELECT name FROM _migrations WHERE id = 27')
+    expect(applied.name).toBe('lock_down_data_api')
+  })
+
+  it("splits statements without breaking migration 027's dollar-quoted DO block", async () => {
+    db = await createPgliteDb()
+
+    // The DO block's body is full of semicolons. A naive `split(';')` tears
+    // it into fragments that are not valid SQL on their own, so this run
+    // failing is the regression signal for splitStatements().
+    await expect(migrate(db)).resolves.toBeUndefined()
   })
 })

@@ -62,6 +62,47 @@ It is not part of Helpthread's product or architecture.
 The original charter and its complete amendment record are preserved at
 [docs/history/CHARTER-v1.md](../history/CHARTER-v1.md).
 
+## 2026-07-28 — The Supabase Data API is closed; Postgres is reached directly
+
+**Decided:** 2026-07-28
+
+**Context.** A Supabase advisor alert reported one publicly accessible table. Checking the
+project found the problem was broader: all 19 tables in `public` had Row-Level Security
+disabled *and* full `SELECT/INSERT/UPDATE/DELETE/TRUNCATE` granted to the `anon` and
+`authenticated` roles. Supabase exposes `public` through PostgREST, and the anon key is
+public by design, so this was unauthenticated read and write against production —
+including INSERT into `agents`, `agent_auth_identities`, `agent_mailbox_access`, and
+`webauthn_credentials`, which is enough to self-provision an authenticated Agent.
+`mailbox_oauth_tokens` was partially cushioned: its token columns hold AES-256-GCM
+ciphertext keyed outside the database, so a dump yields ciphertext, not usable Gmail
+credentials. Inspection of the data found no evidence of tampering — this checked state,
+not access logs, so it is not proof of non-access.
+
+**Decision.** The PostgREST Data API is not part of Helpthread's architecture. The
+application reaches Postgres directly over the pooler (`DATABASE_URL`) and uses Supabase
+Storage with the `service_role` key; no anon-key client exists anywhere in the codebase.
+Migration 027 therefore enables RLS on every table in `public` and revokes the
+`anon`/`authenticated` grants, including via `ALTER DEFAULT PRIVILEGES` so future tables
+do not arrive pre-granted. The same lockdown was applied directly to the production
+project ahead of the migration landing, to close live exposure rather than wait on review.
+
+**Alternatives considered.** Enabling RLS alone was rejected: the grants would remain, so
+a single future permissive policy would reopen everything. Revoking grants alone was
+rejected for the mirror-image reason — Supabase re-running its stock bootstrap restores
+them. Writing real per-tenant RLS policies was rejected as solving a problem Helpthread
+does not have: policies exist to make anon access safe, and there is no anon access to
+make safe. Deny-by-default with no policies is the honest expression of that.
+
+**Consequences.** The Supabase security advisor now reports `rls_enabled_no_policy` at
+INFO level for every table. That is the intended end state, not an outstanding item.
+Tables are owned by `postgres`, which bypasses RLS unless `FORCE ROW LEVEL SECURITY` is
+set — deliberately not set — so the application is unaffected. A standing rule follows:
+any migration adding a table to `public` must also enable RLS on it. Separately,
+`splitStatements` in `src/db/migrate.ts` had to learn about dollar quoting, since
+migration 027's role guard is a `DO $$ ... $$` block whose body contains semicolons.
+
+**Supersedes.** Nothing.
+
 Future material decisions should record:
 
 1. date and scope;
