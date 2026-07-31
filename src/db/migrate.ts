@@ -1447,6 +1447,208 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
 `
 
 /**
+ * Migration 027 — close the PostgREST Data API surface.
+ *
+ * ## What was wrong
+ *
+ * Supabase exposes the `public` schema through PostgREST, and its stock
+ * setup grants `anon` and `authenticated` full `SELECT/INSERT/UPDATE/
+ * DELETE/TRUNCATE` on tables in that schema. Row-Level Security is what is
+ * normally supposed to make those grants safe — but no migration up to 026
+ * ever enabled RLS, so every table stood fully open to anyone holding the
+ * project's anon key. The anon key is public by design (it ships to
+ * browsers), so that is effectively unauthenticated read AND write:
+ * dumping `conversations`/`threads`, but also INSERTing into `agents`,
+ * `agent_auth_identities`, `agent_mailbox_access` and
+ * `webauthn_credentials` to self-provision an authenticated Agent, or
+ * TRUNCATEing the lot. `mailbox_oauth_tokens` is the one partial mercy —
+ * its token columns are AES-256-GCM ciphertext (`src/store/token-crypto.
+ * ts`) keyed outside the database, so a dump yields ciphertext.
+ *
+ * Nothing in this codebase uses that surface: the app reaches Postgres
+ * directly over the pooler (`DATABASE_URL`, `src/db/postgres.ts`) and
+ * Supabase Storage with the `service_role` key
+ * (`src/providers/adapters/supabase-storage/`). There is no anon-key
+ * client anywhere in the repo. The Data API was pure attack surface with
+ * zero application value, which is what makes closing it entirely safe.
+ *
+ * ## Defence in depth, not either/or
+ *
+ * Both halves below are applied because they fail independently: RLS alone
+ * would be undone by a future `GRANT` plus a permissive policy, and
+ * revoked grants alone would be undone by anything that re-grants. Neither
+ * layer is load-bearing on its own.
+ *
+ * Be precise about what the `ALTER DEFAULT PRIVILEGES` calls do and do
+ * NOT buy, because it is easy to overrate them. `ALTER DEFAULT PRIVILEGES
+ * ... REVOKE` *deletes a default-ACL entry*; it does not install a
+ * standing deny. And without `FOR ROLE` it applies only to the role that
+ * executes it — the one running this migration. So it stops tables
+ * created by THIS role from arriving pre-granted, and nothing more. It
+ * does not survive Supabase re-running its stock bootstrap (which simply
+ * re-creates the entry), and it does not touch default privileges defined
+ * for other roles such as `supabase_admin`. The durable protection is the
+ * standing rule below, not this statement.
+ *
+ * 1. **RLS on every table**, spelled out one `ALTER TABLE` per table rather
+ *    than looped, so the set is reviewable in the diff and a table added
+ *    later fails loudly by omission instead of being silently swept in.
+ *    With no policies attached this is deny-by-default. It does not affect
+ *    the application: these tables are owned by `postgres`, and a table
+ *    owner bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set (which we
+ *    deliberately do not set).
+ * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` (subject
+ *    to the limits spelled out above) so tables created by future
+ *    migrations do not silently arrive pre-granted. Note that `REVOKE
+ *    ... FROM anon` removes only that role's own ACL entry — privileges
+ *    held via the `PUBLIC` pseudo-role are unaffected, which is why
+ *    `anon` still reports schema `USAGE` afterwards. The table-level
+ *    grants are the gate that matters; schema `USAGE` alone conveys no
+ *    access to any table.
+ *
+ * Neither half hardcodes `public`, because `PostgresDb` supports a `schema`
+ * option (`src/db/postgres.ts`) that puts every table in a named schema
+ * instead. The `ALTER TABLE`s are unqualified, so they resolve wherever
+ * search_path finds the table; the revokes then derive that SAME schema
+ * from `'conversations'::regclass` rather than from `current_schema()`.
+ * That distinction is load-bearing and the reason for the comment in the
+ * `DO` block below — the two rules disagree whenever the first entry on
+ * search_path is not the schema holding the tables, and picking the wrong
+ * one fails silently, leaving the grants in place while reporting success.
+ *
+ * ## Why the `DO` block
+ *
+ * `anon`/`authenticated` are Supabase-created roles. They do not exist in
+ * PGlite, which is what the test suite runs `migrate()` against
+ * (`createPgliteDb`, `src/db/client.ts`), and an unguarded `REVOKE ... FROM
+ * anon` is a hard error when the role is missing — it would fail every
+ * test that migrates. The `pg_roles` guard makes the revokes a no-op off
+ * Supabase while still applying in production. This block is also why
+ * {@link splitStatements} had to learn about dollar quoting.
+ *
+ * ## Standing rule for future migrations
+ *
+ * A migration that adds a table MUST also `ENABLE ROW LEVEL SECURITY` on
+ * it. The `ALTER DEFAULT PRIVILEGES` above means such a table
+ * arrives without anon grants, so RLS is the second layer rather than the
+ * only one — but the rule stands so the two layers stay in step.
+ */
+export const MIGRATION_027_LOCK_DOWN_DATA_API = `
+ALTER TABLE _migrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE threads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mailboxes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mailbox_oauth_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gmail_watch_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inbound_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE queue_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE thread_attachments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_auth_identities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_mailbox_access ENABLE ROW LEVEL SECURITY;
+ALTER TABLE assistants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_endpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE saved_replies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_challenges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_stepup_tokens ENABLE ROW LEVEL SECURITY;
+DO $migration027$
+DECLARE
+  target_schema name;
+  role_name text;
+  leftover integer;
+BEGIN
+  -- Resolve the target schema the SAME way the unqualified ALTER TABLEs
+  -- above did: by asking where an actual application table landed, not via
+  -- current_schema(). Those two rules can DIVERGE — an unqualified name scans
+  -- search_path for a schema that CONTAINS the table, while current_schema()
+  -- is just the first existing entry on the path — and the failure is silent:
+  -- RLS would be enabled in one schema while the revokes hit another, with
+  -- the migration reporting success and the grants still in place. Anchoring
+  -- to 'conversations'::regclass (migration 001, so always present here)
+  -- makes both halves land in the same schema by construction.
+  --
+  -- Scope this honestly: it is defence, not a fix for a reachable bug. Via
+  -- migrate() the divergent state cannot arise today, because migrate()'s own
+  -- CREATE TABLE IF NOT EXISTS _migrations uses creation semantics
+  -- (current_schema()) — a shadowed search_path makes it land in the leading
+  -- schema, find no applied rows, and re-bootstrap every table there, after
+  -- which both rules agree. Divergence needs _migrations in one schema and
+  -- the app tables in another, which no path here produces. An earlier
+  -- revision used current_schema() and was caught in review; this keeps the
+  -- migration correct on its own terms rather than relying on that caller.
+  SELECT n.nspname INTO STRICT target_schema
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.oid = 'conversations'::regclass;
+
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      CONTINUE;
+    END IF;
+    EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM %I', target_schema, role_name);
+    -- ROUTINES, not FUNCTIONS: ALL FUNCTIONS IN SCHEMA covers functions and
+    -- aggregates but NOT procedures, which would leave those grants standing.
+    EXECUTE format('REVOKE ALL ON ALL ROUTINES IN SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TABLES FROM %I',
+      target_schema, role_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM %I',
+      target_schema, role_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON FUNCTIONS FROM %I',
+      target_schema, role_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TYPES FROM %I',
+      target_schema, role_name
+    );
+  END LOOP;
+
+  -- Revoking from anon/authenticated by name is not sufficient: a privilege
+  -- granted to the PUBLIC pseudo-role is held by EVERY role, so a lone
+  -- 'GRANT SELECT ... TO PUBLIC' leaves both of them able to read the table
+  -- with no ACL entry of their own to revoke. Relations only — deliberately
+  -- NOT routines, where Postgres grants EXECUTE to PUBLIC by default and
+  -- stripping it could break an extension living in this schema. Table data
+  -- is what the PostgREST surface exposes and what this migration is about.
+  EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM PUBLIC', target_schema);
+  EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM PUBLIC', target_schema);
+
+  -- Verify rather than assume. REVOKE only strips ACL entries whose GRANTOR is
+  -- the executing role (or a role it can act as); against entries granted by
+  -- someone else — Supabase's bootstrap runs as supabase_admin — it emits a
+  -- warning and completes successfully, leaving the privileges in place. That
+  -- is the same silent-success shape the schema resolution above guards
+  -- against, and this migration exists precisely to close a hole that nobody
+  -- noticed, so it fails loudly rather than reporting a lockdown it did not
+  -- achieve. grantee = 0 is PUBLIC, which has no pg_roles row — hence the
+  -- LEFT JOIN, so an effective privilege held that way is counted too.
+  SELECT count(*) INTO leftover
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   CROSS JOIN LATERAL aclexplode(c.relacl) acl
+    LEFT JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE n.nspname = target_schema
+     AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+     AND (acl.grantee = 0 OR r.rolname IN ('anon', 'authenticated'));
+
+  IF leftover > 0 THEN
+    RAISE EXCEPTION
+      'migration 027: % privilege(s) reachable by anon/authenticated (directly or via PUBLIC) remain on relations in schema % after REVOKE. The migrating role is probably not the grantor of those grants, so REVOKE only warned. Re-run as the grantor, or as a role that is a member of it.',
+      leftover, target_schema;
+  END IF;
+END
+$migration027$;
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1578,6 +1780,11 @@ const MIGRATIONS: Migration[] = [
     name: 'webauthn',
     sql: MIGRATION_026_WEBAUTHN,
   },
+  {
+    id: 27,
+    name: 'lock_down_data_api',
+    sql: MIGRATION_027_LOCK_DOWN_DATA_API,
+  },
 ]
 
 /**
@@ -1594,18 +1801,156 @@ const MIGRATIONS: Migration[] = [
  * multi-statement-capable method just for this one caller, `migrate` stays
  * inside the same thin `query`-only seam every other module uses, and
  * splits the (fully first-party, never user-controlled) migration SQL into
- * individual statements itself. This is safe specifically because
- * migration bodies are our own embedded string constants — never data —
- * and none of them contain a semicolon inside a string literal or a
- * dollar-quoted body; that invariant is worth re-checking if a future
- * migration ever needs one (e.g. a function body), at which point a
- * smarter splitter would be warranted.
+ * individual statements itself.
+ *
+ * ## Why this is no longer a plain `split(';')`
+ *
+ * The original splitter split on every semicolon, resting on the invariant
+ * that no migration body contained one inside a string literal or a
+ * dollar-quoted block — with a note that a smarter splitter would be
+ * warranted the first time one did. Migration 027 is that first time: its
+ * role-guarded `REVOKE`s live in a `DO $$ ... $$` block whose body is full
+ * of semicolons, and a naive split would tear it into fragments that are
+ * not valid SQL on their own.
+ *
+ * So this scanner tracks the lexical contexts in which a `;` is NOT a
+ * statement terminator:
+ *
+ * - `'...'` single-quoted literals (with `''` escaping),
+ * - `E'...'` escape strings, where a backslash escapes the next character
+ *   (so `E'a\';b'` is ONE literal, not a literal followed by `;b`),
+ * - `"..."` quoted identifiers,
+ * - `$tag$ ... $tag$` dollar-quoted bodies (tag matched exactly, so a
+ *   nested `$$` inside a `$body$` does not close it),
+ * - `-- ...` line comments and `/* ... *\/` block comments (which nest in
+ *   Postgres, so the scanner counts depth).
+ *
+ * Everything outside those contexts splits on `;` exactly as before, so
+ * migrations 001–026 tokenize identically to the old implementation —
+ * verified by `splitStatements` tests in `./migrate.test.ts`, which is
+ * also why this is exported despite having no non-test caller.
+ *
+ * Deliberately NOT handled, both latent and unreachable from any migration
+ * in this file:
+ *
+ * - `standard_conforming_strings = off`, under which a plain `'...'` would
+ *   also honour backslash escapes. Postgres has defaulted it to `on` since
+ *   9.1 and nothing here depends on it.
+ * - An `E'...'` immediately following a dollar-quote terminator
+ *   (`$e$x$e$E'a\';b'`). The token-boundary guard includes `$` in its
+ *   look-behind because Postgres identifiers may contain `$` and
+ *   `foo$e'x'` must NOT be read as an escape string — which makes the two
+ *   cases genuinely ambiguous to a scanner this size. Postgres resolves it
+ *   by longest-match; we accept the false negative, since the alternative
+ *   breaks the commoner case.
  */
-function splitStatements(sql: string): string[] {
-  return sql
-    .split(';')
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0)
+export function splitStatements(sql: string): string[] {
+  const statements: string[] = []
+  let current = ''
+  let index = 0
+
+  while (index < sql.length) {
+    const rest = sql.slice(index)
+
+    // Line comment — consume through end of line (or end of input).
+    if (rest.startsWith('--')) {
+      const newline = sql.indexOf('\n', index)
+      const stop = newline === -1 ? sql.length : newline
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    // Block comment — Postgres nests these, so track depth.
+    if (rest.startsWith('/*')) {
+      let depth = 0
+      let scan = index
+      while (scan < sql.length) {
+        if (sql.startsWith('/*', scan)) {
+          depth += 1
+          scan += 2
+        } else if (sql.startsWith('*/', scan)) {
+          depth -= 1
+          scan += 2
+          if (depth === 0) break
+        } else {
+          scan += 1
+        }
+      }
+      current += sql.slice(index, scan)
+      index = scan
+      continue
+    }
+
+    // Dollar-quoted body — the tag must match exactly to close it.
+    // Tag grammar per Postgres: `$$`, or `$tag$` where tag starts with a
+    // letter/underscore and may then contain digits (`$migration027$`).
+    const dollarTag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(rest)
+    if (dollarTag !== null) {
+      const tag = dollarTag[0]
+      const close = sql.indexOf(tag, index + tag.length)
+      const stop = close === -1 ? sql.length : close + tag.length
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    // Escape string (`E'...'` / `e'...'`) — a backslash escapes the next
+    // character, so the closing quote must be found by scanning rather than
+    // by indexOf. Handled before the plain-quote branch below, which would
+    // otherwise stop at the backslash-escaped quote in `E'a\';b'`.
+    // The `[A-Za-z0-9_$]` look-behind keeps this from firing on the tail of
+    // an identifier that happens to end in `e` (Postgres only lexes `E'` as
+    // an escape string at a token boundary).
+    const escapeString = /^[Ee]'/.exec(rest)
+    if (escapeString !== null && !/[A-Za-z0-9_$]/.test(sql[index - 1] ?? '')) {
+      let scan = index + 2
+      while (scan < sql.length) {
+        if (sql[scan] === '\\') {
+          scan += 2
+        } else if (sql[scan] === "'") {
+          // A doubled '' is an escaped quote here too, not a close.
+          if (sql[scan + 1] === "'") scan += 2
+          else {
+            scan += 1
+            break
+          }
+        } else {
+          scan += 1
+        }
+      }
+      current += sql.slice(index, Math.min(scan, sql.length))
+      index = scan
+      continue
+    }
+
+    const char = sql[index]
+
+    // Single-quoted literal or double-quoted identifier. A doubled quote
+    // ('' / "") is an escaped quote, not a close, and falls out naturally:
+    // the close is consumed, then the next iteration re-opens on the second.
+    if (char === "'" || char === '"') {
+      const close = sql.indexOf(char, index + 1)
+      const stop = close === -1 ? sql.length : close + 1
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    if (char === ';') {
+      statements.push(current)
+      current = ''
+      index += 1
+      continue
+    }
+
+    current += char
+    index += 1
+  }
+
+  statements.push(current)
+
+  return statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0)
 }
 
 /**
