@@ -16,6 +16,14 @@
  * the conversation-CRUD routes; the router guarantees the method is `POST`
  * and the caller already cleared the Bearer gate before either ever runs.
  *
+ * **The Bearer gate is NOT the only check.** Both handlers additionally
+ * require an **admin acting Agent** ({@link requireAdmin}), because both make
+ * the server dial an operator-supplied `host:port`. An earlier revision of
+ * this heading described them as ordinary Bearer-gated routes and nothing
+ * more — which is precisely the misreading that left them un-gated in the
+ * first place (review, 2026-07-25). `web/src/lib/api.ts` sends
+ * `actingAgent: true` for both calls.
+ *
  * ## The password is never echoed back
  *
  * `handleImapConnect`'s success response is the persisted `MailboxRecord`

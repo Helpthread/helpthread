@@ -114,6 +114,34 @@ export interface ImapClient {
   close(): Promise<void>
 }
 
+/**
+ * The IANA implicit-TLS port for IMAP (RFC 8314 §3.3, `imaps`). A connection
+ * to this port begins its TLS handshake immediately; a connection to 143
+ * starts in cleartext and upgrades via `STARTTLS`.
+ */
+export const IMAPS_PORT = 993
+
+/**
+ * Which TLS mode the IMAP leg should use for `port`, ignoring any single
+ * shared "secure" flag the caller may also hold for its SMTP leg.
+ *
+ * The two legs are independent and routinely differ: every provider preset in
+ * the connect UI pairs IMAP on 993 (implicit TLS) with SMTP on either 465
+ * (implicit) or 587 (STARTTLS). Feeding one flag to both — as an earlier
+ * revision did — made an Outlook or iCloud preset (`imapPort: 993`,
+ * `smtpPort: 587`, `secure: false`) attempt STARTTLS against an implicit-TLS
+ * IMAP port, which cannot succeed (review, 2026-07-25).
+ *
+ * Derived from the port rather than asked for, because the port already
+ * determines the answer and an operator who changes one without the other has
+ * simply misconfigured the inbox. Making TLS an explicit per-leg field in the
+ * API, schema, and UI is tracked separately — it needs a product call on how
+ * the connect form presents it.
+ */
+export function imapImplicitTlsForPort(port: number): boolean {
+  return port === IMAPS_PORT
+}
+
 /** Credentials + connection info for {@link createImapClient}. */
 export interface ImapClientOptions {
   host: string

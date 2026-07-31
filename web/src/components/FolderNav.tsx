@@ -171,6 +171,13 @@ export function FolderNav({
           <button
             type="button"
             title="Mailbox settings"
+            // Both child icons are decorative, so `title` alone is an
+            // unreliable accessible name; and without the disclosure pair,
+            // assistive tech cannot tell this opens a menu or whether it is
+            // currently open (review, 2026-07-25).
+            aria-label="Mailbox settings"
+            aria-haspopup="menu"
+            aria-expanded={gearOpen}
             disabled={mailbox === null}
             onClick={() => setGearOpen((current) => !current)}
             style={{

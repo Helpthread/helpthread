@@ -111,7 +111,7 @@ export class MailboxProviderConflictError extends Error {
 
   constructor(address: string, requestedProvider: string) {
     super(
-      `Mailbox ${address} is already connected through a different transport. Changing an existing inbox's transport to '${requestedProvider}' is not supported yet — connect it at a different address, or remove this one first.`,
+      `Mailbox ${address} is already connected through a different transport. Changing an existing inbox's transport to '${requestedProvider}' is not supported yet. Connect a different address instead.`,
     )
     this.name = 'MailboxProviderConflictError'
     this.address = address

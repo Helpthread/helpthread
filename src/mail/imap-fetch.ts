@@ -79,6 +79,7 @@ import {
   fetchImapInboundMessages,
   type ImapClient,
   type ImapClientOptions,
+  imapImplicitTlsForPort,
 } from '../providers/adapters/imap/index.js'
 import type { RawInboundMessage } from '../providers/index.js'
 import type { ImapConfigStore } from '../store/imap-config.js'
@@ -237,7 +238,9 @@ async function fetchOneMailbox(
         createImapClient({
           host: config.imapHost,
           port: config.imapPort,
-          secure: config.secure,
+          // Per-leg, from the IMAP port — `config.secure` describes the SMTP
+          // leg's mode and does not transfer (see `imapImplicitTlsForPort`).
+          secure: imapImplicitTlsForPort(config.imapPort),
           auth: { user: config.username, pass: resolvedPassword },
         }),
       maxPerInvocation,

@@ -19,7 +19,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { ImapFlowLike } from './client.js'
-import { createImapClient } from './client.js'
+import { createImapClient, IMAPS_PORT, imapImplicitTlsForPort } from './client.js'
 
 interface FakeFlowState {
   uidValidity: bigint | number
@@ -285,5 +285,34 @@ describe('createImapClient.uidFetchRawSince', () => {
     await expect(client.uidFetchRawSince(0, 50)).rejects.toThrow(
       'did not return a parsed INTERNALDATE',
     )
+  })
+})
+
+// HT-101 review fix (CodeRabbit, 2026-07-25). A single shared `secure` flag was
+// fed to BOTH the IMAP and SMTP legs. Every connect-UI preset pairs IMAP on 993
+// with SMTP on 465 or 587, so an Outlook/iCloud preset (`smtpPort: 587`,
+// `secure: false`) made the IMAP leg attempt STARTTLS against an implicit-TLS
+// port, which cannot succeed. TLS mode is now derived per leg from its own port.
+describe('imapImplicitTlsForPort', () => {
+  it('uses implicit TLS on 993, the IANA imaps port', () => {
+    expect(imapImplicitTlsForPort(993)).toBe(true)
+    expect(imapImplicitTlsForPort(IMAPS_PORT)).toBe(true)
+  })
+
+  it('uses STARTTLS on 143, the cleartext-then-upgrade port', () => {
+    expect(imapImplicitTlsForPort(143)).toBe(false)
+  })
+
+  it("does NOT take its answer from an SMTP port — 587 and 465 are the SMTP leg's business", () => {
+    expect(imapImplicitTlsForPort(587)).toBe(false)
+    expect(imapImplicitTlsForPort(465)).toBe(false)
+  })
+
+  it('the regression itself: an Outlook-shaped preset still gets implicit TLS on its IMAP leg', () => {
+    // imapPort 993 + smtpPort 587 + secure:false — the exact shape that broke.
+    const preset = { imapPort: 993, smtpPort: 587, secure: false }
+    expect(imapImplicitTlsForPort(preset.imapPort)).toBe(true)
+    // ...and the shared flag is NOT what decides it.
+    expect(imapImplicitTlsForPort(preset.imapPort)).not.toBe(preset.secure)
   })
 })

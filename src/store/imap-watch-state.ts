@@ -114,9 +114,10 @@ export interface ImapWatchStateStore {
   /**
    * Seed `mailboxId`'s BASELINE cursor at connect time — module doc's
    * "start fetching new mail from here forward, never a resync of the
-   * mailbox's entire history." Same upsert shape as {@link setCursor}
-   * (module doc: the two share SQL and differ only in when/why they're
-   * called).
+   * mailbox's entire history." An unconditional upsert — deliberately NOT
+   * the same statement as {@link setCursor}, which is a lease-fenced plain
+   * `UPDATE`. Seeding happens inside the connect transaction, where no fetch
+   * lease exists to hold; fencing it would make connect impossible.
    *
    * Optionally runs against a caller-supplied `tx` (`Db.transaction`'s
    * `Queryable`) instead of the bound `db`, so a connect flow can commit
@@ -156,7 +157,7 @@ export interface ImapWatchStateStore {
   /**
    * Release `mailboxId`'s fetch lease — but ONLY if `leaseToken` (the value
    * {@link claimFetchLease} returned when it granted this run's claim)
-   * still matches the row's CURRENT `claimed_until`. Zero rows matched (the
+   * still matches the row's CURRENT `lease_token`. Zero rows matched (the
    * token doesn't match — already released and reclaimed by a successor,
    * or the row no longer exists) is a SILENT no-op, not an error — same
    * convention as `GmailWatchStateStore.releaseReconcileLease`, for the
@@ -209,7 +210,7 @@ export function createImapWatchStateStore(db: Db): ImapWatchStateStore {
     },
 
     async setCursor(mailboxId, cursor, leaseToken, tx) {
-      // `claimed_until = $4::timestamptz` is the fence (interface doc's SACRED
+      // `lease_token = $4::uuid` is the fence (interface doc's SACRED
       // section) — the same token-scoped predicate `releaseFetchLease` uses,
       // applied to the write that actually matters. Zero rows means our lease
       // was superseded while we were ingesting; the caller reports it and

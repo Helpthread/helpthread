@@ -7,6 +7,6 @@
  */
 
 export type { ImapClient, ImapClientOptions, ImapMailboxInfo, ImapRawMessage } from './client.js'
-export { createImapClient } from './client.js'
+export { createImapClient, IMAPS_PORT, imapImplicitTlsForPort } from './client.js'
 export type { ImapCursor, ImapFetchResult } from './fetch.js'
 export { DEFAULT_MAX_PER_INVOCATION, fetchImapInboundMessages } from './fetch.js'

@@ -92,7 +92,11 @@
  */
 
 import type { Db } from '../db/client.js'
-import type { ImapClient, ImapClientOptions } from '../providers/adapters/imap/index.js'
+import {
+  type ImapClient,
+  type ImapClientOptions,
+  imapImplicitTlsForPort,
+} from '../providers/adapters/imap/index.js'
 import type { VerifySmtpConnectionOptions } from '../providers/adapters/smtp/index.js'
 import type { ImapConfigStore } from '../store/imap-config.js'
 import type { ImapCredentialStore } from '../store/imap-credentials.js'
@@ -252,7 +256,11 @@ async function attemptImapConnection(
     client = createImapClient({
       host: input.imapHost,
       port: input.imapPort,
-      secure: input.secure ?? true,
+      // Per-leg, from the IMAP port. `input.secure` describes the SMTP leg —
+      // the connect UI's presets pair IMAP 993 with SMTP 587 and `secure:
+      // false`, so passing it here attempted STARTTLS on an implicit-TLS port
+      // (see `imapImplicitTlsForPort`).
+      secure: imapImplicitTlsForPort(input.imapPort),
       auth: { user: input.username, pass: input.password },
     })
     await client.connect()

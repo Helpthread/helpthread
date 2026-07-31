@@ -177,6 +177,17 @@ export async function fetchImapInboundMessages(
       uidValidityReset,
     }
   } finally {
-    await client.close()
+    // Never let cleanup replace the outcome. The bundled `ImapClient`
+    // (`./client.ts`) is already written to swallow its own close failures,
+    // but `createClient` is an injected seam — any other implementation could
+    // throw, and a throw HERE would overwrite an in-flight AUTH rejection with
+    // a meaningless close error, or reject a fetch whose messages were already
+    // retrieved. The guarantee belongs at the call site, not in one
+    // implementation's good behaviour (review, 2026-07-25).
+    try {
+      await client.close()
+    } catch {
+      // Nothing to release and nothing a caller could act on.
+    }
   }
 }
