@@ -1528,7 +1528,7 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
  * value a holder proves ownership with. Gmail's lease
  * (`GmailWatchStateStore.claimReconcileLease`) uses the rendered
  * `claimed_until::text` as its token, and an adversarial review of HT-101
- * (2026-07-25) showed why that is too weak to fence a *write*: two successive
+ * (2026-07-31) showed why that is too weak to fence a *write*: two successive
  * claims that land within one clock tick mint the SAME token, so a stale
  * holder's token compares equal to the live holder's and passes the check.
  * A test forced exactly that collision. A fresh `gen_random_uuid()` per claim
@@ -1610,7 +1610,7 @@ CREATE TABLE imap_watch_state (
  * ## `ON DELETE RESTRICT`, not `SET NULL`
  *
  * An earlier revision used `ON DELETE SET NULL`, which an adversarial review
- * (2026-07-25) showed silently violates provenance. `NULL` already has a
+ * (2026-07-31) showed silently violates provenance. `NULL` already has a
  * meaning here — "this conversation predates the column, so send from the
  * deployment default" (`../mail/sender-resolver.ts`'s `resolve(null)`).
  * `SET NULL` overloads that same value with a second, incompatible meaning:

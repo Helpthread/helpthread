@@ -288,7 +288,7 @@ describe('buildApp — end-to-end wiring over PGlite', () => {
   })
 
   /**
-   * Both IMAP routes are admin-gated as of the HT-101 review (2026-07-25) —
+   * Both IMAP routes are admin-gated as of the HT-101 review (2026-07-31) —
    * they make the server dial an operator-supplied host:port, so the service
    * Bearer alone is not enough. Seeds a real active admin over the same `db`
    * the handler was built with.

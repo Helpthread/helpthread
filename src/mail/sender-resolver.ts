@@ -156,7 +156,7 @@ export function createSenderResolver(deps: SenderResolverDeps): SenderResolver {
       // something `runDeliveryWorker` does not recognise, and that worker
       // rethrows anything that is not a `SenderResolutionError`, aborting the
       // ENTIRE sweep. One mailbox with a bad key would then stop outbound
-      // retries for every other mailbox (review, 2026-07-25). Contain it as a
+      // retries for every other mailbox (review, 2026-07-31). Contain it as a
       // per-row resolution failure so the blast radius stays one mailbox.
       const [config, password] = await Promise.all([
         imapConfigStore.getConfig(mailbox.id),

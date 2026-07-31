@@ -150,7 +150,7 @@ describe('createImapWatchStateStore', () => {
 
   // --- setCursor -------------------------------------------------------------
 
-  // HT-101 review fix (Codex adversarial pass, 2026-07-25): `setCursor` is
+  // HT-101 review fix (Codex adversarial pass, 2026-07-31): `setCursor` is
   // lease-fenced and is NO LONGER an upsert. It advances an existing row only
   // while the caller still holds the live lease — see the interface's SACRED
   // section for the reset-quarantine escape this closes.

@@ -174,7 +174,7 @@ export function FolderNav({
             // Both child icons are decorative, so `title` alone is an
             // unreliable accessible name; and without the disclosure pair,
             // assistive tech cannot tell this opens a menu or whether it is
-            // currently open (review, 2026-07-25).
+            // currently open (review, 2026-07-31).
             aria-label="Mailbox settings"
             aria-haspopup="menu"
             aria-expanded={gearOpen}

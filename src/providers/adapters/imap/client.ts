@@ -130,7 +130,7 @@ export const IMAPS_PORT = 993
  * (implicit) or 587 (STARTTLS). Feeding one flag to both — as an earlier
  * revision did — made an Outlook or iCloud preset (`imapPort: 993`,
  * `smtpPort: 587`, `secure: false`) attempt STARTTLS against an implicit-TLS
- * IMAP port, which cannot succeed (review, 2026-07-25).
+ * IMAP port, which cannot succeed (review, 2026-07-31).
  *
  * Derived from the port rather than asked for, because the port already
  * determines the answer and an operator who changes one without the other has
@@ -332,7 +332,7 @@ export function createImapClient(
     // would replace a real outcome — including a SUCCESSFUL fetch — with a
     // cleanup error, discarding a batch that was already ingested. imapflow's
     // own `close()` can throw synchronously on an already-broken connection,
-    // which the previous revision left unguarded (review, 2026-07-25).
+    // which the previous revision left unguarded (review, 2026-07-31).
     async close() {
       if (!flow) return
       try {

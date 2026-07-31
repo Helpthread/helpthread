@@ -90,7 +90,7 @@ export interface MailboxRecord {
  * ## The message says "not supported", NOT "disconnect it first"
  *
  * An earlier revision told the operator to disconnect and retry. That
- * instruction was false (caught in review, 2026-07-25):
+ * instruction was false (caught in review, 2026-07-31):
  * {@link MailboxStore.markDisconnected} only sets `status`, leaving `provider`
  * exactly as it was, so the retry hits this same conflict forever. Worse,
  * disconnect does not remove the OLD transport's sidecar rows either, so even

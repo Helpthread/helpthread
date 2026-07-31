@@ -21,7 +21,7 @@
  * the server dial an operator-supplied `host:port`. An earlier revision of
  * this heading described them as ordinary Bearer-gated routes and nothing
  * more — which is precisely the misreading that left them un-gated in the
- * first place (review, 2026-07-25). `web/src/lib/api.ts` sends
+ * first place (review, 2026-07-31). `web/src/lib/api.ts` sends
  * `actingAgent: true` for both calls.
  *
  * ## The password is never echoed back
@@ -152,7 +152,7 @@ function validateConnectInput(
  *
  * Both write endpoints take an operator-supplied `host`/`port` and make the
  * server open a connection to it. Left at service-Bearer-only — as an earlier
- * revision was, until an adversarial review caught it (2026-07-25) — any
+ * revision was, until an adversarial review caught it (2026-07-31) — any
  * holder of the deployment's API token could use `/imap/check` as a network
  * probe against hosts and ports it can reach but the caller cannot,
  * distinguishing open from closed from filtered by the leg outcomes this

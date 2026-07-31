@@ -375,7 +375,7 @@ export function ConnectInboxForm({
         {/* `htmlFor` only when the id it names actually exists — the locked
             (reconnect) branch renders a plain div, so an unconditional
             `htmlFor` pointed at nothing, breaking the label association for
-            screen readers and click-to-focus (review, 2026-07-25). */}
+            screen readers and click-to-focus (review, 2026-07-31). */}
         {lockAddress ? (
           <FieldLabel>Email address</FieldLabel>
         ) : (

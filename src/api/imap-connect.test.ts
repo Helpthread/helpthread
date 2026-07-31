@@ -239,7 +239,7 @@ describe('handleImapCheck', () => {
   })
 })
 
-// HT-101 review fix (CodeRabbit, 2026-07-25). Both endpoints make the server
+// HT-101 review fix (CodeRabbit, 2026-07-31). Both endpoints make the server
 // dial an operator-supplied host:port. They were service-Bearer-only, so any
 // API-token holder could use /imap/check as a network probe. The sibling READ
 // endpoint already required admin; the two that actually dial did not.

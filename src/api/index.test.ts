@@ -2946,7 +2946,7 @@ describe('createInboxApi', () => {
 
     /**
      * Create a real, active ADMIN Agent — both IMAP routes are admin-gated
-     * (HT-101 review fix, 2026-07-25), so the Bearer token alone no longer
+     * (HT-101 review fix, 2026-07-31), so the Bearer token alone no longer
      * reaches the handler.
      */
     async function adminAgentId(db: Db): Promise<string> {
@@ -3046,7 +3046,7 @@ describe('createInboxApi', () => {
 
     // Acts as an ADMIN deliberately. Sending these unauthenticated made both
     // calls 401 and the assertions pass vacuously — a handler that echoed the
-    // password in a 200 body would not have been caught (review, 2026-07-25).
+    // password in a 200 body would not have been caught (review, 2026-07-31).
     // The point of this test is the SUCCESS path's body, so it has to reach it.
     it('never echoes the password anywhere in either response body', async () => {
       const { db } = await freshApi()

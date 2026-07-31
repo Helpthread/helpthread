@@ -595,7 +595,7 @@ export async function buildApp(
         createImapClient,
         ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
       })
-      // `skipped` counts too (review, 2026-07-25). A mailbox skipped on every
+      // `skipped` counts too (review, 2026-07-31). A mailbox skipped on every
       // tick — a lease stuck by a crashed run, a missing config, credential,
       // or baseline cursor — is an intake OUTAGE, not a quiet tick: mail is
       // arriving and nothing is collecting it. Gating the summary on

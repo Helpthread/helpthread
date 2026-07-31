@@ -61,7 +61,7 @@
  * UID arithmetic — a `sinceUid+1 : sinceUid+max` range can span zero real
  * messages while mail waits just above it, since UIDs are not dense (RFC 3501
  * §2.3.1.1). That range shape is the stall bug `./client.ts`'s module doc
- * records; this comment described it as the intended design until 2026-07-25.
+ * records; this comment described it as the intended design until 2026-07-31.
  * The full remaining-invocation-budget
  * scheme (§5: "every network operation... carries its own timeout derived
  * from the remaining invocation budget") is Stage 2/3 cron-wiring, not this
@@ -138,7 +138,7 @@ export async function fetchImapInboundMessages(
   // `connect()` is INSIDE the try, so a failure part-way through the handshake
   // (TLS up, AUTH rejected) still reaches the `finally` and releases whatever
   // socket was allocated. Outside it — as an earlier revision had it (review,
-  // 2026-07-25) — a rejected login leaked the connection, and the cron retries
+  // 2026-07-31) — a rejected login leaked the connection, and the cron retries
   // every 2 minutes forever.
   try {
     await client.connect()
@@ -183,7 +183,7 @@ export async function fetchImapInboundMessages(
     // throw, and a throw HERE would overwrite an in-flight AUTH rejection with
     // a meaningless close error, or reject a fetch whose messages were already
     // retrieved. The guarantee belongs at the call site, not in one
-    // implementation's good behaviour (review, 2026-07-25).
+    // implementation's good behaviour (review, 2026-07-31).
     try {
       await client.close()
     } catch {

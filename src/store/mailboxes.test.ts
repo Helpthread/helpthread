@@ -372,7 +372,7 @@ describe('createMailboxStore', () => {
       expect(rows).toHaveLength(1)
     })
 
-    // HT-101 review fix (CodeRabbit, 2026-07-25). This block previously
+    // HT-101 review fix (CodeRabbit, 2026-07-31). This block previously
     // asserted the OPPOSITE — that a reconnect overwrites `provider` from
     // `EXCLUDED.provider` — which encoded the defect as a requirement. Letting
     // an IMAP connect convert a Gmail-connected address left that mailbox

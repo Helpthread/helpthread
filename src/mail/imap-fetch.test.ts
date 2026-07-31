@@ -179,7 +179,7 @@ describe('runImapFetch', () => {
     // An empty batch must NOT move the watermark — `fetchImapInboundMessages`
     // returns `lastUid === sinceUid` ("no spurious advance on an empty tick"),
     // so the stored cursor is unchanged. The title claimed an advance this
-    // never asserted and never got (review, 2026-07-25).
+    // never asserted and never got (review, 2026-07-31).
     expect(await stores.watchStateStore.getCursor(mailboxId)).toEqual({
       uidValidity: 100,
       lastUid: 10,

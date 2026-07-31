@@ -79,7 +79,7 @@ const DEFAULT_TIMEOUT_MS = 30_000
  * fail to fire.
  *
  * `verify()` needed it MORE than `sendMail` did, not less (found by review,
- * 2026-07-25): sending happens on a cron tick, where a hang costs one wasted
+ * 2026-07-31): sending happens on a cron tick, where a hang costs one wasted
  * invocation, but `verifySmtpConnection` runs synchronously inside the
  * connect/check HTTP request, where a hang holds an operator's request open
  * indefinitely.
