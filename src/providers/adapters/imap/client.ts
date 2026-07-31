@@ -122,35 +122,39 @@ export interface ImapClient {
 export const IMAPS_PORT = 993
 
 /**
- * Which TLS mode the IMAP leg should use, given its own `port` and whatever
- * shared `secure` flag the caller holds (which primarily describes its SMTP
- * leg). Implicit TLS when the port is the standard `imaps` port, OR when the
- * caller explicitly asked for it.
+ * Which TLS mode the IMAP leg should use, from its own port alone: implicit
+ * TLS on 993, STARTTLS otherwise.
  *
- * The two legs are independent and routinely differ: every provider preset in
- * the connect UI pairs IMAP on 993 (implicit TLS) with SMTP on either 465
- * (implicit) or 587 (STARTTLS). Feeding one flag to both — as an earlier
- * revision did — made an Outlook or iCloud preset (`imapPort: 993`,
- * `smtpPort: 587`, `secure: false`) attempt STARTTLS against an implicit-TLS
- * IMAP port, which cannot succeed (review, 2026-07-31).
+ * ## Why this deliberately ignores the shared `secure` flag
  *
- * Deriving from the port ALONE was the first fix, and it regressed the
- * opposite case (caught by a second review the same day): the API accepts any
- * port, so an operator running implicit-TLS IMAP on a non-standard port —
- * `imap.internal:1993` — was previously served correctly by `secure: true`
- * and would suddenly have STARTTLS forced on them. The port answers the
- * preset case; the explicit flag answers the unusual one; `||` honours both
- * without either overriding a working configuration.
+ * `ImapConnectInput.secure` is ONE boolean describing TWO independent
+ * connections, and no rule can recover two bits from one. Three versions of
+ * this function were tried in a single day of review, and each one fixed a
+ * real configuration by breaking another real one:
  *
- * Note the asymmetry this leaves: an operator CANNOT force STARTTLS on 993.
- * That combination does not exist in practice (993 is implicit TLS by
- * definition, RFC 8314 §3.3) and refusing it is the safer default — the
- * failure mode of guessing wrong here is a cleartext credential. Making TLS an
- * explicit per-leg field in the API, schema, and UI is tracked separately; it
- * needs a product call on how the connect form presents it.
+ * | Rule | Fixes | Breaks |
+ * |---|---|---|
+ * | pass `secure` to both legs | — | 993 + `secure:false` — every Outlook/iCloud preset, STARTTLS on an implicit-TLS port |
+ * | `port === 993` | the presets | 1993 + `secure:true` — implicit TLS on a non-standard port |
+ * | `port === 993 \|\| secure` | non-standard ports | 143 + `secure:true` — IMAP STARTTLS with SMTP on 465, a common mixed-mode setup |
+ *
+ * This is the second rule, chosen because its single failure is the rarest and
+ * the least reachable: a non-standard implicit-TLS IMAP port, which no preset
+ * produces and which requires a deliberately unusual server. The third rule's
+ * failure — IMAP 143 alongside SMTPS on 465 — is an ordinary configuration a
+ * self-hosting operator would hit immediately.
+ *
+ * Both wrong answers fail loudly at connect time rather than silently
+ * downgrading a connection, so the cost is a rejected setup an operator can
+ * see, never a cleartext credential.
+ *
+ * **The real fix is per-leg TLS fields in the API, schema, and connect form.**
+ * It needs a product decision about how the form presents two toggles, and is
+ * tracked separately. Until then this function is a deliberate, documented
+ * approximation — not a rule anyone should extend by adding another operand.
  */
-export function imapImplicitTlsForPort(port: number, secure?: boolean): boolean {
-  return port === IMAPS_PORT || secure === true
+export function imapImplicitTlsForPort(port: number): boolean {
+  return port === IMAPS_PORT
 }
 
 /** Credentials + connection info for {@link createImapClient}. */

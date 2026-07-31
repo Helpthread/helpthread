@@ -238,10 +238,9 @@ async function fetchOneMailbox(
         createImapClient({
           host: config.imapHost,
           port: config.imapPort,
-          // Per-leg: the IMAP port decides, with the stored `secure` still
-          // able to opt IN to implicit TLS on a non-standard port (see
-          // `imapImplicitTlsForPort`).
-          secure: imapImplicitTlsForPort(config.imapPort, config.secure),
+          // The IMAP port alone decides; the stored `secure` describes the
+          // SMTP leg and is NOT consulted here (see `imapImplicitTlsForPort`).
+          secure: imapImplicitTlsForPort(config.imapPort),
           auth: { user: config.username, pass: resolvedPassword },
         }),
       maxPerInvocation,

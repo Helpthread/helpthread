@@ -258,10 +258,11 @@ async function attemptImapConnection(
     client = createImapClient({
       host: input.imapHost,
       port: input.imapPort,
-      // Per-leg: the IMAP port decides, with `input.secure` still able to opt
-      // IN to implicit TLS on a non-standard port. See
-      // `imapImplicitTlsForPort` for why neither signal alone is sufficient.
-      secure: imapImplicitTlsForPort(input.imapPort, input.secure),
+      // The IMAP port alone decides. `input.secure` is a single flag covering
+      // two independent legs and is NOT consulted here — see
+      // `imapImplicitTlsForPort` for the three rules tried and why each
+      // alternative broke a real configuration.
+      secure: imapImplicitTlsForPort(input.imapPort),
       auth: { user: input.username, pass: input.password },
     })
     await client.connect()
