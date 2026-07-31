@@ -84,8 +84,24 @@ export interface MailboxRecord {
 /**
  * Raised by {@link MailboxStore.upsertConnectedMailbox} when `address` is
  * already connected under a different provider — see that method's SACRED
- * section for why converting in place corrupts intake. Callers map this to an
- * operator-facing "disconnect it first" error; it is never a 500.
+ * section for why converting in place corrupts intake. Callers map it to a
+ * 4xx; it is never a 500.
+ *
+ * ## The message says "not supported", NOT "disconnect it first"
+ *
+ * An earlier revision told the operator to disconnect and retry. That
+ * instruction was false (caught in review, 2026-07-25):
+ * {@link MailboxStore.markDisconnected} only sets `status`, leaving `provider`
+ * exactly as it was, so the retry hits this same conflict forever. Worse,
+ * disconnect does not remove the OLD transport's sidecar rows either, so even
+ * if the predicate allowed it, the stale-sidecar double-intake this guard
+ * exists to prevent would come straight back.
+ *
+ * Changing a connected address's transport is therefore genuinely unsupported
+ * today, and the message says so plainly rather than sending the operator
+ * round a loop that cannot terminate. Making it supported means deciding what
+ * happens to the old transport's tokens, cursor, and in-flight mail — a
+ * product decision, tracked separately, not something to infer here.
  */
 export class MailboxProviderConflictError extends Error {
   /** The address that is already connected under another provider. */
@@ -95,7 +111,7 @@ export class MailboxProviderConflictError extends Error {
 
   constructor(address: string, requestedProvider: string) {
     super(
-      `Mailbox ${address} is already connected under a different provider. Disconnect it before connecting it as '${requestedProvider}'.`,
+      `Mailbox ${address} is already connected through a different transport. Changing an existing inbox's transport to '${requestedProvider}' is not supported yet — connect it at a different address, or remove this one first.`,
     )
     this.name = 'MailboxProviderConflictError'
     this.address = address

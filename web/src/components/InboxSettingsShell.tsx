@@ -89,6 +89,12 @@ export function InboxSettingsShell({
           <button
             type="button"
             onClick={() => setSwitcherOpen((current) => !current)}
+            // Without these, assistive tech announces a plain button and gives
+            // no way to know it opens a menu or whether that menu is currently
+            // open (review, 2026-07-25).
+            aria-haspopup="menu"
+            aria-expanded={switcherOpen}
+            aria-label={`Switch inbox — currently ${mailbox.address}`}
             style={{
               display: 'flex',
               alignItems: 'center',

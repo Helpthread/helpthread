@@ -176,16 +176,24 @@ export async function runDeliveryWorker(
       const conversation = await deps.store.getConversationByThreadId(claimed.id)
       const resolved = await deps.senderResolver.resolve(conversation?.mailboxId ?? null)
       // Guard against a From/transport MISMATCH on retry. The row's persisted
-      // `fromAddress` is the inbox the ORIGINAL send went out as. If the
-      // conversation's mailbox was since hard-deleted (mailbox_id → null via
-      // `ON DELETE SET NULL`), `resolve(null)` yields the deployment DEFAULT
-      // sender, whose `from` differs from this row's own `fromAddress` —
-      // sending then would put the deleted inbox's address in `From` while a
-      // different server transmits it (an SPF/DKIM misalignment). Refuse:
-      // treat it as an unresolvable row (failed below, sweep continues), never
-      // a mismatched send. For every normal row `resolved.from` equals the
-      // persisted `fromAddress` (both are the mailbox's own address), so this
-      // only ever fires on the genuine mismatch.
+      // `fromAddress` is the inbox the ORIGINAL send went out as. Sending when
+      // the resolver now yields a DIFFERENT address would put one inbox's
+      // address in `From` while another server transmits it — an SPF/DKIM
+      // misalignment, and a silent change of authorship on an existing thread.
+      // Refuse: treat it as an unresolvable row (failed below, sweep
+      // continues), never a mismatched send.
+      //
+      // An earlier revision justified this by "the mailbox was hard-deleted,
+      // so `mailbox_id` became null via ON DELETE SET NULL". That is no longer
+      // reachable and never should have been: migration 028 ships
+      // `ON DELETE RESTRICT` precisely so a mailbox owning conversations
+      // cannot be deleted (review, 2026-07-25). The guard still earns its
+      // place for the cases that ARE reachable — a pre-028 conversation whose
+      // `mailbox_id` is null resolving to a deployment default that differs
+      // from what the original send used, or the default address itself being
+      // reconfigured between the first attempt and a retry. For every normal
+      // row `resolved.from` equals the persisted `fromAddress` (both are the
+      // mailbox's own address), so this only fires on a genuine mismatch.
       if (resolved.from !== claimed.fromAddress) {
         throw new SenderResolutionError(
           'mailbox-not-found',

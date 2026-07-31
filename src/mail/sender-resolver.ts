@@ -62,6 +62,7 @@ import type { GmailOAuthTokenService } from './gmail-oauth.js'
 export type SenderResolutionErrorCode =
   | 'mailbox-not-found'
   | 'missing-imap-connection'
+  | 'unreadable-imap-credential'
   | 'unknown-provider'
 
 /**
@@ -75,8 +76,8 @@ export type SenderResolutionErrorCode =
 export class SenderResolutionError extends Error {
   readonly code: SenderResolutionErrorCode
 
-  constructor(code: SenderResolutionErrorCode, message: string) {
-    super(message)
+  constructor(code: SenderResolutionErrorCode, message: string, options?: { cause?: unknown }) {
+    super(message, options)
     this.name = 'SenderResolutionError'
     this.code = code
   }
@@ -149,9 +150,24 @@ export function createSenderResolver(deps: SenderResolverDeps): SenderResolver {
     }
 
     if (mailbox.provider === 'imap') {
+      // `getPassword` THROWS on an undecryptable credential (wrong
+      // HELPTHREAD_TOKEN_ENC_KEY, tampered ciphertext) rather than returning
+      // null — see `../store/imap-credentials.ts`. A raw throw here escapes as
+      // something `runDeliveryWorker` does not recognise, and that worker
+      // rethrows anything that is not a `SenderResolutionError`, aborting the
+      // ENTIRE sweep. One mailbox with a bad key would then stop outbound
+      // retries for every other mailbox (review, 2026-07-25). Contain it as a
+      // per-row resolution failure so the blast radius stays one mailbox.
       const [config, password] = await Promise.all([
         imapConfigStore.getConfig(mailbox.id),
-        imapCredentialStore.getPassword(mailbox.id),
+        imapCredentialStore.getPassword(mailbox.id).catch((cause: unknown) => {
+          throw new SenderResolutionError(
+            'unreadable-imap-credential',
+            `mailbox ${mailbox.id} (${mailbox.address}) has an IMAP/SMTP credential that could not be decrypted — ` +
+              `check HELPTHREAD_TOKEN_ENC_KEY, or reconnect the inbox to store a fresh app password`,
+            { cause },
+          )
+        }),
       ])
       if (config === null || password === null) {
         throw new SenderResolutionError(

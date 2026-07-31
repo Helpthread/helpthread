@@ -6,7 +6,7 @@ import { migrate } from '../db/migrate.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
 import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
 import type { GmailOAuthTokenService } from '../mail/gmail-oauth.js'
-import type { ImapConnectService } from '../mail/imap-connect.js'
+import { ImapConnectError, type ImapConnectService } from '../mail/imap-connect.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { GmailWatchClient } from '../providers/adapters/gmail/index.js'
 import type {
@@ -3044,15 +3044,42 @@ describe('createInboxApi', () => {
       expect(res.status).toBe(404)
     })
 
+    // Acts as an ADMIN deliberately. Sending these unauthenticated made both
+    // calls 401 and the assertions pass vacuously — a handler that echoed the
+    // password in a 200 body would not have been caught (review, 2026-07-25).
+    // The point of this test is the SUCCESS path's body, so it has to reach it.
     it('never echoes the password anywhere in either response body', async () => {
       const { db } = await freshApi()
       const api = apiWithImapConnect(db, fakeImapConnect())
+      const agentId = await adminAgentId(db)
 
-      const connectRes = await api(post(CONNECT_PATH, VALID_BODY))
-      const checkRes = await api(post(CHECK_PATH, VALID_BODY))
+      const connectRes = await api(postAsAgent(CONNECT_PATH, VALID_BODY, agentId))
+      const checkRes = await api(postAsAgent(CHECK_PATH, VALID_BODY, agentId))
 
+      // Guard the guard: if these stop being 2xx the assertions below go
+      // vacuous again, and silently.
+      expect(connectRes.status).toBe(200)
+      expect(checkRes.status).toBe(200)
       expect(await connectRes.text()).not.toContain(VALID_BODY.password)
       expect(await checkRes.text()).not.toContain(VALID_BODY.password)
+    })
+
+    it('never echoes the password in a 4xx body either — the failure path an operator actually sees', async () => {
+      const { db } = await freshApi()
+      const failing = fakeImapConnect({
+        connect: async () => {
+          throw new ImapConnectError(
+            'imap_failed',
+            'Could not verify the IMAP connection: bad login',
+          )
+        },
+      })
+      const api = apiWithImapConnect(db, failing)
+
+      const res = await api(postAsAgent(CONNECT_PATH, VALID_BODY, await adminAgentId(db)))
+
+      expect(res.status).toBe(422)
+      expect(await res.text()).not.toContain(VALID_BODY.password)
     })
 
     it('existing routes are unaffected: /api/v1/conversations still 401s without a token', async () => {
