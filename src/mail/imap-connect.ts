@@ -134,8 +134,10 @@ export type LegResult = { ok: true } | { ok: false; error: string }
  * with, so the API layer can map each to a clean, secret-free response.
  * `imap_failed`/`smtp_failed` say which connectivity leg failed;
  * `provider_conflict` says the address is already connected under another
- * transport and must be disconnected first
- * (`MailboxStore.upsertConnectedMailbox`'s SACRED section).
+ * transport, and changing an existing inbox's transport is not supported —
+ * disconnecting does NOT clear the way, because it leaves `provider` set
+ * (`MailboxStore.upsertConnectedMailbox`'s SACRED section, and
+ * `MailboxProviderConflictError`'s own doc).
  */
 export type ImapConnectErrorCode = 'imap_failed' | 'smtp_failed' | 'provider_conflict'
 
@@ -256,11 +258,10 @@ async function attemptImapConnection(
     client = createImapClient({
       host: input.imapHost,
       port: input.imapPort,
-      // Per-leg, from the IMAP port. `input.secure` describes the SMTP leg —
-      // the connect UI's presets pair IMAP 993 with SMTP 587 and `secure:
-      // false`, so passing it here attempted STARTTLS on an implicit-TLS port
-      // (see `imapImplicitTlsForPort`).
-      secure: imapImplicitTlsForPort(input.imapPort),
+      // Per-leg: the IMAP port decides, with `input.secure` still able to opt
+      // IN to implicit TLS on a non-standard port. See
+      // `imapImplicitTlsForPort` for why neither signal alone is sufficient.
+      secure: imapImplicitTlsForPort(input.imapPort, input.secure),
       auth: { user: input.username, pass: input.password },
     })
     await client.connect()
@@ -364,8 +365,11 @@ export function createImapConnectService(deps: ImapConnectServiceDeps): ImapConn
           // The address is already connected over another transport (Gmail).
           // Converting it in place would leave that transport's token and
           // cursor behind and double-ingest every message — see the store
-          // method's SACRED section. Surface it as an operator-fixable 409,
-          // never a 500: "disconnect it first" is an action they can take.
+          // method's SACRED section. Surface it as a 409, never a 500: the
+          // request is well-formed and the credentials may be perfect; it is
+          // existing state that refuses. NOT described to the operator as
+          // "disconnect it first" — disconnect leaves `provider` set, so that
+          // instruction could never terminate.
           if (err instanceof MailboxProviderConflictError) {
             throw new ImapConnectError('provider_conflict', err.message)
           }

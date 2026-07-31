@@ -54,7 +54,7 @@ import type { GmailEmailSenderOptions } from '../providers/adapters/gmail/index.
 import type { SmtpEmailSenderOptions } from '../providers/adapters/smtp/index.js'
 import type { EmailSender } from '../providers/index.js'
 import type { ImapConfigStore } from '../store/imap-config.js'
-import type { ImapCredentialStore } from '../store/imap-credentials.js'
+import { ImapCredentialDecryptError, type ImapCredentialStore } from '../store/imap-credentials.js'
 import type { MailboxRecord, MailboxStore } from '../store/mailboxes.js'
 import type { GmailOAuthTokenService } from './gmail-oauth.js'
 
@@ -152,15 +152,23 @@ export function createSenderResolver(deps: SenderResolverDeps): SenderResolver {
     if (mailbox.provider === 'imap') {
       // `getPassword` THROWS on an undecryptable credential (wrong
       // HELPTHREAD_TOKEN_ENC_KEY, tampered ciphertext) rather than returning
-      // null — see `../store/imap-credentials.ts`. A raw throw here escapes as
-      // something `runDeliveryWorker` does not recognise, and that worker
-      // rethrows anything that is not a `SenderResolutionError`, aborting the
-      // ENTIRE sweep. One mailbox with a bad key would then stop outbound
-      // retries for every other mailbox (review, 2026-07-31). Contain it as a
-      // per-row resolution failure so the blast radius stays one mailbox.
+      // null. Left raw, it escapes as something `runDeliveryWorker` does not
+      // recognise, and that worker rethrows anything that is not a
+      // `SenderResolutionError`, aborting the ENTIRE sweep — one mailbox with
+      // a bad key would stop outbound retries for every other mailbox.
+      //
+      // ONLY `ImapCredentialDecryptError` is contained. An earlier revision
+      // caught every rejection here, which swept database faults into the same
+      // bucket: `runDeliveryWorker` marks a `SenderResolutionError` row
+      // `failed`, so a transient Postgres blip would have permanently failed
+      // outbound mail that merely needed retrying (review, 2026-07-31). A
+      // store fault must keep propagating and abort the sweep for a retry.
       const [config, password] = await Promise.all([
         imapConfigStore.getConfig(mailbox.id),
         imapCredentialStore.getPassword(mailbox.id).catch((cause: unknown) => {
+          if (!(cause instanceof ImapCredentialDecryptError)) {
+            throw cause
+          }
           throw new SenderResolutionError(
             'unreadable-imap-credential',
             `mailbox ${mailbox.id} (${mailbox.address}) has an IMAP/SMTP credential that could not be decrypted — ` +

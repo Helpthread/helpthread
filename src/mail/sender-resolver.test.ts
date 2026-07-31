@@ -13,7 +13,11 @@ import type { GmailEmailSenderOptions } from '../providers/adapters/gmail/index.
 import type { SmtpEmailSenderOptions } from '../providers/adapters/smtp/index.js'
 import type { EmailSender } from '../providers/index.js'
 import { createImapConfigStore, type ImapConfigStore } from '../store/imap-config.js'
-import { createImapCredentialStore, type ImapCredentialStore } from '../store/imap-credentials.js'
+import {
+  createImapCredentialStore,
+  ImapCredentialDecryptError,
+  type ImapCredentialStore,
+} from '../store/imap-credentials.js'
 import { createMailboxStore, type MailboxStore } from '../store/mailboxes.js'
 import { ENCRYPTION_KEY_BYTES } from '../store/token-crypto.js'
 import { createSenderResolver, SenderResolutionError } from './sender-resolver.js'
@@ -335,5 +339,88 @@ describe('createSenderResolver', () => {
     })
 
     await expect(resolver.resolve(null)).rejects.toMatchObject({ code: 'mailbox-not-found' })
+  })
+
+  // HT-101 review fix (Codex adversarial pass, 2026-07-31). A decrypt failure
+  // must be contained per-mailbox, but the FIRST version of that fix caught
+  // every rejection — sweeping database faults into the same bucket.
+  // `runDeliveryWorker` marks a `SenderResolutionError` row `failed`, so a
+  // transient Postgres blip would have permanently failed mail that only
+  // needed retrying. Only a real decrypt failure is contained.
+  describe('credential failures: contained vs propagated', () => {
+    async function resolverWithCredentialStore(
+      imapCredentialStore: ImapCredentialStore,
+      mailboxStore: MailboxStore,
+      imapConfigStore: ImapConfigStore,
+    ) {
+      const { factory: createGmailEmailSender } = fakeCreateGmailEmailSender()
+      const { factory: createSmtpEmailSender } = fakeCreateSmtpEmailSender()
+      const { tokenService } = fakeTokenService()
+      return createSenderResolver({
+        mailboxStore,
+        tokenService,
+        imapConfigStore,
+        imapCredentialStore,
+        createGmailEmailSender,
+        createSmtpEmailSender,
+        defaultAddress: DEFAULT_ADDRESS,
+      })
+    }
+
+    it('CONTAINS an undecryptable credential as unreadable-imap-credential — one mailbox fails, the sweep survives', async () => {
+      const { mailboxStore, imapConfigStore } = await freshDeps()
+      const mailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'bad-key@example.test',
+        provider: 'imap',
+      })
+      await imapConfigStore.upsertConfig(mailbox.id, {
+        imapHost: 'imap.example.test',
+        imapPort: 993,
+        smtpHost: 'smtp.example.test',
+        smtpPort: 465,
+        username: 'bad-key@example.test',
+        secure: true,
+      })
+      const failing: ImapCredentialStore = {
+        upsertPassword: async () => {},
+        getPassword: async () => {
+          throw new ImapCredentialDecryptError(mailbox.id)
+        },
+      }
+      const resolver = await resolverWithCredentialStore(failing, mailboxStore, imapConfigStore)
+
+      await expect(resolver.resolve(mailbox.id)).rejects.toMatchObject({
+        name: 'SenderResolutionError',
+        code: 'unreadable-imap-credential',
+      })
+    })
+
+    it('PROPAGATES a store fault untouched — a database blip must abort the sweep for a retry, not fail the mail', async () => {
+      const { mailboxStore, imapConfigStore } = await freshDeps()
+      const mailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'db-blip@example.test',
+        provider: 'imap',
+      })
+      await imapConfigStore.upsertConfig(mailbox.id, {
+        imapHost: 'imap.example.test',
+        imapPort: 993,
+        smtpHost: 'smtp.example.test',
+        smtpPort: 465,
+        username: 'db-blip@example.test',
+        secure: true,
+      })
+      const dbFault = new Error('connection terminated unexpectedly')
+      const failing: ImapCredentialStore = {
+        upsertPassword: async () => {},
+        getPassword: async () => {
+          throw dbFault
+        },
+      }
+      const resolver = await resolverWithCredentialStore(failing, mailboxStore, imapConfigStore)
+
+      // The SAME error object, not wrapped — so `runDeliveryWorker`'s
+      // "not a SenderResolutionError" branch still aborts the sweep.
+      await expect(resolver.resolve(mailbox.id)).rejects.toBe(dbFault)
+    })
   })
 })

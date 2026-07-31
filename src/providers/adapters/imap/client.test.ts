@@ -311,8 +311,25 @@ describe('imapImplicitTlsForPort', () => {
   it('the regression itself: an Outlook-shaped preset still gets implicit TLS on its IMAP leg', () => {
     // imapPort 993 + smtpPort 587 + secure:false — the exact shape that broke.
     const preset = { imapPort: 993, smtpPort: 587, secure: false }
-    expect(imapImplicitTlsForPort(preset.imapPort)).toBe(true)
+    expect(imapImplicitTlsForPort(preset.imapPort, preset.secure)).toBe(true)
     // ...and the shared flag is NOT what decides it.
-    expect(imapImplicitTlsForPort(preset.imapPort)).not.toBe(preset.secure)
+    expect(imapImplicitTlsForPort(preset.imapPort, preset.secure)).not.toBe(preset.secure)
+  })
+
+  // The counter-regression: deriving from the port ALONE broke the opposite
+  // case, an operator running implicit-TLS IMAP on a non-standard port who was
+  // previously served correctly by `secure: true`.
+  it('honours an explicit secure:true on a NON-standard implicit-TLS port', () => {
+    expect(imapImplicitTlsForPort(1993, true)).toBe(true)
+    expect(imapImplicitTlsForPort(10993, true)).toBe(true)
+  })
+
+  it('still uses STARTTLS on a non-standard port when nothing asked for implicit TLS', () => {
+    expect(imapImplicitTlsForPort(1993, false)).toBe(false)
+    expect(imapImplicitTlsForPort(1993)).toBe(false)
+  })
+
+  it('never downgrades 993 to STARTTLS, even when asked — the failure mode there is a cleartext credential', () => {
+    expect(imapImplicitTlsForPort(993, false)).toBe(true)
   })
 })

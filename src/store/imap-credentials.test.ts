@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
-import { createImapCredentialStore } from './imap-credentials.js'
+import { createImapCredentialStore, ImapCredentialDecryptError } from './imap-credentials.js'
 import { ENCRYPTION_KEY_BYTES } from './token-crypto.js'
 
 const RANDOM_UUID = '00000000-0000-4000-8000-000000000000'
@@ -130,7 +130,16 @@ describe('createImapCredentialStore', () => {
     await store.upsertPassword(mailboxId, 'app-password-value')
 
     const wrongKeyStore = createImapCredentialStore(db, randomBytes(ENCRYPTION_KEY_BYTES))
-    await expect(wrongKeyStore.getPassword(mailboxId)).rejects.toThrow(/decrypt failed/)
+    // Typed, so `../mail/sender-resolver.ts` can contain THIS while letting a
+    // database fault propagate and abort the sweep for a retry.
+    await expect(wrongKeyStore.getPassword(mailboxId)).rejects.toBeInstanceOf(
+      ImapCredentialDecryptError,
+    )
+    // The underlying crypto error is preserved as `cause`, not discarded.
+    await expect(wrongKeyStore.getPassword(mailboxId)).rejects.toMatchObject({
+      mailboxId,
+      cause: expect.objectContaining({ message: expect.stringMatching(/decrypt failed/) }),
+    })
   })
 
   it('getPassword throws when the stored ciphertext has been tampered with at rest', async () => {
@@ -149,6 +158,13 @@ describe('createImapCredentialStore', () => {
       [new Uint8Array(tampered), mailboxId],
     )
 
-    await expect(store.getPassword(mailboxId)).rejects.toThrow(/decrypt failed/)
+    await expect(store.getPassword(mailboxId)).rejects.toBeInstanceOf(ImapCredentialDecryptError)
+  })
+
+  it('a MISSING row is still null, not a decrypt error — absent and unreadable are different states', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await insertMailbox(db)
+
+    expect(await store.getPassword(mailboxId)).toBeNull()
   })
 })

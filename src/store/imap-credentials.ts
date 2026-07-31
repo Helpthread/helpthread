@@ -38,6 +38,26 @@ import type { Db, Queryable } from '../db/client.js'
 import { decrypt, encrypt } from './token-crypto.js'
 
 /** Persistence for one mailbox's IMAP/SMTP app password. See the module doc for the encrypt/decrypt and write-only-internal-use contracts. */
+/**
+ * The stored ciphertext for `mailboxId` could not be decrypted — a wrong
+ * `HELPTHREAD_TOKEN_ENC_KEY`, or a tampered/corrupt row. Distinct from a
+ * database fault, deliberately: callers contain THIS (one mailbox is
+ * misconfigured; the others are fine) while letting a store fault propagate,
+ * because a transient database problem must be retried, not recorded as a
+ * permanent per-mailbox failure (review, 2026-07-31).
+ *
+ * Carries no ciphertext and no key material — only which mailbox.
+ */
+export class ImapCredentialDecryptError extends Error {
+  readonly mailboxId: string
+
+  constructor(mailboxId: string, options?: { cause?: unknown }) {
+    super(`imap credential for mailbox ${mailboxId} could not be decrypted`, options)
+    this.name = 'ImapCredentialDecryptError'
+    this.mailboxId = mailboxId
+  }
+}
+
 export interface ImapCredentialStore {
   /**
    * Insert or replace `mailboxId`'s password — encrypted with this store's
@@ -107,7 +127,15 @@ export function createImapCredentialStore(db: Db, encryptionKey: Buffer): ImapCr
       if (row === undefined) {
         return null
       }
-      return decrypt(row.password_ciphertext, encryptionKey)
+      // Typed at the crypto boundary so callers can tell "this one mailbox's
+      // credential is unreadable" from "the database is unwell". The `await`
+      // above has already resolved, so anything thrown here is decryption,
+      // never a store fault.
+      try {
+        return decrypt(row.password_ciphertext, encryptionKey)
+      } catch (cause) {
+        throw new ImapCredentialDecryptError(mailboxId, { cause })
+      }
     },
   }
 }

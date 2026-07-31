@@ -122,8 +122,10 @@ export interface ImapClient {
 export const IMAPS_PORT = 993
 
 /**
- * Which TLS mode the IMAP leg should use for `port`, ignoring any single
- * shared "secure" flag the caller may also hold for its SMTP leg.
+ * Which TLS mode the IMAP leg should use, given its own `port` and whatever
+ * shared `secure` flag the caller holds (which primarily describes its SMTP
+ * leg). Implicit TLS when the port is the standard `imaps` port, OR when the
+ * caller explicitly asked for it.
  *
  * The two legs are independent and routinely differ: every provider preset in
  * the connect UI pairs IMAP on 993 (implicit TLS) with SMTP on either 465
@@ -132,14 +134,23 @@ export const IMAPS_PORT = 993
  * `smtpPort: 587`, `secure: false`) attempt STARTTLS against an implicit-TLS
  * IMAP port, which cannot succeed (review, 2026-07-31).
  *
- * Derived from the port rather than asked for, because the port already
- * determines the answer and an operator who changes one without the other has
- * simply misconfigured the inbox. Making TLS an explicit per-leg field in the
- * API, schema, and UI is tracked separately — it needs a product call on how
- * the connect form presents it.
+ * Deriving from the port ALONE was the first fix, and it regressed the
+ * opposite case (caught by a second review the same day): the API accepts any
+ * port, so an operator running implicit-TLS IMAP on a non-standard port —
+ * `imap.internal:1993` — was previously served correctly by `secure: true`
+ * and would suddenly have STARTTLS forced on them. The port answers the
+ * preset case; the explicit flag answers the unusual one; `||` honours both
+ * without either overriding a working configuration.
+ *
+ * Note the asymmetry this leaves: an operator CANNOT force STARTTLS on 993.
+ * That combination does not exist in practice (993 is implicit TLS by
+ * definition, RFC 8314 §3.3) and refusing it is the safer default — the
+ * failure mode of guessing wrong here is a cleartext credential. Making TLS an
+ * explicit per-leg field in the API, schema, and UI is tracked separately; it
+ * needs a product call on how the connect form presents it.
  */
-export function imapImplicitTlsForPort(port: number): boolean {
-  return port === IMAPS_PORT
+export function imapImplicitTlsForPort(port: number, secure?: boolean): boolean {
+  return port === IMAPS_PORT || secure === true
 }
 
 /** Credentials + connection info for {@link createImapClient}. */
