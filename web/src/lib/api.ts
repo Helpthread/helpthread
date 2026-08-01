@@ -39,11 +39,15 @@ import type {
   Agent,
   AgentRole,
   AuthProviderDescriptor,
+  ConnectedMailbox,
   ConversationDetail,
   ConversationFolder,
   ConversationListResponse,
   ConversationStatus,
   ConversationSummary,
+  ImapCheckResult,
+  ImapConnectionInput,
+  ImapMailboxConfigView,
   MailboxSummary,
   SelfAgent,
   ThreadView,
@@ -370,4 +374,43 @@ export async function putAgentMailboxes(id: string, mailboxIds: string[]): Promi
     actingAgent: true,
   })
   return result.mailboxIds
+}
+
+// --- IMAP/SMTP mailbox connection (HT-101; specs/mail/mailbox-connection.md §5) ---
+// Admin-only, acting-Agent header REQUIRED — same posture as
+// `getMailboxImapConfig` below, not as Gmail connect. Both routes make the
+// server dial an operator-supplied host:port, so the engine
+// (`src/api/imap-connect.ts`) requires an admin acting Agent on top of the
+// service Bearer. Omitting `actingAgent` here would 401 the whole connect
+// screen — and would also be the thing that let a Bearer-only caller reach a
+// route the engine intends to be admin-gated.
+
+/** `POST /api/v1/inbound/imap/check` — attempt both legs and report each independently; persists nothing. Admin only. */
+export function imapCheckConnection(input: ImapConnectionInput): Promise<ImapCheckResult> {
+  return request('/api/v1/inbound/imap/check', {
+    method: 'POST',
+    body: input,
+    actingAgent: true,
+  })
+}
+
+/** `POST /api/v1/inbound/imap/connect` — verify both legs (aborting on the first failure), then persist the mailbox atomically. Admin only. `422` (`imap_failed`/`smtp_failed`) on a connectivity failure, `409` (`provider_conflict`) when the address is already connected over another transport — never echoes the password (module doc). */
+export function imapConnect(input: ImapConnectionInput): Promise<ConnectedMailbox> {
+  return request('/api/v1/inbound/imap/connect', {
+    method: 'POST',
+    body: input,
+    actingAgent: true,
+  })
+}
+
+/**
+ * `GET /api/v1/mailboxes/{id}/imap-config` (HT-101 Stage 2b) — the
+ * mailbox-scoped Connection section's read-only view. Admin-only,
+ * acting-Agent header required (same posture as `listMailboxes`). `404`
+ * when the mailbox has no IMAP/SMTP config on file (e.g. a Gmail-connected
+ * mailbox) — callers render the "not connected over IMAP/SMTP" state for
+ * that case, same "not found ≠ error" split `getAgent` etc. already use.
+ */
+export function getMailboxImapConfig(mailboxId: string): Promise<ImapMailboxConfigView> {
+  return request(`/api/v1/mailboxes/${mailboxId}/imap-config`, { actingAgent: true })
 }

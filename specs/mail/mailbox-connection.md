@@ -1,14 +1,34 @@
 # Mailbox connection — scheduled-fetch intake, IMAP/SMTP transport, and the connect screen
 
-**Status: DRAFT — NOT approved to build against.**
+**Status: DRAFT — built against in HT-101 (2026-07-31); see the status box below.**
+**Promotion to `accepted` is an open decision, not made by this change.**
 **Charter dependency:** the scheduled-fetch amendment (CHARTER.md §7, 2026-07-20).
 
-> ## ⛔ Three unresolved questions block the build order in §7
+> ## Status of the three blocking questions (updated 2026-07-31, HT-101)
 >
 > Adversarial review (2026-07-20) found three gaps, all of which sit on the
-> **mail-semantics invariant** (CHARTER.md §2) and therefore need answers —
-> with fixtures — before any of §7 starts. They are recorded here rather than
-> papered over.
+> **mail-semantics invariant** (CHARTER.md §2). HT-101 answered two and
+> *contained* the third. The original text of each is preserved below; this
+> box records what shipped against it.
+>
+> | # | Question | Status after HT-101 |
+> |---|---|---|
+> | 1 | Self-echo suppression on SMTP+IMAP | **Resolved** — `isOwnMessageReflection` (`src/mail/ingest.ts`) suppresses on our own signed `Message-ID`, and deliberately never reads `In-Reply-To`/`References`, so the `auto-submitted.json` fixture (a customer's out-of-office reply *is* ingested) still holds. |
+> | 2 | `providerMessageId` undefined for IMAP | **Contained, NOT resolved** — see below. |
+> | 3 | The named seam is the wrong shape | **Resolved by declining the seam** — the fetch is a data-contract function (`src/providers/adapters/imap/fetch.ts`), not an `InboundEmailProvider`. §5/§7's claim that it fits behind that webhook-shaped seam was wrong; the adapter documents why. |
+>
+> **On #2 — containment, stated plainly.** IMAP still has no transport-stable
+> id. The adapter mints a placeholder `imap:{uidValidity}:{uid}`, stable only
+> *within* one UIDVALIDITY epoch, and its own doc states it does not resolve
+> this question. What prevents the silent duplication the ledger exists to
+> stop is `src/mail/imap-fetch.ts`'s **SACRED** rule: on a UIDVALIDITY reset
+> the mailbox is **paused** — no ingest, no cursor advance — until a human
+> rebaselines it. The system stops rather than guessing, which satisfies
+> CHARTER.md §2's never-lose/never-corrupt invariants but leaves the
+> underlying identity problem open. **A durable answer is still owed** before
+> IMAP intake can be called complete.
+>
+> ### Original text of the three questions
 >
 > **1. Self-echo suppression has no mechanism on SMTP+IMAP.**
 > `src/store/inbound-deliveries.ts`'s `preSuppressOwnSend` pre-seeds the
@@ -41,9 +61,10 @@
 > satisfiable; the *interface* is not. The claims "least new code" and "not new
 > fetch code" both rest on this and are therefore overstated.
 >
-> Until these are answered, treat §4–§7 below as a sketch of intent, not a
-> buildable specification. §2's spike results and §3's provider matrix are
-> independently verified and stand on their own.
+> Superseded by the status table above: §4–§7 are no longer a sketch. They
+> were built against in HT-101, and where the built code diverged from this
+> text (question #3's seam), the code is right and this document was wrong.
+> §2's spike results and §3's provider matrix remain independently verified.
 
 ## 1. The problem
 
@@ -190,7 +211,7 @@ That is a configuration detail on the mailbox record, not a transport concern.
 ## 7. Build order
 
 1. **Make Pub/Sub optional — not unsupported.** Reschedule the existing Gmail reconcile sweep so it can carry intake on its own, and let the engine boot with no `GMAIL_PUBSUB_*` vars. Neither transport is designated primary — per CHARTER §2, the operator chooses at setup. The Gmail push adapter, the webhook, and the `watch()` renewal all remain fully supported for operators who want sub-minute latency; what changes is that they stop being *mandatory setup*. This removes both silent-failure traps and the billing requirement (Pub/Sub is what forced it). Least new code of any item here — and note this is Gmail-only, per §2: it does nothing for IMAP.
-2. **IMAP provider adapter** behind the existing `InboundEmailProvider` seam, with fixtures proving equivalence against the Gmail path.
+2. **IMAP provider adapter** as a cron-shaped *data-contract* function (`fetchImapInboundMessages`), **not** behind the `InboundEmailProvider` seam — that interface is webhook-shaped (`verifySignature(request)` / `receiveDelivery(request)`) and a scheduled fetch has no `Request` to give it. What is shared with the Gmail path is the *data* contract (`RawInboundMessage`, raw bytes, one `parseInboundEmail`) and the ingest pipeline below it; equivalence fixtures prove that shared path, not a shared interface. Corrected 2026-07-31 — this step previously named the seam, which is blocking question #3 at the top of this document.
 3. **Migrations** — UID cursor + `UIDVALIDITY`; encrypted mailbox credential.
 4. **SMTP sender** behind the existing `EmailSender` seam.
 5. **The connection screen** — design session first, then implementation.

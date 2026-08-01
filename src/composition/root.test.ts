@@ -18,6 +18,7 @@ import type { Db } from '../db/client.js'
 import { createPgliteDb } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { BlobStore } from '../providers/index.js'
+import { createAgentStore } from '../store/agents.js'
 import type { AppConfig } from './config.js'
 import { buildApp } from './root.js'
 
@@ -255,6 +256,111 @@ describe('buildApp — end-to-end wiring over PGlite', () => {
     expect(res.status).toBe(403)
     const body = (await res.json()) as { error: { code: string } }
     expect(body.error.code).toBe('gmail_push_rejected')
+  })
+
+  // --- IMAP/SMTP connect + scheduled fetch (HT-101 Stage 2a-ii) --------------
+  //
+  // No real network is exercised here (no IMAP/SMTP server available in the
+  // test environment): these prove the composition root's WIRING — route
+  // presence, Bearer/cron-secret gating, and validation dispatching through
+  // the real service — not connectivity behavior, which is already covered
+  // against fakes in `src/mail/imap-connect.test.ts`/`imap-fetch.test.ts`.
+
+  it('drives the imap-fetch cron endpoint: authenticated GET → 200 report (0 active imap mailboxes, no network attempted)', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/cron/imap-fetch`, {
+        headers: { Authorization: `Bearer ${CRON_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { ok: boolean; report: { total: number } }
+    expect(body.ok).toBe(true)
+    expect(body.report.total).toBe(0)
+  })
+
+  it('rejects the imap-fetch cron endpoint with a wrong cron secret → 401', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/cron/imap-fetch`, {
+        headers: { Authorization: 'Bearer wrong-secret-0000000000' },
+      }),
+    )
+    expect(res.status).toBe(401)
+  })
+
+  /**
+   * Both IMAP routes are admin-gated as of the HT-101 review (2026-07-31) —
+   * they make the server dial an operator-supplied host:port, so the service
+   * Bearer alone is not enough. Seeds a real active admin over the same `db`
+   * the handler was built with.
+   */
+  async function adminAgentId(): Promise<string> {
+    const result = await createAgentStore(db).createAgent({
+      name: 'IMAP Admin',
+      email: 'imap-admin@example.test',
+      role: 'admin',
+      status: 'active',
+      passwordHash: 'scrypt$unused',
+    })
+    if (!result.ok) throw new Error('expected ok')
+    return result.agent.id
+  }
+
+  it('wires imapConnect: POST /inbound/imap/connect (Bearer + admin) → reaches the real service and 400s a malformed body (no network attempted)', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/imap/connect`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${API_TOKEN}`,
+          'Content-Type': 'application/json',
+          'X-Helpthread-Agent-Id': await adminAgentId(),
+        },
+        body: JSON.stringify({ address: 'nobody@example.test' }), // missing every other field
+      }),
+    )
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: { code: string } }
+    expect(body.error.code).toBe('validation_failed')
+  })
+
+  it('wires imapCheck: POST /inbound/imap/check (Bearer + admin) → reaches the real service and 400s a malformed body', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/imap/check`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${API_TOKEN}`,
+          'Content-Type': 'application/json',
+          'X-Helpthread-Agent-Id': await adminAgentId(),
+        },
+        body: JSON.stringify({}),
+      }),
+    )
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: { code: string } }
+    expect(body.error.code).toBe('validation_failed')
+  })
+
+  it('refuses both IMAP routes on the service Bearer alone — no acting Agent → 401, end to end', async () => {
+    for (const path of ['/api/v1/inbound/imap/connect', '/api/v1/inbound/imap/check']) {
+      const res = await handler(
+        new Request(`${ORIGIN}${path}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        }),
+      )
+      expect(res.status).toBe(401)
+    }
+  })
+
+  it('rejects an imap connect request without the service Bearer token → 401', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/imap/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: 'nobody@example.test' }),
+      }),
+    )
+    expect(res.status).toBe(401)
   })
 })
 

@@ -7,9 +7,11 @@ import {
   createConversationStore,
   type SendEnvelope,
 } from '../store/conversations.js'
+import { createMailboxStore } from '../store/mailboxes.js'
 import { runDeliveryWorker } from './delivery-worker.js'
 import type { Keyring, SigningKey } from './reply-token.js'
 import { type SendReplyDeps, sendReply } from './send.js'
+import { SenderResolutionError, type SenderResolver } from './sender-resolver.js'
 
 // --- fixtures ----------------------------------------------------------------
 
@@ -28,6 +30,17 @@ function fakeSender(): EmailSender & { sent: OutboundEmail[] } {
       return { providerMessageId: 'provider-1' }
     },
   }
+}
+
+/**
+ * A `SenderResolver` fake that ignores `mailboxId` and always resolves to
+ * `sender` — for every test in this suite EXCEPT the dedicated per-mailbox
+ * routing test below, which builds its own resolver that actually branches
+ * on `mailboxId`. Mirrors this suite's pre-HT-101 single-fixed-sender
+ * behavior exactly.
+ */
+function fixedSenderResolver(sender: EmailSender): SenderResolver {
+  return { resolve: async () => ({ sender, from: 'support@example.test' }) }
 }
 
 function envelope(overrides: Partial<SendEnvelope> = {}): SendEnvelope {
@@ -94,7 +107,7 @@ describe('runDeliveryWorker', () => {
 
     const sender = fakeSender()
     const report = await runDeliveryWorker(
-      { store, sender },
+      { store, senderResolver: fixedSenderResolver(sender) },
       { staleAfterMs: 5 * 60_000, batchSize: 50 },
     )
 
@@ -129,7 +142,10 @@ describe('runDeliveryWorker', () => {
     })
 
     const sender = fakeSender()
-    const report = await runDeliveryWorker({ store, sender }, { staleAfterMs: 5 * 60_000 })
+    const report = await runDeliveryWorker(
+      { store, senderResolver: fixedSenderResolver(sender) },
+      { staleAfterMs: 5 * 60_000 },
+    )
 
     expect(report).toEqual({ attempted: 0, sent: 0, failed: 0, skipped: 0 })
     expect(sender.sent).toHaveLength(0)
@@ -155,7 +171,7 @@ describe('runDeliveryWorker', () => {
     await store.claimThreadForDelivery(failedOne.threadId, 30_000)
 
     const sender = fakeSender()
-    const report = await runDeliveryWorker({ store, sender })
+    const report = await runDeliveryWorker({ store, senderResolver: fixedSenderResolver(sender) })
 
     expect(report).toEqual({ attempted: 0, sent: 0, failed: 0, skipped: 0 })
     expect(sender.sent).toHaveLength(0)
@@ -186,7 +202,7 @@ describe('runDeliveryWorker', () => {
     }
 
     const sender = fakeSender()
-    const report = await runDeliveryWorker({ store, sender })
+    const report = await runDeliveryWorker({ store, senderResolver: fixedSenderResolver(sender) })
 
     expect(report).toEqual({ attempted: 0, sent: 0, failed: 0, skipped: 1 })
     expect(sender.sent).toHaveLength(0)
@@ -229,7 +245,7 @@ describe('runDeliveryWorker', () => {
     }
 
     const sender = fakeSender()
-    const report = await runDeliveryWorker({ store, sender })
+    const report = await runDeliveryWorker({ store, senderResolver: fixedSenderResolver(sender) })
 
     expect(report).toEqual({ attempted: 0, sent: 0, failed: 0, skipped: 1 })
     expect(sender.sent).toHaveLength(0)
@@ -250,7 +266,10 @@ describe('runDeliveryWorker', () => {
     }
 
     const sender = fakeSender()
-    const report = await runDeliveryWorker({ store, sender }, { batchSize: 2 })
+    const report = await runDeliveryWorker(
+      { store, senderResolver: fixedSenderResolver(sender) },
+      { batchSize: 2 },
+    )
 
     expect(report).toEqual({ attempted: 2, sent: 2, failed: 0, skipped: 0 })
   })
@@ -274,7 +293,7 @@ describe('runDeliveryWorker', () => {
         throw new Error('still down')
       },
     }
-    const report = await runDeliveryWorker({ store, sender })
+    const report = await runDeliveryWorker({ store, senderResolver: fixedSenderResolver(sender) })
 
     expect(report).toEqual({ attempted: 1, sent: 0, failed: 1, skipped: 0 })
 
@@ -345,7 +364,7 @@ describe('runDeliveryWorker', () => {
     }
 
     const workerPromise = runDeliveryWorker(
-      { store, sender: workerSender },
+      { store, senderResolver: fixedSenderResolver(workerSender) },
       { staleAfterMs: 5 * 60_000 },
     )
     await vi.waitFor(() => expect(workerSendCalls).toBe(1))
@@ -368,20 +387,225 @@ describe('runDeliveryWorker', () => {
     expect(thread?.messageId).toBe(seeded.messageId)
   })
 
-  it("a leaseMs that does not strictly exceed the sender's maxSendMs throws up front — before anything is listed or claimed", async () => {
+  // HT-101 Stage 2b-ii: the sender is no longer one fixed value known
+  // upfront — it varies per claimed row's own mailbox — so this bound check
+  // can no longer run before ANY row is listed/claimed (that would require
+  // knowing every candidate's sender before knowing any candidate at all).
+  // It still runs before the sender is ever INVOKED, per candidate,
+  // immediately after that candidate's own claim + sender resolution — the
+  // property this test now proves is the one that actually matters: a
+  // misconfigured lease/sender bound is caught loudly and `sender.send()` is
+  // never reached, rather than silently reopening the double-send hole.
+  it("a leaseMs that does not strictly exceed the sender's maxSendMs throws before attempting delivery, never invoking the sender", async () => {
     const { store } = await freshStore()
-    const listSpy = vi.spyOn(store, 'listDeliverableThreads')
-    const claimSpy = vi.spyOn(store, 'claimThreadForDelivery')
+    const { conversationId } = await seedConversation(store)
+    await store.appendThread(conversationId, {
+      direction: 'outbound',
+      messageId: '<ht.k1.boundcheck.sig@mail.example.test>',
+      fromAddress: 'support@example.test',
+      bodyText: 'retry me',
+      deliveryStatus: 'failed',
+      sendEnvelope: envelope(),
+    })
+
     const sender = fakeSender() // maxSendMs: 30_000
 
     // Equality is a violation too — the lease must STRICTLY exceed the
     // sender's enforced bound (specs/mail/sending.md §3a).
     await expect(
-      runDeliveryWorker({ store, sender }, { leaseMs: sender.maxSendMs }),
+      runDeliveryWorker(
+        { store, senderResolver: fixedSenderResolver(sender) },
+        { leaseMs: sender.maxSendMs },
+      ),
     ).rejects.toThrow(/must strictly exceed/)
 
-    expect(listSpy).not.toHaveBeenCalled()
-    expect(claimSpy).not.toHaveBeenCalled()
     expect(sender.sent).toHaveLength(0)
+  })
+
+  // --- per-mailbox sender resolution (HT-101 Stage 2b-ii) ---------------------
+
+  describe('per-mailbox sender resolution (HT-101 Stage 2b-ii)', () => {
+    /** Builds a conversation stamped with `mailbox.id` and one 'failed' outbound thread whose `fromAddress` is `mailbox.address` — a retry candidate whose persisted From matches the inbox it belongs to (so the worker's from/transport guard passes on the happy path). */
+    async function seedConversationForMailbox(
+      store: ConversationStore,
+      mailbox: { id: string; address: string },
+      messageId: string,
+    ): Promise<{ conversationId: string; threadId: string }> {
+      const { conversationId } = await store.createConversation({
+        subject: 'Help with my order',
+        customerEmail: 'customer@example.test',
+        firstMessage: {
+          direction: 'inbound',
+          messageId: `<inbound-${messageId}@customer.example.test>`,
+          fromAddress: 'customer@example.test',
+          bodyText: 'Where is my order?',
+        },
+        mailboxId: mailbox.id,
+      })
+      const appended = await store.appendThread(conversationId, {
+        direction: 'outbound',
+        messageId,
+        fromAddress: mailbox.address,
+        bodyText: 'retry me',
+        deliveryStatus: 'failed',
+        sendEnvelope: envelope(),
+      })
+      if (!appended.ok) throw new Error('unreachable')
+      return { conversationId, threadId: appended.threadId }
+    }
+
+    it("resolves each claimed thread's sender from ITS OWN conversation's mailbox, not a single fixed sender", async () => {
+      const { db: rawDb, store } = await freshStore()
+      const mailboxStore = createMailboxStore(rawDb)
+      const mailboxA = await mailboxStore.upsertConnectedMailbox({
+        address: 'inbox-a@example.test',
+        provider: 'gmail',
+      })
+      const mailboxB = await mailboxStore.upsertConnectedMailbox({
+        address: 'inbox-b@example.test',
+        provider: 'imap',
+      })
+
+      await seedConversationForMailbox(store, mailboxA, '<ht.k1.mailbox-a.sig@mail.example.test>')
+      await seedConversationForMailbox(store, mailboxB, '<ht.k1.mailbox-b.sig@mail.example.test>')
+
+      const senderA = fakeSender()
+      const senderB = fakeSender()
+      const resolvedMailboxIds: (string | null)[] = []
+      const senderResolver: SenderResolver = {
+        async resolve(mailboxId) {
+          resolvedMailboxIds.push(mailboxId)
+          if (mailboxId === mailboxA.id) return { sender: senderA, from: mailboxA.address }
+          if (mailboxId === mailboxB.id) return { sender: senderB, from: mailboxB.address }
+          throw new Error(`unexpected mailboxId: ${mailboxId}`)
+        },
+      }
+
+      const report = await runDeliveryWorker({ store, senderResolver })
+
+      expect(report).toEqual({ attempted: 2, sent: 2, failed: 0, skipped: 0 })
+      expect(senderA.sent.map((e) => e.messageId)).toEqual([
+        '<ht.k1.mailbox-a.sig@mail.example.test>',
+      ])
+      expect(senderB.sent.map((e) => e.messageId)).toEqual([
+        '<ht.k1.mailbox-b.sig@mail.example.test>',
+      ])
+      expect(resolvedMailboxIds.sort()).toEqual([mailboxA.id, mailboxB.id].sort())
+    })
+
+    it('a claimed thread whose mailbox cannot be resolved (SenderResolutionError) is marked failed and the sweep continues with the next candidate', async () => {
+      const { db: rawDb, store } = await freshStore()
+      const mailboxStore = createMailboxStore(rawDb)
+      const goodMailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'inbox-good@example.test',
+        provider: 'gmail',
+      })
+      // A REAL mailbox row (the FK on conversations.mailbox_id requires one),
+      // but standing in for one whose IMAP config/credential is missing —
+      // exactly the condition SenderResolver itself throws
+      // SenderResolutionError for (`missing-imap-connection`).
+      const brokenMailbox = await mailboxStore.upsertConnectedMailbox({
+        address: 'inbox-broken@example.test',
+        provider: 'imap',
+      })
+
+      const { threadId: brokenThreadId } = await seedConversationForMailbox(
+        store,
+        brokenMailbox,
+        '<ht.k1.broken-mailbox.sig@mail.example.test>',
+      )
+      await seedConversationForMailbox(
+        store,
+        goodMailbox,
+        '<ht.k1.good-mailbox.sig@mail.example.test>',
+      )
+
+      const goodSender = fakeSender()
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const senderResolver: SenderResolver = {
+        async resolve(mailboxId) {
+          if (mailboxId === goodMailbox.id) return { sender: goodSender, from: goodMailbox.address }
+          throw new SenderResolutionError(
+            'missing-imap-connection',
+            `mailbox ${mailboxId} is missing its IMAP/SMTP connection config`,
+          )
+        },
+      }
+
+      const report = await runDeliveryWorker({ store, senderResolver })
+
+      // Both candidates were claimed successfully (`attempted = sent +
+      // failed`, per DeliveryWorkerReport's doc) — the broken one counts
+      // toward `failed` even though `sender.send()` was never reached for
+      // it, same as a claim that led to a genuine provider rejection would.
+      expect(report).toEqual({ attempted: 2, sent: 1, failed: 1, skipped: 0 })
+      expect(goodSender.sent.map((e) => e.messageId)).toEqual([
+        '<ht.k1.good-mailbox.sig@mail.example.test>',
+      ])
+
+      const conversation = await store.getConversationByThreadId(brokenThreadId)
+      const brokenThread = conversation?.threads.find((t) => t.id === brokenThreadId)
+      expect(brokenThread?.deliveryStatus).toBe('failed')
+      errorSpy.mockRestore()
+    })
+
+    it('a null mailboxId (pre-2b-i conversation) is passed through to the resolver as null', async () => {
+      const { store } = await freshStore()
+      const { conversationId } = await seedConversation(store)
+      await store.appendThread(conversationId, {
+        direction: 'outbound',
+        messageId: '<ht.k1.null-mailbox.sig@mail.example.test>',
+        fromAddress: 'support@example.test',
+        bodyText: 'retry me',
+        deliveryStatus: 'failed',
+        sendEnvelope: envelope(),
+      })
+
+      const defaultSender = fakeSender()
+      const resolvedMailboxIds: (string | null)[] = []
+      const senderResolver: SenderResolver = {
+        async resolve(mailboxId) {
+          resolvedMailboxIds.push(mailboxId)
+          return { sender: defaultSender, from: 'support@example.test' }
+        },
+      }
+
+      const report = await runDeliveryWorker({ store, senderResolver })
+
+      expect(report).toEqual({ attempted: 1, sent: 1, failed: 0, skipped: 0 })
+      expect(resolvedMailboxIds).toEqual([null])
+    })
+
+    it('refuses to retry a row whose persisted fromAddress no longer matches its resolved transport (mailbox deleted → default) — fails it, never sends mismatched', async () => {
+      const { store } = await freshStore()
+      // A conversation with no mailbox (mailbox_id null, as if its inbox was
+      // hard-deleted) but a row originally sent as a SPECIFIC inbox address.
+      const { conversationId } = await seedConversation(store)
+      await store.appendThread(conversationId, {
+        direction: 'outbound',
+        messageId: '<ht.k1.mismatch.sig@mail.example.test>',
+        fromAddress: 'deleted-inbox@example.test',
+        bodyText: 'retry me',
+        deliveryStatus: 'failed',
+        sendEnvelope: envelope(),
+      })
+
+      const defaultSender = fakeSender()
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      // resolve(null) yields the DEFAULT transport (from = support@...), which
+      // does NOT match the row's persisted 'deleted-inbox@example.test'.
+      const senderResolver: SenderResolver = {
+        async resolve() {
+          return { sender: defaultSender, from: 'support@example.test' }
+        },
+      }
+
+      const report = await runDeliveryWorker({ store, senderResolver })
+
+      expect(report).toEqual({ attempted: 1, sent: 0, failed: 1, skipped: 0 })
+      // The from/transport guard fired BEFORE the sender was ever invoked.
+      expect(defaultSender.sent).toHaveLength(0)
+      errorSpy.mockRestore()
+    })
   })
 })

@@ -19,6 +19,14 @@
  * Keyboard shortcuts moved here from the top bar's menus (a personal
  * preference is not a Manage- or avatar-scoped affordance); the global `?`
  * shortcut (`ShortcutsProvider`) is unchanged.
+ *
+ * Inboxes/mailbox connection is NOT a Settings section (specs/ui/admin-ia.md
+ * §1's three-scope rule): the mailbox LIST is Global-admin scope
+ * (`Manage ▾ → Mailboxes`, `app/manage/mailboxes/page.tsx`) and per-mailbox
+ * connection settings are Mailbox-scoped (the folder rail's gear →
+ * `InboxSettingsShell`, `app/mailbox/[id]/settings/[section]/page.tsx`) —
+ * HT-101's first pass hung both off this Settings screen, a scope
+ * violation corrected in the same ticket that added the two real homes.
  */
 
 import Link from 'next/link'

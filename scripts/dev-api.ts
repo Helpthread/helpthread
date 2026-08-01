@@ -33,6 +33,7 @@
  *   skipped, since the whole point is that the data survives.
  */
 
+import { Buffer } from 'node:buffer'
 import { createServer } from 'node:http'
 import { createInboxApi } from '../src/api/index.js'
 import { createPasswordAuthProvider } from '../src/auth/password-provider.js'
@@ -42,10 +43,21 @@ import { migrate } from '../src/db/migrate.js'
 import { createDevEmailSender } from '../src/dev/dev-sender.js'
 import { createHttpBridge } from '../src/dev/http-adapter.js'
 import { seedDevData } from '../src/dev/seed.js'
+import { createImapConnectService } from '../src/mail/imap-connect.js'
 import type { Keyring } from '../src/mail/reply-token.js'
+import type { SenderResolver } from '../src/mail/sender-resolver.js'
+import { createImapClient } from '../src/providers/adapters/imap/index.js'
+import { createPostgresQueue } from '../src/providers/adapters/postgres-queue/index.js'
+import { verifySmtpConnection } from '../src/providers/adapters/smtp/index.js'
 import { createAgentStore } from '../src/store/agents.js'
+import { createAssistantStore } from '../src/store/assistants.js'
 import { createConversationStore } from '../src/store/conversations.js'
+import { createImapConfigStore } from '../src/store/imap-config.js'
+import { createImapCredentialStore } from '../src/store/imap-credentials.js'
+import { createImapWatchStateStore } from '../src/store/imap-watch-state.js'
 import { createMailboxStore } from '../src/store/mailboxes.js'
+import { createSavedReplyStore } from '../src/store/saved-replies.js'
+import { createWebhookEndpointStore } from '../src/store/webhook-endpoints.js'
 
 const PORT = Number(process.env.HT_DEV_PORT ?? 8787)
 const API_TOKEN = process.env.HT_DEV_TOKEN ?? 'helpthread-dev-token'
@@ -59,6 +71,12 @@ const SUPPORT_ADDRESS = 'support@dev.localhost'
 const KEYRING: Keyring = {
   current: { keyId: 'dev', secret: 'dev-only-signing-secret-not-for-production-use' },
 }
+
+// A fixed dev-only AES-256-GCM key (exactly 32 bytes) for the IMAP app-password
+// store — never used outside this local harness; a real deployment supplies
+// HELPTHREAD_TOKEN_ENC_KEY (`src/composition/config.ts`). Anything encrypted
+// under this key is throwaway dev data by construction.
+const DEV_TOKEN_ENC_KEY = Buffer.from('helpthread-dev-only-enc-key-32b!', 'utf8')
 
 async function main(): Promise<void> {
   const db = await createPgliteDb(DB_PATH !== undefined ? { dataDir: DB_PATH } : undefined)
@@ -87,14 +105,65 @@ async function main(): Promise<void> {
     seededCount = seeded.conversationCount
   }
 
+  // --- IMAP/SMTP mailbox connection (HT-101) ------------------------------
+  // The real adapters and stores, wired exactly as `src/composition/root.ts`
+  // wires them, so `POST /inbound/imap/{connect,check}` and `GET
+  // /mailboxes/{id}/imap-config` actually work in this harness. Without this
+  // the routes are simply absent (`imapConnect` is optional on InboxApiDeps)
+  // and the connect UI 404s against a dev server — which is exactly what
+  // happened before this was added. `createImapClient`/`verifySmtpConnection`
+  // make REAL outbound connections, so a connect attempt here talks to the
+  // operator's actual mail server, same as production.
+  const imapConfigStore = createImapConfigStore(db)
+  const imapCredentialStore = createImapCredentialStore(db, DEV_TOKEN_ENC_KEY)
+  const imapWatchStateStore = createImapWatchStateStore(db)
+  const imapConnectService = createImapConnectService({
+    db,
+    mailboxStore,
+    configStore: imapConfigStore,
+    credentialStore: imapCredentialStore,
+    watchStateStore: imapWatchStateStore,
+    createImapClient,
+    verifySmtp: verifySmtpConnection,
+  })
+
+  // Every reply in this harness goes through the console dev sender, whatever
+  // inbox its conversation belongs to — the harness never transmits real mail.
+  // Production resolves a per-inbox sender instead (`src/mail/sender-resolver.ts`).
+  const senderResolver: SenderResolver = {
+    async resolve() {
+      return { sender, from: SUPPORT_ADDRESS }
+    },
+  }
+
+  // `assistants`, `webhooks`, and `savedReplies` are REQUIRED on
+  // `InboxApiDeps`, and this file sits outside `tsconfig.json`'s `include`
+  // (only `scripts/migrate.ts` is listed), so `npm run typecheck` never
+  // catches their absence — the harness compiles under `tsx` and then fails
+  // at `deps.assistants.store` the moment one of those routes is hit
+  // (review, 2026-07-25). Wired with the real stores over the same dev `db`.
   const api = createInboxApi({
     store,
     apiToken: API_TOKEN,
     sender,
+    senderResolver,
     keyring: KEYRING,
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,
     agents: { store: agentStore, providers: authProviders, mailboxStore },
+    assistants: { store: createAssistantStore(db) },
+    webhooks: {
+      // Same throwaway dev key as the IMAP credential store above — webhook
+      // secrets are encrypted at rest by the same AES-256-GCM path.
+      store: createWebhookEndpointStore(db, DEV_TOKEN_ENC_KEY),
+      queue: createPostgresQueue(db),
+    },
+    savedReplies: { store: createSavedReplyStore(db), mailboxStore },
+    imapConnect: {
+      service: imapConnectService,
+      configStore: imapConfigStore,
+      mailboxStore,
+    },
   })
 
   const baseUrl = `http://127.0.0.1:${PORT}`

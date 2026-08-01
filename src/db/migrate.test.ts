@@ -71,6 +71,8 @@ describe('migrate', () => {
       { id: 25, name: 'conversation_snooze' },
       { id: 26, name: 'webauthn' },
       { id: 27, name: 'lock_down_data_api' },
+      { id: 28, name: 'imap_transport' },
+      { id: 29, name: 'conversation_mailbox_id' },
     ])
   })
 
@@ -108,6 +110,8 @@ describe('migrate', () => {
       { id: 25 },
       { id: 26 },
       { id: 27 },
+      { id: 28 },
+      { id: 29 },
     ])
   })
 
@@ -1708,6 +1712,62 @@ describe('migrate', () => {
       `SELECT has_table_privilege('anon', 'public.conversations', 'SELECT') AS reachable`,
     )
     expect(after.reachable).toBe(false)
+  })
+
+  it('migration 029 adds conversations.mailbox_id: no backfill for pre-existing rows, real FK to mailboxes, ON DELETE RESTRICT', async () => {
+    const database = await createPgliteDb()
+    db = database
+
+    // Apply only through migration 28, then write a conversation the way a
+    // pre-029 deployment would have — no mailbox_id column yet.
+    await migrate(database, { throughId: 28 })
+    const [existing] = await database.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    await expect(migrate(database)).resolves.toBeUndefined()
+
+    // No backfill: the pre-existing row reads NULL, exactly the value
+    // Stage 2b-ii's send path treats as "use the deployment default sender."
+    const [row] = await database.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(row.mailbox_id).toBeNull()
+
+    // Setting a real mailbox works.
+    const [mailbox] = await database.query<{ id: string }>(
+      `INSERT INTO mailboxes (address, provider) VALUES ('support@example.test', 'gmail') RETURNING id`,
+    )
+    await database.query('UPDATE conversations SET mailbox_id = $1 WHERE id = $2', [
+      mailbox.id,
+      existing.id,
+    ])
+
+    // Deleting that mailbox is REFUSED, not silently un-set. `SET NULL` would
+    // overload NULL's existing "predates the column, use the deployment
+    // default" meaning with "had an inbox, it was deleted" — indistinguishable
+    // afterwards, so every in-flight reply on this conversation would go out
+    // from a different From: address with no error. See the migration's doc.
+    await expect(
+      database.query('DELETE FROM mailboxes WHERE id = $1', [mailbox.id]),
+    ).rejects.toThrow()
+
+    // ...and the conversation still points at its own inbox.
+    const [afterDelete] = await database.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(afterDelete.mailbox_id).toBe(mailbox.id)
+
+    // A nonexistent mailbox id violates the FK.
+    await expect(
+      database.query('UPDATE conversations SET mailbox_id = $1 WHERE id = $2', [
+        '00000000-0000-0000-0000-000000000000',
+        existing.id,
+      ]),
+    ).rejects.toThrow()
   })
 })
 

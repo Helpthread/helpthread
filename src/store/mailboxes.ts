@@ -81,6 +81,44 @@ export interface MailboxRecord {
   status: MailboxStatus
 }
 
+/**
+ * Raised by {@link MailboxStore.upsertConnectedMailbox} when `address` is
+ * already connected under a different provider — see that method's SACRED
+ * section for why converting in place corrupts intake. Callers map it to a
+ * 4xx; it is never a 500.
+ *
+ * ## The message says "not supported", NOT "disconnect it first"
+ *
+ * An earlier revision told the operator to disconnect and retry. That
+ * instruction was false (caught in review, 2026-07-31):
+ * {@link MailboxStore.markDisconnected} only sets `status`, leaving `provider`
+ * exactly as it was, so the retry hits this same conflict forever. Worse,
+ * disconnect does not remove the OLD transport's sidecar rows either, so even
+ * if the predicate allowed it, the stale-sidecar double-intake this guard
+ * exists to prevent would come straight back.
+ *
+ * Changing a connected address's transport is therefore genuinely unsupported
+ * today, and the message says so plainly rather than sending the operator
+ * round a loop that cannot terminate. Making it supported means deciding what
+ * happens to the old transport's tokens, cursor, and in-flight mail — a
+ * product decision, tracked separately, not something to infer here.
+ */
+export class MailboxProviderConflictError extends Error {
+  /** The address that is already connected under another provider. */
+  readonly address: string
+  /** The provider the rejected connect attempt asked for. */
+  readonly requestedProvider: string
+
+  constructor(address: string, requestedProvider: string) {
+    super(
+      `Mailbox ${address} is already connected through a different transport. Changing an existing inbox's transport to '${requestedProvider}' is not supported yet. Connect a different address instead.`,
+    )
+    this.name = 'MailboxProviderConflictError'
+    this.address = address
+    this.requestedProvider = requestedProvider
+  }
+}
+
 /** Persistence operations for the `mailboxes` table. See the module doc for why this is intentionally narrow today. */
 export interface MailboxStore {
   /**
@@ -164,10 +202,32 @@ export interface MailboxStore {
   /**
    * Insert a new connected mailbox, or — on a **reconnect** for an address
    * that already exists — reactivate it to `active` (gmail-connect.md §4
-   * step 5, §5's idempotent-by-address reconnect). `provider` is written on
-   * every call (including a reconnect), matching `EXCLUDED.provider`, so a
-   * reconnect always leaves the row's `provider` in sync with the fresh
-   * grant rather than whatever the row previously held.
+   * step 5, §5's idempotent-by-address reconnect).
+   *
+   * ## SACRED — a reconnect NEVER changes `provider`
+   *
+   * Throws {@link MailboxProviderConflictError} when a row already exists for
+   * `address` under a DIFFERENT provider. An earlier revision wrote
+   * `provider = EXCLUDED.provider` unconditionally, which let an IMAP connect
+   * silently convert a Gmail-connected mailbox: the row flipped to
+   * `provider: 'imap'` while its `mailbox_oauth_tokens` row and
+   * `gmail_watch_state` cursor stayed behind. The mailbox then satisfied BOTH
+   * intake paths at once — `runImapFetch` selects on `provider === 'imap'`,
+   * but `runGmailReconcileSweep` iterates {@link listActiveMailboxes}, which
+   * filters on `status` ONLY. The two transports mint different
+   * `providerMessageId` values for the same physical message (a Gmail message
+   * id vs `imap:<uidValidity>:<uid>`), so the `(mailboxId,
+   * providerMessageId)` ledger cannot dedupe across them and every inbound
+   * message is ingested twice — precisely the silent duplication CHARTER.md
+   * §2's never-corrupt invariant forbids.
+   *
+   * The guard is a `WHERE` on the `DO UPDATE`, not a read-then-write: a
+   * check-then-upsert would leave a window for a concurrent connect of the
+   * same address to land between the two statements. On conflict the update
+   * matches no row, `RETURNING` comes back empty, and that empty result is
+   * what raises the error. Changing a mailbox's transport is therefore an
+   * explicit disconnect followed by a fresh connect, never an implicit
+   * side effect of reconnecting.
    *
    * `INSERT ... ON CONFLICT (address) DO UPDATE` — never a plain `INSERT`,
    * which would violate migration 009's `UNIQUE(address)` constraint on a
@@ -273,17 +333,26 @@ export function createMailboxStore(db: Db): MailboxStore {
     },
 
     async upsertConnectedMailbox(input, tx) {
+      // `provider` is deliberately NOT in the SET list: the WHERE below makes
+      // it provably equal to EXCLUDED.provider on every row this updates, so
+      // assigning it would be dead code that reads like a permitted change.
       const rows = await (tx ?? db).query<MailboxRow>(
         `INSERT INTO mailboxes (address, provider)
          VALUES ($1, $2)
          ON CONFLICT (address) DO UPDATE SET
            status = 'active',
-           provider = EXCLUDED.provider,
            updated_at = now()
+         WHERE mailboxes.provider = EXCLUDED.provider
          RETURNING id, address, provider, status`,
         [input.address, input.provider],
       )
-      return toMailboxRecord(rows[0])
+      const row = rows[0]
+      if (row === undefined) {
+        // The insert conflicted AND the update's WHERE rejected it — the only
+        // way this statement returns nothing (interface doc's SACRED section).
+        throw new MailboxProviderConflictError(input.address, input.provider)
+      }
+      return toMailboxRecord(row)
     },
 
     async listActiveMailboxes() {

@@ -89,6 +89,28 @@ const GMAIL_DISCONNECT: RouteDef = {
   methods: ['POST'],
 }
 
+/**
+ * `/api/v1/inbound/imap/connect` — verify + persist a per-inbox IMAP/SMTP
+ * connection (HT-101 Stage 2a-ii; specs/mail/mailbox-connection.md §5), POST
+ * only. An ORDINARY Bearer-gated route — unlike Gmail's OAuth connect, there
+ * is no pre-auth callback: the operator supplies host/port/credentials
+ * directly in this one request (`src/api/imap-connect.ts`'s module doc).
+ */
+const IMAP_CONNECT: RouteDef = {
+  pattern: /^\/api\/v1\/inbound\/imap\/connect$/,
+  methods: ['POST'],
+}
+
+/**
+ * `/api/v1/inbound/imap/check` — verify IMAP + SMTP connectivity WITHOUT
+ * persisting anything (HT-101 Stage 2a-ii), POST only. Anchored (`check$`)
+ * so it never collides with `IMAP_CONNECT`'s `connect$`.
+ */
+const IMAP_CHECK: RouteDef = {
+  pattern: /^\/api\/v1\/inbound\/imap\/check$/,
+  methods: ['POST'],
+}
+
 // --- Agents & Authentication (HT-54; specs/auth/agents-and-auth.md §6) -----
 //
 // All still Bearer-gated ordinary routes (spec §6: "All under the existing
@@ -235,6 +257,12 @@ const SAVED_REPLY_ITEM: RouteDef = {
   methods: ['PATCH', 'DELETE'],
 }
 
+/** `/api/v1/mailboxes/{id}/imap-config` — read-only IMAP/SMTP connection config, no credential (admin only) — HT-101 Stage 2b, GET only. Distinct suffix from `SAVED_REPLIES_LIST`, never contends for the same pathname. */
+const MAILBOX_IMAP_CONFIG: RouteDef = {
+  pattern: /^\/api\/v1\/mailboxes\/(?<mailboxId>[^/]+)\/imap-config$/,
+  methods: ['GET'],
+}
+
 // --- Webhooks admin API (HT-69; specs/modules/substrate-v1.md §5) -----------
 //
 // Admin-only, acting-Agent header REQUIRED on every route (`src/api/
@@ -320,6 +348,8 @@ const ROUTES: readonly RouteDef[] = [
   CONVERSATION_DRAFTS,
   GMAIL_CONNECT,
   GMAIL_DISCONNECT,
+  IMAP_CONNECT,
+  IMAP_CHECK,
   AUTH_PROVIDERS,
   SETUP,
   AUTH_VERIFY,
@@ -340,6 +370,7 @@ const ROUTES: readonly RouteDef[] = [
   AGENT_WEBAUTHN_CREDENTIALS,
   SAVED_REPLY_ITEM,
   SAVED_REPLIES_LIST,
+  MAILBOX_IMAP_CONFIG,
   AGENT_ITEM,
   WEBHOOKS_LIST,
   WEBHOOK_TEST,
@@ -364,6 +395,8 @@ export type RouteMatch =
   | { kind: 'conversation-assignee'; id: string }
   | { kind: 'gmail-connect' }
   | { kind: 'gmail-disconnect' }
+  | { kind: 'imap-connect' }
+  | { kind: 'imap-check' }
   | { kind: 'auth-providers' }
   | { kind: 'setup' }
   | { kind: 'auth-verify' }
@@ -392,6 +425,7 @@ export type RouteMatch =
   | { kind: 'saved-replies-create'; mailboxId: string }
   | { kind: 'saved-reply-patch'; mailboxId: string; replyId: string }
   | { kind: 'saved-reply-delete'; mailboxId: string; replyId: string }
+  | { kind: 'mailbox-imap-config'; mailboxId: string }
   | { kind: 'webhooks-list' }
   | { kind: 'webhooks-create' }
   | { kind: 'webhook-patch'; id: string }
@@ -509,6 +543,12 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     if (route === GMAIL_DISCONNECT) {
       return { kind: 'gmail-disconnect' }
     }
+    if (route === IMAP_CONNECT) {
+      return { kind: 'imap-connect' }
+    }
+    if (route === IMAP_CHECK) {
+      return { kind: 'imap-check' }
+    }
     if (route === AUTH_PROVIDERS) {
       return { kind: 'auth-providers' }
     }
@@ -583,6 +623,10 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
       return method === 'DELETE'
         ? { kind: 'saved-reply-delete', mailboxId, replyId }
         : { kind: 'saved-reply-patch', mailboxId, replyId }
+    }
+    if (route === MAILBOX_IMAP_CONFIG) {
+      const mailboxId = match.groups?.mailboxId as string
+      return { kind: 'mailbox-imap-config', mailboxId }
     }
 
     // Every remaining route guarantees a present, non-empty `id` group (per

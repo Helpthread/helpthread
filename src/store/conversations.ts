@@ -248,6 +248,15 @@ export interface NewConversation {
   subject: string
   customerEmail: string
   firstMessage: NewThread
+  /**
+   * The mailbox this conversation's first inbound message arrived at (HT-101
+   * Stage 2b-i) — `null`/omitted persists as `NULL` (migration 029), which
+   * Stage 2b-ii's send path reads as "fall back to the deployment's default
+   * sender." Stamped by `src/mail/ingest.ts` ONLY on a genuinely new
+   * conversation; never re-supplied for a reply appended to an existing one
+   * (see {@link StoredConversation.mailboxId}).
+   */
+  mailboxId?: string
 }
 
 /** A thread as read back from storage — camelCase, timestamps as `Date`. */
@@ -351,6 +360,22 @@ export interface StoredConversation {
   snoozedUntil: Date | null
   createdAt: Date
   updatedAt: Date
+  /**
+   * The mailbox that took inbound delivery of this conversation's FIRST
+   * message (HT-101 Stage 2b-i; migration 029). Set once, at creation, by
+   * {@link NewConversation.mailboxId}; never changed by a later reply, even
+   * one that arrives at a different connected mailbox.
+   *
+   * `null` has exactly ONE meaning: no mailbox was recorded at ingest —
+   * a conversation created before this column existed. It never means "the
+   * mailbox was deleted": migration 029's FK is `ON DELETE RESTRICT`, so a
+   * mailbox that still owns conversations cannot be deleted at all. That is
+   * deliberate — `SET NULL` would have overloaded this one value with a
+   * second, indistinguishable meaning, and `../mail/sender-resolver.ts`
+   * treats `null` as "send from the deployment default", which would have
+   * silently changed the `From:` address on an existing thread.
+   */
+  mailboxId: string | null
 }
 
 /**
@@ -1019,6 +1044,15 @@ interface ConversationRow {
   snoozed_until: Date | string | null
   created_at: Date | string
   updated_at: Date | string
+  /**
+   * Optional, not required: only the queries that route through {@link
+   * toStoredConversation} (`getConversation`, `getConversationByThreadId`)
+   * select this column — `listConversations`/`summaryReturningSql`'s
+   * {@link ConversationSummaryRow} rows (mapped by {@link
+   * toConversationSummary}, which never reads it) don't. See {@link
+   * StoredConversation.mailboxId}.
+   */
+  mailbox_id?: string | null
 }
 
 /**
@@ -1098,8 +1132,8 @@ export async function createConversationInTx(
   input: NewConversation,
 ): Promise<{ conversationId: string; threadId: string }> {
   const [conversation] = await tx.query<{ id: string }>(
-    'INSERT INTO conversations (subject, customer_email) VALUES ($1, $2) RETURNING id',
-    [input.subject, input.customerEmail],
+    'INSERT INTO conversations (subject, customer_email, mailbox_id) VALUES ($1, $2, $3) RETURNING id',
+    [input.subject, input.customerEmail, input.mailboxId ?? null],
   )
   const { threadId } = await insertThread(tx, conversation.id, input.firstMessage)
   return { conversationId: conversation.id, threadId }
@@ -1297,8 +1331,8 @@ export function createConversationStore(db: Db): ConversationStore {
       // work is done proportional to a deleted conversation's size.
       const conversationRows = await db.query<ConversationRow>(
         includeDeleted
-          ? 'SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, snoozed_until, created_at, updated_at FROM conversations WHERE id = $1'
-          : "SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, snoozed_until, created_at, updated_at FROM conversations WHERE id = $1 AND status <> 'deleted'",
+          ? 'SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, snoozed_until, created_at, updated_at, mailbox_id FROM conversations WHERE id = $1'
+          : "SELECT id, number, subject, customer_email, status, tags, assignee_agent_id, snoozed_until, created_at, updated_at, mailbox_id FROM conversations WHERE id = $1 AND status <> 'deleted'",
         [conversationId],
       )
       const conversationRow = conversationRows[0]
@@ -1805,10 +1839,10 @@ export function createConversationStore(db: Db): ConversationStore {
       const includeDeleted = options?.includeDeleted ?? true
       const conversationRows = await db.query<ConversationRow>(
         includeDeleted
-          ? `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.snoozed_until, c.created_at, c.updated_at
+          ? `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.snoozed_until, c.created_at, c.updated_at, c.mailbox_id
              FROM conversations c JOIN threads t ON t.conversation_id = c.id
              WHERE t.id = $1`
-          : `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.snoozed_until, c.created_at, c.updated_at
+          : `SELECT c.id, c.number, c.subject, c.customer_email, c.status, c.tags, c.assignee_agent_id, c.snoozed_until, c.created_at, c.updated_at, c.mailbox_id
              FROM conversations c JOIN threads t ON t.conversation_id = c.id
              WHERE t.id = $1 AND c.status <> 'deleted'`,
         [threadId],
@@ -2021,6 +2055,7 @@ function toStoredConversation(row: ConversationRow): StoredConversation {
     snoozedUntil: row.snoozed_until === null ? null : toDate(row.snoozed_until),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
+    mailboxId: row.mailbox_id ?? null,
   }
 }
 

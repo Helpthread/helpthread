@@ -13,6 +13,9 @@
  * - the `PostgresDb` (Supabase pooler) + every store over it,
  * - the token encryption seam (`createMailboxTokenStore` with the decoded key),
  * - the Gmail OAuth token service + the outbound `EmailSender`,
+ * - the per-conversation `SenderResolver` (HT-101 Stage 2b-ii), which routes
+ *   a reply through its OWN mailbox's Gmail token or IMAP/SMTP connection
+ *   instead of always through the single `EmailSender` above,
  * - the Gmail push signature verifier (JWKS source built ONCE — see below),
  * - the durable Postgres job queue,
  * - the Gmail connect/consent service and its disconnect counterpart (HT-47),
@@ -46,6 +49,7 @@ import {
   type GmailPushDeps,
   type GmailReconcileJob,
 } from '../api/gmail-webhook.js'
+import type { ImapConnectDeps } from '../api/imap-connect.js'
 import { createInboxApi } from '../api/index.js'
 import type { WebAuthnApiDeps } from '../api/webauthn.js'
 import { createPasswordAuthProvider } from '../auth/password-provider.js'
@@ -66,8 +70,11 @@ import {
   type GmailWatchMaintenanceDeps,
   runGmailWatchMaintenance,
 } from '../mail/gmail-watch-maintenance.js'
-import { ingestInboundMessage } from '../mail/ingest.js'
+import { createImapConnectService } from '../mail/imap-connect.js'
+import { runImapFetch } from '../mail/imap-fetch.js'
+import { type IngestDeps, ingestInboundMessage } from '../mail/ingest.js'
 import type { Keyring } from '../mail/reply-token.js'
+import { createSenderResolver } from '../mail/sender-resolver.js'
 import { runSnoozeWake } from '../mail/snooze-wake.js'
 import {
   createGmailEmailSender,
@@ -76,12 +83,17 @@ import {
   createGmailWatchClient,
   createGooglePushKeySource,
 } from '../providers/adapters/gmail/index.js'
+import { createImapClient } from '../providers/adapters/imap/index.js'
 import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.js'
+import { createSmtpEmailSender, verifySmtpConnection } from '../providers/adapters/smtp/index.js'
 import { createSupabaseStorageBlobStore } from '../providers/adapters/supabase-storage/index.js'
 import type { BlobStore } from '../providers/blob.js'
 import type { QueueMessage, QueueMessageHandler } from '../providers/queue.js'
 import { createAgentStore } from '../store/agents.js'
 import { createAssistantStore } from '../store/assistants.js'
+import { createImapConfigStore } from '../store/imap-config.js'
+import { createImapCredentialStore } from '../store/imap-credentials.js'
+import { createImapWatchStateStore } from '../store/imap-watch-state.js'
 import {
   createConversationStore,
   createEventOutboxStore,
@@ -173,6 +185,15 @@ export async function buildApp(
   const savedReplyStore = createSavedReplyStore(db)
   const webAuthnStore = createWebAuthnStore(db)
 
+  // --- Per-inbox IMAP/SMTP connection stores (HT-101 Stage 2a-i/ii).
+  // `imapCredentialStore` reuses the SAME `tokenEncryptionKey` as `tokenStore`
+  // above — one crypto module (`token-crypto.ts`), every per-mailbox secret,
+  // not a second key hierarchy (mirrors `webhookEndpointStore`'s identical
+  // reuse below). ---
+  const imapConfigStore = createImapConfigStore(db)
+  const imapCredentialStore = createImapCredentialStore(db, config.tokenEncryptionKey)
+  const imapWatchStateStore = createImapWatchStateStore(db)
+
   // --- Module substrate (HT-69; specs/modules/substrate-v1.md §4/§5): the
   // event outbox and webhook endpoint stores. `webhookEndpointStore` reuses
   // the SAME `tokenEncryptionKey` as `tokenStore` above (mailbox OAuth
@@ -218,6 +239,25 @@ export async function buildApp(
       }
       return tokenService.getAccessToken(mailbox.id)
     },
+  })
+
+  // --- Per-conversation sender resolution (HT-101 Stage 2b-ii) — routes each
+  // outbound reply through the SAME inbox its conversation arrived at,
+  // rather than always through the single `sender` above. `createGmailEmailSender`/
+  // `createSmtpEmailSender` are injected rather than imported by
+  // `sender-resolver.ts` itself, per `src/providers/README.md`'s composition-
+  // root rule (mirrors every other `createWatchClient`/`createImapClient`
+  // injection in this file). `defaultAddress: config.supportAddress` is what
+  // a `null` mailboxId (a pre-2b-i conversation) falls back to — see that
+  // module's doc comment. ---
+  const senderResolver = createSenderResolver({
+    mailboxStore,
+    tokenService,
+    imapConfigStore,
+    imapCredentialStore,
+    createGmailEmailSender,
+    createSmtpEmailSender,
+    defaultAddress: config.supportAddress,
   })
 
   // --- Passkeys (HT-75; specs/auth/passkeys.md §3) — ONLY when
@@ -324,20 +364,47 @@ export async function buildApp(
   })
   const gmailDisconnect: GmailDisconnectDeps = { service: disconnectService }
 
-  // --- The Agent Inbox API, with gmailPush + gmailConnect + gmailDisconnect
-  // PRESENT (the engine leaves them absent by default; this root is the one
-  // place they are wired). openTracking is intentionally OMITTED — the
-  // shipped privacy default is OFF (v1.1 designed contract). ---
+  // --- IMAP/SMTP connect/check service (HT-101 Stage 2a-ii) — the per-inbox
+  // counterpart of the Gmail connect service above, wired to the SAME `db`
+  // (for its own atomic persist) and the three IMAP stores constructed
+  // earlier. `createImapClient`/`verifySmtpConnection` are the ONLY place
+  // either concrete adapter is constructed — engine modules never import
+  // them directly (`src/providers/README.md`'s rule; mirrors every other
+  // `createWatchClient`/`createHistoryClient` injection in this file). ---
+  const imapConnectService = createImapConnectService({
+    db,
+    mailboxStore,
+    configStore: imapConfigStore,
+    credentialStore: imapCredentialStore,
+    watchStateStore: imapWatchStateStore,
+    createImapClient,
+    verifySmtp: verifySmtpConnection,
+  })
+  // configStore/mailboxStore (HT-101 Stage 2b) back the read-only
+  // `GET .../mailboxes/{id}/imap-config` handler — the SAME instances
+  // `imapConnectService` above was built from, not a second copy.
+  const imapConnect: ImapConnectDeps = {
+    service: imapConnectService,
+    configStore: imapConfigStore,
+    mailboxStore,
+  }
+
+  // --- The Agent Inbox API, with gmailPush + gmailConnect + gmailDisconnect +
+  // imapConnect PRESENT (the engine leaves them absent by default; this root
+  // is the one place they are wired). openTracking is intentionally OMITTED —
+  // the shipped privacy default is OFF (v1.1 designed contract). ---
   const inboxApi = createInboxApi({
     store,
     apiToken: config.apiToken,
     sender,
+    senderResolver,
     keyring,
     mailDomain: config.mailDomain,
     supportAddress: config.supportAddress,
     gmailPush,
     gmailConnect,
     gmailDisconnect,
+    imapConnect,
     attachments: { store: attachmentStore, blobStore },
     // Agents & Authentication (HT-54) — CORE, required (unlike the
     // absent-by-default fields above). uiBaseUrl is spread in only when
@@ -374,13 +441,19 @@ export async function buildApp(
     selfEchoGuard: { mailboxStore, inboundDeliveryStore },
   })
 
+  // --- Shared ingest deps — the SAME IngestDeps every inbound transport's
+  // `ingest` closure is built from (the Gmail reconcile handler below AND
+  // the IMAP fetch cron), so a fixture-proven ingest pipeline never diverges
+  // per transport. ---
+  const ingestDeps: IngestDeps = { db, inboundDeliveryStore, blobStore, keyring }
+
   // --- The reconcile handler the queue drain dispatches to. ---
   const reconcileHandler = createGmailReconcileHandler({
     tokenService,
     mailboxStore,
     watchStateStore,
     blobStore,
-    ingest: (raw) => ingestInboundMessage(raw, { db, inboundDeliveryStore, blobStore, keyring }),
+    ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
     createHistoryClient: (getAccessToken) => createGmailHistoryClient({ getAccessToken }),
   })
 
@@ -503,6 +576,34 @@ export async function buildApp(
       const report = await runSnoozeWake({ store })
       if (report.due > 0) {
         console.info(JSON.stringify({ event: 'snooze_wake', ...report }))
+      }
+      return report
+    },
+    // IMAP scheduled-fetch sweep (HT-101 Stage 2a-ii) — a SEPARATE cron tick
+    // (IMAP_FETCH_PATH) from every Gmail-specific job above: fetches bounded
+    // new mail for every active `provider === 'imap'` mailbox. `ingest`
+    // reuses the SAME `ingestDeps` the Gmail reconcile handler is built with
+    // above — one fixture-proven ingest pipeline, shared by both inbound
+    // transports. Quiet-tick log suppression matches every other cron
+    // closure here.
+    runImapFetch: async () => {
+      const report = await runImapFetch({
+        mailboxStore,
+        configStore: imapConfigStore,
+        credentialStore: imapCredentialStore,
+        watchStateStore: imapWatchStateStore,
+        createImapClient,
+        ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
+      })
+      // `skipped` counts too (review, 2026-07-31). A mailbox skipped on every
+      // tick — a lease stuck by a crashed run, a missing config, credential,
+      // or baseline cursor — is an intake OUTAGE, not a quiet tick: mail is
+      // arriving and nothing is collecting it. Gating the summary on
+      // fetched/paused/failed alone made that state indistinguishable from
+      // "no mailboxes configured," which is the one case worth staying silent
+      // for. Only a run that touched nothing at all logs nothing.
+      if (report.fetched > 0 || report.paused > 0 || report.failed > 0 || report.skipped > 0) {
+        console.info(JSON.stringify({ event: 'imap_fetch', ...report }))
       }
       return report
     },

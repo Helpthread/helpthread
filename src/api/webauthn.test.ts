@@ -120,6 +120,7 @@ describe('Passkey (WebAuthn) API', () => {
       store: createConversationStore(db),
       apiToken: TOKEN,
       sender,
+      senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,

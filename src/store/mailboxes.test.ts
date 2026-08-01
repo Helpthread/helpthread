@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
-import { createMailboxStore } from './mailboxes.js'
+import { createMailboxStore, MailboxProviderConflictError } from './mailboxes.js'
 
 const RANDOM_UUID = '00000000-0000-4000-8000-000000000000'
 
@@ -372,25 +372,67 @@ describe('createMailboxStore', () => {
       expect(rows).toHaveLength(1)
     })
 
-    it('reconnect updates provider from EXCLUDED.provider (seed differs from reconnect)', async () => {
+    // HT-101 review fix (CodeRabbit, 2026-07-31). This block previously
+    // asserted the OPPOSITE — that a reconnect overwrites `provider` from
+    // `EXCLUDED.provider` — which encoded the defect as a requirement. Letting
+    // an IMAP connect convert a Gmail-connected address left that mailbox
+    // satisfying BOTH intake paths at once (`runImapFetch` selects on
+    // `provider`, `runGmailReconcileSweep` on `status` alone), and the two
+    // transports mint different `providerMessageId` values for one physical
+    // message, so the ledger cannot dedupe across them: every inbound message
+    // ingested twice. See `upsertConnectedMailbox`'s SACRED section.
+    it('REFUSES to change provider on reconnect — throws MailboxProviderConflictError, leaves the row untouched', async () => {
       const { db, store } = await freshStore()
-      // Seed with a DIFFERENT provider than the reconnect uses, so this
-      // actually proves EXCLUDED.provider overwrote the row rather than the
-      // value happening to already match. Migration 009's `provider` column is
-      // unconstrained text, so a placeholder value is valid here.
-      await insertMailbox(db, { address: 'provider-swap@example.test', provider: 'legacy-imap' })
+      await insertMailbox(db, { address: 'provider-swap@example.test', provider: 'gmail' })
 
-      const mailbox = await store.upsertConnectedMailbox({
-        address: 'provider-swap@example.test',
-        provider: 'gmail',
-      })
+      await expect(
+        store.upsertConnectedMailbox({
+          address: 'provider-swap@example.test',
+          provider: 'imap',
+        }),
+      ).rejects.toThrow(MailboxProviderConflictError)
 
-      expect(mailbox.provider).toBe('gmail')
-      const rows = await db.query<{ provider: string }>(
-        'SELECT provider FROM mailboxes WHERE address = $1',
+      // The row is unchanged — not converted, and not duplicated.
+      const rows = await db.query<{ provider: string; status: string }>(
+        'SELECT provider, status FROM mailboxes WHERE address = $1',
         ['provider-swap@example.test'],
       )
+      expect(rows).toHaveLength(1)
       expect(rows[0].provider).toBe('gmail')
+    })
+
+    it('carries the address and the requested provider on the conflict error, so the operator message can name both', async () => {
+      const { db, store } = await freshStore()
+      await insertMailbox(db, { address: 'conflict-detail@example.test', provider: 'gmail' })
+
+      await expect(
+        store.upsertConnectedMailbox({
+          address: 'conflict-detail@example.test',
+          provider: 'imap',
+        }),
+      ).rejects.toMatchObject({
+        name: 'MailboxProviderConflictError',
+        address: 'conflict-detail@example.test',
+        requestedProvider: 'imap',
+      })
+    })
+
+    it('a SAME-provider reconnect still reactivates — the guard blocks conversion, not reconnection', async () => {
+      const { db, store } = await freshStore()
+      const mailboxId = await insertMailbox(db, {
+        address: 'same-provider@example.test',
+        provider: 'imap',
+        status: 'needs_reconnect',
+      })
+
+      const mailbox = await store.upsertConnectedMailbox({
+        address: 'same-provider@example.test',
+        provider: 'imap',
+      })
+
+      expect(mailbox.id).toBe(mailboxId)
+      expect(mailbox.provider).toBe('imap')
+      expect(mailbox.status).toBe('active')
     })
 
     it('bumps updated_at on reconnect', async () => {
