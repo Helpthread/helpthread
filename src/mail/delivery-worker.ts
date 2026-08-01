@@ -185,7 +185,7 @@ export async function runDeliveryWorker(
       //
       // An earlier revision justified this by "the mailbox was hard-deleted,
       // so `mailbox_id` became null via ON DELETE SET NULL". That is no longer
-      // reachable and never should have been: migration 028 ships
+      // reachable and never should have been: migration 029 ships
       // `ON DELETE RESTRICT` precisely so a mailbox owning conversations
       // cannot be deleted (review, 2026-07-31). The guard still earns its
       // place for the cases that ARE reachable — a pre-028 conversation whose

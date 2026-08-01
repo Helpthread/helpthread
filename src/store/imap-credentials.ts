@@ -1,9 +1,9 @@
 /**
  * `ImapCredentialStore` — persistence for `imap_mailbox_credentials`
- * (migration 027, `src/db/migrate.ts`): the per-mailbox IMAP/SMTP app
+ * (migration 028, `src/db/migrate.ts`): the per-mailbox IMAP/SMTP app
  * password, always encrypted at rest (HT-101 Stage 2a-i).
  *
- * This module is the encrypt/decrypt boundary migration 027's doc comment
+ * This module is the encrypt/decrypt boundary migration 028's doc comment
  * calls out — the same "reserve the column, a dedicated store owns the
  * crypto" split `mailbox-tokens.ts` established for `mailbox_oauth_tokens`
  * (migration 010). Every write goes through `token-crypto.ts`'s

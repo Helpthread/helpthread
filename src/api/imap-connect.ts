@@ -81,7 +81,7 @@ type FieldProblem = string
  * Validate and narrow a parsed JSON body into an {@link ImapConnectInput}.
  * `address`/`imapHost`/`smtpHost`/`username`/`password` must be non-empty
  * strings; `imapPort`/`smtpPort` must be integers in the same `1..65535`
- * range migration 027's `CHECK` constraint enforces on `imap_mailbox_config`
+ * range migration 028's `CHECK` constraint enforces on `imap_mailbox_config`
  * (so an invalid port is rejected HERE, before ever attempting a connection
  * or a doomed insert); `secure`, if present, must be a boolean.
  */

@@ -175,10 +175,10 @@ Stated explicitly in the operator docs, because it is the quiet advantage: repli
 App passwords are long-lived secrets granting full mailbox access. They must be encrypted at rest via the existing `HELPTHREAD_TOKEN_ENC_KEY` path (`src/store/token-crypto.ts`, AES-256-GCM) already used for OAuth tokens, never logged, never returned by any API read, and write-only in the UI — show a "configured" state, never the value.
 
 **Encryption is not sufficient on its own.** The credential table needs
-deny-by-default server-only authorization, not merely ciphertext at rest — the
-same gap already open on `mailbox_oauth_tokens` (see §8: RLS is disabled on
-every table today). Whatever answer that gets must cover this table from the
-day it exists, rather than inheriting the same debt.
+deny-by-default server-only authorization, not merely ciphertext at rest. That
+answer now exists (see §8): migration 027 enables RLS on every table and revokes
+the PostgREST role grants, so a new table inherits protection only if it does the
+same. This table must enable RLS in the migration that creates it.
 
 **Lifecycle — app passwords die quietly.** Unlike an OAuth grant, there is no
 revocation signal and no refresh failure to classify. They stop working when
@@ -231,7 +231,7 @@ and documentation, not by changing Helpthread's operator-deployed model.
 
 Also found while mapping the current path, each requiring separate follow-up:
 
-- **RLS is disabled on all 19 tables**, including `conversations` and `mailbox_oauth_tokens`. Exposure depends on whether the anon key is distributed; enabling RLS without policies would break the engine's own access, so this needs deliberate policy design.
+- **RLS was disabled on all 19 tables** — addressed by migration 027, which enables RLS on every table and revokes the `anon`/`authenticated` grants. The concern recorded here that "enabling RLS without policies would break the engine's own access" was wrong *given how the engine actually connects*: it connects as the role that owns the tables, and an owner bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set. No policy design was needed, because nothing should reach these tables through PostgREST at all. Note the deployment invariant this promotes: `DATABASE_URL` must connect as the table-owning role. Pointing it at a dedicated least-privilege role instead breaks the engine, and the two halves break differently: reads go *quiet* (RLS with no policies returns zero rows rather than raising, so the symptom is an empty inbox) while every write hard-errors with `new row violates row-level security policy`. Expect the loud signal first — inbound ingest fails immediately — with silently empty reads alongside it. Standing rule: a migration adding a table must also enable RLS on it. See [docs/decisions/README.md](../../docs/decisions/README.md).
 - **Three doc-drift defects** in `specs/deploy/gmail-inbound-runbook.md`: it names an `api/[...path].ts` entrypoint that was tried and abandoned (the real file is `api/index.ts`, which documents why), says "three cron jobs" where `vercel.json` declares four, and omits `HELPTHREAD_UI_BASE_URL` and the entire web-project env set — so an operator following only the runbook gets a working engine and a non-functional UI.
 - **No `.env.example`** anywhere in the repo; the 17-variable contract exists only as a prose table and as validation logic in `src/composition/config.ts`.
 - **History-cursor expiry fallback** not audited. Gmail expires history cursors; the 404 path exists but has not been reviewed for a mailbox that goes quiet for an extended period.

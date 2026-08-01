@@ -1,7 +1,7 @@
 /**
- * `ImapConfigStore` — persistence for `imap_mailbox_config` (migration 027,
+ * `ImapConfigStore` — persistence for `imap_mailbox_config` (migration 028,
  * `src/db/migrate.ts`): the non-secret IMAP/SMTP connection parameters for a
- * per-mailbox IMAP/SMTP connection (HT-101 Stage 2a-i). See migration 027's
+ * per-mailbox IMAP/SMTP connection (HT-101 Stage 2a-i). See migration 028's
  * doc comment for why this is a separate table from `imap_mailbox_credentials`
  * (`./imap-credentials.ts`) — this store never reads or writes ciphertext,
  * and never needs to: the password lives entirely in that sibling store.
@@ -22,7 +22,7 @@ import type { Db, Queryable } from '../db/client.js'
 
 /**
  * The non-secret parameters of a per-mailbox IMAP/SMTP connection — every
- * field `imap_mailbox_config` (migration 027) carries EXCEPT the password,
+ * field `imap_mailbox_config` (migration 028) carries EXCEPT the password,
  * which lives in `imap_mailbox_credentials` (`./imap-credentials.ts`).
  */
 export interface ImapConnectionConfig {

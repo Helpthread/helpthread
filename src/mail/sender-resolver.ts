@@ -25,7 +25,7 @@
  * conversation keeps going out through the same mailbox it always did.
  *
  * That is the ONLY way `null` arises. A stamped conversation can never
- * decay to `null`: migration 028's FK is `ON DELETE RESTRICT`, so a mailbox
+ * decay to `null`: migration 029's FK is `ON DELETE RESTRICT`, so a mailbox
  * with conversations cannot be deleted. This matters here specifically —
  * if a delete could null the column, this function would silently start
  * sending an existing thread's replies from a different address, which is

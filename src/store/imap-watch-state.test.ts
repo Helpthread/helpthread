@@ -281,7 +281,7 @@ describe('createImapWatchStateStore', () => {
       expect(rows[0].claimed_until).not.toBeNull()
       expect((rows[0].claimed_until as Date).getTime()).toBeGreaterThan(before.getTime())
       // The token is the row's own `lease_token` uuid, NOT a rendering of
-      // `claimed_until` — see migration 027's doc for the tick-collision that
+      // `claimed_until` — see migration 028's doc for the tick-collision that
       // made a timestamp token unusable as a write fence.
       expect(rows[0].lease_token).toBe(token)
     })

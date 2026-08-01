@@ -1,8 +1,8 @@
 /**
  * `ImapWatchStateStore` — persistence for a mailbox's IMAP fetch cursor
- * (`imap_watch_state`, migration 027, `src/db/migrate.ts`) and its
+ * (`imap_watch_state`, migration 028, `src/db/migrate.ts`) and its
  * never-double-fetch lease (HT-101 Stage 2a-i). One row per mailbox
- * (`mailbox_id` is the PRIMARY KEY — migration 027's doc comment), holding
+ * (`mailbox_id` is the PRIMARY KEY — migration 028's doc comment), holding
  * the {@link ImapCursor} (`uid_validity`/`last_uid`, reused verbatim from
  * `../providers/adapters/imap/fetch.ts` — no second cursor type is defined
  * here) plus `claimed_until` (the fetch lease).
@@ -73,7 +73,7 @@ export interface ImapWatchStateStore {
    * `imap_watch_state` row exists yet for this mailbox (between connection
    * and {@link seedBaseline}) — unlike `GmailWatchStateStore.getCursor`,
    * there is no partial-row case to consider: both `uid_validity` and
-   * `last_uid` are `NOT NULL` (migration 027's doc comment), so a row
+   * `last_uid` are `NOT NULL` (migration 028's doc comment), so a row
    * either fully exists or does not exist at all.
    */
   getCursor(mailboxId: string): Promise<ImapCursor | null>
@@ -253,7 +253,7 @@ export function createImapWatchStateStore(db: Db): ImapWatchStateStore {
       // The token is a FRESH uuid per claim, not the rendered `claimed_until`
       // Gmail's lease uses: two claims inside one clock tick mint the same
       // timestamp, so a timestamp token cannot distinguish a stale holder from
-      // the live one (migration 027's doc records the collision a test forced).
+      // the live one (migration 028's doc records the collision a test forced).
       // `claimed_until` still decides expiry; `lease_token` decides ownership.
       const rows = await db.query<{ lease_token: string }>(
         `UPDATE imap_watch_state
