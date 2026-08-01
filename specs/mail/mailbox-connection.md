@@ -113,7 +113,9 @@ Verified 2026-07-20. App-password availability gates the whole approach.
 | Zoho / Yahoo / iCloud | Yes | 2FA required |
 | cPanel / self-hosted | Yes | The mailbox password is the credential |
 | **Microsoft 365 business** | **No** | Basic auth removed and unre-enablable — **OAuth mandatory** |
-| Outlook.com consumer | Unresolved | Microsoft's own docs contradict; test before claiming support |
+| Outlook.com consumer | **No** | Resolved 2026-07-31: Microsoft requires OAuth2 for POP/IMAP/SMTP on consumer accounts too; app passwords are refused |
+
+**Resolution of the Outlook.com row (2026-07-31).** The row above read *unresolved — test before claiming support* while the connect screen shipped `outlook.com`/`hotmail.com`/`live.com` presets regardless. Microsoft's own documentation settles it in both directions: Exchange Online states "Basic authentication is now disabled in all tenants… no one (you or Microsoft support) can re-enable" it, and notes the deprecation "also prevents the use of app passwords"; the consumer Outlook.com guidance likewise requires Modern Auth/OAuth2 for POP, IMAP and SMTP. Those presets are removed, and typing such an address now shows an explicit "requires OAuth" notice instead of offering settings that cannot authenticate.
 
 Two consequences:
 
