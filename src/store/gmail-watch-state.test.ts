@@ -349,40 +349,54 @@ describe('createGmailWatchStateStore', () => {
 
   // --- claimReconcileLease / releaseReconcileLease (HT-48, gmail-push.md §6) ---
 
-  /**
-   * Expire a lease the way production does — by moving the clock past it, not
-   * by rewinding `claimed_until` with SQL.
-   *
-   * ## Why not the SQL rewind these tests used to do
-   *
-   * The lease token IS `claimed_until` (`now() + leaseMs`), so two claims
-   * whose `now()` lands on the same instant with the same `leaseMs` render the
-   * IDENTICAL token — and PGlite's `now()` only advances in whole
-   * MILLISECONDS, so back-to-back claims collide routinely. Rewinding
-   * `claimed_until` in SQL faked the expiry WITHOUT the elapsed time it
-   * implies, so the successor's claim ran in the same millisecond as its
-   * predecessor's and the two tokens came back equal — a real-clock race that
-   * failed roughly half of all runs.
-   *
-   * In production the successor can only claim once the prior lease has
-   * actually expired, i.e. at least `leaseMs` later, so its `claimed_until` is
-   * necessarily later too and the tokens necessarily differ. Advancing the
-   * (faked) system clock — which PGlite reads for `now()` — reproduces that
-   * guarantee exactly, and deterministically.
-   */
-  function expireReconcileLease(leaseMs: number) {
-    vi.setSystemTime(Date.now() + leaseMs + 1_000)
-  }
-
   describe('claimReconcileLease / releaseReconcileLease', () => {
-    // Only `Date` is faked: PGlite reads the system clock for `now()`, but
-    // faking timers wholesale would stall any `setTimeout` it relies on.
+    /**
+     * These tests run on a FROZEN, fixed clock. Only `Date` is faked — PGlite
+     * reads the system clock for `now()`, so faking it moves the database's
+     * clock too, while leaving `setTimeout` real so nothing PGlite relies on
+     * stalls. The clock is pinned to a constant instant rather than whatever
+     * `useFakeTimers` inherited from the wall clock, so no assertion in this
+     * block can depend on when it happened to run; time moves only when
+     * {@link expireReconcileLease} moves it.
+     */
+    const FROZEN_NOW = new Date('2026-01-01T00:00:00.000Z')
+
     beforeEach(() => {
       vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(FROZEN_NOW)
     })
     afterEach(() => {
       vi.useRealTimers()
     })
+
+    /**
+     * Expire a lease the way production does — by moving the clock past it,
+     * not by rewinding `claimed_until` with SQL. Advances to ONE MILLISECOND
+     * past expiry (the smallest step PGlite's `now()` can resolve), so the
+     * claim guard's strict `claimed_until < now()` boundary stays under test
+     * rather than being cleared by a wide margin.
+     *
+     * ## Why not the SQL rewind these tests used to do
+     *
+     * The lease token IS `claimed_until` (`now() + leaseMs`), so two claims
+     * whose `now()` lands on the same instant with the same `leaseMs` render
+     * the IDENTICAL token — and PGlite's `now()` only advances in whole
+     * MILLISECONDS, so back-to-back claims collide routinely. Rewinding
+     * `claimed_until` in SQL faked the expiry WITHOUT the elapsed time it
+     * implies, so the successor's claim ran in the same millisecond as its
+     * predecessor's and the two tokens came back equal — a real-clock race
+     * that failed roughly half of all runs.
+     *
+     * In production the successor can only claim once the prior lease has
+     * actually expired, i.e. at least `leaseMs` later, so its `claimed_until`
+     * is necessarily later too and the tokens necessarily differ. Jumping the
+     * clock past the lease reproduces that ORDERING guarantee deterministically
+     * — it models the expiry, not the passage of time itself: the clock stays
+     * frozen at its new instant until moved again.
+     */
+    function expireReconcileLease(leaseMs: number) {
+      vi.setSystemTime(Date.now() + leaseMs + 1)
+    }
 
     it('claims an unclaimed mailbox, setting claimed_until in the future and returning it as the lease token', async () => {
       const { db, store } = await freshStore()
