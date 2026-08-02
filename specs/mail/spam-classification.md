@@ -29,7 +29,8 @@ paths behaved differently, and neither behaviour was chosen:
   race the label application and drop real mail. But the only label check downstream was
   the self-echo filter. **A message Google had already put in `SPAM` became an ordinary
   `active` conversation in the inbox.** Google's verdict was computed, delivered to us,
-  and thrown away.
+  and thrown away. The same held for `TRASH` — mail the operator's own filter or own hand
+  had already deleted still opened live support work (§3.1's `TRASH` note).
 
 An operator who connects a Gmail mailbox reasonably expects Gmail's spam filtering to
 still apply. It did not.
@@ -63,12 +64,26 @@ transport's own conclusion across the provider boundary. Three states:
 
 | Value | Meaning |
 |---|---|
-| `'spam'` | The provider affirmatively classified the message as junk. |
+| `'spam'` | The source mailbox has already discarded this message as unwanted — its classifier called it junk, **or** the operator threw it away. |
 | `'clean'` | The provider classified it and did not call it junk. |
 | `'unknown'` | No verdict available — the provider does not classify, or omitted it on this delivery. |
 
 Omitted entirely by a transport with no concept of a verdict; ingest reads an absent
 field exactly as `'unknown'`.
+
+**`'spam'` is broader than its name and this is deliberate (§7, D7).** It covers two
+different things: a *classifier verdict* ("this is junk") and an *operator action* ("I
+deleted this"). They are not the same claim — one is a machine's guess, the other is a
+person's decision, and the person's is the stronger of the two. They are collapsed into
+one value because the only thing either one is allowed to change is identical: the status a
+brand-new conversation is filed under. Nothing downstream branches on which of the two
+produced the verdict, so distinguishing them on the wire would be a field nobody reads.
+
+Two consequences worth stating rather than discovering. §3.2's header scoring must not read
+`'spam'` as evidence that a *classifier* fired — it is not necessarily one. And a message
+the operator deleted lands in the Spam folder, which is a slight vocabulary stretch, paid
+knowingly: it is the folder for mail that is not live work, everything in it is fully
+stored and readable, and a reply reopens it to `active` (§4.2) whichever path filed it.
 
 `'clean'` and `'unknown'` produce the same outcome today (§4.1) but are kept distinct on
 the wire: "we asked and it said no" is evidence, "we have no idea" is not, and §3.2's
@@ -90,11 +105,21 @@ starts standing down in the presence of an explicit `'clean'`.
 **Per transport:**
 
 - **Gmail** (built, `spamVerdictOf` in `src/mail/gmail-reconcile.ts`): the system `SPAM`
-  label ⇒ `'spam'`; any other non-empty label set ⇒ `'clean'`; an empty/absent `labelIds`
-  ⇒ `'unknown'`, because the history client documents that Gmail does not guarantee the
-  field is populated. This runs **after** the self-echo filter, so our own outbound reply
-  that Gmail happened to file as junk is skipped entirely rather than filed as a spam
-  conversation.
+  **or** `TRASH` label ⇒ `'spam'`; any other non-empty label set ⇒ `'clean'`; an
+  empty/absent `labelIds` ⇒ `'unknown'`, because the history client documents that Gmail
+  does not guarantee the field is populated. This runs **after** the self-echo filter, so
+  our own outbound reply that Gmail happened to file as junk — or that the operator
+  deleted — is skipped entirely rather than filed as a spam conversation.
+
+  **`TRASH` is the operator-action half of the widened `'spam'` above.** A message the
+  operator's own mailbox threw away reaches us for exactly the reason a `SPAM`-labeled one
+  does: `history.list` is an unfiltered delta stream, and the client set-unions
+  `labelsAdded` without ever removing a label. So both `['TRASH']` — a Gmail filter that
+  deletes on arrival — and `['INBOX','TRASH']` — a manual delete inside the reconcile
+  window — arrive intact. Without this they fell through to `'clean'` and opened a live
+  conversation for mail the operator had already discarded. Note this is a *stronger*
+  signal than the classifier half, not a weaker one: `SPAM` is Google guessing, `TRASH` is
+  usually the operator deciding.
 
   Reading a bare absence of `SPAM` as `'clean'` is licensed by the rule above and by one
   specific fact: **Gmail classifies every message it accepts**, so a delivered message
@@ -107,11 +132,12 @@ starts standing down in the presence of an explicit `'clean'`.
   `labelAdded` alongside `messageAdded` and set-unions the label deltas
   (`src/providers/adapters/gmail/history.ts`), so a message that arrives labeled `INBOX`
   and is classified `SPAM` moments later — **within the same reconcile window** — is
-  correctly seen as spam. What is *not* covered: a `SPAM` label applied **after** the
-  window's `history.list` snapshot. That message has already been ingested as `active`,
-  and the next reconcile deliberately ignores a `labelsAdded` record for an id it did not
-  itself newly add (otherwise any re-labeling of any old message would manufacture an
-  ingest). So it stays `active`.
+  correctly seen as spam. What is *not* covered: a `SPAM` or `TRASH` label applied
+  **after** the window's `history.list` snapshot. That message has already been ingested
+  as `active`, and the next reconcile deliberately ignores a `labelsAdded` record for an
+  id it did not itself newly add (otherwise any re-labeling of any old message would
+  manufacture an ingest). So it stays `active`. Deleting a message you already saw arrive
+  in Helpthread therefore does not retroactively file it — that is §5's problem.
 
   This is not a regression — before this spec, *every* spam message stayed `active` — but
   it means the feature must not be described as "Gmail's spam filtering now applies."
@@ -267,6 +293,8 @@ approved.
 | D4 | Header scoring requires one strong or two weak signals; a lone weak signal never classifies | ⚠️ INFERRED — a conservative default, not a measured threshold |
 | D5 | `Auto-Submitted` is a loop-guard concern, not a spam signal | ⚠️ INFERRED |
 | D6 | Gmail's "labels present, none of them `SPAM`" keeps reporting `'clean'` rather than `'unknown'`; §3.1 states the justification instead of the code changing | Maintainer, 2026-08-02: chose "Keep code, tighten §3.1" over narrowing the code, on the question of whether `'clean'` is honest for a message with no `SPAM` label |
+| D7 | A `TRASH`-labeled Gmail message is filed as `spam`, sharing one verdict value with classifier-flagged junk rather than getting a separate signal and status | Maintainer, 2026-08-02: chose "file as `spam`" over a separate provider signal filed as `closed`, and over leaving it `active`, once told the writeback hazard behind the original recommendation was void per D3 |
+| D7a | A message carrying **both** `SPAM` and `TRASH` is filed as `spam` | Follows mechanically from D7 — the two map to one value, so the combination needs no rule of its own |
 
 **One-way door:** none, in what is built or specified. The only candidate was writing
 classification state back into the operator's own mailbox, and D3 closed that door rather

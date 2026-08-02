@@ -767,6 +767,116 @@ describe('createGmailReconcileHandler', () => {
       expect(getRawMessage).not.toHaveBeenCalled()
       expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
     })
+
+    // --- TRASH: the operator-action half of the verdict (§3.1, §7 D7) ------
+    // TRASH is not a classifier verdict — it is the operator's own mailbox
+    // having discarded the message, by a delete-on-arrival filter or by
+    // hand. It reaches this handler for the same reason SPAM does (the
+    // delta stream is unfiltered and the client never REMOVES a label), and
+    // before D7 it fell through to 'clean' and opened live support work for
+    // mail the operator had already thrown away.
+
+    it("a TRASH-labeled message — a filter that deleted on arrival — carries providerSpamVerdict: 'spam'", async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['trashed-1', ['TRASH']]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'trashed-1': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      // Still never dropped (inbound-ingestion.md §1 invariant #3) — it is
+      // filed, not discarded, and a reply reopens it (§4.2).
+      expect(ingest).toHaveBeenCalledTimes(1)
+      const raw = ingest.mock.calls[0][0] as RawInboundMessage
+      expect(raw.providerMessageId).toBe('trashed-1')
+      expect(raw.providerSpamVerdict).toBe('spam')
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    // The manual-delete shape. The history client set-unions labelsAdded
+    // and never removes a label, so a message that arrived in INBOX and was
+    // deleted inside the same reconcile window reaches us carrying BOTH.
+    // INBOX must not out-vote TRASH — this is the case that regressed to
+    // 'clean' before D7.
+    it("INBOX + TRASH — deleted by hand inside the window — is 'spam', not 'clean'", async () => {
+      const { store: watchStateStore } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['trashed-2', ['INBOX', 'TRASH']]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'trashed-2': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      await handler(job())
+
+      expect((ingest.mock.calls[0][0] as RawInboundMessage).providerSpamVerdict).toBe('spam')
+    })
+
+    // §7 D7a: both labels map to the one value, so the combination needs no
+    // rule of its own. Asserted so that stays true if either branch moves.
+    it("SPAM + TRASH — junk the operator then deleted — is 'spam'", async () => {
+      const { store: watchStateStore } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['trashed-3', ['SPAM', 'TRASH']]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'trashed-3': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      await handler(job())
+
+      expect((ingest.mock.calls[0][0] as RawInboundMessage).providerSpamVerdict).toBe('spam')
+    })
+
+    it('a TRASH-labeled message that is ALSO a self-echo is still skipped — our own deleted reply is not a spam conversation', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const getRawMessage = vi.fn(async () => null)
+      const historyClient: GmailHistoryClient = {
+        listAddedMessageIds: async () => ({
+          kind: 'ok',
+          messages: taggedMsgs([['echo-trashed-1', ['SENT', 'TRASH']]]),
+          newHistoryId: 'cursor-2',
+        }),
+        getRawMessage,
+      }
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(ingest).not.toHaveBeenCalled()
+      expect(getRawMessage).not.toHaveBeenCalled()
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
   })
 
   it('a 404-expired cursor pauses the mailbox, does not advance the cursor, and acks', async () => {
