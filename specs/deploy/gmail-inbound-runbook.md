@@ -3,8 +3,8 @@
 Status: executed 2026-07-17 and live-verified. The threading round-trip passed
 on the second run, after the first run exposed two Gmail transport bugs fixed
 the same day in PRs #52 and #53. These are the one-time operator steps required
-to take the merged engine code live: a deployed Vercel environment where **RIQ's own
-inbound Gmail flows end-to-end** into a Helpthread conversation. This is the
+to take the merged engine code live: a deployed Vercel environment where **a real
+inbound Gmail mailbox flows end-to-end** into a Helpthread conversation. This is the
 "deployed, end-to-end" acceptance path; the actual **real Google consent**
 that connects the mailbox is the last step.
 
@@ -18,21 +18,24 @@ come to exist.
 > auth + the provisioning checklist this expands) and
 > [gmail-connect.md](../mail/gmail-connect.md) §3 (the OAuth app + scopes).
 
-## As deployed (RIQ dogfood, 2026-07-17)
+## The shape of a completed provisioning run
 
-The concrete, non-secret values from the live provisioning run (no client IDs,
-no keys — those stay in Vercel env only):
+Every step below produces one of these. The values are illustrative — substitute
+your own; the *shapes* are what matter, because several of them must byte-match
+each other (noted where they do). No client IDs and no keys appear here or
+anywhere else in the repo; those live only in the deployment's environment.
 
-- **GCP project**: `helpthread-desk` (org `resonantiq.app`). Not to be
-  confused with the unrelated personal `gmail-mcp-personal` GCP project
-  (personal-Gmail QA MCP, RIQAPP-1035) — different org, different purpose.
-- **Pub/Sub topic**: `projects/helpthread-desk/topics/gmail-push`
-- **Pub/Sub subscription**: `projects/helpthread-desk/subscriptions/gmail-push-sub`
-- **Push service account**: `gmail-push-invoker@helpthread-desk.iam.gserviceaccount.com`
-- **Vercel project**: `helpthread` (team Resonant IQ) → https://desk.resonantiq.app
-- **Supabase project**: `Helpthread` (ref `ytpqyteltabveygzcfcq`, `us-east-1`)
-- **Storage bucket**: `helpthread-blobs`
-- **Mailbox**: `help@resonantiq.app` (alias `support@`)
+- **GCP project**: `<your-project>` — owns the OAuth app, and the Pub/Sub topic
+  when push is configured.
+- **Pub/Sub topic**: `projects/<your-project>/topics/gmail-push` *(optional)*
+- **Pub/Sub subscription**: `projects/<your-project>/subscriptions/gmail-push-sub` *(optional)*
+- **Push service account**: `gmail-push-invoker@<your-project>.iam.gserviceaccount.com` *(optional)*
+- **Vercel project** → your production origin, e.g. `https://desk.example.com`
+  (this is `PUBLIC_BASE_URL`, and the OAuth redirect URI and push endpoint are
+  built from it — A2.3, A3.4)
+- **Supabase project**: Postgres + Storage, in a region near your Vercel functions
+- **Storage bucket**: e.g. `helpthread-blobs` (private)
+- **Mailbox**: the Workspace address the desk answers on, e.g. `support@example.com`
 
 ## 0. Architecture being deployed
 
@@ -62,7 +65,7 @@ the row commits) is what protects invariant #1.
 ## Prerequisites
 
 - A **Google Workspace** account for the mailbox to connect (e.g.
-  `support@resonantiq.app`) — Workspace, because the OAuth app is **Internal**
+  `support@example.com`) — Workspace, because the OAuth app is **Internal**
   (no CASA verification, no external-user consent screen).
 - A **Google Cloud project** with billing (Pub/Sub needs a billing account;
   volume here is negligible/free-tier).
@@ -216,7 +219,7 @@ privilege).
      tokens (`openssl rand -base64 32`; ≥32 chars). Rotating it breaks
      threading of replies to already-sent mail (single-secret dogfood limit).
    - `CRON_SECRET` — guards the internal cron/drain endpoints (`openssl rand -base64 24`; ≥16 chars).
-2. `PUBLIC_BASE_URL` = your production URL (e.g. `https://desk.resonantiq.app`),
+2. `PUBLIC_BASE_URL` = your production URL (e.g. `https://desk.example.com`),
    matching the OAuth redirect URI (A2.3) and the Pub/Sub push endpoint (A3.4).
    No trailing slash (the composition root strips one defensively either way).
 3. Deploy. `vercel.json` (in the repo) declares **five** Vercel Cron jobs:
@@ -285,7 +288,7 @@ function files. The cron paths above resolve through that same function.
 | `CRON_SECRET` | you mint (C1) | guards internal cron endpoints |
 | `PUBLIC_BASE_URL` | Vercel C2 | your prod origin, no trailing slash |
 | `HELPTHREAD_MAIL_DOMAIN` | you choose | domain minted into outbound Message-IDs |
-| `HELPTHREAD_SUPPORT_ADDRESS` | the mailbox | e.g. `support@resonantiq.app` |
+| `HELPTHREAD_SUPPORT_ADDRESS` | the mailbox | e.g. `support@example.com` |
 | `HELPTHREAD_SIGNING_SECRET` | you mint | ≥32 chars; HMAC keyring for reply/state/view tokens |
 
 ## Part E — Connect the mailbox (operator action)

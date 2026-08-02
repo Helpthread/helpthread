@@ -64,12 +64,12 @@ and is REQUIRED — with no fallback — once `NODE_ENV=production`.
   password — all through the engine's acting-Agent header
   (`src/lib/api.ts`'s `actingAgent` option), never a raw client call.
 
-## The fidelity mandate (TJ, 2026-07-12)
+## The fidelity mandate (maintainer decision, 2026-07-12)
 
 **The pixel source of truth is the Claude Design prototype** (`Helpthread
 App.dc.html` in the "Helpthread Agent Inbox Design" project), and this app is
 not done until it matches that design exactly — all of its surface, not a
-subset. Deviations of any kind (visual, copy, interaction) need TJ's explicit
+subset. Deviations of any kind (visual, copy, interaction) need the maintainer's explicit
 sign-off. See the "UI fidelity" section of the repo CLAUDE.md.
 
 ## Shipped so far

@@ -1,7 +1,7 @@
 # Admin Information Architecture
 
-Status: **accepted** (2026-07-18, TJ fidelity review) — the information-architecture
-contract every UI increment is checked against. It incorporates TJ's direction and
+Status: **accepted** (2026-07-18, maintainer fidelity review) — the information-architecture
+contract every UI increment is checked against. It incorporates the maintainer's direction and
 black-box observations captured during the original internal deployment. Those
 observations are evidence, not a product definition; Helpthread's charter and design
 system govern the interface.
@@ -22,8 +22,7 @@ Top-bar utilities (scope-neutral): notifications bell (event feed), global searc
 ## 2. Surface index
 
 Observed 2026-07-18 and subsequently made Helpthread-specific. The module catalog—not
-another product's packaging—defines what belongs in core and what is paid. See
-`specs/modules/catalog.md`.
+another product's packaging—defines what belongs in core and what is paid.
 
 - **Dashboard (home)** — multi-mailbox card grid: one card per mailbox with folder counts
   (Unassigned/Mine/Starred/Drafts/Assigned + last-activity dates) and quick actions
@@ -72,7 +71,7 @@ another product's packaging—defines what belongs in core and what is paid. See
 
 ## 4. Changelog
 
-- **2026-07-18**: initial version from TJ's fidelity review (screenshot index +
+- **2026-07-18**: initial version from the maintainer's fidelity review (screenshot index +
   three-scope rule + module caveat). Roadmap tickets for deferred surfaces filed under HT.
-- **2026-07-18**: §2's open core-vs-module calls resolved by
-  `specs/modules/catalog.md`; this doc keeps the observations, that one keeps the line.
+- **2026-07-18**: §2's open core-vs-module calls resolved by the module catalog; this
+  doc keeps the observations, the catalog keeps the line.

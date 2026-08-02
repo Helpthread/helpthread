@@ -5,9 +5,9 @@ in schema, code, docs, UI, and prose. The word "plugin" survives only inside the
 phrase *plugin exception* (the AGPL §7 additional permission, named in the
 Classpath-exception tradition) and in charter quotations.
 
-Status: **draft for TJ review**. Governed by docs/history/CHARTER-v1.md §3/§4 (module boundary,
-out-of-process preference, zero privileged first-party access) and
-`specs/modules/catalog.md`  §4's build sequence. This spec is also raw material
+Status: **draft for maintainer review**. Governed by docs/history/CHARTER-v1.md §3/§4 (module boundary,
+out-of-process preference, zero privileged first-party access) and the module
+catalog's build sequence. This spec is also raw material
 for the §7 plugin-exception text: the exception gets drafted against this real,
 shipped API — before the first external contribution merges.
 
@@ -29,7 +29,7 @@ and nothing more: it hears about inbound mail (events → webhook), reads the co
 general scopes/permissions system, marketplace plumbing (license keys, registry,
 metering), webhook redelivery tooling. Each waits for a real module to need it.
 
-**The additive-forward rule (TJ, 2026-07-18): marketplace attaches, it never
+**The additive-forward rule (maintainer, 2026-07-18): marketplace attaches, it never
 retrofits.** Everything in this spec must remain correct unmodified when the
 marketplace phase arrives — commerce is additions on top, never a rebuild of the
 substrate. The specific commitments that keep it true:
@@ -298,7 +298,7 @@ to land in `specs/api/agent-inbox-v1.md` alongside implementation:
 | Draft creation | idempotent via `draft:`-scoped Idempotency-Key | key replay returns the original |
 | Approval → delivery | existing delivery-worker lease/retry semantics | unchanged |
 
-## 9. Decision points for TJ (called out, not silently taken)
+## 9. Decision points for the maintainer (called out, not silently taken)
 
 1. **Actor-model migration folded into substrate v1** (§2) vs. split into its own
    ticket. Recommendation: folded — it's the substrate's data model.
@@ -324,6 +324,6 @@ to land in `specs/api/agent-inbox-v1.md` alongside implementation:
   wire amendments made explicit; idempotency namespace scoped; author-identity
   forward-carry specified). Same day: the additive-forward rule added (§1) with
   `module` attribution on webhook endpoints (§5) — marketplace attaches, never
-  retrofits (TJ). Same day, during implementation: §2's CHECK predicate corrected
+  retrofits (maintainer decision). Same day, during implementation: §2's CHECK predicate corrected
   for the three-valued-logic NULL trap (`IS NOT NULL` guards added; found by a failing
   store test).

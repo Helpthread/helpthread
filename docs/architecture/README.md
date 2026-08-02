@@ -50,9 +50,7 @@ capabilities that require deeper composition.
 
 The canonical module documents are:
 
-- [module substrate](../../specs/modules/substrate-v1.md);
-- [open-core catalog](../../specs/modules/catalog.md);
-- [marketplace](../../specs/modules/marketplace-v1.md); and
+- [module substrate](../../specs/modules/substrate-v1.md); and
 - [operator guides](../modules/README.md).
 
 The legal boundary between the AGPL core and separately licensed modules is documented

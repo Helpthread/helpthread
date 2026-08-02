@@ -22,7 +22,7 @@ splitting them at a seam:
 - **Resonant IQ's own deployment, and paying customers:** want Google SSO, magic-link,
   SAML/enterprise SSO. These are **licensed marketplace modules**, not part of the free
   core. **Passkey login (WebAuthn) is the one exception — it is core, not a marketplace
-  module:** security hygiene is always free (module catalog §1,  2026-07-18); when
+  module:** security hygiene is always free (decided 2026-07-18); when
   built, it ships as a second **core** auth provider on this same seam (catalog §2.2),
   never through the marketplace path below. It is not yet built in this increment (§11).
 
@@ -156,7 +156,7 @@ Agent ids") and how  was handled.
 ### 3.4 Per-Agent mailbox scoping — **grants managed now, enforcement deferred** (§12.4, decided)
 
 Helpthread scopes each Agent to specific mailboxes and already carries `mailbox_id`
-throughout. Originally decided as schema-only; **superseded the same day by TJ's fidelity
+throughout. Originally decided as schema-only; **superseded the same day by the maintainer's fidelity
 review**: the grants are real, managed data now — auto-granted at Agent creation, read and
 written through the §6 endpoints and the per-Agent Permissions screen (§7). What remains
 deferred is *enforcement of conversation visibility*, per the pinned semantics below.
@@ -169,7 +169,7 @@ CREATE TABLE agent_mailbox_access (   agent_id    uuid NOT NULL REFERENCES agent
 );
 ```
 
-**Semantics pinned (TJ, 2026-07-18 — the Permissions UI ships now):**
+**Semantics pinned (maintainer, 2026-07-18 — the Permissions UI ships now):**
 
 - **Admins have implicit access to all mailboxes** — grants rows are never consulted for
   an admin.
@@ -513,7 +513,7 @@ is retired (§8).
 - **No marketplace providers** (Google SSO, magic-link, SAML/enterprise SSO) — only the seam
   + the free `password` provider. Premium modules wait on the §7 exception text.
 - **No passkey provider either** — passkey (WebAuthn) is core, not a marketplace module
-  (module catalog §1/§2.2), but it is not yet built in this increment. It lands later
+  (the free-core line, decided 2026-07-18), but it is not yet built in this increment. It lands later
   as a second **core** auth provider on the §4 seam, wired in `root.ts` alongside
   `PasswordAuthProvider`, not through the marketplace path.
 - **No entitlement/licensing machinery** — separate marketplace infrastructure.
@@ -530,14 +530,14 @@ is retired (§8).
   mechanism — it acts on an already-`active` Agent, so it cannot reuse the invite token's
   status-transition consumption, §9).
 
-## 12. Decision points for TJ (called out, not silently taken)
+## 12. Decision points for the maintainer (called out, not silently taken)
 
 1. **Roles:** Admin + Agent. *(Confirmed.)*
 2. **First admin:** `/setup` first-run screen, zero-Agents-guarded. *(Confirmed.)*
 3. **Provisioning:** both — invite-primary (via the core `EmailSender`) + admin-set-password
    fallback. *(Recommended.)*
 4. **Per-Agent mailbox scoping (§3.4):** model the `agent_mailbox_access` table in this
-   migration; no scoping behavior or UI. *(Confirmed — TJ, 2026-07-18.)*
+   migration; no scoping behavior or UI. *(Confirmed — maintainer, 2026-07-18.)*
 5. **Profile fields (§3.1):** lean v1 — name, email, password, role, disable, **timezone**;
    avatar, job title, phone, alternate-emails, language, time-format **deferred**. *(Open.)*
 6. **Acting-Agent trust model (§8):** the web asserts the Agent id under the service token,
@@ -547,8 +547,8 @@ is retired (§8).
 
 - **draft.6 (2026-07-19, catalog reconciliation):** flagged by CodeRabbit on PR #82 —
   this spec (written 2026-07-18, pre-dating the module catalog) classified passkey login as
-  a marketplace-only add-on; the catalog decision the same day (`specs/modules/catalog.md`
-  §1/§2.2) made passkey login core, security hygiene, never paid. Reclassified
+  a marketplace-only add-on; the catalog decision the same day made passkey login core,
+  security hygiene, never paid. Reclassified
   throughout (§1, §3.2, §11): passkey is core, just not yet built — it will land as a second
   **core** auth provider on the §4 seam, not a marketplace module. Google SSO, magic-link,
   and SAML/enterprise SSO remain marketplace, unchanged. The provider-abstraction
@@ -564,7 +564,7 @@ is retired (§8).
   the cardinality argument `specs/auth/passkeys.md` §2.1 explicitly rejects (nothing here
   restricts `provider='passkey'` to one row per Agent); the rationale now cites only the two
   reasons that hold, mutable per-use state and the incompatible column shape.
-- **draft.5 (2026-07-18, TJ fidelity review):** mailbox-access semantics pinned and the
+- **draft.5 (2026-07-18, maintainer fidelity review):** mailbox-access semantics pinned and the
   Permissions UI pulled forward (§3.4): admins implicit-all, auto-grant-on-create,
   admin-only grant endpoints (§6: `GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes`);
   conversation-visibility enforcement explicitly deferred to the multi-mailbox increment
@@ -576,7 +576,7 @@ is retired (§8).
   delete/re-create); password writes on an `invited` Agent are refused (§6) — closing the
   incoherent states (credential-less `active`, permanently-stranded invite, unusable
   password) an unconstrained `status` field permitted.
-- **draft.2 (2026-07-18):** decisions resolved for the build (TJ's  go-ahead):
+- **draft.2 (2026-07-18):** decisions resolved for the build (the maintainer's go-ahead):
   `agent_mailbox_access` is modelled now, schema-only, no behavior (§3.4, §12.4 confirmed);
   the acting-Agent header rule pinned per-endpoint — required on `/agents/*`, `/auth/me`,
   and `PUT .../assignee`; other inbox endpoints stay bearer-only this increment, with the

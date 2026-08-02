@@ -2,12 +2,6 @@
 
 Helpthread is open-source support infrastructure (AGPL-3.0 core; a Resonant IQ, Inc. product). **CHARTER.md is the constitution** — read it before substantive work.
 
-## Delegation ladder
-
-Shared rule (mirrored from the resonantiq canonical doc) — imported so it loads in every session that reads this repo.
-
-@.claude/rules/delegation-ladder.md
-
 ## References & provenance
 
 - Helpthread is an independent implementation. No code copied or derived from copyleft-licensed projects, ever.
@@ -22,7 +16,7 @@ Shared rule (mirrored from the resonantiq canonical doc) — imported so it load
   sources and their source is not read in a Helpthread development session.
 - Behavior is specified from RFCs, public documentation, and — where already captured —
   black-box fixtures.
-- Every substantive change gets real human review before merge — ordinary PR review, preserved in git history. This is also what keeps AI-assisted work copyrightable; a rubber stamp doesn't meet that bar.
+- Nothing reaches `main` without review and the maintainer's approval. Surface what a reviewer needs to decide — the risk, the tradeoff, the thing you are unsure about — rather than a summary that reads as finished.
 
 ## Coding discipline
 
@@ -37,30 +31,29 @@ Adapted in our own words from Andrej Karpathy's observations on LLM coding pitfa
 
 - Branches: `<type>/<kebab-description>`. PRs to `main`; `main` stays releasable. No direct pushes to `main` after Phase 0.
 - Commit author email stays the noreply address already set in `.git/config` (GitHub email-privacy blocks the real one).
-- Delegate work to subagents on the cheapest capable model: Haiku for mechanical, Sonnet for standard implementation, top-tier only for correctness-critical reasoning.
 - Mail semantics are sacred under the charter's "Conversation integrity" rule: changes require fixture-proven equivalence or explicit written justification. Verify against reality before claiming done; put the evidence in the PR.
 
 ## Vocabulary
 
 **Agents** are human support staff. **Assistants** are AI actors. Never conflate them — in schema, code, docs, or prose.
 
-**Modules** are the extension artifacts operators install (free or paid; TJ, 2026-07-18). Never "plugins" — that word survives only inside the legal phrase *plugin exception* (the AGPL §7 additional permission) and charter quotations.
+**Modules** are the extension artifacts operators install (free or paid; maintainer decision, 2026-07-18). Never "plugins" — that word survives only inside the legal phrase *plugin exception* (the AGPL §7 additional permission) and charter quotations.
 
-## UI fidelity (TJ, 2026-07-12)
+## UI fidelity (maintainer decision, 2026-07-12)
 
-The Agent Inbox UI's pixel source of truth is the Claude Design prototype — `Helpthread App.dc.html` in the "Helpthread Agent Inbox Design" project (the "Helpthread" design-system project carries the same components). **The dogfood site must match it exactly — the whole designed surface, not a subset.** Any deviation — visual, copy, or interaction — requires TJ's explicit sign-off. The work is not complete until the maintained fidelity checklist is clear.
+The Agent Inbox UI's pixel source of truth is the Claude Design prototype — `Helpthread App.dc.html` in the "Helpthread Agent Inbox Design" project (the "Helpthread" design-system project carries the same components). **The dogfood site must match it exactly — the whole designed surface, not a subset.** Any deviation — visual, copy, or interaction — requires the maintainer's explicit sign-off. The work is not complete until the maintained fidelity checklist is clear.
 
-**Design and app reconcile in both directions (TJ, 2026-07-20).** The two are one system, and neither is allowed to silently drift from the other:
+**Design and app reconcile in both directions (maintainer decision, 2026-07-20).** The two are one system, and neither is allowed to silently drift from the other:
 
 - **Design → app.** Files under `web/src/components/ds/` are verbatim copies of the design project's components. Byte-for-byte: its quotes, its semicolons, its import order, its line wrapping. Biome is disabled for that path (`biome.json` override) precisely so a formatter pass can't quietly break the correspondence — without that, byte comparison stops working as a drift detector. New or changed design work comes down via DesignSync; it is not hand-edited in the app.
-- **App → design.** If TJ approved something into the dev app, it is approved, and it goes back up into the design project. App-first work is normal — it just isn't finished until the design system has it. `.tsx` screens with API wiring convert to presentational `.jsx` with fixture data on the way up; every style value survives the conversion unchanged.
+- **App → design.** If the maintainer approved something into the dev app, it is approved, and it goes back up into the design project. App-first work is normal — it just isn't finished until the design system has it. `.tsx` screens with API wiring convert to presentational `.jsx` with fixture data on the way up; every style value survives the conversion unchanged.
 
-**Where things live upstream (TJ, 2026-07-20).** The design project has three component folders: `components/core/` for primitives (reusable, context-free, no knowledge of a screen), `components/inbox/` for inbox-specific composition, and `components/app/` for app-level surface — whole screens plus the chrome that frames every screen. The test for `app/` is that the thing owns a route or wraps all of them; anything smaller and reusable is `core/`. Screens upstream are presentational: fixture data, callback props, no API. The app keeps the wiring, the design project keeps the pixels. `web/src/components/ds/` mirrors `core/` and `inbox/`; the `app/` screens live at `web/src/components/` as `.tsx` and are *converted* on the way up, not copied — so they are the one part of the surface where the two sides are deliberately not byte-identical.
+**Where things live upstream (maintainer decision, 2026-07-20).** The design project has three component folders: `components/core/` for primitives (reusable, context-free, no knowledge of a screen), `components/inbox/` for inbox-specific composition, and `components/app/` for app-level surface — whole screens plus the chrome that frames every screen. The test for `app/` is that the thing owns a route or wraps all of them; anything smaller and reusable is `core/`. Screens upstream are presentational: fixture data, callback props, no API. The app keeps the wiring, the design project keeps the pixels. `web/src/components/ds/` mirrors `core/` and `inbox/`; the `app/` screens live at `web/src/components/` as `.tsx` and are *converted* on the way up, not copied — so they are the one part of the surface where the two sides are deliberately not byte-identical.
 
-The invariant underneath both directions is that **a difference between the two is always a bug in one of them** — so when a re-pull surfaces a semantic difference (a changed style value, prop, or logic, as opposed to formatting), that is a finding, not a merge conflict to resolve in passing. Stop and get TJ's call on which side wins.
+The invariant underneath both directions is that **a difference between the two is always a bug in one of them** — so when a re-pull surfaces a semantic difference (a changed style value, prop, or logic, as opposed to formatting), that is a finding, not a merge conflict to resolve in passing. Stop and get the maintainer's call on which side wins.
 
 ## Ecosystem
 
 - **This repo**: engineering truth — charter, specs, ADRs, code.
-- **Confluence (Helpthread space)**: business layer — decision log, counsel checklist, status for stakeholders (Tito reads here).
+- **A private internal space**: business layer — decision log, counsel checklist, stakeholder status. Its location and contents are not recorded here.
 - A `CLAUDE.local.md` (gitignored) may carry machine-local working notes; it is never committed.

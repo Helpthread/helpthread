@@ -30,8 +30,8 @@ agents-and-auth.md §1 states this as the one deliberate exception to the
 core/marketplace boundary: "Passkey login (WebAuthn) is the one
 exception — it is core, not a marketplace module... it ships as a second
 **core** auth provider on this same seam (catalog §2.2), never through the
-marketplace path." This matches the module catalog's own free-core line
-(`specs/modules/catalog.md` §1, §2.2 — accepted 2026-07-18):
+marketplace path." This matches the free-core line
+(accepted 2026-07-18):
 "Security hygiene is always free: passkey login (WebAuthn) is core,
 deliberately; baseline security hygiene belongs in core."
 
@@ -225,12 +225,12 @@ anything the caller supplies would let an attacker simply assert the origin
 they want checked against, collapsing the protection to nothing.
 
 - **`rpId`** = the hostname (no scheme, no port) of `HELPTHREAD_UI_BASE_URL`
-  — e.g. `inbox.resonantiq.app`, the deployed Agent Inbox's own host.
-  **Not** `desk.resonantiq.app`, the ENGINE's host — draft.1's worked
+  — e.g. `inbox.example.com`, the deployed Agent Inbox's own host.
+  **Not** `desk.example.com`, the ENGINE's host — draft.1's worked
   example used the wrong one. This is not a cosmetic mistake: WebAuthn
   ceremonies run in whatever browser tab is actually showing the login
   page, so the real, browser-reported origin is always the UI's,
-  `inbox.resonantiq.app`, never the engine's — the engine is never loaded
+  `inbox.example.com`, never the engine's — the engine is never loaded
   in an Agent's browser at all. If `rpId`/`expectedOrigin` were ever
   misconfigured to the engine's host instead, `clientDataJSON.origin` would
   never match what the RP expects, and every single ceremony — registration
@@ -1011,7 +1011,7 @@ footgun someone has to remember to re-derive later.
   screen: the passkey add/rename/revoke controls on `AgentProfileScreen.tsx`
   (`/manage/agents/{id}`) and the login screen's conditional-UI/fallback-button
   treatment are new designed surfaces with no existing Claude Design
-  prototype, requiring TJ's sign-off before or alongside build, exactly as
+  prototype, requiring the maintainer's sign-off before or alongside build, exactly as
   agents-and-auth.md §7 already requires for its own new screens.
 - **Changing `HELPTHREAD_UI_BASE_URL`'s host silently invalidates every
   existing passkey.** `rpId` is derived from it (§3); WebAuthn credentials
@@ -1096,7 +1096,7 @@ performed against the actual published artifacts (npm registry, GitHub
 API, unpkg-hosted type declarations), not asserted from training-data
 recollection of the package's reputation.
 
-## 14. Decision points for TJ
+## 14. Decision points for the maintainer
 
 1. **Credential storage: new `webauthn_credentials` table**, not rows in
    `agent_auth_identities` — a deliberate departure from what agents-and-
@@ -1155,7 +1155,7 @@ recollection of the package's reputation.
 - **draft.4 (2026-07-19, engine-implementation review):** Corrects a
   core-vs-marketplace classification error that survived drafts 1–3
   unnoticed (§1, §12). Passkey login is core, not a licensed marketplace
-  module — `specs/modules/catalog.md` §1/§2.2 decided this on 2026-07-18
+  module — the module catalog decided this on 2026-07-18
   (the day before draft.1), and `agents-and-auth.md` §1 already
   carries the corrected framing as of PR #85 (merged 2026-07-19,
   the same day as draft.1–3 were written). This spec's own "licensed
@@ -1203,8 +1203,8 @@ recollection of the package's reputation.
   patch. The challenge-row volume claim (§2.2) is corrected from "low,
   interactive-event-scale" (false — a row mints on every login-page mount)
   to an honest statement plus an opportunistic-purge fix, no cron. §3's
-  worked example corrected (`inbox.resonantiq.app`, the UI's own host — not
-  `desk.resonantiq.app`, the engine's), and a `localhost`-only,
+  worked example corrected (`inbox.example.com`, the UI's own host — not
+  `desk.example.com`, the engine's), and a `localhost`-only,
   no-IP-literal dev carve-out added. §2.1's justification corrected —
   cardinality was never a valid reason to avoid `agent_auth_identities`
   (nothing there restricts multiple `passkey` rows); the departure is now

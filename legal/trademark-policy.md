@@ -1,12 +1,7 @@
-# Helpthread Trademark Policy (DRAFT)
+# Helpthread Trademark Policy
 
-> **Status: DRAFT for counsel review (TJ).** Drafted 2026-07-19. This is a faithful
-> first draft encoding already-made decisions; it is not legal advice and has not been
-> reviewed by outside counsel — TJ is the reviewing counsel.
->
-> **Gate:** must clear review **before public launch** (the [legal guide](README.md) lists "the
-> trademark policy (before public launch)" among the counsel paperwork in deadline
-> order).
+> This policy governs use of the Helpthread name and marks. It does not restrict any
+> right granted by the software license, and it is not legal advice.
 
 ---
 
@@ -28,8 +23,7 @@ leaving the software as free as its license promises.
 The **"Marks"** are:
 
 - the name **Helpthread** and any Helpthread word marks and logos;
-- the name of the official **Helpthread marketplace** *(the literal marketplace name —
-  counsel to confirm the final string before adoption)*.
+- the name of the official **Helpthread marketplace**.
 
 The Marks are owned by **Resonant IQ, Inc.** (**"Resonant IQ"**). Helpthread is a
 Resonant IQ product. Nothing in the AGPL-3.0, or in any Helpthread commercial module
@@ -154,25 +148,3 @@ consistently with them.
 If you want to use the Marks in a way this policy doesn't clearly allow, or you're unsure
 which side of a line you're on, please ask. Resonant IQ can grant permission for uses
 beyond those described here. Write to **trademarks@resonantiq.app**.
-
----
-
-### Notes to counsel (not part of the policy)
-
-- **Owner / entity.** Marks attributed to Resonant IQ, Inc. per the [legal guide](README.md)
-  ("owns the Helpthread name and marks"). The npm org and official marketplace name are
-  named as Marks per the charter's "the assets that stay with the company — the
-  Helpthread name and marks, the npm organization, the official marketplace."
-- **Rename-on-material-modification** is drafted in the Firefox/Iceweasel tradition and
-  stated politely, as instructed — a request and a courtesy, not an AGPL restriction
-  (which would be void under the AGPL's own terms). Per the adjudicated Codex-review fixes
-  (2026-07-19), §4 now (a) states expressly that it is not a condition of the AGPL
-  and imposes no copyright-license restriction, and (b) defines "materially modified" on a
-  confusion-based standard with de minimis examples (security patches, packaging, config
-  defaults, backports = not material).
-- **Placeholders.** The contact route (section 7) is set to **trademarks@resonantiq.app**
-  (mailbox alias to be created in Workspace before launch — tracked as a launch-gate action). Any specific registered-mark
-  notices (®/™ status, registration numbers) are not in the repo and are left for TJ.
-- **No new policy invented.** This encodes the allow/require list in the decided scope;
-  it does not add a formal trademark-license program, logo-usage spec, or enforcement
-  procedure beyond the "ask us" route.
