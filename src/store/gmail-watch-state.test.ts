@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import { createGmailWatchStateStore } from './gmail-watch-state.js'
@@ -349,15 +349,41 @@ describe('createGmailWatchStateStore', () => {
 
   // --- claimReconcileLease / releaseReconcileLease (HT-48, gmail-push.md §6) ---
 
-  /** Directly rewinds a mailbox's claimed_until into the past — mirrors conversations.test.ts's expireLease for the outbound lease, exercising expiry without a real sleep. */
-  async function expireReconcileLease(db: Db, mailboxId: string) {
-    await db.query(
-      "UPDATE gmail_watch_state SET claimed_until = now() - interval '1 second' WHERE mailbox_id = $1",
-      [mailboxId],
-    )
+  /**
+   * Expire a lease the way production does — by moving the clock past it, not
+   * by rewinding `claimed_until` with SQL.
+   *
+   * ## Why not the SQL rewind these tests used to do
+   *
+   * The lease token IS `claimed_until` (`now() + leaseMs`), so two claims
+   * whose `now()` lands on the same instant with the same `leaseMs` render the
+   * IDENTICAL token — and PGlite's `now()` only advances in whole
+   * MILLISECONDS, so back-to-back claims collide routinely. Rewinding
+   * `claimed_until` in SQL faked the expiry WITHOUT the elapsed time it
+   * implies, so the successor's claim ran in the same millisecond as its
+   * predecessor's and the two tokens came back equal — a real-clock race that
+   * failed roughly half of all runs.
+   *
+   * In production the successor can only claim once the prior lease has
+   * actually expired, i.e. at least `leaseMs` later, so its `claimed_until` is
+   * necessarily later too and the tokens necessarily differ. Advancing the
+   * (faked) system clock — which PGlite reads for `now()` — reproduces that
+   * guarantee exactly, and deterministically.
+   */
+  function expireReconcileLease(leaseMs: number) {
+    vi.setSystemTime(Date.now() + leaseMs + 1_000)
   }
 
   describe('claimReconcileLease / releaseReconcileLease', () => {
+    // Only `Date` is faked: PGlite reads the system clock for `now()`, but
+    // faking timers wholesale would stall any `setTimeout` it relies on.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
     it('claims an unclaimed mailbox, setting claimed_until in the future and returning it as the lease token', async () => {
       const { db, store } = await freshStore()
       const mailboxId = await insertMailbox(db)
@@ -403,7 +429,7 @@ describe('createGmailWatchStateStore', () => {
 
       const first = await store.claimReconcileLease(mailboxId, 30_000)
       expect(first).not.toBeNull()
-      await expireReconcileLease(db, mailboxId)
+      expireReconcileLease(30_000)
 
       const second = await store.claimReconcileLease(mailboxId, 30_000)
       expect(second).not.toBeNull()
@@ -469,7 +495,7 @@ describe('createGmailWatchStateStore', () => {
       // its lease before ever calling release.
       const tokenA = await store.claimReconcileLease(mailboxId, 30_000)
       expect(tokenA).not.toBeNull()
-      await expireReconcileLease(db, mailboxId)
+      expireReconcileLease(30_000)
 
       // Holder B — a legitimate successor — claims the now-expired lease and
       // is actively working.
