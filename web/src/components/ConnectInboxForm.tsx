@@ -50,20 +50,34 @@ interface ProviderPreset {
 }
 
 /**
- * Recognized-domain starter set (spec's list). SMTP `secure` follows
- * nodemailer's own documented convention — `true` (implicit TLS) for the
- * port 465 providers, `false` (STARTTLS) for the port 587 ones — rather
- * than a blanket `true` for every preset: `verifySmtpConnection`
- * (`src/providers/adapters/smtp/verify.ts`) passes `secure` straight to
- * nodemailer, and nodemailer's own docs are explicit that `secure: true` on
- * port 587 fails the handshake. **Flagged for TJ**: this is a factual
- * correction of the spec text's "default secure: true" for Outlook/iCloud,
- * not a product decision — see the PR description.
+ * Recognized-domain starter set. **Every host, port and TLS value below was
+ * checked against that provider's own published documentation on 2026-07-31**
+ * — Gmail, Yahoo, iCloud, Fastmail and Zoho support pages, not a secondary
+ * source. All were correct as configured; the audit's finding was about who is
+ * MISSING (see {@link OAUTH_ONLY_DOMAINS}), not about a wrong port.
+ *
+ * A domain earns a preset only if its provider accepts an app password for
+ * IMAP and SMTP. That is the whole gate: an entry here is a promise that
+ * typing this address and pasting an app password will work.
+ *
+ * SMTP `secure` follows nodemailer's documented convention — `true` (implicit
+ * TLS) for the port 465 providers, `false` (STARTTLS) for the 587 ones —
+ * because `verifySmtpConnection` (`src/providers/adapters/smtp/verify.ts`)
+ * passes it straight through, and `secure: true` on 587 fails the handshake.
+ * Note this flag describes the SMTP leg ONLY; the IMAP leg derives its own
+ * mode from its port (`imapImplicitTlsForPort`), and making that per-leg and
+ * explicit is tracked separately.
  *
  * The spec text's SMTP hosts for iCloud/Fastmail/Zoho read
- * "smtp.smtp.____.com" (a doubled prefix); that looks like a copy/paste
- * typo against the real single-prefix hostnames, so the real hostnames are
- * used here. **Flagged for TJ** alongside the `secure` correction above.
+ * "smtp.smtp.____.com" (a doubled prefix); that is a copy/paste typo against
+ * the real single-prefix hostnames, which the provider docs confirm and which
+ * are used here.
+ *
+ * Known gap, unresolved: Apple publishes DIFFERENT usernames per leg for
+ * iCloud — the local part for IMAP, the full address for SMTP — and
+ * `ImapConnectInput` carries one `username` for both. Apple's own guidance is
+ * to try the full address if the short form fails, so this preset may work as
+ * written, but it is untested and the data model cannot express the split.
  */
 const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
   'gmail.com': {
@@ -81,30 +95,6 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     smtpHost: 'smtp.gmail.com',
     smtpPort: 465,
     secure: true,
-  },
-  'outlook.com': {
-    label: 'Outlook',
-    imapHost: 'outlook.office365.com',
-    imapPort: 993,
-    smtpHost: 'smtp.office365.com',
-    smtpPort: 587,
-    secure: false,
-  },
-  'hotmail.com': {
-    label: 'Outlook',
-    imapHost: 'outlook.office365.com',
-    imapPort: 993,
-    smtpHost: 'smtp.office365.com',
-    smtpPort: 587,
-    secure: false,
-  },
-  'live.com': {
-    label: 'Outlook',
-    imapHost: 'outlook.office365.com',
-    imapPort: 993,
-    smtpHost: 'smtp.office365.com',
-    smtpPort: 587,
-    secure: false,
   },
   'yahoo.com': {
     label: 'Yahoo Mail',
@@ -148,13 +138,70 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
   },
 }
 
+/**
+ * Domains whose provider does NOT accept an app password for IMAP/SMTP at all,
+ * mapped to the label shown when an operator types one.
+ *
+ * These are not "presets we haven't written yet" — they cannot work by any
+ * host/port combination, so offering a preset would hand the operator a
+ * credential their provider will refuse. Microsoft removed Basic
+ * authentication from Exchange Online entirely ("no one (you or Microsoft
+ * support) can re-enable" it) and requires OAuth2 for POP, IMAP and SMTP on
+ * consumer Outlook.com too; app passwords are explicitly covered by that
+ * removal.
+ *
+ * `specs/mail/mailbox-connection.md` §3 already recorded Microsoft 365
+ * business as **No** and consumer Outlook.com as *unresolved — test before
+ * claiming support*. Presets for these domains shipped anyway; this is the
+ * correction. Verified against Microsoft's own documentation 2026-07-31.
+ *
+ * ## This list CANNOT detect Microsoft, and must not be read as if it does
+ *
+ * It is an exact-match hint for well-known CONSUMER domains, nothing more. A
+ * Microsoft 365 business tenant uses its own domain — `ops@contoso.example`
+ * has no Microsoft-shaped string in it — so it matches nothing here, gets no
+ * notice, and the operator is invited to enter an app password Exchange
+ * Online will refuse. Subdomains (`user@mail.outlook.com`) miss for the same
+ * reason.
+ *
+ * Real detection needs provider discovery (an MX or Autodiscover lookup at the
+ * moment the address is typed), which this screen does not do. Until it does,
+ * spec §4's requirement that "for an M365 business domain the app-password
+ * option is disabled with an explanation" is **not implemented** — recorded
+ * there as a known gap rather than quietly assumed satisfied by this list.
+ * Adding more domains narrows the gap; it never closes it.
+ */
+const OAUTH_ONLY_DOMAINS: Record<string, string> = {
+  'outlook.com': 'Outlook',
+  'outlook.co.uk': 'Outlook',
+  'hotmail.com': 'Outlook',
+  'hotmail.co.uk': 'Outlook',
+  'hotmail.de': 'Outlook',
+  'hotmail.fr': 'Outlook',
+  'hotmail.it': 'Outlook',
+  'hotmail.es': 'Outlook',
+  'live.com': 'Outlook',
+  'live.co.uk': 'Outlook',
+  'live.ca': 'Outlook',
+  'live.com.au': 'Outlook',
+  'msn.com': 'Outlook',
+  'passport.com': 'Outlook',
+  'office365.com': 'Microsoft 365',
+}
+
 function domainFromAddress(address: string): string | null {
   const at = address.lastIndexOf('@')
   if (at < 0 || at === address.length - 1) return null
-  return address
-    .slice(at + 1)
-    .trim()
-    .toLowerCase()
+  return (
+    address
+      .slice(at + 1)
+      .trim()
+      .toLowerCase()
+      // A trailing dot is a legal fully-qualified DNS name (`outlook.com.`) and
+      // resolves to the same host, so leaving it on let an address slip past
+      // both maps — no preset AND no OAuth notice (review, 2026-07-31).
+      .replace(/\.+$/, '')
+  )
 }
 
 function parsePort(value: string): number | null {
@@ -247,6 +294,7 @@ export function ConnectInboxForm({
 
   const domain = domainFromAddress(address)
   const preset = domain !== null ? PROVIDER_PRESETS[domain] : undefined
+  const oauthOnlyLabel = domain !== null ? OAUTH_ONLY_DOMAINS[domain] : undefined
   const advancedOpen = manualAdvancedOverride ?? preset === undefined
 
   function clearCheckState(): void {
@@ -258,6 +306,18 @@ export function ConnectInboxForm({
     setAddress(value)
     clearCheckState()
     const nextDomain = domainFromAddress(value)
+    // An OAuth-only domain clears whatever a previous preset left behind.
+    // Without this, typing gmail.com and then outlook.com leaves Gmail's hosts
+    // sitting underneath an "Outlook requires OAuth" warning — the form would
+    // be showing one provider's settings while warning about another's.
+    if (nextDomain !== null && OAUTH_ONLY_DOMAINS[nextDomain] !== undefined) {
+      setImapHost('')
+      setImapPort('')
+      setSmtpHost('')
+      setSmtpPort('')
+      setAppliedPresetDomain(null)
+      return
+    }
     const nextPreset = nextDomain !== null ? PROVIDER_PRESETS[nextDomain] : undefined
     if (nextPreset !== undefined && nextDomain !== appliedPresetDomain) {
       setImapHost(nextPreset.imapHost)
@@ -414,6 +474,24 @@ export function ConnectInboxForm({
         {preset !== undefined && !lockAddress && (
           <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--ht-ink-dim)' }}>
             {preset.label} recognized — using {preset.imapHost} / {preset.smtpHost}.
+          </p>
+        )}
+        {/* Deliberately NOT gated on `!lockAddress`, unlike the preset hint
+            above. A reconnect screen is where an operator is MOST likely to
+            retry a stored Outlook mailbox that has never been able to
+            authenticate, and hiding the reason there was exactly backwards
+            (review, 2026-07-31). The stored host/port values are left visible
+            rather than cleared — this screen exists to review them, and
+            blanking a locked form would destroy the context it is for. */}
+        {oauthOnlyLabel !== undefined && (
+          <p
+            role="status"
+            style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--ht-warn, var(--ht-ink))' }}
+          >
+            {oauthOnlyLabel} does not allow app passwords for IMAP or SMTP — it requires OAuth.
+            {lockAddress
+              ? ' Reconnecting this inbox will not work.'
+              : ' Connecting this address here will not work.'}
           </p>
         )}
       </div>
