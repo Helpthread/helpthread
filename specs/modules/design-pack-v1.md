@@ -26,7 +26,7 @@ itself.
 
 ## 2. Why a separate package, and why permissive
 
-`web/src/components/ds/` (20 files / 21 components after HT-93, §3) and `web/src/theme/tokens/`
+`web/src/components/ds/` (42 published files, §3) and `web/src/theme/tokens/`
 (`colors.css`, `shape.css`, `typography.css`) are the right raw material. They are also
 **AGPL-3.0**, because they live in this tree.
 
