@@ -257,6 +257,22 @@ export interface NewConversation {
    * (see {@link StoredConversation.mailboxId}).
    */
   mailboxId?: string
+
+  /**
+   * The status this conversation is CREATED at — `'active'` when omitted,
+   * which is what every caller but one wants and what the column already
+   * defaults to.
+   *
+   * The one caller that supplies it is `src/mail/ingest.ts`, passing
+   * `'spam'` when the transport's own classifier already called the message
+   * junk (`RawInboundMessage.providerSpamVerdict`, specs/mail/spam-
+   * classification.md §4). Deliberately narrowed to those two values: a
+   * conversation is never BORN `closed` (nothing has been resolved),
+   * `pending` (nobody has snoozed it), or `deleted` (it would be
+   * unreachable) — those are states an Actor moves a conversation into
+   * later, via `ConversationStore.setStatus`.
+   */
+  status?: 'active' | 'spam'
 }
 
 /** A thread as read back from storage — camelCase, timestamps as `Date`. */
@@ -1132,8 +1148,8 @@ export async function createConversationInTx(
   input: NewConversation,
 ): Promise<{ conversationId: string; threadId: string }> {
   const [conversation] = await tx.query<{ id: string }>(
-    'INSERT INTO conversations (subject, customer_email, mailbox_id) VALUES ($1, $2, $3) RETURNING id',
-    [input.subject, input.customerEmail, input.mailboxId ?? null],
+    'INSERT INTO conversations (subject, customer_email, mailbox_id, status) VALUES ($1, $2, $3, $4) RETURNING id',
+    [input.subject, input.customerEmail, input.mailboxId ?? null, input.status ?? 'active'],
   )
   const { threadId } = await insertThread(tx, conversation.id, input.firstMessage)
   return { conversationId: conversation.id, threadId }

@@ -103,7 +103,40 @@ export interface RawInboundMessage {
 
   /** When the provider recorded/delivered the message — not a header-parsed `Date`. */
   receivedAt: Date
+
+  /**
+   * What the TRANSPORT already concluded about this message being junk
+   * (specs/mail/spam-classification.md §3) — the provider's own verdict,
+   * carried through verbatim, never re-derived here.
+   *
+   * Every mail provider we intake from runs its own spam classifier before
+   * we ever see the message, and that verdict is both free and better than
+   * anything we would compute from headers alone. This field is how it
+   * survives the provider→pipeline seam instead of being discarded.
+   *
+   * Three states, deliberately not a boolean:
+   *
+   * - `'spam'` — the provider affirmatively classified it as junk (for
+   *   Gmail, the system `SPAM` label on the message).
+   * - `'clean'` — the provider classified it and did NOT call it junk.
+   * - `'unknown'` — no verdict is available (the provider does not classify,
+   *   or omitted the field on this delivery). Distinct from `'clean'`
+   *   because "we asked and it said no" and "we have no idea" must not
+   *   collapse: only the former is evidence.
+   *
+   * Omitted entirely by a provider that has no concept of a spam verdict;
+   * `src/mail/ingest.ts` reads an absent field exactly like `'unknown'`.
+   *
+   * A verdict NEVER causes a message to be dropped — inbound-ingestion.md
+   * §1's third invariant (at-least-once, never silently lost) is not
+   * negotiable, and a false positive that vanished would be unrecoverable.
+   * It only decides the STATUS a newly-created conversation is filed under.
+   */
+  providerSpamVerdict?: ProviderSpamVerdict
 }
+
+/** See {@link RawInboundMessage.providerSpamVerdict}. */
+export type ProviderSpamVerdict = 'spam' | 'clean' | 'unknown'
 
 /**
  * Provider for turning one inbound-mail provider's webhook delivery into

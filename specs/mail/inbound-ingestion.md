@@ -45,6 +45,11 @@ knows:
 - `providerMessageId` — the transport's own stable id for the message (for Gmail, the
   Gmail message id). This is the idempotency authority (§4), *not* the RFC `Message-ID`.
 - `receivedAt` — when the transport recorded delivery (not a header-parsed `Date`).
+- `providerSpamVerdict` — optional; what the transport's own spam classifier already
+  concluded (`'spam' | 'clean' | 'unknown'`), carried through verbatim and never
+  re-derived here. It decides the status a *newly created* conversation is filed under
+  and nothing else — never whether the message is stored, which is invariant #3's to
+  answer, not a classifier's. See [spam-classification.md](./spam-classification.md).
 
 > **Correction.** The interface as first drafted returns a `NormalizedInboundEmail`
 > — headers and body already parsed, attachments already blob-referenced. That is wrong

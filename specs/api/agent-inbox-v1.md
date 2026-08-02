@@ -111,8 +111,12 @@ conversations `active`, and v1.0's `open` rows migrate to `active`. `pending` is
 statement that the conversation is parked awaiting something outside the inbox (a
 customer, a third party, a release); nothing sets it automatically in v1, and it still
 counts as open work (§3a). `closed` is resolved. `spam` is junk an Agent has thrown out
-of the inbox; nothing classifies spam automatically in v1. Status pills in the UI:
-Active = accent, Pending = warn, Closed = dim, Spam = critical.
+of the inbox — **or, since 2026-08-02, junk a brand-new conversation was filed as at
+intake when the transport's own classifier already called it spam**
+([spam-classification.md](../mail/spam-classification.md) §4). That is the only automatic
+source: nothing re-files an existing conversation, and no message is ever dropped rather
+than filed. Status pills in the UI: Active = accent, Pending = warn, Closed = dim,
+Spam = critical.
 
 **Snooze exception to "pending is never cleared automatically" (v1.1).** A snooze
 is a TIMED `pending` — `pending` plus a `snoozedUntil` timestamp (§4b) — and it is the

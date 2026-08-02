@@ -256,7 +256,12 @@ import type { GmailReconcileJob } from '../api/gmail-webhook.js'
 // compile time; the concrete `createGmailHistoryClient` is wired in at the
 // composition root and injected as `createHistoryClient` below.
 import type { GmailHistoryClient } from '../providers/adapters/gmail/index.js'
-import type { BlobStore, RawInboundMessage, RawMessageContent } from '../providers/index.js'
+import type {
+  BlobStore,
+  ProviderSpamVerdict,
+  RawInboundMessage,
+  RawMessageContent,
+} from '../providers/index.js'
 import type { QueueHandlerResult, QueueMessage, QueueMessageHandler } from '../providers/queue.js'
 import type { GmailWatchStateStore } from '../store/gmail-watch-state.js'
 import type { MailboxStore } from '../store/mailboxes.js'
@@ -584,6 +589,7 @@ async function reconcileOneMailbox(
         mailboxId,
         providerMessageId: messageId,
         receivedAt: fetched.receivedAt,
+        providerSpamVerdict: spamVerdictOf(labelIds),
       }
       outcomes.push(await ingest(raw))
     }
@@ -662,6 +668,34 @@ async function reconcileOneMailbox(
 function isSelfEchoMessage(labelIds: string[]): boolean {
   if (labelIds.includes('DRAFT')) return true
   return labelIds.includes('SENT') && !labelIds.includes('INBOX')
+}
+
+/**
+ * Translate Gmail's own labels into the transport-agnostic
+ * {@link RawInboundMessage.providerSpamVerdict} (specs/mail/spam-
+ * classification.md §3.1). Gmail has already classified every message it
+ * hands us; `history.list` is deliberately NOT label-filtered (see
+ * `../providers/adapters/gmail/history.ts`), so a `SPAM`-labeled message
+ * arrives here exactly like any other added message and, before this,
+ * became an ordinary `active` conversation — Google's verdict silently
+ * discarded.
+ *
+ * The empty-`labelIds` case reports `'unknown'`, not `'clean'`: the history
+ * client documents that Gmail does not guarantee `labelIds` is populated on
+ * a history record, so an absent field is missing information, never an
+ * affirmative not-spam. This mirrors the fail-open discipline the self-echo
+ * filter already applies to the same field — an unlabeled message is
+ * ingested normally, into the ordinary inbox.
+ *
+ * Note the ordering at the call site: this runs only AFTER
+ * {@link isSelfEchoMessage} has already skipped the message, so a
+ * `SENT`+`SPAM` self-echo (our own reply that Gmail happened to file as
+ * junk) is never ingested at all rather than being filed as a spam
+ * conversation.
+ */
+function spamVerdictOf(labelIds: string[]): ProviderSpamVerdict {
+  if (labelIds.length === 0) return 'unknown'
+  return labelIds.includes('SPAM') ? 'spam' : 'clean'
 }
 
 /**
