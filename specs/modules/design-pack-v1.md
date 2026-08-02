@@ -4,10 +4,10 @@ Status: **draft for TJ review** (HT-95). Governed by CHARTER.md §3/§4 (module 
 out-of-process preference, zero privileged first-party access), `specs/modules/catalog.md`
 (HT-66) §1's born-proprietary discipline, and CLAUDE.md's UI-fidelity rule.
 
-**Not blocked on HT-93/HT-94.** The pack sources from the Claude Design project directly,
-as a sibling of `web/src/components/ds/` rather than downstream of it (§5). 16 of the 20
-files are already promoted there; the four remaining files arrive in the pack whenever
-HT-94 part B promotes them upstream (see §3 for the file-vs-component counts).
+**HT-93 and HT-94 have merged.** The pack sources from the Claude Design project
+directly, as a sibling of `web/src/components/ds/` rather than downstream of it (§5).
+Everything it needs is promoted upstream today; see §3 for exact counts, which are stated
+in **published files**, not components.
 
 ## 1. Purpose
 
@@ -46,17 +46,37 @@ Three ways out; this spec picks the third.
 
 The strategic read: components are not the moat. The mail engine, the modules, and the
 hosted engine are. AGPL on the design pack actively fights the goal in §1; a permissive
-license serves it. And per `catalog.md` §1, **paid → free stays possible** — moving
-these components to a permissive license is a move in the permitted direction.
+license serves it. (An earlier draft cited `catalog.md` §1's "paid → free stays possible" as authority
+here. That is a **monetization** axis — whether a paid module may later join the free
+core — and says nothing about copyleft→permissive relicensing. The citation was a
+category error and is withdrawn; the argument above stands without it.)
 
 **Decision: MIT — ratified by TJ, 2026-07-20** ("yes MIT"), after confirming the scope is
 the design pack alone: the core stays AGPL-3.0, `LICENSE` is untouched, and
-`web/src/components/ds/` remains part of the AGPL core. This is not a relicensing of core
-code — Resonant IQ holds the copyright outright (`ds/` has a single author), so the same
-components are simply published under a second licence in a separate package while the
-copies inside the core stay AGPL. On the cost, TJ: *"i really don't care if someone does
-anything with design components."* The brand-asset carve-out in §3 is the one boundary
-that stands.
+`web/src/components/ds/` remains part of the AGPL core. On the cost, TJ: *"i really don't
+care if someone does anything with design components."* The brand-asset carve-out in §3
+is the one boundary that stands.
+
+**Who may grant MIT is an open question, not a settled one.** An earlier draft asserted
+that "Resonant IQ holds the copyright outright (`ds/` has a single author)." That does not
+survive checking, and the error mattered because everything downstream rested on it:
+
+- `git log --format='%an' -- web/src/components/ds/` returns exactly one name — **TJ
+  Baker, an individual.** Not Resonant IQ, Inc. Single authorship in `git log` records who
+  *committed*; it is not a determination of who *owns*.
+- **CHARTER.md §3 says the opposite of what that draft assumed:** contributions come in
+  under **DCO**, no CLA, no copyright assignment, and "Contributors keep the copyright on
+  their work." The project holds an inbound AGPL-3.0 licence, not title. That is the
+  structural feature making the core's licence permanent — and it cuts against a casual
+  claim of corporate ownership.
+- If a written assignment to Resonant IQ exists (e.g. an IP-assignment instrument
+  executed as a founder), **that instrument is the operative authority and must be cited
+  by name here.** Absent it, the grantor is TJ Baker personally.
+
+Publishing under MIT still works either way — a sole author may licence their own work
+however they like. What must not ship is a public claim about *which entity* holds title
+that the repository's own constitution contradicts. Resolving this is item 5 of the §2.1
+gate.
 
 Apache-2.0 was considered for its express patent grant and rejected —
 there is no patentable invention in a component library, so the grant covers a threat
@@ -107,14 +127,41 @@ Concretely, before the first MIT publish:
 4. **The clearance is written down** in the pack repo and dated, so a later contributor
    can see what was checked and when rather than re-deriving it.
 
+5. **The grantor is named.** Either the assignment instrument transferring `ds/` to
+   Resonant IQ is cited, or the licence is granted by TJ Baker personally. The public
+   `LICENSE` file must name whoever actually holds title (see the copyright discussion
+   in §2).
+
+**How this gate is enforced, since prose gates drift.** An earlier draft called this
+blocking while providing no mechanism — the same shape as the instructions that failed in
+the audit this repo has already run. Concretely:
+
+- The clearance lives at **`CLEARANCE.md` in the pack repo**, dated, listing each item
+  above and what was checked.
+- The pack's **publish workflow asserts that file exists and is newer than the last
+  `sources` manifest change**, and fails otherwise. A missing or stale clearance blocks
+  `npm publish` mechanically, not by convention.
+- **Owner: TJ**, as the person who must sign the licensing call. No one else can clear it.
+- **The pack repo is not created until item 5 is answered** — that keeps the question in
+  front of a human rather than behind a checkbox nobody reads.
+
 If any item is unresolved, the release does not ship. Publishing first and auditing after
 is the one sequence this gate exists to prevent.
 
 ## 3. Scope of the pack
 
-**Brand assets are excluded, permanently.** The wordmark, logo, and any
-Helpthread-identifying mark stay out of the pack and out of its repo — including
-`guidelines/type-wordmark.html` and any brand-specific value in `theme/helpthread.css`.
+**Brand assets are excluded, permanently** — the wordmark and logo artwork, and anything
+that functions as a Helpthread mark: `guidelines/type-wordmark.html` and any logo file.
+
+**What is NOT excluded, stated plainly because an earlier draft implied otherwise.** That
+draft claimed the pack "ships the *system* — never the *identity*", and pointed at
+`theme/helpthread.css` as carrying brand values. Checked: that file is a comment plus
+three `@import`s and contains no brand value at all, so the carve-out as written excluded
+nothing. Meanwhile the token files the pack *does* ship are brand-bearing —
+`colors.css` opens with a block literally commented `/* identity */` above
+`--ht-accent: #4a55a2`, and `typography.css` sets `--ht-serif: "Source Serif 4"`, the
+wordmark face. **The palette and type scale ship, and are meant to be overridden** (§4);
+only the marks themselves are withheld.
 
 MIT grants copyright, **not trademark**, so a permissive licence would not let anyone
 call their product Helpthread regardless. But shipping the wordmark inside an MIT package
@@ -127,29 +174,31 @@ Sourced from the design project (§5), in three layers:
 1. **Tokens** — `tokens/{colors,shape,typography}.css` plus `theme/helpthread.css`,
    published as CSS and as a typed export. This is the layer that makes §4 work.
    `fonts/fonts.css` is **excluded pending HT-99** — see §3.1.
-2. **Core components** — `components/core/`. **12 at v1**, one per file: Button, Avatar,
-   DropdownMenu, StatusPill, TagChip, Toast, TextInput, MenuItem, IconButton, EmptyState,
-   Skeleton, Kbd. HT-94 part B promotes **four more files** out of
-   `templates/new-primitives/`: SplitButton, CommandMenu, SnoozePicker, and
-   `CredentialRow.jsx` — which exports **two** components, `CredentialRow` and
-   `PasskeyList` (verified 2026-07-20; there is no separate `PasskeyList.jsx`).
-3. **Inbox components** — `components/inbox/` (ConversationRow, MessageBand, ToolbarBand,
-   FolderItem). Included because a module rendering conversation-shaped data should
-   render it the same way the desk does.
+2. **Core** — `components/core/`, **34 files**: 17 `.jsx` and their 17 `.d.ts`
+   siblings. Button, Avatar, DropdownMenu, StatusPill, TagChip, Toast, TextInput,
+   MenuItem, IconButton, EmptyState, Skeleton, Kbd, SplitButton, CommandMenu,
+   SnoozePicker, CredentialRow — plus `primitives-support.jsx`, a **shared helper the
+   four newest primitives import** (`chevron`, `RING`, `useFocusRing`, `fmtDate`, icons).
+   It is not a component and ships anyway; omitting it would break the package.
+3. **Inbox** — `components/inbox/`, **8 files**: ConversationRow, MessageBand,
+   ToolbarBand, FolderItem and their `.d.ts` siblings. Included because a module
+   rendering conversation-shaped data should render it the same way the desk does.
 
-**Totals, stated once to stop the drift.** Count *files* and *components* separately —
-conflating them is what made earlier drafts of this section disagree with themselves:
+**Totals, verified against the tree on 2026-08-02.** Counted in **published files** —
+every path the package ships, which is the unit §2.1's clearance gate and §5's manifest
+both operate on. Earlier drafts counted only `.jsx` and silently omitted 21 `.d.ts` files
+plus the shared helper:
 
-| | Files | Components |
-| --- | --- | --- |
-| Core at v1 | 12 | 12 |
-| Inbox | 4 | 4 |
-| **v1 total** | **16** | **16** |
-| + HT-94 part B | 4 | 5 (`CredentialRow.jsx` exports two) |
-| **After HT-94 part B** | **20** | **21** |
+| | `.jsx` | `.d.ts` | Files |
+| --- | --- | --- | --- |
+| `components/core/` | 17 | 17 | **34** |
+| `components/inbox/` | 4 | 4 | **8** |
+| **Total** | 21 | 21 | **42** |
 
-Every count elsewhere in this spec means **files** unless it says otherwise, and refers to
-the post-HT-94 figure unless it says "at v1".
+Components are a different count and deliberately not the unit used elsewhere: 20
+components across 21 `.jsx` files, because `CredentialRow.jsx` exports both
+`CredentialRow` and `PasskeyList`, and `primitives-support.jsx` exports no component at
+all. Where this spec says a number without qualification, it means **files**.
 
 ### 3.1 Fonts are excluded from v1 — HT-99
 
@@ -241,8 +290,10 @@ What is real:
 Either way the merge is a reviewed PR, which is what keeps §6's conformance claim
 honest.
 
-(Vocabulary, per CLAUDE.md: **Agents** are human support staff, **Assistants** are AI
-actors. The automation here is an Assistant.)
+(The sync automation is an AI actor, not a person. This spec deliberately does not
+restate the Agent/Assistant vocabulary rule — that definition was revised on 2026-07-31
+and a copy here would be one more place to drift out of date. `CLAUDE.md` is the single
+source.)
 
 ### The drift gate needs a content hash, not a revision pin
 
@@ -262,8 +313,12 @@ manifest never saw:
 - **`sources`** — per-file SHA-256 of every file fetched from the design project, plus
   its exact path set. Detects upstream movement.
 - **`generated`** — per-file SHA-256 of every artifact the build emits (typed token
-  exports, entry points, type declarations), plus its exact path set. Detects hand edits
-  *and* files that appear or vanish, which a hash-only check would miss.
+  exports, entry points), plus its exact path set. Detects hand edits *and* files that
+  appear or vanish, which a hash-only check would miss.
+  **The `.d.ts` files are NOT in this set.** They are fetched verbatim from the design
+  project alongside their `.jsx` siblings (HT-97 re-pulled 21 of them), so they belong in
+  `sources`. Classifying them as generated would mean upstream `.d.ts` churn could never
+  trip the "upstream moved" row — it would read as clean forever.
 
 There is a third category the first two miss — **files that are neither fetched nor
 generated**: `package.json`, `README.md`, `LICENSE`, CI config, anything hand-authored in
