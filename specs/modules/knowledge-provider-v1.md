@@ -101,8 +101,14 @@ path becomes nominal without anyone deciding that it should.
 
 ## 2. Exposure profiles — the safety model
 
-**Internal knowledge must not reach a customer.** This section is how that is pursued, and
-what it does and does not guarantee.
+**This section addresses results returned through the knowledge-provider interface. It does
+not claim that Helpthread as a whole prevents all internal information from reaching a
+customer.** It states the conformance requirements, the trust assumptions they rest on, and
+the known residual disclosures.
+
+The scoping matters: an earlier draft opened with the unqualified sentence "internal
+knowledge must not reach a customer," which reads as a whole-product confidentiality
+guarantee — and §2.7 says outright that Helpthread does not deliver one.
 
 ### 2.1 What an earlier draft got wrong
 
@@ -122,18 +128,28 @@ changeable by any request parameter:
 | `customer_safe` | Its credential can reach **only** content the operator has published to the general public. |
 | `agent_only` | May reach internal content. Never queried from any customer-facing path. |
 
-**Routing is by where an answer can end up, not by who is asking:**
+**A customer-egress retrieval path is one whose results can be supplied directly to a
+customer, or to an Assistant capable of customer-directed output.** Routing follows that
+definition:
 
-- **Agent inbox search** — may query `customer_safe` and `agent_only` providers.
-- **The embeddable widget** — `customer_safe` only.
+- **The embeddable widget** — customer-egress. `customer_safe` only.
 - **Any Assistant that can produce customer-directed output** (a draft reply, an automated
-  response) — `customer_safe` only, *regardless of its read access elsewhere*.
+  response) — customer-egress. `customer_safe` only, *regardless of its read access
+  elsewhere*.
+- **Agent inbox search** — **not** a customer-egress path. Agents may query both profiles,
+  and remain responsible for what they put in a reply.
 
-That last rule is the one an earlier draft got wrong by reasoning that "the reader is
-trusted." An auto-answers module reads with Assistant credentials and writes toward
-customers; it is an egress path, and human approval of a draft is an operational control,
-not a confidentiality boundary. A reviewer can approve a draft without recognising that a
-sentence in it was internal.
+Two clarifications, both corrections to earlier drafts:
+
+The Assistant rule replaces reasoning that "the reader is trusted." An auto-answers module
+reads with Assistant credentials and writes toward customers; it is an egress path, and human
+approval of a draft is an operational control, **not a confidentiality boundary** — a
+reviewer can approve a draft without recognising that a sentence in it was internal.
+
+The Agent rule is where "route by where the answer can end up" was too loose as a slogan: an
+Agent can read an internal article and paste it into a customer reply, and no interface can
+stop that. The real distinction is **automated or direct customer egress versus a trusted
+human workflow**, and this contract governs only the former.
 
 **The boundary is the credential's reach, not the URL.** Two endpoints on one system sharing
 one unrestricted credential are not isolation. What a `customer_safe` registration must mean
@@ -147,24 +163,33 @@ profile. A provider that only ever serves public content implements one profile 
 complete — which keeps the cheap path the safe one, and means an adapter author is not
 forced to build internal-content handling they do not want.
 
-### 2.3 What this actually guarantees
+### 2.3 Security property required for conformance
 
-Stated precisely, because the earlier overstatement is exactly the kind of claim that gets
-believed:
+Because the implementation and the conformance suite are planned rather than built (§8.2),
+the following is a **normative requirement on a conforming v1 implementation, not a claim
+about code that ships today**:
 
-> Helpthread never requests or routes an `agent_only` knowledge source into a
-> customer-facing path. Whether a source registered `customer_safe` is genuinely safe to
-> disclose depends on the operator configuring it against a corpus that is already public.
+> Given a `customer_safe` registration whose credential the provider in fact enforces as
+> restricted to a globally public corpus, a customer-egress retrieval request can query only
+> `customer_safe` registrations, returns only results labelled `public` through the customer
+> projection, and neither reads nor writes an agent-path cache. It cannot query, or return a
+> result obtained from, an `agent_only` registration.
 
-This buys real protection against the failures most likely to occur: core or consumer code
-mistakenly widening an audience; cache entries crossing between contexts; a stolen
-customer-path credential reaching internal material; a mixed-corpus endpoint being routed
-into the widget; an adapter leaking what it cannot itself retrieve.
+**This property is limited to retrieval through this interface.** It does not cover provider
+or operator misconfiguration, text an Agent chooses to put in a reply, or information
+obtained through any other Helpthread API.
 
-It does **not** prove a provider published the right content. A provider can still point its
-public credential at the wrong collection, or an operator can publish an internal article
-into a genuinely public corpus. **No contract can prevent that**, and pretending otherwise
-was the original error.
+Subject to its stated assumption, it prevents a request parameter widening the retrieval
+profile, prevents an agent-path cache entry crossing into a customer-egress response, and
+limits a stolen customer-egress credential to `customer_safe` registrations. **It does not
+make a mixed-corpus or over-privileged `customer_safe` registration safe.**
+
+It also does not establish that returned text is semantically public. A provider can
+associate its public credential with the wrong collection, return internal text labelled
+`public`, or an operator can publish an internal article into a genuinely public corpus.
+**This contract cannot detect or prevent those conditions from the returned text alone** —
+other architectures could add independent classification, public-origin verification, or
+approval workflows, and this one deliberately does not.
 
 The per-result `audience` field (§4.4) is retained as **schema validation and a tripwire**,
 not as an authorization decision: a `customer_safe` provider returning anything labelled
@@ -190,17 +215,24 @@ future module owns end-user identity.
   is not.
 - A provider whose profile is unset cannot be queried at all.
 
-### 2.6 Test-asserted invariants
+### 2.6 Conformance invariants to be test-asserted
 
-- No customer-facing path can query an `agent_only` provider, under any parameter,
-  credential, cache state, or provider response.
-- An Assistant capable of customer-directed output cannot obtain internal knowledge.
-- No response on a customer path contains **explicit** provider identifiers, per-provider
-  status, total-result counts, scores, ordering metadata, or translation-group keys (§5.4).
-  ("Explicit" is load-bearing — §5.4 names the residual signals this cannot remove.)
+- No customer-egress retrieval request can query an `agent_only` registration, or return a
+  result obtained from one, for any allowed request parameter, **customer-egress**
+  credential, cache state, or provider response. (Agent credentials may query `agent_only`
+  by design — §2.2.)
+- An Assistant capable of customer-directed output cannot be granted
+  `knowledge:read_internal`, and its retrieval can query only `customer_safe` registrations.
+  (Scoped to this interface: §2.7 records what this does not cover.)
+- Customer-egress responses use exactly the customer projection in §5.4, containing no
+  dedicated provider-identity or status, total-count, score or rank, document/revision/chunk,
+  audience or freshness, or translation-group field. Array length and order, returned URLs,
+  and response timing remain observable, as §5.4 describes.
+- Customer-egress retrieval never reads or writes a retrieval cache.
 - A `customer_safe` provider returning an `internal`-labelled result has that result dropped
   and a health warning recorded.
-- With no `customer_safe` provider configured, widget search returns empty.
+- With no `customer_safe` provider configured, **every** customer-egress path returns no
+  results.
 
 ### 2.7 A gap this spec does not close, stated plainly
 
@@ -210,10 +242,14 @@ internal notes. **A perfectly safe knowledge path therefore does not deliver a g
 disclose an internal note instead of an internal article.
 
 That is a substrate-level issue, larger than this spec and not created by it. Closing it
-needs either a customer-visible conversation read surface that excludes internal notes, or
-an explicit statement that human review is the confidentiality control for conversation
-data. Recorded as open decision **§10.2**; this spec does not resolve it and does not claim
-the broader invariant.
+requires an **enforced customer-visible conversation projection that excludes internal notes
+before the model call**. Human review alone will not do: §2.2 already establishes that draft
+approval is an operational control, not a confidentiality boundary, and that reasoning does
+not become weaker when applied to notes instead of articles.
+
+Until that projection exists, a conversation-reading Assistant cannot conform to §4.6 for
+customer-directed output. Recorded as open decision **§10.2**. **This gap limits the scope of
+§2.3; it does not negate the knowledge-interface property.**
 
 ## 3. Provider registration
 
@@ -480,7 +516,7 @@ the caller can put text in front of a customer.
 | Caller | May reach | Projection | Cacheable |
 |---|---|---|---|
 | Agent (service token + acting-Agent id, per `docs/modules/README.md`) | `customer_safe` + `agent_only` | agent | yes (§6.3) |
-| Assistant holding `knowledge:read_internal` | `customer_safe` + `agent_only` | agent | yes (§6.3) |
+| Assistant holding `knowledge:read_internal` — **future; unreachable in v1, see §5.2** | `customer_safe` + `agent_only` | agent | yes (§6.3) |
 | Assistant holding `knowledge:read_public` | `customer_safe` only | **customer** | **no** |
 | Widget route (§5.3) | `customer_safe` only | customer | no |
 
@@ -568,9 +604,10 @@ Returned `url` values can also identify a provider despite no provider field bei
 And **timing** differs measurably between a query that matched withheld content and one that
 matched nothing.
 
-None of these disclose content; they can disclose that *something exists*. v1 does not
-mitigate them: backfilling to a constant result count would require querying past the limit
-on every request, and constant-time fan-out across external providers is not achievable.
+These signals do not directly return withheld passage text, but chosen-query observation can
+reveal facts about whether particular content exists or matches. v1 does not mitigate them:
+backfilling to a constant result count would require querying past the limit on every
+request, and constant-time fan-out across external providers is not achievable.
 
 **What follows from this** is the point of §2.3: the tripwire is a misconfiguration alarm,
 not a containment boundary. A `customer_safe` registration pointed at a mixed corpus is a
@@ -717,9 +754,10 @@ visible rather than discovered:
 1. **Pull versus an optional provider-declared index** (§1.1) — recommendation: pull only in
    v1; an index is additive later if latency proves unacceptable.
 2. **The conversation-notes gap** (§2.7) — a drafting Assistant can disclose an internal note
-   even with a perfectly safe knowledge path. Needs either a customer-visible conversation
-   read surface or an explicit statement that human review is the control. **Recommendation:
-   decide before the auto-answers module ships, not before this one.**
+   even with a conforming knowledge path. It needs an enforced customer-visible conversation
+   projection applied before the model call; human review alone is not a confidentiality
+   boundary. **Recommendation: require that projection before the auto-answers module ships.
+   It does not block this interface.**
 3. **Timing side channel** (§5.4) — recommendation: accept and document for v1.
 4. **`context.conversationId` on agent-only providers** (§4.3) — off by default, operator
    opt-in per registration. Confirm that is the right default.
@@ -763,3 +801,20 @@ visible rather than discovered:
   and timing named as residual signals (§5.4, §2.6); the conformance suite is marked as a
   planned deliverable rather than an existing one (§8.2); and §9.1 now lists what remains
   unspecified rather than leaving it to be discovered.
+- **2026-08-02** (fourth pass — §2 assessed specifically as a public commitment): the design
+  was judged defensible and the disclosure posture appropriate, but the wording still read as
+  a stronger promise than delivered. §2 is now **scoped to this interface** rather than
+  opening with a whole-product confidentiality sentence its own §2.7 contradicts. §2.3 is
+  restated as **a security property required for conformance**, not a guarantee about shipped
+  code — nothing has been built, and categorical "never" language in a document headed "what
+  this guarantees" is written assurance a reader could try to rely on. **"Customer-egress
+  path" is now defined** (§2.2): agent inbox search is explicitly *not* one, since an Agent
+  can put an internal article into a reply and no interface prevents that — the real line is
+  automated or direct customer egress versus a trusted human workflow, which the earlier
+  "where the answer can end up" slogan blurred. §2.6's invariants are scoped to
+  customer-egress credentials, gain the missing no-cache invariant, and cover every
+  customer-egress path rather than only the widget. §2.7 no longer offers "human review is the
+  confidentiality control" as an option, which contradicted §2.2's own reasoning. §5.4 no
+  longer claims residual signals disclose only existence — chosen-query observation can reveal
+  more. And "no contract can prevent that" is narrowed: this contract cannot detect semantic
+  misclassification from returned text, but other architectures could.
