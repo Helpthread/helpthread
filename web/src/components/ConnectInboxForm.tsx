@@ -476,13 +476,22 @@ export function ConnectInboxForm({
             {preset.label} recognized — using {preset.imapHost} / {preset.smtpHost}.
           </p>
         )}
-        {oauthOnlyLabel !== undefined && !lockAddress && (
+        {/* Deliberately NOT gated on `!lockAddress`, unlike the preset hint
+            above. A reconnect screen is where an operator is MOST likely to
+            retry a stored Outlook mailbox that has never been able to
+            authenticate, and hiding the reason there was exactly backwards
+            (review, 2026-07-31). The stored host/port values are left visible
+            rather than cleared — this screen exists to review them, and
+            blanking a locked form would destroy the context it is for. */}
+        {oauthOnlyLabel !== undefined && (
           <p
             role="status"
             style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--ht-warn, var(--ht-ink))' }}
           >
             {oauthOnlyLabel} does not allow app passwords for IMAP or SMTP — it requires OAuth.
-            Connecting this address here will not work.
+            {lockAddress
+              ? ' Reconnecting this inbox will not work.'
+              : ' Connecting this address here will not work.'}
           </p>
         )}
       </div>

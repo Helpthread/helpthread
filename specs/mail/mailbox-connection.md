@@ -115,7 +115,14 @@ Verified 2026-07-20. App-password availability gates the whole approach.
 | **Microsoft 365 business** | **No** | Basic auth removed and unre-enablable — **OAuth mandatory** |
 | Outlook.com consumer | **No** | Resolved 2026-07-31: Microsoft requires OAuth2 for POP/IMAP/SMTP on consumer accounts too; app passwords are refused |
 
-**Resolution of the Outlook.com row (2026-07-31).** The row above read *unresolved — test before claiming support* while the connect screen shipped `outlook.com`/`hotmail.com`/`live.com` presets regardless. Microsoft's own documentation settles it in both directions: Exchange Online states "Basic authentication is now disabled in all tenants… no one (you or Microsoft support) can re-enable" it, and notes the deprecation "also prevents the use of app passwords"; the consumer Outlook.com guidance likewise requires Modern Auth/OAuth2 for POP, IMAP and SMTP. Those presets are removed, and typing such an address now shows an explicit "requires OAuth" notice instead of offering settings that cannot authenticate.
+**Resolution of the Outlook.com row (2026-07-31).** The row above read *unresolved — test before claiming support* while the connect screen shipped `outlook.com`/`hotmail.com`/`live.com` presets regardless. Microsoft's own documentation settles it in both directions: Exchange Online states "Basic authentication is now disabled in all tenants… no one (you or Microsoft support) can re-enable" it, and notes the deprecation "also prevents the use of app passwords"; the consumer Outlook.com guidance likewise requires Modern Auth/OAuth2 for POP, IMAP and SMTP.
+
+Sources, so this is checkable rather than asserted:
+
+- [Deprecation of Basic authentication in Exchange Online](https://learn.microsoft.com/en-us/exchange/clients-and-mobile-in-exchange-online/deprecation-of-basic-authentication-exchange-online) — "Basic authentication is now disabled in all tenants"; "The deprecation of basic authentication also prevents the use of app passwords."
+- [POP, IMAP, and SMTP settings for Outlook.com](https://support.microsoft.com/en-us/outlook/pop-imap-and-smtp-settings-for-outlook-com) — consumer accounts require Modern Auth/OAuth2.
+
+The other five providers' settings in §3 were verified the same day against [Gmail](https://support.google.com/mail/answer/78892), [Yahoo](https://help.yahoo.com/kb/SLN4075.html), [iCloud](https://support.apple.com/en-us/102525), [Fastmail](https://www.fastmail.help/hc/en-us/articles/1500000278342-IMAP-POP-and-SMTP-settings) and [Zoho](https://www.zoho.com/mail/help/imap-access.html); all were correct as configured. Those presets are removed, and typing such an address now shows an explicit "requires OAuth" notice instead of offering settings that cannot authenticate.
 
 Two consequences:
 
