@@ -32,10 +32,24 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # via env, not inline — refs may contain $, backtick, or ;
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
-          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || git diff --name-only "origin/${{ github.event.pull_request.base.ref }}...HEAD")
+
+          # THREE-dot: what this PR changed, not what main changed since it forked.
+          # Two-dot compares tips, so a branch merely behind main reports every file
+          # main touched — measured at 74 files against this PR's actual 3. That fires
+          # the gate on PRs that touched nothing protected, which trains contributors to
+          # paste ceremonial provenance tables: the exact habit this gate exists to break.
+          #
+          # --no-renames: with rename detection on, `git mv CHARTER.md docs/old.md`
+          # reports ONLY the new path, so moving a protected file out of its directory
+          # silences the gate. Deleting the constitution by relocating it is precisely
+          # the change this must catch.
+          CHANGED=$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA" \
+            || git diff --no-renames --name-only "origin/$BASE_REF...HEAD")
           echo "Changed files:"; echo "$CHANGED"
 
           # The tier: constitution, legal text, and the specs that carry licensing,
@@ -47,6 +61,8 @@ jobs:
             -e '^legal/' \
             -e '^LICENSE' \
             -e '^specs/modules/' \
+            -e '^\.github/workflows/pr-verdict\.yml$' \
+            -e '^\.claude/rules/pr-verdict\.md$' \
             || true)
 
           if [ -n "$HIGH_RISK" ]; then
@@ -70,6 +86,26 @@ jobs:
           echo "$FILES"
           echo
 
+          # Normalize the body ONCE, before any check, removing the two things that
+          # look like content to a regex and like nothing to a human:
+          #   - HTML comments: `<!-- 🟢 SAFE TO MERGE -->` as the first line satisfied
+          #     the verdict and the bot-line check while rendering invisible. A leading
+          #     PR-template comment also wrongly failed the verdict check.
+          #   - Fenced code blocks: the protocol doc's own ```markdown example of a
+          #     "## Decision provenance" table satisfied the provenance requirement,
+          #     so quoting the rule counted as following it.
+          # Every check below reads BODY_CLEAN, never the raw body.
+          BODY_CLEAN=$(python3 - <<'PYEOF'
+import os, re
+b = os.environ.get("BODY") or ""
+b = re.sub(r"<!--.*?-->", "", b, flags=re.S)   # HTML comments
+b = re.sub(r"^```.*?^```", "", b, flags=re.S|re.M)  # fenced blocks
+b = re.sub(r"^~~~.*?^~~~", "", b, flags=re.S|re.M)
+print(b)
+PYEOF
+)
+          BODY="$BODY_CLEAN"
+
           # 1. A verdict marker, one of exactly three, on the FIRST non-empty line.
           #    Matching anywhere would let a PR bury the verdict under arbitrary prose —
           #    the whole point is that it is the first thing read.
@@ -89,7 +125,12 @@ jobs:
           if grep -qiE '^#{1,}[[:space:]]*Decision provenance' <<<"$BODY"; then
             # Stop at the next heading — reading to end-of-body swallows any later
             # table (a test-results table, for instance) and parses it as provenance rows.
-            ROWS=$(awk '/^#+[[:space:]]*[Dd]ecision provenance/{f=1;next} f&&/^#+[[:space:]]/{exit} f' <<<"$BODY" \
+            # Terminate on an ATX heading (# Foo) OR a setext underline (--- / ===),
+            # which the earlier awk missed — a "Test results" setext heading let the
+            # table under it be parsed as provenance rows.
+            ROWS=$(awk '/^#+[[:space:]]*[Dd]ecision provenance/{f=1;next} \
+                        f&&/^#+[[:space:]]/{exit} \
+                        f&&/^(-{3,}|={3,})[[:space:]]*$/{exit} f' <<<"$BODY" \
                    | grep -E '^\|' | grep -vE '^\|[[:space:]]*[-:[:space:]]+\|' | tail -n +2 || true)
             if [ -z "$ROWS" ]; then
               fail "The 'Decision provenance' section has no rows. If this PR encodes no decisions, say so in a row ('None — no new decisions')."
