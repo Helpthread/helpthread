@@ -22,7 +22,9 @@
  * - `createInboxApi` with `gmailPush` + `gmailConnect` + `gmailDisconnect`
  *   PRESENT (they are absent-by-default on the engine; this root is where
  *   they get wired), and
- * - the two internal cron closures (queue drain, watch maintenance),
+ * - the six internal cron closures (queue drain, outbox drain, snooze wake,
+ *   Gmail watch maintenance, Gmail reconcile sweep, IMAP fetch) — the count
+ *   grew with HT-69/77/94/101 while this line still said "two",
  *
  * then hands them to {@link createAppHandler} (`./app.ts`) as one
  * `(request) => Promise<Response>`.
