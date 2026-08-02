@@ -439,6 +439,44 @@ describe('ingestInboundMessage', () => {
       expect(await countRows(db, 'conversations')).toBe(1)
       expect(await countRows(db, 'threads')).toBe(2)
     })
+
+    it("a 'spam'-verdict reply onto an ALREADY-spam conversation still REOPENS it to active — the reopen rule (agent-inbox-v1.md §4a) outranks the verdict, because a customer who replies is a customer", async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+
+      // A first message the provider called junk: filed as spam.
+      const first = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-junk-1', freshCustomerRaw(), 'spam'),
+        deps,
+      )
+      if (first.kind !== 'stored') throw new Error('unreachable')
+      expect(await statusOf(db, first.conversationId)).toBe('spam')
+
+      const replyToken = mintReplyMessageId(
+        { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+        keyring,
+      )
+      const replyRaw = rawMessage(
+        {
+          From: 'customer@example.test',
+          To: 'support@example.test',
+          Subject: 'Re: Help with my order',
+          'Message-ID': '<cust-2@customer.example.test>',
+          'In-Reply-To': replyToken,
+        },
+        'Still broken, please help.',
+      )
+
+      // The provider called THIS one junk too. It still reopens: the token
+      // proves we wrote to this address first, which outranks a classifier.
+      const second = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-junk-2', replyRaw, 'spam'),
+        deps,
+      )
+
+      expect(second).toMatchObject({ kind: 'stored', conversationId: first.conversationId })
+      expect(await statusOf(db, first.conversationId)).toBe('active')
+      expect(await countRows(db, 'conversations')).toBe(1)
+    })
   })
 
   // --- HT-101 Stage 2b-i: mailbox_id is stamped once, at creation, never

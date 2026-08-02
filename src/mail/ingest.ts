@@ -737,14 +737,14 @@ async function storeAndMarkDelivered(
  *
  * - **It never drops anything.** A `'spam'` verdict changes one column. The
  *   message is parsed, stored, threaded, and attachment-linked exactly as a
- *   clean one is (inbound-ingestion.md §1's third invariant), so an Actor
+ *   clean one is (inbound-ingestion.md §1's third invariant), so an Agent
  *   who opens the Spam folder sees the real message and a reply reopens it
  *   to `active` (agent-inbox-v1.md §4a) — a false positive is always
  *   recoverable.
  * - **It never re-files an existing conversation.** A reply that carried a
  *   valid reply token threads onto its target and leaves that target's
  *   status alone, however the provider classified this particular message.
- *   Our own token is the stronger signal, and an Actor who put a
+ *   Our own token is the stronger signal, and an Agent who put a
  *   conversation somewhere must not be silently overruled by Google.
  * - **Only `'spam'` is evidence.** `'clean'`, `'unknown'`, and an omitted
  *   field all mean `active` — see {@link RawInboundMessage.providerSpamVerdict}

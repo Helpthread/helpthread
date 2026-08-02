@@ -13,7 +13,7 @@ always outranks anything here. Status vocabulary is
 
 ## 1. The problem this closes
 
-Before this spec, `spam` was a status an Actor set by hand and nothing else — as
+Before this spec, `spam` was a status an Agent set by hand and nothing else — as
 agent-inbox-v1.md §3a put it: "nothing classifies spam automatically in v1."
 
 That was a deliberate v1 deferral, but it left a defect underneath it. The two intake
@@ -47,7 +47,7 @@ Three constraints bound everything below:
 2. **Our own reply token always wins.** If `decideThreading` matched a valid token, the
    message belongs to that conversation and the conversation's status is not this spec's
    business (§4.2).
-3. **An Actor's judgment is never silently overruled.** Automatic classification decides
+3. **An Agent's judgment is never silently overruled.** Automatic classification decides
    where a *brand-new* conversation is filed. It never re-files a conversation a human
    already placed.
 
@@ -136,26 +136,45 @@ arrived cannot audit what we filed.
 
 ### 4.2 Replies to existing conversations
 
-**No effect, ever.** A message that threads onto an existing conversation by valid reply
-token leaves that conversation's status untouched, however the provider classified it.
-Two reasons, either sufficient: our token is the stronger signal (we minted it, and it
-proves we wrote to this address first), and the target's current status may be an Actor's
-own deliberate placement.
+**The verdict has no effect on an existing conversation, ever.** A message that threads
+onto one by valid reply token contributes its thread and nothing else; the verdict is not
+read. Two reasons, either sufficient: our token is the stronger signal (we minted it, and
+it proves we wrote to this address first), and the target's current status may be an
+Agent's own deliberate placement.
 
-The existing reopen rule is unchanged and does the right thing here already: a reply to a
-`spam` conversation reopens it to `active` (agent-inbox-v1.md §4a). A customer who
-answers is a customer, whatever a classifier thought of the first message.
+That is a statement about **this spec's** input only, and it must not be read as "the
+status cannot change." It can, by a rule that predates this spec and is untouched by it:
+agent-inbox-v1.md §4a's reopen, which moves a `closed` or `spam` conversation to `active`
+on any genuinely-new inbound thread (`appendThreadInTx`, `src/store/conversations.ts`).
+
+Spelled out, because the composition is the part that is easy to get wrong:
+
+| Target's status | Verdict on the arriving reply | Resulting status | Decided by |
+|---|---|---|---|
+| `active` | `'spam'` | `active` — unchanged | This spec: verdict not read on append |
+| `active` | `'clean'` / `'unknown'` | `active` — unchanged | This spec: verdict not read on append |
+| `spam` | `'spam'` | **`active` — reopened** | §4a's reopen rule, not this spec |
+| `spam` | `'clean'` / `'unknown'` | **`active` — reopened** | §4a's reopen rule, not this spec |
+
+The third row is the counter-intuitive one and it is deliberate: a message the provider
+called junk, replying to a conversation we ourselves filed as junk, still reopens it. The
+reply token proves we wrote to that address first, and a customer who answers is a
+customer whatever a classifier thought of either message. Both `spam` rows are covered by
+tests in `src/mail/ingest.test.ts`.
+
+The practical consequence for an operator: a false positive self-heals the moment the
+sender replies, and never needs the Spam folder to be checked for it to do so.
 
 ## 5. Reclassification (NOT BUILT)
 
-### 5.1 The Actor's correction is the ground truth
+### 5.1 The Agent's correction is the ground truth
 
-An Actor moving a conversation out of `spam` is the only correction signal that matters.
+An Agent moving a conversation out of `spam` is the only correction signal that matters.
 It is already recorded by `setStatus`.
 
 ### 5.2 Sender allow-listing
 
-A sender an Actor has rescued from spam should not be re-classified on their next
+A sender an Agent has rescued from spam should not be re-classified on their next
 message. The intended mechanism is per-mailbox sender state, not a global list.
 
 ### 5.3 Feeding corrections back to the provider — OPEN
@@ -169,7 +188,7 @@ schedule they cannot see. **Not decided** (§7, D3).
 Whether automatic classification is on by default, and whether it can be turned off, is
 **not decided** (§7, D1). The rest of the surface follows from that answer: a settings
 toggle, and whether the Spam folder shows a "filed automatically" affordance distinct
-from "an Actor filed this."
+from "an Agent filed this."
 
 ## 7. Decision ledger
 
@@ -182,8 +201,8 @@ source. Anything marked **INFERRED** is the author's judgment and has not been a
 | — | Spam is never auto-classified in v1 | Prior accepted spec, agent-inbox-v1.md §3a |
 | D0 | Junk mail is stored and filed as `spam`, never dropped at intake | ⚠️ INFERRED — follows from inbound-ingestion.md §1's never-dropped invariant, but applying it to junk specifically is the author's reading |
 | D1 | Whether automatic spam classification is on by default, and whether an operator can turn it off | ⚠️ INFERRED — unresolved; §6 is unbuildable until answered |
-| D2 | A spam-verdict message whose reply token names a *deleted* conversation is filed as spam | ⚠️ INFERRED — the valid token argues it is a real customer; the deletion argues an Actor already discarded that thread. Uniform rule chosen for simplicity, not because the edge was decided |
-| D3 | Whether an Actor's "not spam" correction is written back to the operator's Gmail | ⚠️ INFERRED — unresolved. Writing to the operator's mailbox unprompted is a one-way door of a kind the charter's data-ownership promise touches |
+| D2 | A spam-verdict message whose reply token names a *deleted* conversation is filed as spam | ⚠️ INFERRED — the valid token argues it is a real customer; the deletion argues an Agent already discarded that thread. Uniform rule chosen for simplicity, not because the edge was decided |
+| D3 | Whether an Agent's "not spam" correction is written back to the operator's Gmail | ⚠️ INFERRED — unresolved. Writing to the operator's mailbox unprompted is a one-way door of a kind the charter's data-ownership promise touches |
 | D4 | Header scoring requires one strong or two weak signals; a lone weak signal never classifies | ⚠️ INFERRED — a conservative default, not a measured threshold |
 | D5 | `Auto-Submitted` is a loop-guard concern, not a spam signal | ⚠️ INFERRED |
 

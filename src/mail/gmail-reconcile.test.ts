@@ -755,6 +755,10 @@ describe('createGmailReconcileHandler', () => {
 
       expect(result).toEqual({ kind: 'ack' })
       expect(ingest).not.toHaveBeenCalled()
+      // The ordering claim in spamVerdictOf's doc comment, asserted rather
+      // than described: the self-echo filter runs BEFORE messages.get, so a
+      // skipped echo costs no raw fetch even when it also carries SPAM.
+      expect(getRawMessage).not.toHaveBeenCalled()
       expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
     })
   })
