@@ -16,7 +16,7 @@ Helpthread is open-source support infrastructure (AGPL-3.0 core; a Resonant IQ, 
   sources and their source is not read in a Helpthread development session.
 - Behavior is specified from RFCs, public documentation, and — where already captured —
   black-box fixtures.
-- Every substantive change gets real human review before merge — ordinary PR review, preserved in git history. This is also what keeps AI-assisted work copyrightable; a rubber stamp doesn't meet that bar.
+- Nothing reaches `main` without review and the maintainer's approval. Surface what a reviewer needs to decide — the risk, the tradeoff, the thing you are unsure about — rather than a summary that reads as finished.
 
 ## Coding discipline
 
