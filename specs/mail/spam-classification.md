@@ -75,6 +75,18 @@ the wire: "we asked and it said no" is evidence, "we have no idea" is not, and �
 header signals will need to tell them apart — header scoring should defer to an explicit
 `'clean'` and should not defer to silence.
 
+**Each transport must earn `'clean'`; no transport inherits it.** The table above defines
+`'clean'` as an *affirmative* judgment, and "the provider sent us something and none of it
+said spam" is not, on its own, that judgment. The two collapse only where the transport
+classifies **every** message it delivers, so that the absence of a junk marker is itself
+the verdict. That happens to hold for Gmail (below), which is why its implementation reads
+a bare absence of `SPAM` as `'clean'` — but it holds *because of a property of Gmail*, not
+because absence generally means clean. A transport that classifies only some of its mail,
+or that marks junk only above a confidence threshold, must report `'unknown'` for the
+unmarked remainder. Getting this wrong is invisible today, because §4.1 files `'clean'` and
+`'unknown'` identically; it becomes load-bearing the moment §3.2's header scoring ships and
+starts standing down in the presence of an explicit `'clean'`.
+
 **Per transport:**
 
 - **Gmail** (built, `spamVerdictOf` in `src/mail/gmail-reconcile.ts`): the system `SPAM`
@@ -83,6 +95,12 @@ header signals will need to tell them apart — header scoring should defer to a
   field is populated. This runs **after** the self-echo filter, so our own outbound reply
   that Gmail happened to file as junk is skipped entirely rather than filed as a spam
   conversation.
+
+  Reading a bare absence of `SPAM` as `'clean'` is licensed by the rule above and by one
+  specific fact: **Gmail classifies every message it accepts**, so a delivered message
+  carrying labels but not `SPAM` has been assessed and cleared. This is the whole
+  justification — it is not a default, and the next transport does not get it for free
+  (§7, D6).
 
   **This is best-effort, not complete, and the boundary is worth stating precisely.**
   `history.list` is a delta stream, not a snapshot. The history client requests
@@ -248,6 +266,7 @@ approved.
 | D3 | An Agent's "not spam" correction is **never** written back to the operator's Gmail | Maintainer decision, 2026-08-02 |
 | D4 | Header scoring requires one strong or two weak signals; a lone weak signal never classifies | ⚠️ INFERRED — a conservative default, not a measured threshold |
 | D5 | `Auto-Submitted` is a loop-guard concern, not a spam signal | ⚠️ INFERRED |
+| D6 | Gmail's "labels present, none of them `SPAM`" keeps reporting `'clean'` rather than `'unknown'`; §3.1 states the justification instead of the code changing | Maintainer, 2026-08-02: chose "Keep code, tighten §3.1" over narrowing the code, on the question of whether `'clean'` is honest for a message with no `SPAM` label |
 
 **One-way door:** none, in what is built or specified. The only candidate was writing
 classification state back into the operator's own mailbox, and D3 closed that door rather
