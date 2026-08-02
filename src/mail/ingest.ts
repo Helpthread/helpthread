@@ -56,7 +56,12 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Db, Queryable } from '../db/client.js'
-import type { BlobStore, RawInboundMessage, RawMessageContent } from '../providers/index.js'
+import type {
+  BlobStore,
+  ProviderSpamVerdict,
+  RawInboundMessage,
+  RawMessageContent,
+} from '../providers/index.js'
 import { insertThreadAttachmentsInTx, type NewThreadAttachment } from '../store/attachments.js'
 import { appendThreadInTx, createConversationInTx, type NewThread } from '../store/conversations.js'
 import { appendOutboxEventInTx } from '../store/event-outbox.js'
@@ -439,6 +444,7 @@ async function processClaimedDelivery(
       parsed,
       attachmentRefs,
       delivery.attempts,
+      raw.providerSpamVerdict ?? 'unknown',
     )
     logIngestEvent({
       ...base,
@@ -648,9 +654,10 @@ async function storeAndMarkDelivered(
   parsed: ParsedEmail,
   attachmentRefs: Omit<NewThreadAttachment, 'threadId'>[],
   claimedAttempts: number,
+  spamVerdict: ProviderSpamVerdict,
 ): Promise<{ conversationId: string; threadId: string; appendFallback?: AppendFallbackReason }> {
   return db.transaction(async (tx) => {
-    const written = await writeParsedEmail(tx, mailboxId, decision, parsed)
+    const written = await writeParsedEmail(tx, mailboxId, decision, parsed, spamVerdict)
     await insertThreadAttachmentsInTx(
       tx,
       attachmentRefs.map((ref) => ({ ...ref, threadId: written.threadId })),
@@ -720,12 +727,36 @@ async function storeAndMarkDelivered(
  * already has whatever mailbox its own creation recorded, and a reply
  * threaded onto it must not overwrite that, even if this particular reply
  * happened to arrive at a different connected mailbox.
+ *
+ * ## The spam verdict (specs/mail/spam-classification.md §4)
+ *
+ * `spamVerdict` follows exactly the same shape, and for the same reason: it
+ * decides the STATUS of a brand-new conversation at both
+ * `createConversationInTx` call sites, and the `append` branch never reads
+ * it at all. Three properties are load-bearing:
+ *
+ * - **It never drops anything.** A `'spam'` verdict changes one column. The
+ *   message is parsed, stored, threaded, and attachment-linked exactly as a
+ *   clean one is (inbound-ingestion.md §1's third invariant), so an Agent
+ *   who opens the Spam folder sees the real message and a reply reopens it
+ *   to `active` (agent-inbox-v1.md §4a) — a false positive is always
+ *   recoverable.
+ * - **It never re-files an existing conversation.** A reply that carried a
+ *   valid reply token threads onto its target and leaves that target's
+ *   status alone, however the provider classified this particular message.
+ *   Our own token is the stronger signal, and an Agent who put a
+ *   conversation somewhere must not be silently overruled by Google.
+ * - **Only `'spam'` is evidence.** `'clean'`, `'unknown'`, and an omitted
+ *   field all mean `active` — see {@link RawInboundMessage.providerSpamVerdict}
+ *   for why "we asked and it said no" and "we have no idea" are still kept
+ *   distinct on the wire even though they agree here.
  */
 async function writeParsedEmail(
   tx: Queryable,
   mailboxId: string,
   decision: ThreadingDecision,
   parsed: ParsedEmail,
+  spamVerdict: ProviderSpamVerdict,
 ): Promise<{ conversationId: string; threadId: string; appendFallback?: AppendFallbackReason }> {
   const firstMessage: NewThread = {
     direction: 'inbound',
@@ -735,6 +766,7 @@ async function writeParsedEmail(
     bodyText: parsed.text,
     bodyHtml: parsed.html,
   }
+  const status = spamVerdict === 'spam' ? 'spam' : 'active'
 
   if (decision.kind === 'new') {
     const created = await createConversationInTx(tx, {
@@ -742,6 +774,7 @@ async function writeParsedEmail(
       customerEmail: fromAddressOf(parsed),
       firstMessage,
       mailboxId,
+      status,
     })
     await emitNewConversationEvents(tx, created.conversationId, created.threadId)
     return created
@@ -769,6 +802,7 @@ async function writeParsedEmail(
     customerEmail: fromAddressOf(parsed),
     firstMessage,
     mailboxId,
+    status,
   })
   await emitNewConversationEvents(tx, created.conversationId, created.threadId)
   return { ...created, appendFallback: appended.reason }

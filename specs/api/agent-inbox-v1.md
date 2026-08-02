@@ -107,12 +107,23 @@ interface AttachmentView {
 ```
 
 **Status semantics (v1.1).** `active` is the working state — inbound mail creates
-conversations `active`, and v1.0's `open` rows migrate to `active`. `pending` is an Agent
+conversations `active` (with one exception, below), and v1.0's `open` rows migrate to
+`active`. `pending` is an Agent
 statement that the conversation is parked awaiting something outside the inbox (a
 customer, a third party, a release); nothing sets it automatically in v1, and it still
 counts as open work (§3a). `closed` is resolved. `spam` is junk an Agent has thrown out
-of the inbox; nothing classifies spam automatically in v1. Status pills in the UI:
+of the inbox — **or, since 2026-08-02, a brand-new conversation filed as junk at intake
+because the transport's own classifier already called it spam**
+([spam-classification.md](../mail/spam-classification.md) §4). Status pills in the UI:
 Active = accent, Pending = warn, Closed = dim, Spam = critical.
+
+That intake classification is narrow, and two boundaries matter. It applies **only when
+the conversation is created** — it is never read for a message that threads onto an
+existing conversation, so it can neither re-file nor rescue one. And it never decides
+whether a message is *stored*: junk is filed under a different status, never dropped
+(inbound-ingestion.md §1). The reopen rule below is unaffected by it and still governs
+existing conversations — including one filed as `spam` at intake, which a reply reopens
+to `active` like any other. See spam-classification.md §4.2 for the full interaction.
 
 **Snooze exception to "pending is never cleared automatically" (v1.1).** A snooze
 is a TIMED `pending` — `pending` plus a `snoozedUntil` timestamp (§4b) — and it is the

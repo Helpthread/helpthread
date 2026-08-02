@@ -657,6 +657,118 @@ describe('createGmailReconcileHandler', () => {
     })
   })
 
+  // --- The provider spam verdict (specs/mail/spam-classification.md §3) ------
+  // Gmail has already classified every message it hands us. `history.list`
+  // is not label-filtered, so a SPAM-labeled message reaches this handler
+  // exactly like any other added message. It is INGESTED (never dropped —
+  // inbound-ingestion.md §1 invariant #3), carrying the verdict forward so
+  // ingest can file the conversation as `spam` instead of `active`.
+
+  describe('provider spam verdict', () => {
+    it("a SPAM-labeled message is ingested, not dropped, and carries providerSpamVerdict: 'spam'", async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['junk-1', ['SPAM']]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'junk-1': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      // Never dropped: junk still gets a ledger row and a conversation.
+      expect(ingest).toHaveBeenCalledTimes(1)
+      const raw = ingest.mock.calls[0][0] as RawInboundMessage
+      expect(raw.providerMessageId).toBe('junk-1')
+      expect(raw.providerSpamVerdict).toBe('spam')
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+
+    it("an ordinary INBOX message carries providerSpamVerdict: 'clean' — an explicit not-spam, not an absent field", async () => {
+      const { store: watchStateStore } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['customer-1', ['INBOX']]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'customer-1': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      await handler(job())
+
+      expect((ingest.mock.calls[0][0] as RawInboundMessage).providerSpamVerdict).toBe('clean')
+    })
+
+    // `[]` IS the omitted-field case at this seam: the history client
+    // normalizes an absent `labelIds` to `[]` before this handler ever sees
+    // it (`../providers/adapters/gmail/history.ts` — "Defaults to [] when
+    // Gmail's response omits labelIds"), so `ListedMessage.labelIds` is
+    // always a present array. There is no separate `undefined` shape to test
+    // here; that normalization is the adapter's own contract.
+    it("an empty label set reports 'unknown' — the shape an omitted labelIds is normalized to, so we assert nothing either way", async () => {
+      const { store: watchStateStore } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const historyClient = fakeHistoryClient({
+        listResult: {
+          kind: 'ok',
+          messages: taggedMsgs([['no-labels-1', []]]),
+          newHistoryId: 'cursor-2',
+        },
+        rawMessages: { 'no-labels-1': { rawBytes: textBytes('raw'), receivedAt: new Date() } },
+      })
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      await handler(job())
+
+      expect((ingest.mock.calls[0][0] as RawInboundMessage).providerSpamVerdict).toBe('unknown')
+    })
+
+    it('a SPAM-labeled message that is ALSO a self-echo is still skipped — the self-echo filter runs first', async () => {
+      const { store: watchStateStore, setCalls } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
+      const getRawMessage = vi.fn(async () => null)
+      const historyClient: GmailHistoryClient = {
+        listAddedMessageIds: async () => ({
+          kind: 'ok',
+          messages: taggedMsgs([['echo-junk-1', ['SENT', 'SPAM']]]),
+          newHistoryId: 'cursor-2',
+        }),
+        getRawMessage,
+      }
+      const ingest = vi.fn(async (raw: RawInboundMessage) => storedOutcome(raw))
+
+      const handler = createGmailReconcileHandler(
+        baseDeps({ watchStateStore, ingest, createHistoryClient: () => historyClient }),
+      )
+
+      const result = await handler(job())
+
+      expect(result).toEqual({ kind: 'ack' })
+      expect(ingest).not.toHaveBeenCalled()
+      // The ordering claim in spamVerdictOf's doc comment, asserted rather
+      // than described: the self-echo filter runs BEFORE messages.get, so a
+      // skipped echo costs no raw fetch even when it also carries SPAM.
+      expect(getRawMessage).not.toHaveBeenCalled()
+      expect(setCalls).toEqual([{ mailboxId: MAILBOX_ID, historyId: 'cursor-2' }])
+    })
+  })
+
   it('a 404-expired cursor pauses the mailbox, does not advance the cursor, and acks', async () => {
     const { store: mailboxStore, records } = fakeMailboxStore(activeMailbox())
     const { store: watchStateStore, setCalls } = fakeWatchStateStore({
