@@ -1,15 +1,16 @@
-# Knowledge Provider Interface v1 — connecting any knowledge base
+# Knowledge Provider Interface v1 — connecting a knowledge base
 
-Vocabulary (fixed, like Agents/Assistants/modules): a **knowledge provider** is any system
-that can answer "what do you know about this?" — a first-party knowledge-base module, a
-third-party product, or an operator's own wiki. A **document** is one retrievable unit of
-knowledge in one language. A **chunk** is an addressable passage of a document. Helpthread
-is always the **consumer**; the provider is always the **source**.
+Vocabulary (fixed, like Agents/Assistants/modules): a **knowledge provider** is any HTTP
+endpoint implementing this contract. A **document** is one retrievable unit of knowledge in
+one language. A **chunk** is an addressable passage of a document. Helpthread is always the
+**consumer**; the provider is always the **source**. An **adapter** is a provider
+implementation that fronts an existing product (Notion, Confluence, a static site) — §1.3
+explains why adapters are the normal case, not the exception.
 
 Status: **draft for maintainer review.** Governed by the Founding Charter (v2, adopted
 2026-07-23) — principally *Extensibility without privilege*, *Public APIs and events*,
-*Infrastructure before applications*, and *Operator ownership*. Builds on
-`substrate-v1.md`, which stays unchanged.
+*Infrastructure before applications*, and *Operator ownership*. **Amends `substrate-v1.md`
+§3** (§5.2 of this document); that amendment is explicit, not inherited.
 
 ## 1. Purpose & scope
 
@@ -21,371 +22,645 @@ it. This spec defines the public contract that makes that true.
 > "we are not going to limit Helpthread to using our KB module only - Helpthread should be
 > able to connect to any knowledgebase as a source of knowledge."
 
+That quotation decides **provider neutrality** and nothing else. Every other choice in this
+document is this spec's own, is marked as a recommendation where it is genuinely open, and
+is listed in §10 where it needs a maintainer answer.
+
 Three surfaces, all core-AGPL and free forever:
 
-1. **Provider registration** — an operator registers one or more knowledge providers.
-2. **Retrieval** — Helpthread asks a registered provider for relevant knowledge, at
-   request time, and receives passages with citations.
-3. **A consumer-facing search API** — one documented endpoint that fans out across
-   registered providers, so every consumer (the agent inbox, the embeddable widget, an AI
-   module) speaks to knowledge the same way regardless of who provides it.
+1. **Provider registration** — an operator registers one or more knowledge providers, each
+   with a fixed **exposure profile** (§2).
+2. **Retrieval** — Helpthread asks a registered provider for relevant knowledge at request
+   time and receives passages with citations.
+3. **A consumer-facing search API** — so the agent inbox, the embeddable widget, and AI
+   modules all speak to knowledge the same way regardless of who provides it.
 
-**This interface is free core and carries no commercial gate of any kind.** A first-party
-paid knowledge-base module is one implementation of this contract and receives no
-privileged path — the charter's *Extensibility without privilege* is the reason this spec
-exists rather than a direct integration.
+**This interface is free core and carries no commercial gate.** A first-party paid
+knowledge-base module is one implementation of this contract and receives no privileged
+path: no in-process API, no extra metadata channel, no privileged registration flag, and no
+relaxed customer-safety path. §8 makes that testable rather than asserted.
 
-### 1.1 Pull, not push — and why
+### 1.1 Pull, not push
 
-Helpthread **queries providers at request time**. It does not ingest, index, mirror, or
-cache provider content as a matter of course.
+Helpthread **queries providers at request time**. It does not ingest, index, or mirror
+provider content.
 
-The alternative — providers push content into a core-side index — was rejected on three
-grounds. It would put a second authoritative copy of operator knowledge inside the
-helpdesk, which is a synchronization problem with no correct answer once documents are
-edited, unpublished, or have their visibility changed. It would make the core responsible
-for reindexing on every provider-side change, requiring a resident indexing process the
-*Founding deployment posture* rules out. And it would make relevance a core concern, which
-would advantage whichever provider best matched the core's indexing assumptions — the
-opposite of an equally-available mechanism.
+**This is a recommendation, not a charter requirement.** An earlier draft claimed the
+charter's *Founding deployment posture* "rules out" a core-side indexing process; that was
+an overstatement — the charter explicitly permits "queueing, scheduled and durable work"
+behind provider interfaces. The argument for pull stands on its own merits:
 
-Pull keeps the provider authoritative over its own content, its own relevance, and its own
-permissions, and keeps the core's obligation narrow: ask well, filter defensively, cite
-honestly.
+- A core-side index is a second copy of operator knowledge, and copies desynchronize
+  exactly when it matters most — when a document is edited, unpublished, or reclassified.
+  Stale authorization state is the failure mode §2 exists to prevent.
+- It keeps relevance a provider concern. A core index would rank best for whichever provider
+  most resembled the core's indexing assumptions.
+- It keeps the core's obligation narrow: ask well, route safely, cite honestly.
 
-The cost is real and is accepted: retrieval latency sits in the request path, and a
-provider that is down means no results. §6 specifies the degradation.
+The costs are real and accepted: retrieval latency sits in the request path, a provider that
+is down contributes nothing (§6), and the core cannot search knowledge offline. If those
+costs prove wrong in practice, an optional provider-declared index is an additive change,
+not a rewrite. Recorded as open decision **§10.1**.
 
 ### 1.2 Non-goals for v1
 
-Each waits for a real consumer to need it.
-
-- **No core-side indexing, ingestion, or content storage.** §1.1.
-- **No write path.** The core never creates, edits, or publishes provider content.
-  Authoring is a provider capability (charter, *Application and module model*).
+- **No core-side indexing, ingestion, or content storage.**
+- **No write path.** Authoring, publishing, and management are provider capabilities
+  (charter, *Application and module model*).
 - **No answer generation.** This interface returns passages and citations. Composing an
-  answer belongs to the consumer — for conversation-facing answers, the separate
-  auto-answers module.
-- **No cross-provider deduplication or unified ranking beyond §5.4's stated merge.**
-- **No knowledge events.** Whether article lifecycle changes should be observable through
-  the core's event vocabulary is deliberately open (§9.3).
-- **No provider-to-provider federation.** A provider that itself aggregates other sources
-  is free to do so; the core does not orchestrate it.
+  answer belongs to the consumer.
+- **No customer-specific entitlement.** §2.4 — customer retrieval reaches globally public
+  content only.
+- **No cross-provider deduplication.** §5.5's merge is deliberately simple.
+- **No knowledge events**, no pagination (§4.5), no provider-to-provider federation.
+- **No first-party connectors for third-party products.** §1.3.
 
-## 2. The safety property this spec exists to protect
+### 1.3 What "connect any knowledge base" honestly means
 
-**Internal knowledge must never reach a customer.** Every other requirement here is
-ordinary engineering; this one is the invariant.
+**Most existing products cannot implement this contract directly.** Notion, Confluence, and
+Guru do not expose a Helpthread-shaped endpoint; a static documentation site has no
+request-time compute at all. Each needs a small **adapter** — a service that receives this
+contract's request, queries the product, and maps the result back.
 
-It is protected by **two independent gates**, deliberately redundant:
+The accurate claim is therefore: **any knowledge base with a usable search or content API
+can participate, through an adapter implementing this contract.** The unqualified "connects
+to anything" claim is not true and should not be made in documentation or marketing.
 
-1. **The provider filters.** Every retrieval request carries an explicit `audience`
-   (§4.2). A provider must return only documents permitted for that audience.
-2. **The core filters again.** Every result carries an `audience` classification (§4.3).
-   The core **drops** any result whose classification is not permitted in the requesting
-   context, before ranking, before returning, before any consumer sees it.
+**The project does not ship adapters for third-party products in v1** (maintainer decision,
+2026-08-02). The charter requires the same public mechanism, not a finished integration, and
+states directly that "Replacement does not need to be effortless. It must remain
+architecturally possible." A first-party module being designed around this interface is
+commercial advantage, not platform privilege.
 
-Gate 2 exists because gate 1 is implemented by software the project does not control. A
-third-party provider with a permissions bug must not be able to leak internal content
-through Helpthread.
+**What the project does ship, because the alternative is a contract that drifts** (maintainer
+decision, 2026-08-02): a machine-readable schema for the request and response (§4), and a
+**conformance suite written against this contract rather than against any implementation**,
+which the first-party module passes unchanged (§8). Without these, ambiguities get resolved
+silently in whatever way the only existing implementation happens to behave, and the public
+path becomes nominal without anyone deciding that it should.
 
-**Classification is a property of the concrete document**, never inherited from a
-collection, a category, a translation sibling, or any parent. The failure this forbids is
-concrete: an English article is public while its German translation is still in internal
-review; if classification were inherited from a shared parent, a German-language customer
-query would surface unapproved internal content.
+## 2. Exposure profiles — the safety model
 
-**Caching (§6.3) is keyed on audience** together with locale and the authorization scope of
-the caller. A cache that ignores audience reintroduces the leak that gates 1 and 2 removed.
+**Internal knowledge must not reach a customer.** This section is how that is pursued, and
+what it does and does not guarantee.
 
-**Test-asserted invariants:**
+### 2.1 What an earlier draft got wrong
 
-- A result classified `internal` is never returned in a `customer` context, at any layer,
-  under any provider response.
-- A malformed or missing `audience` field on a result is treated as `internal` — fail
-  closed, never open.
-- A cache entry populated for one audience is never served to another.
+An earlier draft claimed "two independent gates": the provider filters by a requested
+audience, and the core filters again on a per-result audience label. **Those gates are not
+independent.** Both rest on the same provider-supplied fact. A provider that mislabels an
+internal document as public defeats both simultaneously, and the core cannot tell that
+response from a legitimate one. The claim is withdrawn.
+
+### 2.2 The model: route by destination, isolate by credential
+
+**A provider registration carries a fixed exposure profile**, set at registration and not
+changeable by any request parameter:
+
+| Profile | Meaning |
+|---|---|
+| `customer_safe` | Its credential can reach **only** content the operator has published to the general public. |
+| `agent_only` | May reach internal content. Never queried from any customer-facing path. |
+
+**Routing is by where an answer can end up, not by who is asking:**
+
+- **Agent inbox search** — may query `customer_safe` and `agent_only` providers.
+- **The embeddable widget** — `customer_safe` only.
+- **Any Assistant that can produce customer-directed output** (a draft reply, an automated
+  response) — `customer_safe` only, *regardless of its read access elsewhere*.
+
+That last rule is the one an earlier draft got wrong by reasoning that "the reader is
+trusted." An auto-answers module reads with Assistant credentials and writes toward
+customers; it is an egress path, and human approval of a draft is an operational control,
+not a confidentiality boundary. A reviewer can approve a draft without recognising that a
+sentence in it was internal.
+
+**The boundary is the credential's reach, not the URL.** Two endpoints on one system sharing
+one unrestricted credential are not isolation. What a `customer_safe` registration must mean
+is that the credential it holds *cannot retrieve internal content at all* — an anonymous
+public API, a published site, or a separately deployed public projection. A provider may
+register twice with genuinely permission-separated credentials; it may also legitimately
+share a URL if and only if the two credentials differ in what they can reach.
+
+**`customer_safe` is the minimum useful provider.** Internal search is the optional second
+profile. A provider that only ever serves public content implements one profile and is
+complete — which keeps the cheap path the safe one, and means an adapter author is not
+forced to build internal-content handling they do not want.
+
+### 2.3 What this actually guarantees
+
+Stated precisely, because the earlier overstatement is exactly the kind of claim that gets
+believed:
+
+> Helpthread never requests or routes an `agent_only` knowledge source into a
+> customer-facing path. Whether a source registered `customer_safe` is genuinely safe to
+> disclose depends on the operator configuring it against a corpus that is already public.
+
+This buys real protection against the failures most likely to occur: core or consumer code
+mistakenly widening an audience; cache entries crossing between contexts; a stolen
+customer-path credential reaching internal material; a mixed-corpus endpoint being routed
+into the widget; an adapter leaking what it cannot itself retrieve.
+
+It does **not** prove a provider published the right content. A provider can still point its
+public credential at the wrong collection, or an operator can publish an internal article
+into a genuinely public corpus. **No contract can prevent that**, and pretending otherwise
+was the original error.
+
+The per-result `audience` field (§4.4) is retained as **schema validation and a tripwire**,
+not as an authorization decision: a `customer_safe` provider returning anything labelled
+`internal` is misconfigured, and the core drops the result and records a health warning.
+
+### 2.4 Customer retrieval reaches globally public content only
+
+There is no customer identity, tenant, plan, or entitlement in this contract. A document
+meant for one customer but not another cannot be expressed: marking it public leaks it,
+marking it internal makes it unreachable.
+
+**v1 therefore states the limit rather than implying a capability it lacks**: customer-facing
+retrieval reaches globally public content. Authenticated per-customer knowledge requires a
+customer identity that does not exist anywhere in Helpthread today, and belongs to whichever
+future module owns end-user identity.
+
+### 2.5 Fail closed
+
+- A missing, malformed, or unrecognised `audience` on a result is treated as `internal`.
+- **If no `customer_safe` provider is configured, customer-facing search returns no
+  knowledge.** It never falls back to an `agent_only` provider, and it never degrades to
+  "search everything and filter." Absence of knowledge is an acceptable outcome; disclosure
+  is not.
+- A provider whose profile is unset cannot be queried at all.
+
+### 2.6 Test-asserted invariants
+
+- No customer-facing path can query an `agent_only` provider, under any parameter,
+  credential, cache state, or provider response.
+- An Assistant capable of customer-directed output cannot obtain internal knowledge.
+- No response on a customer path contains provider identifiers, per-provider status, result
+  counts, scores, ordering signals, or translation-group keys (§5.4).
+- A `customer_safe` provider returning an `internal`-labelled result has that result dropped
+  and a health warning recorded.
+- With no `customer_safe` provider configured, widget search returns empty.
+
+### 2.7 A gap this spec does not close, stated plainly
+
+Assistants today read conversations through the same read API Agents use, which includes
+internal notes. **A perfectly safe knowledge path therefore does not deliver a general
+"internal information never reaches a customer" property** — a drafting Assistant can
+disclose an internal note instead of an internal article.
+
+That is a substrate-level issue, larger than this spec and not created by it. Closing it
+needs either a customer-visible conversation read surface that excludes internal notes, or
+an explicit statement that human review is the confidentiality control for conversation
+data. Recorded as open decision **§10.2**; this spec does not resolve it and does not claim
+the broader invariant.
 
 ## 3. Provider registration
 
-`knowledge_providers` table: `id`, `name`, `base_url` (https only), `secret`
-(server-generated, returned once, encrypted at rest via the existing token-crypto
-AES-256-GCM envelope — signing needs the plaintext back), `module text NULL` (attribution
+`knowledge_providers` table: `id`, `name`, `base_url` (https; see §3.2), `exposure_profile`
+(`customer_safe` | `agent_only`, required, immutable after creation — changing exposure
+means a new registration), `secret` (server-generated, returned once, encrypted at rest via
+the existing token-crypto AES-256-GCM envelope — signing needs the plaintext back),
+`previous_secret` + `secret_rotated_at` (nullable; §3.1), `module text NULL` (attribution
 slug, mirroring `assistants.module` / `webhook_endpoints.module` per substrate-v1 §1's
-additive-forward rule), `capabilities jsonb` (§3.2, refreshed at registration and on
-demand), `status ('active','disabled','auto_disabled')`, consecutive-failure counter,
-timestamps.
+additive-forward rule), `capabilities jsonb`, `contract_version`, `priority int` (operator
+ordering, §5.5), `status`, failure counters (§6.2), timestamps.
 
-**Admin API** (Agent-authenticated, mirroring `substrate-v1.md` §5's webhook admin shape):
-`POST /api/v1/knowledge/providers`, `GET /api/v1/knowledge/providers`, `PATCH …/{id}`,
-`DELETE …/{id}`, `POST …/{id}/test` (performs a synthetic retrieval and reports what came
-back, so an operator can prove a provider works before relying on it).
+**Admin API**: `POST /api/v1/knowledge/providers`, `GET …`, `PATCH …/{id}`, `DELETE …/{id}`,
+`POST …/{id}/rotate-secret`, `POST …/{id}/test`.
 
-### 3.1 Outbound authentication and SSRF posture
+**Authorization, stated exactly rather than by analogy.** These routes require the
+deployment's service Bearer token **plus** an `X-Helpthread-Agent-Id` naming an Agent whose
+`role === 'admin'` — the same three-part requirement the shipped webhook admin routes
+enforce (`src/api/webhooks.ts`). An earlier draft said only "Agent-authenticated," which
+would have let any Agent register an SSRF target and read back a signing secret.
+
+`POST …/{id}/test` performs a synthetic retrieval and returns what came back. It is
+**admin-only, never customer-shaped**: it does not accept an audience parameter, it queries
+only the registration under test, it writes nothing to any cache shared with live traffic,
+and it does not increment the failure counters that drive auto-disable.
+
+### 3.1 Outbound authentication
 
 Requests from Helpthread to a provider carry:
 
-- `X-Helpthread-Signature: t=<unix-ts>, v1=<hex HMAC-SHA256(secret, t + "." + body)>` —
-  the same Stripe-shape construction webhook delivery already uses (`substrate-v1.md` §5),
-  so a provider author implements one signature scheme for both directions. Providers
-  should reject a stale `t` (recommended window: 5 minutes).
-- `X-Helpthread-Request`: unique request id, for correlation in provider logs.
+- `X-Helpthread-Signature: t=<unix-ts>, n=<nonce>, v1=<hex HMAC-SHA256(secret, t + "." + n + "." + rawBody)>`
+  — the same HMAC construction shipped `signWebhookPayload` uses, extended with a nonce
+  inside the signed material. Signature is computed over the **raw body bytes**, not a
+  re-serialization.
+- `X-Helpthread-Request`: the same nonce, for log correlation.
 
-**SSRF posture, identical to webhook delivery**: https only, redirects not followed, and
-the retrieval client refuses URLs resolving to private or link-local ranges
-(resolve-then-connect pinning). A `base_url` is operator-supplied and therefore untrusted.
+**Providers must reject** — not "should" — a request whose timestamp falls outside a
+5-minute window, and must reject a repeated nonce within that window. An earlier draft's
+"should" left a compliant provider able to serve captured requests indefinitely, and left
+the request id outside the signature where it could be altered freely.
 
-### 3.2 Capability declaration and graceful degradation
+**Rotation**: `rotate-secret` mints a new secret and retains the previous one for an overlap
+window (default 24h) during which either verifies, so an adapter can redeploy without
+downtime. Signatures and secrets are never logged.
 
-A provider declares what it supports. The core adapts rather than requiring parity, because
-requiring parity would make the contract satisfiable only by providers built like ours.
+### 3.2 Network posture, and the operator's own wiki
 
-| Capability | If absent, the core… |
+https only, redirects not followed, resolve-then-connect DNS pinning — matching webhook
+delivery.
+
+**Private and link-local address ranges are refused by default.** An earlier draft named "an
+operator's own wiki" as a supported case while forbidding exactly the addresses such a wiki
+usually lives on. Both cannot be true. The resolution: a registration may set
+`allow_private_network: true`, which is **admin-only, off by default, logged, and displayed
+prominently in the admin surface as an SSRF-risk acknowledgement**. An operator running an
+internal wiki can then use it deliberately; nobody gets there by accident.
+
+### 3.3 Capability declaration
+
+A provider declares capabilities at registration, and the core re-reads them from
+`GET {base_url}/capabilities` when the operator asks. The core adapts rather than requiring
+parity — requiring parity would make the contract satisfiable only by providers built like
+the first-party one.
+
+| Capability | Absent means |
 |---|---|
-| `semanticSearch` | still sends the query; the provider does whatever matching it can |
-| `localeFallback` | does not request cross-language fallback (§4.2) |
-| `freshness` | receives no staleness signal and must not infer one (§4.3) |
-| `translationGroups` | receives no grouping data and does not synthesize any |
-| `chunking` | treats each result as a whole document; `chunkId` may be absent |
+| `semanticSearch` | the provider matches however it can; the core does not care |
+| `locale` | the core sends no locale and expects none back |
+| `localeFallback` | the core never requests cross-language fallback |
+| `freshness` | no staleness signal; the core must not infer one |
+| `translationGroups` | no grouping data; the core synthesizes none |
+| `chunking` | results are whole documents; `chunkId` absent |
+| `scoring` | no `score`; ordering falls to operator `priority` (§5.5) |
+| `citationUrl` | results carry no `url`; consumers show text without a link |
 
-**Only `retrieve` (§4) is mandatory.** Everything else is optional. A provider that
-implements one endpoint and returns whole documents with URLs is a valid, fully-supported
-knowledge provider. This is the concrete test of *Extensibility without privilege*: the
-minimum viable provider must be genuinely small.
+**Only `retrieve` is mandatory.** §8 states what "minimum viable provider" actually costs,
+because an earlier draft's claim that it was "one endpoint" was not honest accounting.
 
 ## 4. Retrieval
 
-`POST {base_url}/retrieve` — the one endpoint every provider implements.
+`POST {base_url}/retrieve`, `Content-Type: application/json; charset=utf-8`.
 
-### 4.1 Timeouts and blast radius
+### 4.1 Contract versioning
 
-10-second timeout, matching webhook delivery. Retrieval is request-scoped work in a
-serverless request path; there is no retry, because a retry doubles the latency an agent is
-staring at. A provider that times out contributes no results and increments its
-consecutive-failure counter; at the threshold it flips to `auto_disabled`, visible in the
-admin API and surfaced by `/api/v1/internal/health` — the same lifecycle
-`webhook_endpoints` already has.
+The provider contract carries its **own** version, independent of the core's `/api/v1`:
+`X-Helpthread-Knowledge-Version: 1` on every request, and `contractVersion` in every
+response. Additive optional fields do not bump it; any change to a required field, a
+default, or a filtering rule does. Unknown fields are ignored by both sides. A provider
+responding with an unsupported version is treated as failed, not as empty.
 
-**Providers are queried concurrently**, and the overall call returns when all have answered
-or the timeout expires, whichever is first. One slow provider degrades that provider, never
-the search.
+### 4.2 Limits, timeouts, and failure classes
 
-### 4.2 Request
+- **Timeout**: 10 seconds, wall clock, **including DNS resolution** — the shipped webhook
+  client's abort excludes it, and that gap is closed here rather than inherited.
+- **Response size**: 1 MiB. Larger is truncated-and-failed, never partially parsed.
+- **No retry within a request.** A retry doubles latency an agent is watching.
+- **Failure classes are distinguished**, because treating them alike disadvantages
+  externally-hosted providers that a co-located first-party module would rarely hit:
+
+| Class | Core behaviour |
+|---|---|
+| `429` / `503` with `Retry-After` | honoured; counts toward a transient budget, not the disable counter |
+| Timeout / connection failure | transient budget |
+| `401` / `403` | configuration failure — surfaced to the operator immediately, disabled after a low threshold |
+| Malformed or unsupported-version response | contract failure — surfaced, low threshold |
+| `5xx` without `Retry-After` | transient budget |
+
+Providers are queried **concurrently**; the call returns when all have answered or the
+timeout expires.
+
+### 4.3 Request
 
 ```json
 {
   "query": "customer can't reset their password",
-  "audience": "customer",
+  "limit": 10,
   "locale": "de-DE",
   "localeFallback": true,
-  "limit": 10,
   "context": { "conversationId": "uuid" }
 }
 ```
 
-- **`audience`** — `customer` or `agent`. Required. Gate 1 of §2.
-- **`locale`** — BCP 47. Optional; absent means the operator's default.
-- **`localeFallback`** — whether a provider may answer in another language when it has
-  nothing in the requested one. Only sent to providers declaring `localeFallback`.
-- **`context`** — optional, and deliberately thin. `conversationId` lets a provider that
-  also holds a Helpthread credential fetch more context itself. **The core never sends
-  conversation content, customer identity, or message bodies to a provider.** A knowledge
-  provider is a third-party system in the general case; shipping conversation data to it by
-  default would put operator data somewhere the operator did not choose to put it. Anything
-  richer is the provider's own authenticated call, on the operator's explicit configuration.
+- **`query`** — required, non-empty, ≤ 1024 characters.
+- **`limit`** — optional; default 10, maximum 50. Providers may return fewer, never more.
+- **`locale`** — BCP 47. Sent only to providers declaring `locale`.
+- **`localeFallback`** — sent only to providers declaring `localeFallback`.
+- **`context.conversationId`** — **sent only to `agent_only` providers, and only when the
+  operator has enabled it on that registration.** It is never sent to a `customer_safe`
+  provider: telling a public-facing source that a specific conversation exists is a
+  disclosure with no compensating benefit, and it would let a provider tailor results per
+  conversation on a path where the core cannot reason about who is asking.
 
-### 4.3 Response
+**No audience parameter exists.** Exposure is a property of the registration (§2.2), not of
+the request, so there is nothing for a caller to tamper with and nothing for core code to
+widen by mistake.
+
+**The core never sends conversation content, message bodies, customer identity, or
+attachments to any provider.**
+
+### 4.4 Response
 
 ```json
 {
+  "contractVersion": 1,
   "results": [
     {
       "documentId": "provider-defined-stable-id",
+      "title": "Resetting your password",
+      "snippet": "…the passage that matched, as plain text…",
+      "audience": "public",
       "revision": "opaque-version-token",
       "chunkId": "optional-passage-id",
-      "title": "Resetting your password",
-      "snippet": "…the passage that matched…",
       "url": "https://help.example.com/de/passwort-zuruecksetzen",
       "locale": "de-DE",
-      "audience": "public",
       "score": 0.87,
-      "freshness": { "state": "current", "reviewDueAt": "2026-11-01T00:00:00Z" },
+      "freshness": "current",
+      "reviewDueAt": "2026-11-01T00:00:00Z",
       "translationGroupId": "optional-provider-defined-key"
     }
   ],
-  "requestedLocale": "de-DE",
   "returnedLocale": "de-DE"
 }
 ```
 
-Required on every result: `documentId`, `title`, `url`, `audience`. Everything else is
-optional and its absence is meaningful rather than an error.
+**Required on every result: `documentId`, `title`, `snippet`, `audience`.**
 
-- **`audience`** — `public` or `internal`. Gate 2 of §2. **Missing or unrecognized is
-  treated as `internal`.**
-- **`revision`** — opaque to the core, compared only for equality. It exists so a citation
-  can name the version that was actually read, which the charter's *Actor model* requires
-  of AI work that must stay "attributable, reviewable."
-- **`locale`, `requestedLocale`, `returnedLocale`** — together these tell a consumer whether
-  it got an exact-language match or a deliberate cross-language fallback. **This distinction
-  is not cosmetic**: without it an AI consumer can translate an outdated English policy into
-  German and present it as current German guidance. Consumers are required to surface the
-  difference; §5.3 states how.
-- **`freshness`** — `current` | `stale` | `unknown`, with an optional review date. A
-  document flagged for re-review may legitimately remain published; the signal exists so a
-  consumer can decline to *auto-answer* from it while a human reading it sees it fine.
-  Absent for providers not declaring `freshness`, and absence means `unknown`, never
-  `current`.
-- **`translationGroupId`** — optional, provider-defined, opaque. Present only from providers
-  declaring `translationGroups`. **The core never requires it and never infers it.** A
-  third-party knowledge base may model translations however it likes; requiring our model
-  would hand a first-party module the privileged path this whole spec exists to prevent.
+`snippet` is required because an earlier draft made it optional while claiming a
+title-and-link-only provider was "fully supported." It is not: a provider returning no text
+supplies nothing an AI consumer can ground an answer in and nothing an agent can read
+without leaving the page. A contract whose stated minimum cannot serve its stated purpose is
+a broken contract. `snippet` is **plain text** — providers send no markup, and the core
+renders none (§4.6).
 
-### 4.4 Retrieved content is untrusted input
+Optional fields, and what their absence means:
 
-A result's `title` and `snippet` are authored content from a system the project does not
-control, and they flow onward into agent-facing UI and — through the auto-answers module —
-into AI prompts.
+- **`audience`** — `public` | `internal`. Tripwire only (§2.3), not authorization. Missing
+  or unrecognised is treated as `internal` and dropped.
+- **`revision`** — opaque, compared only for equality. A **recommended** provenance
+  mechanism so a citation can name the version actually read. An earlier draft attributed
+  this requirement to the charter's *Actor model*; the charter requires AI work to stay
+  attributable and reviewable, which is weaker and does not mandate revision tokens.
+- **`freshness`** — `current` | `stale` | `unknown`, a **string**, with `reviewDueAt` as a
+  separate optional field. (An earlier draft defined this as an object in the example and an
+  enum in the prose.) Absent means `unknown`, never `current`.
+- **`translationGroupId`** — opaque, provider-defined, **never required and never inferred**.
+  A third-party knowledge base may model translations however it likes; requiring the
+  first-party module's model would be the privileged path this spec exists to prevent.
+  **Stripped entirely on customer paths** (§5.4).
+- **`url`** — see §4.6.
+- **`returnedLocale`** — computed by the core **after filtering**, from results that survived
+  it. A provider-supplied envelope value is ignored, since it could otherwise describe a
+  document the consumer never receives.
 
-- Rendered anywhere in core UI, they are treated as untrusted text and escaped. No HTML
-  from a provider is rendered as markup by the core.
-- Passed to any model, they are data, never instructions. Consumers must not act on
-  directives appearing inside retrieved passages. This is stated in the contract because a
-  compromised or careless provider is otherwise a prompt-injection path straight into an
-  operator's outgoing customer mail.
-- `url` is validated as https before it is offered as a link.
+### 4.5 No pagination in v1
+
+Search is **top-K only, permanently in v1** — there is no cursor, no continuation token, and
+no snapshot semantics. Stable cross-provider pagination would require either a core-side
+merged result set held across requests or per-provider cursors the core cannot reconcile.
+Stated explicitly so it is a decision rather than an omission.
+
+### 4.6 Retrieved content is untrusted, and "data not instructions" is not a control
+
+A result's `title`, `snippet`, and `url` are authored in a system the project does not
+control, and they flow into agent-facing UI and into AI prompts.
+
+**Core obligations:**
+
+- `title` and `snippet` are rendered as escaped plain text. No provider-supplied markup is
+  rendered as markup, anywhere.
+- `url`, when present, must be `https`, must resolve to a **public** destination, must carry
+  no userinfo component, and is never fetched automatically by the core or offered to a model
+  as something to retrieve. A URL failing these checks is dropped and the result is shown
+  without a link.
+
+**Consumer obligations, stated normatively because an earlier draft's "treat them as data,
+never instructions" is an aspiration and not a boundary.** Models do not reliably separate
+instructions from data, and a `public` passage can contain text instructing a model to
+disclose whatever else is in its context. Therefore, any model call that can produce
+customer-directed output:
+
+1. contains **only** customer-visible conversation content and already-filtered
+   `customer_safe` results — no internal notes, no agent-context retrieval, no secrets;
+2. exposes **no tools** capable of network fetch, sending, or file access;
+3. treats retrieved passages as quoted source material in a structurally separate part of
+   the prompt, never as system or developer instruction;
+4. re-checks provenance at the outbound sink: every citation in generated output must
+   correspond to a result that actually survived filtering for that request;
+5. is exercised by prompt-injection tests in the consuming module's own suite.
+
+These are requirements on consumers, including the first-party auto-answers module. This
+spec cannot enforce them from the core, and says so rather than implying the core has.
 
 ## 5. The consumer-facing search API
 
-One endpoint, so every consumer speaks to knowledge identically.
+`POST /api/v1/knowledge/search` — POST rather than GET so query text and parameters stay out
+of URLs, logs, and referrers. Responses carry `Cache-Control: private, no-store`, and
+intermediary caching is prohibited on this route.
 
-`GET /api/v1/knowledge/search?q=…&audience=…&locale=…&limit=…`
+### 5.1 Callers and their ceilings
 
-Authenticated as either an Agent (the inbox, per `docs/modules/README.md`'s credential
-table) or an Assistant (a module, using its existing bearer token — this extends
-`substrate-v1.md` §3's fixed capability set by one read-only capability, `knowledge:read`,
-and is the only substrate change this spec requires).
+| Caller | May reach |
+|---|---|
+| Agent (service token + acting-Agent id, per `docs/modules/README.md`) | `customer_safe` + `agent_only` |
+| Assistant holding `knowledge:read_internal` | `customer_safe` + `agent_only` |
+| Assistant holding `knowledge:read_public` | `customer_safe` only |
+| Widget route (§5.3) | `customer_safe` only |
 
-### 5.1 Audience is derived, never trusted from the caller
+**The ceiling is a property of the credential, immutable per request.** There is no
+parameter by which any caller selects a wider scope.
 
-An Agent-authenticated call may request either audience. **An unauthenticated or
-customer-facing surface may only ever produce `audience=customer`** — the widget path (§5.5)
-derives it server-side and there is no parameter a browser can set to obtain internal
-content.
+### 5.2 Substrate amendment (explicit)
 
-### 5.2 What it returns
+This spec **amends `substrate-v1.md` §3**, which today defines a fixed capability set with no
+named scopes. An earlier draft claimed to leave the substrate unchanged while adding a
+capability to it — a contradiction, corrected here.
 
-The merged, filtered result set — each entry carrying its originating provider's id and
-name alongside the §4.3 fields, so a consumer can always show where an answer came from.
+Two capabilities are added, **default-deny**: `knowledge:read_public` and
+`knowledge:read_internal`. Existing Assistants receive neither on migration; an admin grants
+them explicitly. **An Assistant that can post drafts or otherwise produce customer-directed
+output must not hold `knowledge:read_internal`**, and the grant path refuses that
+combination rather than trusting configuration discipline.
 
-### 5.3 Locale honesty is mandatory for consumers
+This is the substrate's first named capability. It is deliberately two flags rather than a
+general scopes system — substrate-v1 §1's "capability enforcement lives at one point" means
+a real scopes model can replace it additively later.
 
-When `returnedLocale` differs from `requestedLocale`, the response marks the result
-`localeFallback: true`. Consumers must not silently present it as if it were in the
-requested language:
+### 5.3 The widget route
 
-- Agent-facing UI labels it ("English — no German article").
-- The auto-answers module must not generate a customer-facing answer in the requested
-  language from a fallback-language source without that fact reaching the human reviewing
-  the draft.
+The widget does **not** call §5's endpoint. It calls a distinct route with a distinct
+credential class, on which:
 
-### 5.4 Merging across providers
+- exposure is hard-wired to `customer_safe` — the concept of an agent-only provider does not
+  exist on this code path;
+- there is no audience, provider-selection, or profile parameter in the request schema;
+- the response uses the customer projection (§5.4);
+- with no `customer_safe` provider configured, it returns empty (§2.5).
 
-Ordering is by provider-reported `score` where present, with results from providers
-reporting no score interleaved round-robin after the top scored results. **This is
-deliberately simple and deliberately documented as simple.** Cross-provider relevance
-normalization is not solvable without either scoring content the core does not hold (§1.1)
-or privileging providers whose scores resemble ours. Operators can order providers
-explicitly; that ordering is the tie-break.
+An earlier draft asserted the widget "derives audience server-side" without specifying a
+route, which would have left an implementation free to expose the general endpoint and
+overwrite a parameter — a correct-by-review rather than correct-by-construction design.
 
-If real multi-provider use shows this is inadequate, the fix is a documented ordering
-policy the operator controls — not a core ranking model.
+**The widget path is free core and works with any registered `customer_safe` provider.**
+Whether the widget's own commercial terms change is a product question for the module
+catalog, not this spec; an earlier draft asserted those terms here and should not have.
 
-### 5.5 The embeddable widget
+### 5.4 Two response projections
 
-The widget consumes this endpoint through the core, which means **KB search in the free
-widget works with any registered provider and is never gated on buying a first-party
-module.** The widget remains free with Helpthread branding; branding removal remains the
-paid capability. Nothing here changes that line, and this interface is what keeps it
-honest.
+**Agent projection** — the full §4.4 fields, plus originating provider id and name, plus a
+per-provider status list (§6.1).
 
-## 6. Failure, degradation, and caching
+**Customer projection** — `title`, `snippet`, `url`, `locale`, and a `localeFallback` flag.
+**Nothing else.** Specifically absent: provider identity, per-provider status or error
+detail, result counts beyond what is returned, scores, `documentId`, `revision`, `chunkId`,
+`translationGroupId`, `audience`, and `freshness`.
+
+Each omission closes a side channel. Provider identity and status reveal an operator's
+internal tooling. Scores and counts reveal that *something* matched and was withheld —
+`translationGroupId` most sharply, since a group key present on a public German article can
+reveal that an internal sibling exists. Filtering results while leaving their metadata is
+not filtering.
+
+**Filtering happens before any cache write and again on read** (§6.3). A raw provider
+envelope is never stored where a customer path can reach it.
+
+**Timing remains an observable side channel** — a query matching withheld content may take
+measurably longer than one matching nothing. v1 does not mitigate this and says so; the
+disclosure is weak (existence, not content) and constant-time fan-out across external
+providers is not achievable. Recorded at §10.3.
+
+### 5.5 Locale honesty
+
+When `returnedLocale` differs from the requested locale, results carry `localeFallback:
+true` and consumers must surface it. Agent UI labels it. A customer-directed answer must not
+be generated in the requested language from a fallback-language source without that fact
+reaching the human reviewing the draft — otherwise an outdated English policy becomes
+confident current German guidance.
+
+### 5.6 Merging across providers
+
+**Operator `priority` is the primary ordering**, then provider-reported `score` within a
+priority band, then round-robin for providers declaring no `scoring` capability.
+
+Operator ordering leads rather than score because scores from different providers are not
+comparable, and ordering by raw score privileges whichever providers produce
+confidently-scaled numbers. Cross-provider relevance normalization is not solvable without
+scoring content the core does not hold.
+
+## 6. Failure and caching
 
 ### 6.1 A provider being down is not an error
 
-Search returns the results it has, plus a per-provider status list. A consumer showing zero
-results because the only provider timed out must be able to say so rather than implying the
-knowledge base is empty. The agent inbox never blocks on knowledge retrieval.
+The agent projection returns results plus a per-provider status list, so a consumer showing
+nothing can say why rather than implying the knowledge base is empty. The customer
+projection carries no status (§5.4). The agent inbox never blocks on retrieval.
 
-### 6.2 Auto-disable
+### 6.2 Auto-disable is a circuit breaker, not a counter
 
-Consecutive failures increment; at the threshold the provider flips to `auto_disabled` and
-stops being queried until an operator re-enables it. Identical in shape to
-`webhook_endpoints`, and surfaced the same way, so operators learn one lifecycle.
+Transient failures (§4.2) open a circuit with exponential backoff and periodic probing;
+recovery closes it without operator action. Configuration and contract failures escalate to
+the operator quickly and disable at a low threshold. Failures driven by widget traffic do
+not disable a provider for agent traffic — otherwise anonymous request volume becomes a way
+to degrade staff tooling.
 
 ### 6.3 Caching
 
-Optional, short-lived, and **keyed on `(providerId, query, audience, locale, callerScope)`**
-— every element load-bearing. A cache omitting `audience` or `callerScope` is a §2
-violation. Recommended default TTL is short (single-digit minutes): knowledge changes, and
-an operator who unpublishes an article expects it gone.
+**Customer-path responses are not cached in v1.**
 
-Cached entries are invalidated by nothing in v1 — there is no push channel from provider to
-core (§1.2). Short TTL is the whole mechanism, and that is stated rather than implied.
+A short TTL cannot deliver §2's property. If an article is unpublished or reclassified, a
+customer cache entry written legitimately moments earlier remains servable — audience keying
+does not help, because the entry was correct when written. An earlier draft acknowledged
+"invalidated by nothing in v1" while claiming an absolute guarantee; those cannot both hold,
+and the cache is what gives way.
+
+**Agent-path caching is optional**, keyed on the full tuple `(providerId, providerConfigGeneration,
+normalizedQuery, locale, localeFallback, normalizedLimit, contractVersion, callerScope)`,
+where `callerScope` is the canonical identifier of the authenticated principal and its
+granted capabilities. **Caching is disabled entirely whenever `context.conversationId` is
+present**, since the provider may have tailored results to it. Default TTL is short
+(single-digit minutes). Entries are written post-filter and re-validated on read.
 
 ## 7. What this does not require of the core
 
-Recorded so the boundary stays legible, per *Infrastructure before applications*:
+The core gains provider registration, an outbound retrieval client, routing and filtering,
+two endpoints, and two Assistant capabilities. It gains **no** content model, authoring,
+publishing, editor, taxonomy, versioning, or article schema. Those are provider concerns,
+exactly as the charter's *Application and module model* assigns them.
 
-The core gains provider registration, an outbound retrieval client, a merge-and-filter
-step, one endpoint, and one Assistant capability. It gains **no** content model, no
-authoring, no publishing, no editor, no taxonomy, no versioning, and no article schema.
-Those are provider concerns, exactly as the charter's *Application and module model*
-assigns them: "authoring, publishing, presentation, and management remain module
-capabilities."
+**Module API designation.** The routes in §3 and §5, and the provider contract in §4, are
+added to the published `docs/modules/` surface. That designation matters for the future
+AGPL-3.0 §7 additional permission, which per `legal/module-api-exception.md` is **not
+adopted and grants nothing today**; the designation is documentation, not a licensing act.
 
-## 8. Test posture
+## 8. Conformance, and honest minimum-provider accounting
 
-Beyond §2's invariants:
+### 8.1 What a minimum provider actually costs
 
-- A minimum-viable provider — one `retrieve` endpoint, no declared capabilities, whole
-  documents, no scores — is exercised end to end in tests. If that fixture ever needs more
-  than the mandatory fields, the contract has stopped being equally available and the test
-  is the alarm.
-- A provider returning malformed results, wrong content types, oversized payloads, or
-  results missing `audience` is exercised, and none of it reaches a consumer.
-- A provider that times out, and one that 500s, both degrade to a per-provider status
-  without failing the search.
-- Fallback-locale results are asserted to carry `localeFallback: true` through to the
-  consumer response.
+An earlier draft claimed "one endpoint." The honest checklist:
 
-## 9. Open questions for the maintainer
+1. A continuously-available public HTTPS endpoint with a valid certificate.
+2. Accepting and validating this contract's request schema.
+3. Verifying the HMAC signature over raw bytes, with timestamp and nonce rejection.
+4. Searching the underlying corpus and responding within 10 seconds.
+5. Producing a stable `documentId` per document.
+6. Producing `title` and a plain-text `snippet`.
+7. Emitting the response envelope with `contractVersion`.
+8. Holding a credential whose reach matches its registered exposure profile.
 
-1. **Provider ordering as operator configuration** (§5.4) — confirm that explicit operator
-   ordering plus provider-reported scores is the right v1 answer, rather than any core-side
-   relevance model. Recommendation: yes; a core ranking model over content the core does not
-   hold cannot be made fair across providers.
-2. **`context.conversationId` in the retrieval request** (§4.2) — it lets a provider fetch
-   its own context, but it also tells a third-party system that a specific conversation
-   exists. Recommendation: keep it, because the id alone carries no content and the
-   alternative is providers guessing; confirm the trade is acceptable.
-3. **Knowledge events** (§1.2) — should the core's event vocabulary learn about knowledge
-   changes, so modules can react to a published or expired article? A provider can already
-   publish its own events through its own contract. A core vocabulary amendment is warranted
-   only if the core must broker knowledge events across multiple providers. Deliberately
-   left open; no v1 dependency.
-4. **Whether `freshness` should ever be advisory to the core itself** — for example, the
-   core declining to offer a `stale` result to a customer-facing surface by default rather
-   than leaving that entirely to consumers. Recommendation: leave it to consumers in v1,
-   because a core-side policy would apply unevenly across providers that do not report
-   freshness at all.
+That is a small service, but it is a service — with hosting, a certificate, and a credential
+store. **For a static documentation site it additionally requires a search index**, since a
+static site has no request-time compute. Stating this is what keeps §1.3's claim honest.
 
-## 10. Changelog
+### 8.2 The conformance suite
 
-- **2026-08-02**: initial draft. Written after the maintainer's decision that Helpthread
-  connects to any knowledge base rather than only a first-party module. Pull-based retrieval
-  chosen over core-side indexing (§1.1); the internal-content-leak invariant and its two
-  independent gates specified (§2); capability declaration added so a minimum-viable
-  provider is genuinely small (§3.2); locale-fallback honesty made a contract requirement
-  after an adversarial review identified stale-translation answers as a concrete
-  customer-harm path (§4.3, §5.3).
+A **black-box conformance suite**, written against this contract and runnable against any
+URL, publicly available and not repository-internal. **The first-party module passes it
+unchanged, in CI**, and the suite is the definition of conformance — not the first-party
+module's behaviour.
+
+Beyond §2.6's invariants, it exercises: a minimum provider (mandatory fields only, no
+declared capabilities); malformed, oversized, wrong-content-type, and unsupported-version
+responses; results missing `audience`; each failure class in §4.2; timestamp and nonce
+rejection; secret rotation across the overlap window; and fallback-locale flagging surviving
+to the consumer.
+
+**Privilege check, asserted rather than promised**: the first-party module registers through
+the public admin API, holds no capability unavailable to a third party, receives no
+in-process call path, and reaches no field or route absent from this document.
+
+## 9. Deliberately accepted costs
+
+Recorded so they are decisions rather than discoveries: retrieval latency in the request
+path; no offline knowledge search; no pagination; no per-customer entitlement; timing side
+channels unmitigated; no customer-path caching, so every widget search is a live fan-out;
+and adapters required for existing products, written by whoever wants the integration.
+
+## 10. Open questions for the maintainer
+
+1. **Pull versus an optional provider-declared index** (§1.1) — recommendation: pull only in
+   v1; an index is additive later if latency proves unacceptable.
+2. **The conversation-notes gap** (§2.7) — a drafting Assistant can disclose an internal note
+   even with a perfectly safe knowledge path. Needs either a customer-visible conversation
+   read surface or an explicit statement that human review is the control. **Recommendation:
+   decide before the auto-answers module ships, not before this one.**
+3. **Timing side channel** (§5.4) — recommendation: accept and document for v1.
+4. **`context.conversationId` on agent-only providers** (§4.3) — off by default, operator
+   opt-in per registration. Confirm that is the right default.
+5. **`allow_private_network`** (§3.2) — confirm that an admin-only, off-by-default,
+   prominently-warned escape hatch is the right resolution for operator-hosted wikis.
+6. **MCP as an optional transport later** — the Model Context Protocol standardizes server
+   interaction and authorization but not this contract's semantics; a provider would still
+   need an MCP server. Plausible as an additional transport once the contract is stable, not
+   as a replacement for it in v1.
+
+## 11. Changelog
+
+- **2026-08-02**: initial draft, then substantially revised before review after two
+  adversarial passes (Codex, read-only). The first draft claimed "two independent gates"
+  protecting internal content; **they were not independent** — both rested on the same
+  provider-supplied label — and the claim is withdrawn and replaced by registration-level
+  exposure profiles routed by destination (§2). Other corrections: the minimum provider
+  could not return any article text, making it unable to serve its stated purpose (§4.4);
+  the widget's safe path was asserted but unspecified (§5.3); an Assistant's audience ceiling
+  was undefined, so an auto-answers module could have read internal knowledge and drafted
+  customer mail (§5.2); customer-path caching could serve reclassified content and is removed
+  (§6.3); side channels in metadata, counts, and translation-group keys were open (§5.4); the
+  substrate was said to be unchanged while being changed (§5.2); admin authorization was
+  understated (§3); replay protection was advisory (§3.1); the charter was overstated to
+  justify the pull design (§1.1); and "connects to any knowledge base" was not true without
+  the adapter qualification (§1.3). Maintainer decisions recorded 2026-08-02: the corrected
+  safety split; and module-first with no third-party connectors, but with machine-readable
+  schemas and a conformance suite the first-party module must pass.
