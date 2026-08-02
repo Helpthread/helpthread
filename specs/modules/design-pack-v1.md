@@ -6,8 +6,8 @@ out-of-process preference, zero privileged first-party access), `specs/modules/c
 
 **Not blocked on HT-93/HT-94.** The pack sources from the Claude Design project directly,
 as a sibling of `web/src/components/ds/` rather than downstream of it (§5). 16 of the 20
-components are already promoted there; the four new primitives arrive in the pack whenever
-HT-94 part B promotes them upstream.
+files are already promoted there; the four remaining files arrive in the pack whenever
+HT-94 part B promotes them upstream (see §3 for the file-vs-component counts).
 
 ## 1. Purpose
 
@@ -26,7 +26,7 @@ itself.
 
 ## 2. Why a separate package, and why permissive
 
-`web/src/components/ds/` (20 components after HT-93) and `web/src/theme/tokens/`
+`web/src/components/ds/` (20 files / 21 components after HT-93, §3) and `web/src/theme/tokens/`
 (`colors.css`, `shape.css`, `typography.css`) are the right raw material. They are also
 **AGPL-3.0**, because they live in this tree.
 
@@ -85,11 +85,30 @@ where the files came from, not what may be granted. Before the first publish:
   human review CLAUDE.md requires was real enough to support authorship, and that nothing
   was adapted from a source whose license forbids relicensing (CHARTER provenance rules).
 
-**The asymmetry that lowers the stakes:** MIT grants whatever rights exist. If some of
-the pack turns out to be uncopyrightable, the license still functions — the exposure is
-"cannot stop others from using it," not "infringing." For a pack whose entire purpose is
-for others to use it, that failure mode is close to harmless. The audit is due diligence,
-not a blocker to design around.
+**This audit is a blocking release gate, not due diligence.** An earlier draft called it
+"not a blocker to design around" on the reasoning that MIT grants only whatever rights
+exist, so a wrongly-published component leaves you unable to enforce rather than
+infringing. That reasoning holds for the *downside*, and it is still true — but it is the
+wrong test for a **one-way door**. Once published under MIT, copies already taken cannot
+be recalled, so the check has to pass *before* the release, not eventually.
+
+Concretely, before the first MIT publish:
+
+1. **Every published path** is cleared, not just components — tokens, `theme/`, typed
+   exports, and any file the package ships. A rights gap in a token file is the same
+   problem as one in a button.
+2. **Sole authorship is verified and dated**, not assumed. `git log` on `ds/` showing a
+   single author is the current evidence; it stops being sufficient the moment a DCO
+   contribution lands, because charter §3's inbound-equals-outbound rule makes those lines
+   AGPL-3.0 and unrelicensable by anyone but their author.
+3. **AI-assisted generation is reconciled** against `legal/provenance-policy.md` — single
+   authorship in `git log` records who committed, which is not by itself a determination
+   of copyright subsistence in machine-generated output.
+4. **The clearance is written down** in the pack repo and dated, so a later contributor
+   can see what was checked and when rather than re-deriving it.
+
+If any item is unresolved, the release does not ship. Publishing first and auditing after
+is the one sequence this gate exists to prevent.
 
 ## 3. Scope of the pack
 
@@ -108,17 +127,29 @@ Sourced from the design project (§5), in three layers:
 1. **Tokens** — `tokens/{colors,shape,typography}.css` plus `theme/helpthread.css`,
    published as CSS and as a typed export. This is the layer that makes §4 work.
    `fonts/fonts.css` is **excluded pending HT-99** — see §3.1.
-2. **Core components** — `components/core/`. **12 at v1**: Button, Avatar, DropdownMenu,
-   StatusPill, TagChip, Toast, TextInput, MenuItem, IconButton, EmptyState, Skeleton,
-   Kbd. **16 after HT-94 part B** promotes SplitButton, CommandMenu, SnoozePicker, and
-   CredentialRow/PasskeyList out of `templates/new-primitives/`.
+2. **Core components** — `components/core/`. **12 at v1**, one per file: Button, Avatar,
+   DropdownMenu, StatusPill, TagChip, Toast, TextInput, MenuItem, IconButton, EmptyState,
+   Skeleton, Kbd. HT-94 part B promotes **four more files** out of
+   `templates/new-primitives/`: SplitButton, CommandMenu, SnoozePicker, and
+   `CredentialRow.jsx` — which exports **two** components, `CredentialRow` and
+   `PasskeyList` (verified 2026-07-20; there is no separate `PasskeyList.jsx`).
 3. **Inbox components** — `components/inbox/` (ConversationRow, MessageBand, ToolbarBand,
    FolderItem). Included because a module rendering conversation-shaped data should
    render it the same way the desk does.
 
-**Totals, stated once to stop the drift:** v1 ships **16** (12 core + 4 inbox); after
-HT-94 part B it is **20** (16 core + 4 inbox). Every count elsewhere in this spec refers
-to the post-HT-94 figure unless it says "at v1".
+**Totals, stated once to stop the drift.** Count *files* and *components* separately —
+conflating them is what made earlier drafts of this section disagree with themselves:
+
+| | Files | Components |
+| --- | --- | --- |
+| Core at v1 | 12 | 12 |
+| Inbox | 4 | 4 |
+| **v1 total** | **16** | **16** |
+| + HT-94 part B | 4 | 5 (`CredentialRow.jsx` exports two) |
+| **After HT-94 part B** | **20** | **21** |
+
+Every count elsewhere in this spec means **files** unless it says otherwise, and refers to
+the post-HT-94 figure unless it says "at v1".
 
 ### 3.1 Fonts are excluded from v1 — HT-99
 
@@ -234,8 +265,19 @@ manifest never saw:
   exports, entry points, type declarations), plus its exact path set. Detects hand edits
   *and* files that appear or vanish, which a hash-only check would miss.
 
-Both sets are exhaustive and closed: a path present in the package but absent from the
-manifest fails the gate, same as a mismatched hash.
+There is a third category the first two miss — **files that are neither fetched nor
+generated**: `package.json`, `README.md`, `LICENSE`, CI config, anything hand-authored in
+the pack repo. A hand-edit there changes what customers receive while passing both checks
+above.
+
+- **`static`** — per-file SHA-256 of every published path that is neither sourced nor
+  generated. Changes here are legitimate and routine; the manifest just makes them
+  *visible in the diff* rather than silent.
+
+**The manifest is exhaustive over the published package, not merely over its inputs.**
+Every path the package ships appears in exactly one of the three sets. A path present in
+the package but absent from the manifest fails the gate, same as a mismatched hash — that
+rule is what makes "exhaustive" mean something rather than being an aspiration.
 
 CI then re-fetches, rebuilds, re-hashes, and compares, which distinguishes the two cases
 the byte-compare alone conflates:
