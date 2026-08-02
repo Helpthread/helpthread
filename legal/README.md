@@ -21,10 +21,11 @@ For modules that form a combined program with the core, the AGPL-3.0 §7 additio
 permission is the legal mechanism defining that boundary. Repository separation alone
 does not do so. Out-of-process integrations generally do not need the exception.
 
-See:
+See the [module API exception](module-api-exception.md).
 
-- [module API exception](module-api-exception.md); and
-- [commercial module license](module-commercial-license.md).
+Separately licensed modules are distributed from their own repositories and carry
+their own license terms there. Those terms govern nothing in this repository and are
+not published here.
 
 ## Provenance and trademarks
 
@@ -35,12 +36,10 @@ See:
 
 ## What is and is not in force
 
-The AGPL-3.0 core license is in force today. The
-[module API exception](module-api-exception.md) is not: it takes effect only when
-appended to the repository's `LICENSE`, and it must be adopted before the first
-external code contribution is merged. The commercial module license applies to paid
-modules on adoption, and the terms of sale that it cross-references are not yet
-written.
+The AGPL-3.0 core license is in force today, and it governs everything in this
+repository. The [module API exception](module-api-exception.md) is not in force: it
+takes effect only when appended to the repository's `LICENSE`, and it must be adopted
+before the first external code contribution is merged.
 
 Current delivery status and outstanding work belong in the
 [Helpthread OSS Roadmap](https://github.com/orgs/Helpthread/projects/1).
