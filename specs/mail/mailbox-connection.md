@@ -134,6 +134,11 @@ Behavioural contract:
 
 - **Provider presets.** Recognise the address's domain and prefill IMAP/SMTP hosts and ports. Unknown domains expand an Advanced section.
 - **Method availability is provider-dependent.** For an M365 business domain the app-password option is disabled *with an explanation*, never silently absent.
+
+  **Status: partially implemented (2026-07-31).** The connect screen recognises a fixed list of well-known Microsoft CONSUMER domains (`outlook.com`, `hotmail.*`, `live.*`, `msn.com`) and shows an explicit "requires OAuth" notice for them. Two deviations from the bullet above, both deliberate and neither silent:
+
+  1. **The notice is advisory, not a disabled control.** The operator can still attempt a connection and receive the real auth failure. Chosen so a diagnostic attempt stays possible; revisit when OAuth-for-Microsoft exists and there is somewhere better to send them.
+  2. **A business tenant on its own domain is not recognised at all.** `ops@contoso.example` matches no list. Detecting it needs MX/Autodiscover discovery at type-time, which this screen does not do. Adding domains narrows this gap and cannot close it.
 - **`Check connection`** performs a real IMAP login + `SELECT INBOX` and a real SMTP handshake + `AUTH`, reporting each leg independently. It must never report success from a config-shape check alone.
 - **`Send test email`** sends an actual message through the operator's SMTP and confirms it is observed back through the fetch path. This round trip is the single most valuable element on the screen, and it is what today's setup path has no equivalent of — which is why silent misconfiguration currently survives to production.
 

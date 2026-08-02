@@ -154,21 +154,54 @@ const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
  * business as **No** and consumer Outlook.com as *unresolved — test before
  * claiming support*. Presets for these domains shipped anyway; this is the
  * correction. Verified against Microsoft's own documentation 2026-07-31.
+ *
+ * ## This list CANNOT detect Microsoft, and must not be read as if it does
+ *
+ * It is an exact-match hint for well-known CONSUMER domains, nothing more. A
+ * Microsoft 365 business tenant uses its own domain — `ops@contoso.example`
+ * has no Microsoft-shaped string in it — so it matches nothing here, gets no
+ * notice, and the operator is invited to enter an app password Exchange
+ * Online will refuse. Subdomains (`user@mail.outlook.com`) miss for the same
+ * reason.
+ *
+ * Real detection needs provider discovery (an MX or Autodiscover lookup at the
+ * moment the address is typed), which this screen does not do. Until it does,
+ * spec §4's requirement that "for an M365 business domain the app-password
+ * option is disabled with an explanation" is **not implemented** — recorded
+ * there as a known gap rather than quietly assumed satisfied by this list.
+ * Adding more domains narrows the gap; it never closes it.
  */
 const OAUTH_ONLY_DOMAINS: Record<string, string> = {
   'outlook.com': 'Outlook',
+  'outlook.co.uk': 'Outlook',
   'hotmail.com': 'Outlook',
+  'hotmail.co.uk': 'Outlook',
+  'hotmail.de': 'Outlook',
+  'hotmail.fr': 'Outlook',
+  'hotmail.it': 'Outlook',
+  'hotmail.es': 'Outlook',
   'live.com': 'Outlook',
+  'live.co.uk': 'Outlook',
+  'live.ca': 'Outlook',
+  'live.com.au': 'Outlook',
+  'msn.com': 'Outlook',
+  'passport.com': 'Outlook',
   'office365.com': 'Microsoft 365',
 }
 
 function domainFromAddress(address: string): string | null {
   const at = address.lastIndexOf('@')
   if (at < 0 || at === address.length - 1) return null
-  return address
-    .slice(at + 1)
-    .trim()
-    .toLowerCase()
+  return (
+    address
+      .slice(at + 1)
+      .trim()
+      .toLowerCase()
+      // A trailing dot is a legal fully-qualified DNS name (`outlook.com.`) and
+      // resolves to the same host, so leaving it on let an address slip past
+      // both maps — no preset AND no OAuth notice (review, 2026-07-31).
+      .replace(/\.+$/, '')
+  )
 }
 
 function parsePort(value: string): number | null {
