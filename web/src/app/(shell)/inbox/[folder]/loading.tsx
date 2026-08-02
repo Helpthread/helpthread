@@ -13,7 +13,7 @@ function SkeletonRow() {
         display: 'flex',
         alignItems: 'center',
         gap: 14,
-        padding: '9px 14px',
+        padding: '9px 24px 9px 14px',
         borderBottom: '1px solid var(--ht-divider)',
       }}
     >
@@ -38,7 +38,7 @@ export default function InboxLoading() {
         flexDirection: 'column',
       }}
     >
-      <ToolbarBand />
+      <ToolbarBand style={{ paddingRight: 24 }} />
       <div>
         <SkeletonRow />
         <SkeletonRow />
