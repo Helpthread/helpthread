@@ -108,7 +108,7 @@
  */
 
 import type { Db } from '../db/client.js'
-import { LATEST_MIGRATION_ID } from '../db/migrate.js'
+import { LATEST_MIGRATION_ID, MIGRATION_IDS } from '../db/migrate.js'
 import type { QueueStats } from '../providers/adapters/postgres-queue/index.js'
 import type { InboundDeliveryStatus } from '../store/inbound-deliveries.js'
 import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
@@ -201,8 +201,10 @@ export interface HealthReport {
   schema: {
     /** Highest migration id in this build (`LATEST_MIGRATION_ID`). */
     expectedMigrationId: number
-    /** Highest id actually recorded in `_migrations`; `null` when the table does not exist yet (never migrated). */
+    /** Highest id actually recorded in `_migrations`; `null` when the table does not exist, or exists with no rows. */
     appliedMigrationId: number | null
+    /** Every migration id this build has that the database does not — empty when in step. A GAP is reported here, not hidden behind `max(id)`. */
+    missing: number[]
   }
 }
 
@@ -228,9 +230,142 @@ const ALL_DELIVERY_STATUSES: InboundDeliveryStatus[] = [
  * fails (a down database IS a health-check failure; the endpoint's generic
  * 500 — and the monitor alerting on any non-200 — reports it honestly).
  */
+/**
+ * Read the database's applied-migration state. Split out and run FIRST because
+ * every other check in this module queries an application table, and on a
+ * database that has not been migrated those queries throw — burying the one
+ * diagnostic that would have explained why (found by adversarial review,
+ * 2026-08-02; the original version failed exactly the fresh-install case it
+ * was written for, and its test passed only because it migrated first and
+ * dropped `_migrations` afterwards, leaving every other table in place).
+ *
+ * Existence is checked in its OWN statement. A single
+ * `CASE WHEN to_regclass(...) ... ELSE (SELECT max(id) FROM _migrations)`
+ * does not work: Postgres resolves the relation at parse time, so the subquery
+ * errors before the CASE can short-circuit.
+ *
+ * Returns every applied id, not just the highest. `max(id)` alone would call a
+ * database healthy when it holds 1..26 plus 29 and is missing 27 and 28 —
+ * `migrate()`'s single transaction makes that unreachable through the normal
+ * path, but manual repair and hand-edited bookkeeping are exactly when a
+ * health check earns its place.
+ */
+async function readSchemaState(db: Db): Promise<{ applied: number[] | null }> {
+  const table = await db.query<{ exists: string | null }>(
+    `SELECT to_regclass('_migrations')::text AS exists`,
+  )
+  if (table[0]?.exists == null) {
+    return { applied: null }
+  }
+  const rows = await db.query<{ id: number }>('SELECT id FROM _migrations ORDER BY id')
+  return { applied: rows.map((r) => r.id) }
+}
+
+/** Build the schema section + any alert it trips. Pure, so the ordering above stays obvious. */
+function assessSchema(applied: number[] | null): {
+  section: HealthReport['schema']
+  alerts: string[]
+} {
+  const expectedIds = [...MIGRATION_IDS]
+  if (applied === null) {
+    return {
+      section: {
+        expectedMigrationId: LATEST_MIGRATION_ID,
+        appliedMigrationId: null,
+        missing: expectedIds,
+      },
+      alerts: [
+        `${SCHEMA_BEHIND_ALERT}: the database has no _migrations table — it has never been migrated. This build expects migration ${LATEST_MIGRATION_ID}. Run \`npm run migrate\`.`,
+      ],
+    }
+  }
+  const appliedSet = new Set(applied)
+  const missing = expectedIds.filter((id) => !appliedSet.has(id))
+  const highestApplied = applied.length === 0 ? null : applied[applied.length - 1]
+  const section = {
+    expectedMigrationId: LATEST_MIGRATION_ID,
+    appliedMigrationId: highestApplied,
+    missing,
+  }
+  if (missing.length > 0) {
+    // Named individually rather than as "behind by N": a GAP is a different
+    // problem from simply being behind, and the list says which it is.
+    return {
+      section,
+      alerts: [
+        `${SCHEMA_BEHIND_ALERT}: database is missing migration(s) ${missing.join(', ')}; this build expects through ${LATEST_MIGRATION_ID}. Run \`npm run migrate\`. Until then, code paths using the newer schema will fail.`,
+      ],
+    }
+  }
+  if (highestApplied !== null && highestApplied > LATEST_MIGRATION_ID) {
+    return {
+      section,
+      alerts: [
+        `${SCHEMA_AHEAD_ALERT}: database is at migration ${highestApplied} but this build only knows ${LATEST_MIGRATION_ID}. The running deployment is older than the schema — likely a rollback, or a deploy that never shipped.`,
+      ],
+    }
+  }
+  return { section, alerts: [] }
+}
+
 export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthReport> {
   const alerts: string[] = []
 
+  // --- Schema version, FIRST. -----------------------------------------------
+  // Everything below queries an application table; on an un-migrated or older
+  // schema those throw. Knowing the schema state up front is what lets a
+  // failure below be reported as "you have not migrated" instead of a generic
+  // 500 naming whichever table happened to be queried first.
+  const { applied } = await readSchemaState(deps.db)
+  const schemaAssessment = assessSchema(applied)
+  alerts.push(...schemaAssessment.alerts)
+
+  // Everything from here queries an application table. If the schema is behind,
+  // a failure here is EXPLAINED by that, so report the explanation rather than
+  // letting a raw "relation ... does not exist" reach the operator as a 500.
+  // A failure with an in-step schema is a real fault and still propagates.
+  try {
+    return await runTrafficChecks(deps, alerts, schemaAssessment.section)
+  } catch (err) {
+    if (schemaAssessment.alerts.length === 0) {
+      throw err
+    }
+    return {
+      ok: false,
+      alerts: [
+        ...schemaAssessment.alerts,
+        `health-checks-unavailable: the remaining checks could not run against this schema (${err instanceof Error ? err.message : String(err)}).`,
+      ],
+      generatedAt: new Date().toISOString(),
+      queue: { ready: 0, oldestReadyAgeSeconds: null, deadLettered: 0, deadLetteredLast24h: 0 },
+      ingest: { last24hByStatus: emptyStatusCounts(), deadLetterTotal: 0 },
+      forgedTokens: {
+        deliveriesLast24h: 0,
+        tokensLast24h: 0,
+        alertThreshold: FORGED_TOKEN_ALERT_THRESHOLD,
+      },
+      mailboxes: [],
+      webhooks: { autoDisabled: [], deliveryFailuresLast24h: 0 },
+      webauthn: { counterRegressionsLast24h: 0 },
+      schema: schemaAssessment.section,
+    }
+  }
+}
+
+/** Zero-filled per-status map, for the degraded report above. */
+function emptyStatusCounts(): Record<InboundDeliveryStatus, number> {
+  return Object.fromEntries(ALL_DELIVERY_STATUSES.map((k) => [k, 0])) as Record<
+    InboundDeliveryStatus,
+    number
+  >
+}
+
+/** Every check that reads an application table. Split out so the schema guard above can wrap it. */
+async function runTrafficChecks(
+  deps: HealthCheckDeps,
+  alerts: string[],
+  schema: HealthReport['schema'],
+): Promise<HealthReport> {
   // --- Queue. ---------------------------------------------------------------
   const stats = await deps.queue.getStats()
   const deadLetteredLast24hRows = await deps.db.query<{ count: number }>(
@@ -390,42 +525,6 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
     )
   }
 
-  // --- Schema version. ------------------------------------------------------
-  // Existence is checked in its OWN statement, before anything references the
-  // table. A single CASE/to_regclass query does NOT work: Postgres resolves
-  // `_migrations` when it parses the statement, so the subquery errors before
-  // the CASE can short-circuit — which would turn "you have never migrated",
-  // the single most likely first-run state, into a generic 500 with no
-  // explanation. Caught by this module's own test.
-  const migrationsTable = await deps.db.query<{ exists: string | null }>(
-    `SELECT to_regclass('_migrations')::text AS exists`,
-  )
-  const appliedMigrationId =
-    migrationsTable[0]?.exists == null
-      ? null
-      : ((
-          await deps.db.query<{ applied: number | null }>(
-            'SELECT max(id) AS applied FROM _migrations',
-          )
-        )[0]?.applied ?? null)
-
-  if (appliedMigrationId === null) {
-    alerts.push(
-      `${SCHEMA_BEHIND_ALERT}: the database has no _migrations table — it has never been migrated. This build expects migration ${LATEST_MIGRATION_ID}. Run \`npm run migrate\`.`,
-    )
-  } else if (appliedMigrationId < LATEST_MIGRATION_ID) {
-    alerts.push(
-      `${SCHEMA_BEHIND_ALERT}: database is at migration ${appliedMigrationId}, this build expects ${LATEST_MIGRATION_ID}. Run \`npm run migrate\`. Until then, code paths using the newer schema will fail.`,
-    )
-  } else if (appliedMigrationId > LATEST_MIGRATION_ID) {
-    // Not necessarily broken — an older build serving a newer database usually
-    // means a rollback — but it is never intentional-and-fine, so it is said
-    // out loud rather than passed silently.
-    alerts.push(
-      `${SCHEMA_AHEAD_ALERT}: database is at migration ${appliedMigrationId} but this build only knows ${LATEST_MIGRATION_ID}. The running deployment is older than the schema — likely a rollback, or a deploy that never shipped.`,
-    )
-  }
-
   return {
     ok: alerts.length === 0,
     alerts,
@@ -440,7 +539,7 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
     mailboxes,
     webhooks: { autoDisabled, deliveryFailuresLast24h },
     webauthn: { counterRegressionsLast24h: webauthnCounterRegressionsLast24h },
-    schema: { expectedMigrationId: LATEST_MIGRATION_ID, appliedMigrationId },
+    schema,
   }
 }
 

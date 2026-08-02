@@ -447,6 +447,7 @@ describe('runHealthCheck', () => {
       expect(report.schema).toEqual({
         expectedMigrationId: LATEST_MIGRATION_ID,
         appliedMigrationId: LATEST_MIGRATION_ID,
+        missing: [],
       })
       expect(report.alerts.some((a) => a.startsWith('schema-'))).toBe(false)
     })
@@ -464,8 +465,8 @@ describe('runHealthCheck', () => {
       expect(alert).toBeDefined()
       // The message has to be actionable on its own — someone reading a 503
       // body at 3am should not need to go find this file.
-      expect(alert).toContain(`database is at migration ${LATEST_MIGRATION_ID - 1}`)
-      expect(alert).toContain(`expects ${LATEST_MIGRATION_ID}`)
+      expect(alert).toContain(`missing migration(s) ${LATEST_MIGRATION_ID}`)
+      expect(alert).toContain(`expects through ${LATEST_MIGRATION_ID}`)
       expect(alert).toContain('npm run migrate')
     })
 
@@ -483,13 +484,16 @@ describe('runHealthCheck', () => {
       expect(report.alerts.some((a) => a.startsWith('schema-newer-than-build: '))).toBe(true)
     })
 
-    it('reports a never-migrated database instead of throwing — the likeliest first-run state', async () => {
+    // A GENUINELY empty database — nothing migrated, no application tables at
+    // all. This is the fresh-install case, and the one the diagnostic exists
+    // for. An earlier version of this test migrated first and then dropped only
+    // `_migrations`, which left every other table in place and so proved
+    // nothing: the real code threw `relation "queue_jobs" does not exist`
+    // before ever reaching the schema check (adversarial review, 2026-08-02).
+    it('DIAGNOSES a completely empty database rather than throwing on the first missing table', async () => {
       const database = await createPgliteDb()
       db = database
-      // Deliberately NOT migrated: no `_migrations` table exists at all.
       const queue = createPostgresQueue(database)
-      await migrate(database)
-      await database.query('DROP TABLE _migrations')
 
       const report = await runHealthCheck({ db: database, queue, pushConfigured: true })
 
@@ -498,6 +502,40 @@ describe('runHealthCheck', () => {
       const alert = report.alerts.find((a) => a.startsWith('schema-migration-pending: '))
       expect(alert).toContain('never been migrated')
       expect(alert).toContain('npm run migrate')
+      // And it says why the rest of the report is empty, rather than pretending
+      // those sections were checked and found healthy.
+      expect(report.alerts.some((a) => a.startsWith('health-checks-unavailable: '))).toBe(true)
+    })
+
+    it('reports a GAP in the applied history — max(id) alone would call this healthy', async () => {
+      const { database, check } = await fresh()
+      // 1..26 + 29 applied, 27 and 28 missing. `max(id)` equals the build's
+      // latest, so a highest-id-only check sees nothing wrong.
+      await database.query('DELETE FROM _migrations WHERE id IN ($1, $2)', [
+        LATEST_MIGRATION_ID - 2,
+        LATEST_MIGRATION_ID - 1,
+      ])
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBe(LATEST_MIGRATION_ID)
+      expect(report.schema.missing).toEqual([LATEST_MIGRATION_ID - 2, LATEST_MIGRATION_ID - 1])
+      const alert = report.alerts.find((a) => a.startsWith('schema-migration-pending: '))
+      expect(alert).toContain(
+        `missing migration(s) ${LATEST_MIGRATION_ID - 2}, ${LATEST_MIGRATION_ID - 1}`,
+      )
+    })
+
+    it('reports an existing-but-empty _migrations table as missing everything', async () => {
+      const { database, check } = await fresh()
+      await database.query('DELETE FROM _migrations')
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBeNull()
+      expect(report.schema.missing).toContain(LATEST_MIGRATION_ID)
     })
   })
 })
