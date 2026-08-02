@@ -20,9 +20,14 @@ fork-based modules alike.
 
 ---
 
-## The exception text
+## The exception text — not adopted, grants nothing
 
 > ### Additional permission under GNU AGPL version 3 section 7 — the Helpthread Module API Exception
+>
+> **NOT ADOPTED — THIS PERMISSION GRANTS NOTHING.** This text has not been appended to
+> the Program's `LICENSE` and is not part of the Program's licensing. No one may rely on
+> it. The Program is licensed under the unmodified GNU AGPL-3.0. This notice is not part
+> of the permission and is deleted when the permission is adopted.
 >
 > If you modify this Program, or any covered work, by combining it with one or more
 > Helpthread Modules (as defined below), or by linking, loading, or invoking such
