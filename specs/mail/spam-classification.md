@@ -3,8 +3,10 @@
 **Status: PARTIALLY BUILT.** §3.1 and §4 are implemented and tested (the provider
 verdict, Gmail's half of it, and the status decision at ingest). §3.2 (header-derived
 signals), §5 (the reclassification loop) and §6 (operator controls) are specified but
-**not built** — and §5.3 and §6 carry open decisions the maintainer has not made. See
-§7 for the decision ledger.
+**not built**. Every blocking decision is now made — §5.3 (no writeback to the operator's
+mailbox) and §6 (on by default, with an off switch) were answered by the maintainer on
+2026-08-02 and are quoted in §7's ledger. What remains unbuilt is implementation work,
+not open questions.
 
 Companion to [inbound-ingestion.md](./inbound-ingestion.md), whose three invariants this
 spec is subordinate to, and [threading.md](./threading.md), whose reply-token decision
@@ -194,18 +196,40 @@ It is already recorded by `setStatus`.
 A sender an Agent has rescued from spam should not be re-classified on their next
 message. The intended mechanism is per-mailbox sender state, not a global list.
 
-### 5.3 Feeding corrections back to the provider — OPEN
+### 5.3 Feeding corrections back to the provider — DECIDED: no
 
-Gmail's API can remove the `SPAM` label, which trains the operator's own filter. Doing so
-means writing to the operator's mailbox in a way they did not directly ask for, on a
-schedule they cannot see. **Not decided** (§7, D3).
+Gmail's API can remove the `SPAM` label, which would train the operator's own filter.
+**Helpthread does not do this** (maintainer, 2026-08-02: "no writeback"). Corrections stay
+inside Helpthread's own database.
+
+This is a boundary, not a deferral: Helpthread reads the operator's mailbox and does not
+write classification state back into it. A correction made here changes what Helpthread
+believes, never what the operator's mail provider believes. An operator who wants Gmail
+retrained does it in Gmail, where they can see it.
+
+Consequence to be honest about: the same sender can keep arriving with a `'spam'` verdict
+after being rescued, because Google's opinion is unchanged. §5.2's per-mailbox sender
+state is what absorbs that, and it is why allow-listing is not optional once §5 is built.
 
 ## 6. Operator controls (NOT BUILT)
 
-Whether automatic classification is on by default, and whether it can be turned off, is
-**not decided** (§7, D1). The rest of the surface follows from that answer: a settings
-toggle, and whether the Spam folder shows a "filed automatically" affordance distinct
-from "an Agent filed this."
+**On by default, with an off switch** (maintainer, 2026-08-02: "on by default with an off
+switch"). Automatic classification applies to a newly connected mailbox with no setup, and
+an operator who does not want it can turn it off.
+
+Three consequences follow, and none are built yet:
+
+- **The switch is per-mailbox, not global.** Mailboxes are connected independently and an
+  operator may trust one provider's filtering and not another's. (INFERRED — the grain was
+  not specified in the decision above; per-mailbox is the author's reading, and it is a
+  two-way door.)
+- **Off means the verdict is not read at all**, not that it is read and ignored. A message
+  arriving at a mailbox with classification off is filed `active` regardless of its label,
+  exactly as before this spec existed.
+- **The Spam folder distinguishes "filed automatically" from "an Agent filed this."**
+  Without that, an operator cannot audit what the classifier did, and cannot tell a
+  mistake of theirs from a mistake of ours. The storage for this does not exist yet —
+  `status` alone does not record who set it.
 
 ## 7. Decision ledger
 
@@ -217,11 +241,16 @@ source. Anything marked **INFERRED** is the author's judgment and has not been a
 | — | Build the fix plus a spec for real auto-classification, rather than the fix alone | Maintainer, 2026-08-02: "b" (in reply to the (a) fix-only / (b) fix-plus-spec choice) |
 | — | Spam is never auto-classified in v1 | Prior accepted spec, agent-inbox-v1.md §3a |
 | D0 | Junk mail is stored and filed as `spam`, never dropped at intake | ⚠️ INFERRED — follows from inbound-ingestion.md §1's never-dropped invariant, but applying it to junk specifically is the author's reading |
-| D1 | Whether automatic spam classification is on by default, and whether an operator can turn it off | ⚠️ INFERRED — unresolved; §6 is unbuildable until answered |
+| D1 | Automatic spam classification is **on by default**, and an operator can **switch it off** | Maintainer, 2026-08-02: "on by default with an off switch" |
+| D1a | That switch is **per-mailbox** rather than global | ⚠️ INFERRED — the grain was not part of D1's answer. A two-way door |
 | D2 | A spam-verdict message whose reply token names a *deleted* conversation is filed as spam | ⚠️ INFERRED — the valid token argues it is a real customer; the deletion argues an Agent already discarded that thread. Uniform rule chosen for simplicity, not because the edge was decided |
-| D3 | Whether an Agent's "not spam" correction is written back to the operator's Gmail | ⚠️ INFERRED — unresolved. Writing to the operator's mailbox unprompted is a one-way door of a kind the charter's data-ownership promise touches |
+| D3 | An Agent's "not spam" correction is **never** written back to the operator's Gmail | Maintainer, 2026-08-02: "no writeback" |
 | D4 | Header scoring requires one strong or two weak signals; a lone weak signal never classifies | ⚠️ INFERRED — a conservative default, not a measured threshold |
 | D5 | `Auto-Submitted` is a loop-guard concern, not a spam signal | ⚠️ INFERRED |
 
-**One-way door:** none in what is built. D3 would be one — it modifies state in the
-operator's own mailbox, outside Helpthread's database.
+**One-way door:** none, in what is built or specified. The only candidate was writing
+classification state back into the operator's own mailbox, and D3 closed that door rather
+than walking through it — Helpthread reads the operator's mail and does not write its own
+opinions into it. Every remaining INFERRED row above (D0, D1a, D2, D4, D5) is a two-way
+door: each changes a default or a threshold, and reversing any of them costs one edit and
+no migration.
