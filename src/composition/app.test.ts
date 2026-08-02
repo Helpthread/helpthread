@@ -28,6 +28,7 @@ const HEALTHY_REPORT: HealthReport = {
   mailboxes: [],
   webhooks: { autoDisabled: [], deliveryFailuresLast24h: 0 },
   webauthn: { counterRegressionsLast24h: 0 },
+  schema: { expectedMigrationId: 1, appliedMigrationId: 1, missing: [] },
 }
 
 /** Build a handler over spy deps; the inbox API spy returns a recognizable 299 so delegation is observable. */
