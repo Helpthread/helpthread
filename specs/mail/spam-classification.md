@@ -80,6 +80,23 @@ header signals will need to tell them apart — header scoring should defer to a
   field is populated. This runs **after** the self-echo filter, so our own outbound reply
   that Gmail happened to file as junk is skipped entirely rather than filed as a spam
   conversation.
+
+  **This is best-effort, not complete, and the boundary is worth stating precisely.**
+  `history.list` is a delta stream, not a snapshot. The history client requests
+  `labelAdded` alongside `messageAdded` and set-unions the label deltas
+  (`src/providers/adapters/gmail/history.ts`), so a message that arrives labeled `INBOX`
+  and is classified `SPAM` moments later — **within the same reconcile window** — is
+  correctly seen as spam. What is *not* covered: a `SPAM` label applied **after** the
+  window's `history.list` snapshot. That message has already been ingested as `active`,
+  and the next reconcile deliberately ignores a `labelsAdded` record for an id it did not
+  itself newly add (otherwise any re-labeling of any old message would manufacture an
+  ingest). So it stays `active`.
+
+  This is not a regression — before this spec, *every* spam message stayed `active` — but
+  it means the feature must not be described as "Gmail's spam filtering now applies."
+  It applies to mail Gmail had classified by the time we read the history window, which
+  is the common case and not all cases. Closing the remainder is §5's reclassification
+  problem, not something the intake path can solve.
 - **IMAP** (built by omission): the client opens `INBOX`, so a server-side Junk move
   means the message is never fetched. The field is not supplied ⇒ `'unknown'`. This is
   the correct verdict: we genuinely do not know, because we never saw the message at all.

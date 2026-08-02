@@ -713,7 +713,13 @@ describe('createGmailReconcileHandler', () => {
       expect((ingest.mock.calls[0][0] as RawInboundMessage).providerSpamVerdict).toBe('clean')
     })
 
-    it("a message with no labelIds at all reports 'unknown' — Gmail omitted the field, so we assert nothing either way", async () => {
+    // `[]` IS the omitted-field case at this seam: the history client
+    // normalizes an absent `labelIds` to `[]` before this handler ever sees
+    // it (`../providers/adapters/gmail/history.ts` — "Defaults to [] when
+    // Gmail's response omits labelIds"), so `ListedMessage.labelIds` is
+    // always a present array. There is no separate `undefined` shape to test
+    // here; that normalization is the adapter's own contract.
+    it("an empty label set reports 'unknown' — the shape an omitted labelIds is normalized to, so we assert nothing either way", async () => {
       const { store: watchStateStore } = fakeWatchStateStore({ [MAILBOX_ID]: 'cursor-1' })
       const historyClient = fakeHistoryClient({
         listResult: {
