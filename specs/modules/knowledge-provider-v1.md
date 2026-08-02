@@ -195,8 +195,9 @@ future module owns end-user identity.
 - No customer-facing path can query an `agent_only` provider, under any parameter,
   credential, cache state, or provider response.
 - An Assistant capable of customer-directed output cannot obtain internal knowledge.
-- No response on a customer path contains provider identifiers, per-provider status, result
-  counts, scores, ordering signals, or translation-group keys (§5.4).
+- No response on a customer path contains **explicit** provider identifiers, per-provider
+  status, total-result counts, scores, ordering metadata, or translation-group keys (§5.4).
+  ("Explicit" is load-bearing — §5.4 names the residual signals this cannot remove.)
 - A `customer_safe` provider returning an `internal`-labelled result has that result dropped
   and a health warning recorded.
 - With no `customer_safe` provider configured, widget search returns empty.
@@ -254,9 +255,19 @@ Requests from Helpthread to a provider carry:
 "should" left a compliant provider able to serve captured requests indefinitely, and left
 the request id outside the signature where it could be altered freely.
 
-**Rotation**: `rotate-secret` mints a new secret and retains the previous one for an overlap
-window (default 24h) during which either verifies, so an adapter can redeploy without
-downtime. Signatures and secrets are never logged.
+**Rotation**: the core is the *signer* and the provider the *verifier*, so an overlap window
+only works if the core sends both signatures. `rotate-secret` mints a new secret and retains
+the previous one for a window (default 24h); during it, the core emits **both** in one
+header — `v1=<hmac-new>,v1=<hmac-previous>` — and a provider accepts the request if **any**
+`v1` value matches the secret it holds. This is the multi-signature scheme Stripe uses for
+the same reason. An adapter can then be redeployed with the new secret at any point in the
+window with no failed requests in either direction.
+
+(An earlier draft said the core "retains the previous secret… during which either verifies,"
+which does nothing: the core signs with exactly one secret, so a provider still holding the
+old one would have rejected every request.)
+
+Signatures, secrets, and nonces are never logged.
 
 ### 3.2 Network posture, and the operator's own wiki
 
@@ -349,8 +360,17 @@ timeout expires.
 the request, so there is nothing for a caller to tamper with and nothing for core code to
 widen by mistake.
 
-**The core never sends conversation content, message bodies, customer identity, or
-attachments to any provider.**
+**What the core sends, stated accurately.** The core never *itself* adds conversation
+content, message bodies, customer identity, or attachments to a retrieval request — the
+fields above are the entire request. But `query` is caller-supplied text, and a caller can
+put anything in it: an agent may paste a customer's words, and an automated consumer may
+build a query from a conversation. **So the guarantee is on the core's own construction, not
+on the bytes that ultimately leave.**
+
+Consumers therefore carry an obligation the core cannot enforce: a consumer that derives a
+query from conversation content must send only what retrieval needs, and must treat a
+provider as a third-party recipient of whatever it puts in `query`. This is stated because
+an earlier draft's absolute claim was false and would have been relied on.
 
 ### 4.4 Response
 
@@ -453,15 +473,26 @@ intermediary caching is prohibited on this route.
 
 ### 5.1 Callers and their ceilings
 
-| Caller | May reach |
-|---|---|
-| Agent (service token + acting-Agent id, per `docs/modules/README.md`) | `customer_safe` + `agent_only` |
-| Assistant holding `knowledge:read_internal` | `customer_safe` + `agent_only` |
-| Assistant holding `knowledge:read_public` | `customer_safe` only |
-| Widget route (§5.3) | `customer_safe` only |
+Three things are fixed per credential — what it may reach, which projection it receives, and
+whether its results may be cached. They are decided together, by **egress class**: whether
+the caller can put text in front of a customer.
 
-**The ceiling is a property of the credential, immutable per request.** There is no
-parameter by which any caller selects a wider scope.
+| Caller | May reach | Projection | Cacheable |
+|---|---|---|---|
+| Agent (service token + acting-Agent id, per `docs/modules/README.md`) | `customer_safe` + `agent_only` | agent | yes (§6.3) |
+| Assistant holding `knowledge:read_internal` | `customer_safe` + `agent_only` | agent | yes (§6.3) |
+| Assistant holding `knowledge:read_public` | `customer_safe` only | **customer** | **no** |
+| Widget route (§5.3) | `customer_safe` only | customer | no |
+
+**The ceiling is a property of the credential, immutable per request.** No parameter selects
+a wider scope.
+
+The third column is not cosmetic. An earlier draft left Assistant callers unassigned, which
+left a real disclosure path: a `customer_safe` result is cached while public, its source
+article is then unpublished or reclassified, and a drafting Assistant serves the stale entry
+into customer output. Any credential that can reach a customer therefore gets the customer
+projection and no caching, so the freshness rule in §6.3 covers every egress path rather
+than only the widget.
 
 ### 5.2 Substrate amendment (explicit)
 
@@ -478,6 +509,18 @@ combination rather than trusting configuration discipline.
 This is the substrate's first named capability. It is deliberately two flags rather than a
 general scopes system — substrate-v1 §1's "capability enforcement lives at one point" means
 a real scopes model can replace it additively later.
+
+**`knowledge:read_internal` is unreachable in v1, and this spec says so rather than shipping
+a dead grant.** Every Assistant under the shipped model can post drafts and notes — that is
+the fixed capability set, not a configurable one — so *every* Assistant is a customer-output
+principal, and the rule above forbids all of them the internal grant. Making it reachable
+requires draft-posting to become separately revocable, which is substrate work this spec does
+not do.
+
+The consequence, stated plainly: **in v1, Assistants get `knowledge:read_public` and nothing
+else.** `knowledge:read_internal` is defined here so the model is coherent and so a
+non-drafting Assistant class has somewhere to land when it exists. An implementation must
+refuse to grant it until then rather than granting it and relying on operator discipline.
 
 ### 5.3 The widget route
 
@@ -517,10 +560,22 @@ not filtering.
 **Filtering happens before any cache write and again on read** (§6.3). A raw provider
 envelope is never stored where a customer path can reach it.
 
-**Timing remains an observable side channel** — a query matching withheld content may take
-measurably longer than one matching nothing. v1 does not mitigate this and says so; the
-disclosure is weak (existence, not content) and constant-time fan-out across external
-providers is not achievable. Recorded at §10.3.
+**Residual signals this cannot remove, named rather than glossed.** Stripping explicit
+metadata is not non-interference. If a misconfigured `customer_safe` provider returns mixed
+results and the tripwire drops the internal ones, then **the number of surviving results and
+their order still vary with what was withheld** — a JSON array discloses its own length.
+Returned `url` values can also identify a provider despite no provider field being present.
+And **timing** differs measurably between a query that matched withheld content and one that
+matched nothing.
+
+None of these disclose content; they can disclose that *something exists*. v1 does not
+mitigate them: backfilling to a constant result count would require querying past the limit
+on every request, and constant-time fan-out across external providers is not achievable.
+
+**What follows from this** is the point of §2.3: the tripwire is a misconfiguration alarm,
+not a containment boundary. A `customer_safe` registration pointed at a mixed corpus is a
+misconfiguration to be detected and fixed, not a state the core makes safe. Recorded at
+§10.3.
 
 ### 5.5 Locale honesty
 
@@ -606,10 +661,13 @@ static site has no request-time compute. Stating this is what keeps §1.3's clai
 
 ### 8.2 The conformance suite
 
-A **black-box conformance suite**, written against this contract and runnable against any
-URL, publicly available and not repository-internal. **The first-party module passes it
-unchanged, in CI**, and the suite is the definition of conformance — not the first-party
-module's behaviour.
+**Planned deliverable, not an existing one.** A black-box conformance suite, written against
+this contract and runnable against any URL, published rather than repository-internal. It
+ships alongside the implementation of this spec; the first-party module is required to pass
+it unchanged in CI, and the suite — not the first-party module's behaviour — is the
+definition of conformance.
+
+Stated as a requirement on future work because it is one. Nothing here has been built.
 
 Beyond §2.6's invariants, it exercises: a minimum provider (mandatory fields only, no
 declared capabilities); malformed, oversized, wrong-content-type, and unsupported-version
@@ -627,6 +685,32 @@ Recorded so they are decisions rather than discoveries: retrieval latency in the
 path; no offline knowledge search; no pagination; no per-customer entitlement; timing side
 channels unmitigated; no customer-path caching, so every widget search is a live fan-out;
 and adapters required for existing products, written by whoever wants the integration.
+
+## 9.1 What this document does not yet specify
+
+This is a contract and a safety model, not an implementation specification. The following
+must be settled before or alongside implementation, and are listed so their absence is
+visible rather than discovered:
+
+- Full JSON schemas for the provider request and response and for every route in §3 and §5,
+  published as a named, versioned artifact — §1.3's anti-drift commitment is not satisfied by
+  prose examples.
+- A fixed error-code vocabulary and error envelope for provider responses.
+- **Global merge limit.** `limit` is currently per provider, so N providers can produce
+  N×limit results. The merged cap and how it interacts with §5.6's ordering are undefined.
+- Capability grant and revoke API, persistence, and migration for §5.2's two flags.
+- Nonce format and entropy, replay-store atomicity across multiple core instances, and
+  clock-skew tolerance.
+- Circuit-breaker constants: thresholds, backoff curve, probe interval, and the exact state
+  machine. §6.2 is a policy, not yet a specification.
+- Cache-key normalization rules and what increments `providerConfigGeneration`.
+- Maximum lengths and uniqueness rules for `documentId`, `chunkId`, `title`, `snippet`,
+  `url`, and `translationGroupId`.
+- Abuse controls on the public widget route, with failure behaviour uniform enough not to
+  become its own side channel.
+- `allow_private_network` (§3.2) needs its exact permitted-range semantics, re-resolution
+  behaviour, and audit-record shape — an escape hatch this sharp should not be left to
+  implementer judgement.
 
 ## 10. Open questions for the maintainer
 
@@ -664,3 +748,18 @@ and adapters required for existing products, written by whoever wants the integr
   the adapter qualification (§1.3). Maintainer decisions recorded 2026-08-02: the corrected
   safety split; and module-first with no third-party connectors, but with machine-readable
   schemas and a conformance suite the first-party module must pass.
+- **2026-08-02** (third pass): a verification review confirmed §2.3's narrowed guarantee
+  holds and that the factual claims about shipped code and the charter are accurate. It found
+  two further errors of reasoning, now fixed. **Secret rotation did not work as written** —
+  the core signs and the provider verifies, so retaining a previous secret in the core
+  achieved nothing; the core now emits both signatures during the overlap window (§3.1). **The
+  claim that the core "never sends conversation content" was false** — `query` is
+  caller-supplied and a consumer may build it from a conversation; the guarantee is narrowed
+  to the core's own request construction and the consumer obligation is stated (§4.3). Also:
+  Assistant callers had no assigned projection or caching class, leaving a stale-cache path
+  into customer output (§5.1); `knowledge:read_internal` is unreachable under the shipped
+  Assistant model and is now documented as such rather than shipped as a dead grant (§5.2);
+  the no-leak invariant is narrowed to explicit metadata, with cardinality, ordering, URLs,
+  and timing named as residual signals (§5.4, §2.6); the conformance suite is marked as a
+  planned deliverable rather than an existing one (§8.2); and §9.1 now lists what remains
+  unspecified rather than leaving it to be discovered.
