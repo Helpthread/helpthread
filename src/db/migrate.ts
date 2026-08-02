@@ -2003,6 +2003,25 @@ const MIGRATIONS: Migration[] = [
 ]
 
 /**
+ * The highest migration id this BUILD knows about — the schema version the
+ * running code expects.
+ *
+ * Exists so `src/composition/health.ts` can compare it against the database's
+ * own `max(_migrations.id)` and report a version skew. That skew is reachable
+ * by construction: `src/composition/root.ts` deliberately does not migrate on
+ * cold start (see `scripts/migrate.ts` — schema changes are an operator step),
+ * so every deploy opens a window where new code runs against an older schema
+ * until someone runs `npm run migrate`.
+ *
+ * Before this existed the window announced itself only as whatever happened to
+ * break first — a cron erroring every two minutes against a table that did not
+ * exist yet, one failing request at a time, with nothing naming the cause.
+ * Derived from {@link MIGRATIONS} rather than written down, so it cannot drift
+ * from the list it describes.
+ */
+export const LATEST_MIGRATION_ID = MIGRATIONS.reduce((max, m) => (m.id > max ? m.id : max), 0)
+
+/**
  * Split a migration's SQL body into individual statements on `;`.
  *
  * `Db.query`/`Queryable.query` (`src/db/client.ts`) is deliberately typed

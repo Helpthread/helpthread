@@ -10,6 +10,24 @@
  * the platform aggregates logs (CHARTER.md §4), and this endpoint is the
  * one pull-based surface those logs can't provide.
  *
+ * ## Schema version: the one check about the deploy itself
+ *
+ * `src/composition/root.ts` deliberately does not migrate on cold start —
+ * schema changes are an operator step (`scripts/migrate.ts`). Every deploy
+ * therefore opens a window where the new build runs against the previous
+ * schema until someone runs `npm run migrate`, and with auto-deploy-on-merge
+ * that window opens without anyone deciding to open it.
+ *
+ * Observed 2026-08-02: HT-101 shipped three migrations, the deploy landed
+ * first, and an `imap-fetch` cron spent the gap erroring every two minutes
+ * against tables that did not exist yet. Nothing named the cause; the only
+ * symptom was a failing cron. This check turns that into a 503 on a URL, with
+ * the fix in the message.
+ *
+ * It deliberately does NOT migrate anything. Reporting the skew keeps the
+ * "schema changes are an operator step" rule intact while removing the part
+ * that made it dangerous — that the violation was silent.
+
  * ## What it reports, and the alert each section can trip
  *
  * - **Queue** (`PostgresQueue.getStats` + a 24h dead-letter window):
@@ -40,6 +58,11 @@
  *   72h means renewal has been failing for days — caught while there is
  *   still runway). `disconnected` mailboxes are deliberately silent: that
  *   state is an operator's own explicit action (HT-47).
+ * - **Schema version** (`_migrations` vs the build's own
+ *   `LATEST_MIGRATION_ID`): `schema-migration-pending` when the database is
+ *   BEHIND the running build, `schema-newer-than-build` when it is ahead.
+ *   Unlike every other section here, this one reports on the DEPLOYMENT, not
+ *   on traffic — see the dedicated section below for why it earns a place.
  * - **Webhooks** (HT-69; specs/modules/substrate-v1.md §5: "surfaced by
  *   `/api/v1/internal/health` (runbook Part G gains a section)"):
  *   `webhook-endpoint-auto-disabled` for every `webhook_endpoints` row
@@ -85,6 +108,7 @@
  */
 
 import type { Db } from '../db/client.js'
+import { LATEST_MIGRATION_ID } from '../db/migrate.js'
 import type { QueueStats } from '../providers/adapters/postgres-queue/index.js'
 import type { InboundDeliveryStatus } from '../store/inbound-deliveries.js'
 import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
@@ -169,7 +193,24 @@ export interface HealthReport {
     /** `webauthn_credentials` rows whose `sign_count_regression_at` falls in the last 24h. Any value `> 0` trips the `webauthn-counter-regression` alert. */
     counterRegressionsLast24h: number
   }
+  /**
+   * Whether the database's schema matches what this build expects. See the
+   * module doc's Schema version section — this is the one check that reports
+   * on the DEPLOYMENT rather than on traffic.
+   */
+  schema: {
+    /** Highest migration id in this build (`LATEST_MIGRATION_ID`). */
+    expectedMigrationId: number
+    /** Highest id actually recorded in `_migrations`; `null` when the table does not exist yet (never migrated). */
+    appliedMigrationId: number | null
+  }
 }
+
+/** Alert code for a database behind the running build — the deploy-without-migrate window. */
+const SCHEMA_BEHIND_ALERT = 'schema-migration-pending'
+
+/** Alert code for a database AHEAD of the running build — a rollback, or a deploy that never shipped. */
+const SCHEMA_AHEAD_ALERT = 'schema-newer-than-build'
 
 /** Every ledger status, for zero-filling {@link HealthReport.ingest}'s per-status map (a status with no 24h rows must still appear, as `0`). */
 const ALL_DELIVERY_STATUSES: InboundDeliveryStatus[] = [
@@ -349,6 +390,42 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
     )
   }
 
+  // --- Schema version. ------------------------------------------------------
+  // Existence is checked in its OWN statement, before anything references the
+  // table. A single CASE/to_regclass query does NOT work: Postgres resolves
+  // `_migrations` when it parses the statement, so the subquery errors before
+  // the CASE can short-circuit — which would turn "you have never migrated",
+  // the single most likely first-run state, into a generic 500 with no
+  // explanation. Caught by this module's own test.
+  const migrationsTable = await deps.db.query<{ exists: string | null }>(
+    `SELECT to_regclass('_migrations')::text AS exists`,
+  )
+  const appliedMigrationId =
+    migrationsTable[0]?.exists == null
+      ? null
+      : ((
+          await deps.db.query<{ applied: number | null }>(
+            'SELECT max(id) AS applied FROM _migrations',
+          )
+        )[0]?.applied ?? null)
+
+  if (appliedMigrationId === null) {
+    alerts.push(
+      `${SCHEMA_BEHIND_ALERT}: the database has no _migrations table — it has never been migrated. This build expects migration ${LATEST_MIGRATION_ID}. Run \`npm run migrate\`.`,
+    )
+  } else if (appliedMigrationId < LATEST_MIGRATION_ID) {
+    alerts.push(
+      `${SCHEMA_BEHIND_ALERT}: database is at migration ${appliedMigrationId}, this build expects ${LATEST_MIGRATION_ID}. Run \`npm run migrate\`. Until then, code paths using the newer schema will fail.`,
+    )
+  } else if (appliedMigrationId > LATEST_MIGRATION_ID) {
+    // Not necessarily broken — an older build serving a newer database usually
+    // means a rollback — but it is never intentional-and-fine, so it is said
+    // out loud rather than passed silently.
+    alerts.push(
+      `${SCHEMA_AHEAD_ALERT}: database is at migration ${appliedMigrationId} but this build only knows ${LATEST_MIGRATION_ID}. The running deployment is older than the schema — likely a rollback, or a deploy that never shipped.`,
+    )
+  }
+
   return {
     ok: alerts.length === 0,
     alerts,
@@ -363,6 +440,7 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
     mailboxes,
     webhooks: { autoDisabled, deliveryFailuresLast24h },
     webauthn: { counterRegressionsLast24h: webauthnCounterRegressionsLast24h },
+    schema: { expectedMigrationId: LATEST_MIGRATION_ID, appliedMigrationId },
   }
 }
 

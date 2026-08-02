@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
-import { migrate } from '../db/migrate.js'
+import { LATEST_MIGRATION_ID, migrate } from '../db/migrate.js'
 import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.js'
 import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
 import { FORGED_TOKEN_ALERT_THRESHOLD, type HealthReport, runHealthCheck } from './health.js'
@@ -432,6 +432,72 @@ describe('runHealthCheck', () => {
       expect(report.ok).toBe(true)
       expect(report.webauthn.counterRegressionsLast24h).toBe(0)
       expect(report.alerts.some((a) => a.startsWith('webauthn-counter-regression'))).toBe(false)
+    })
+  })
+
+  // The deploy-without-migrate window. `root.ts` never migrates on cold start,
+  // so a build can serve traffic against an older schema; before this check the
+  // only symptom was whichever query happened to fail first.
+  describe('schema version skew', () => {
+    it('is silent when the database matches the build', async () => {
+      const { check } = await fresh()
+
+      const report = await check()
+
+      expect(report.schema).toEqual({
+        expectedMigrationId: LATEST_MIGRATION_ID,
+        appliedMigrationId: LATEST_MIGRATION_ID,
+      })
+      expect(report.alerts.some((a) => a.startsWith('schema-'))).toBe(false)
+    })
+
+    it('alerts, names both versions, and names the fix when the database is BEHIND', async () => {
+      const { database, check } = await fresh()
+      // Simulate a deploy that landed before its migration ran.
+      await database.query('DELETE FROM _migrations WHERE id = $1', [LATEST_MIGRATION_ID])
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBe(LATEST_MIGRATION_ID - 1)
+      const alert = report.alerts.find((a) => a.startsWith('schema-migration-pending: '))
+      expect(alert).toBeDefined()
+      // The message has to be actionable on its own — someone reading a 503
+      // body at 3am should not need to go find this file.
+      expect(alert).toContain(`database is at migration ${LATEST_MIGRATION_ID - 1}`)
+      expect(alert).toContain(`expects ${LATEST_MIGRATION_ID}`)
+      expect(alert).toContain('npm run migrate')
+    })
+
+    it('alerts when the database is AHEAD of the build — a rollback, not a no-op', async () => {
+      const { database, check } = await fresh()
+      await database.query('INSERT INTO _migrations (id, name) VALUES ($1, $2)', [
+        LATEST_MIGRATION_ID + 1,
+        'from-a-newer-build',
+      ])
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBe(LATEST_MIGRATION_ID + 1)
+      expect(report.alerts.some((a) => a.startsWith('schema-newer-than-build: '))).toBe(true)
+    })
+
+    it('reports a never-migrated database instead of throwing — the likeliest first-run state', async () => {
+      const database = await createPgliteDb()
+      db = database
+      // Deliberately NOT migrated: no `_migrations` table exists at all.
+      const queue = createPostgresQueue(database)
+      await migrate(database)
+      await database.query('DROP TABLE _migrations')
+
+      const report = await runHealthCheck({ db: database, queue, pushConfigured: true })
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBeNull()
+      const alert = report.alerts.find((a) => a.startsWith('schema-migration-pending: '))
+      expect(alert).toContain('never been migrated')
+      expect(alert).toContain('npm run migrate')
     })
   })
 })
