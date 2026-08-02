@@ -2,10 +2,10 @@ import React from "react";
 import { Avatar } from "../core/Avatar.jsx";
 
 /** Full-bleed inbox table row: checkbox · customer · star · subject/preview ·
- *  count slot · #number · waiting time. Hairline bottom border. */
+ *  badge slot · count slot · #number · waiting time. Hairline bottom border. */
 export function ConversationRow({ customerName, customerEmail, subject, preview, count = "",
-  number = "", time = "", starred = false, onStar, checked = false, onCheck, showCheckbox = true,
-  selected = false, onClick }) {
+  number = "", time = "", badge = null, starred = false, onStar, checked = false, onCheck,
+  showCheckbox = true, selected = false, onClick }) {
   return (
     <div onClick={onClick}
       style={{ display: "flex", alignItems: "center", gap: 14, padding: "9px 24px 9px 14px",
@@ -33,6 +33,7 @@ export function ConversationRow({ customerName, customerEmail, subject, preview,
         <div style={{ marginTop: 1, fontSize: 12, color: "var(--ht-ink-dim)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{preview}</div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
+        {badge}
         <span style={{ minWidth: 36, display: "flex", justifyContent: "flex-end" }}>
           {count && <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--ht-ink-dim)", background: "var(--ht-surface-2)", borderRadius: 999, padding: "2px 8px", fontVariantNumeric: "tabular-nums" }}>{count}</span>}
         </span>
@@ -41,7 +42,7 @@ export function ConversationRow({ customerName, customerEmail, subject, preview,
           <span style={{ fontWeight: 600, color: "var(--ht-ink-muted)" }}>{number}</span>
         </span>
         <span style={{ minWidth: 96, textAlign: "right" }}>
-          {time && <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--ht-ink-muted)", background: "var(--ht-surface-2)", borderRadius: 999, padding: "2px 8px", fontVariantNumeric: "tabular-nums" }}>{time}</span>}
+          {time && <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--ht-ink-muted)", border: "1px solid var(--ht-ink-dim)", borderRadius: 999, padding: "1px 7px", fontVariantNumeric: "tabular-nums" }}>{time}</span>}
         </span>
       </div>
     </div>
