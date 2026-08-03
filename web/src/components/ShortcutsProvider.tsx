@@ -6,7 +6,7 @@
  * `?` toggles the shortcuts overlay, `Escape` closes it. The overlay can
  * also be opened imperatively — `useShortcutsOverlay().open()` — for
  * `SettingsScreen`'s "Keyboard shortcuts" card (HT-54 fidelity correction,
- * TJ's 2026-07-18 admin-IA review: moved here from the top bar's Manage/
+ * the maintainer's 2026-07-18 admin-IA review: moved here from the top bar's Manage/
  * avatar menus — a personal preference, not a Manage- or avatar-scoped
  * affordance).
  *

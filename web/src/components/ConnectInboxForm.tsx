@@ -2,7 +2,7 @@
 
 /**
  * The "Connect an inbox" form (HT-101) — one flow, not a two-step
- * create-then-configure (TJ's fixed decision): address, IMAP/SMTP
+ * create-then-configure (the maintainer's fixed decision): address, IMAP/SMTP
  * connection, and the app-password credential all live in one card.
  * Composed entirely from `ds/core` primitives, same conventions
  * `NewAgentScreen` already established for a CLIENT form backed by a

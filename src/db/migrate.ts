@@ -852,7 +852,7 @@ ALTER TABLE mailboxes ADD CONSTRAINT mailboxes_status_check CHECK (status IN ('a
  * ## `agent_mailbox_access` — schema now, behavior deferred (spec §3.4)
  *
  * Modeled so a future per-Agent mailbox-scoping increment is a store/API
- * change, not a migration against live rows (TJ, 2026-07-18, spec §12.4).
+ * change, not a migration against live rows (maintainer, 2026-07-18, spec §12.4).
  * Nothing in this build reads or writes this table — an EMPTY table means
  * "every Agent may access every mailbox" by definition, not by a runtime
  * check anywhere. `PRIMARY KEY (agent_id, mailbox_id)` needs no separate

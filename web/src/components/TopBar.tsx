@@ -10,7 +10,7 @@
  * fetched server-side in `app/layout.tsx` and handed down as props (no
  * client-side polling, no unread state — that's not in the API yet).
  *
- * ## The three-scope rule (HT-54 fidelity correction, TJ's 2026-07-18
+ * ## The three-scope rule (HT-54 fidelity correction, the maintainer's 2026-07-18
  * admin-IA review)
  *
  * `Manage ▾` is the **global-admin scope's** entry point — admins only, the

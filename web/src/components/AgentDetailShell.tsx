@@ -2,7 +2,7 @@
 
 /**
  * The left sidebar for an Agent's detail area (`/manage/agents/{id}/**`) —
- * HT-54 fidelity correction, TJ's 2026-07-18 admin-IA review (the
+ * HT-54 fidelity correction, the maintainer's 2026-07-18 admin-IA review (the
  * three-scope rule: Team management is `Manage ▾`-scoped, never the avatar
  * menu). Sections: **Profile** (always) and **Permissions** (admin-only —
  * a non-admin viewer, on their own profile, never sees it). Replaces the

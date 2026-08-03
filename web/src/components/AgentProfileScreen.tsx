@@ -9,12 +9,12 @@
  * or admin reset), Save, and — admin viewing someone else — Delete with the
  * two-step arm pattern (`ConversationScreen`'s delete: press → solid
  * critical Confirm → auto-disarm; never `confirm()`). Resend Invite appears
- * only while `status === 'invited'`. **NEW designed surface — requires TJ
+ * only while `status === 'invited'`. **NEW designed surface — requires maintainer
  * fidelity sign-off.**
  *
  * Renders as the content pane inside `AgentDetailShell` (the "Profile"
  * section) — moved off `/settings/team/{id}` to `/manage/agents/{id}` and
- * off a bare "← Team" link onto the shell's sidebar, per TJ's 2026-07-18
+ * off a bare "← Team" link onto the shell's sidebar, per the maintainer's 2026-07-18
  * admin-IA fidelity review (HT-54): Team management is `Manage ▾`-scoped,
  * not nested under Settings.
  */
@@ -41,7 +41,7 @@ import { useToast } from './Toaster'
 const DELETE_DISARM_MS = 3500
 const MIN_PASSWORD_LENGTH = 8
 
-/** Theme choices for the self-profile Appearance section (TJ, 2026-07-18: a personal preference lives in the personal scope, not Manage → Settings). Device-local persistence via `useTheme`; account-synced with HT-61. */
+/** Theme choices for the self-profile Appearance section (maintainer, 2026-07-18: a personal preference lives in the personal scope, not Manage → Settings). Device-local persistence via `useTheme`; account-synced with HT-61. */
 const THEME_OPTIONS: Array<{ value: Theme; label: string }> = [
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },

@@ -5,7 +5,7 @@
  * Design prototype has no login screen at all — this is a NEW designed
  * surface with no prototype to match pixel-for-pixel; it borrows
  * `AuthFailure`'s fixed-full-screen, calm, no-blame register as the closest
- * sibling, but it has NOT been through TJ's design sign-off. **Flagging
+ * sibling, but it has NOT been through the maintainer's design sign-off. **Flagging
  * prominently per CLAUDE.md's UI-fidelity mandate — treat these pixels as a
  * placeholder until reviewed.**
  *

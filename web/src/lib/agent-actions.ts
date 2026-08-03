@@ -2,7 +2,7 @@
 
 /**
  * Agent-management server actions (HT-54) — the write path for
- * `/manage/agents/**` (moved off `/settings/team/**` per TJ's 2026-07-18
+ * `/manage/agents/**` (moved off `/settings/team/**` per the maintainer's 2026-07-18
  * admin-IA fidelity review). Unlike `actions.ts`'s conversation mutations (which
  * call bearer-only engine endpoints, so each action re-verifies the session
  * cookie itself before ever touching the API — see that file's module doc),

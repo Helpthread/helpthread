@@ -8,9 +8,9 @@
  * "Send an invite email" (default ON) with an admin-set password field that
  * appears only when it's off. No password field when inviting (spec: the
  * two provisioning paths are exclusive). **NEW designed surface — requires
- * TJ fidelity sign-off.**
+ * maintainer fidelity sign-off.**
  *
- * Moved off `/settings/team/new` per TJ's 2026-07-18 admin-IA fidelity
+ * Moved off `/settings/team/new` per the maintainer's 2026-07-18 admin-IA fidelity
  * review (HT-54) — see `TeamListScreen`'s doc comment.
  *
  * The role picker is a segmented two-button control, the same

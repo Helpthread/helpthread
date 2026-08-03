@@ -2,13 +2,13 @@
 
 /**
  * /settings — the global Settings surface, now with the reference IA's left
- * section-sidebar (HT-54 fidelity correction, TJ's 2026-07-18 admin-IA
+ * section-sidebar (HT-54 fidelity correction, the maintainer's 2026-07-18 admin-IA
  * review; specs/ui/admin-ia.md): every Manage surface separates its content
  * into sections down a left rail, and Settings sections are the injection
  * points future increments (HT-56: Mail Settings, Alerts) and modules
  * extend. Sections today: **General** (deployment identity + the branding
  * note) and **Keyboard shortcuts**. Appearance moved to the Agent's own
- * profile (TJ, 2026-07-18): a theme is a PERSONAL preference, and the
+ * profile (maintainer, 2026-07-18): a theme is a PERSONAL preference, and the
  * three-scope rule puts personal things in the personal scope — device-local
  * persistence for now, account-synced with HT-61.
  *

@@ -4,7 +4,7 @@
  * `/setup` — first-run bootstrap (HT-54; specs/auth/agents-and-auth.md §6,
  * §7): creates the deployment's first admin. Public, zero-Agents-guarded —
  * the page component redirects to `/login` once `needsSetup` is false. **NEW
- * designed surface — requires TJ fidelity sign-off** (same gate as the HT-51
+ * designed surface — requires maintainer fidelity sign-off** (same gate as the HT-51
  * login screen this borrows its register from; see `LoginScreen`'s module
  * doc for the two documented `ds/` workarounds this screen reuses verbatim
  * rather than inventing new ones).

@@ -199,7 +199,7 @@ message. The intended mechanism is per-mailbox sender state, not a global list.
 ### 5.3 Feeding corrections back to the provider — DECIDED: no
 
 Gmail's API can remove the `SPAM` label, which would train the operator's own filter.
-**Helpthread does not do this** (maintainer, 2026-08-02: "no writeback"). Corrections stay
+**Helpthread does not do this** (maintainer decision, 2026-08-02). Corrections stay
 inside Helpthread's own database.
 
 This is a boundary, not a deferral: Helpthread reads the operator's mailbox and does not
@@ -213,8 +213,8 @@ state is what absorbs that, and it is why allow-listing is not optional once §5
 
 ## 6. Operator controls (NOT BUILT)
 
-**On by default, with an off switch** (maintainer, 2026-08-02: "on by default with an off
-switch"). Automatic classification applies to a newly connected mailbox with no setup, and
+**On by default, with an off switch** (maintainer decision, 2026-08-02). Automatic
+classification applies to a newly connected mailbox with no setup, and
 an operator who does not want it can turn it off.
 
 Three consequences follow, and none are built yet:
@@ -238,13 +238,13 @@ source. Anything marked **INFERRED** is the author's judgment and has not been a
 
 | # | Decision — in plain words | Source |
 |---|---|---|
-| — | Build the fix plus a spec for real auto-classification, rather than the fix alone | Maintainer, 2026-08-02: "b" (in reply to the (a) fix-only / (b) fix-plus-spec choice) |
+| — | Build the fix plus a spec for real auto-classification, rather than the fix alone | Maintainer decision, 2026-08-02 (chose fix-plus-spec over fix-only) |
 | — | Spam is never auto-classified in v1 | Prior accepted spec, agent-inbox-v1.md §3a |
 | D0 | Junk mail is stored and filed as `spam`, never dropped at intake | ⚠️ INFERRED — follows from inbound-ingestion.md §1's never-dropped invariant, but applying it to junk specifically is the author's reading |
-| D1 | Automatic spam classification is **on by default**, and an operator can **switch it off** | Maintainer, 2026-08-02: "on by default with an off switch" |
+| D1 | Automatic spam classification is **on by default**, and an operator can **switch it off** | Maintainer decision, 2026-08-02 |
 | D1a | That switch is **per-mailbox** rather than global | ⚠️ INFERRED — the grain was not part of D1's answer. A two-way door |
 | D2 | A spam-verdict message whose reply token names a *deleted* conversation is filed as spam | ⚠️ INFERRED — the valid token argues it is a real customer; the deletion argues an Agent already discarded that thread. Uniform rule chosen for simplicity, not because the edge was decided |
-| D3 | An Agent's "not spam" correction is **never** written back to the operator's Gmail | Maintainer, 2026-08-02: "no writeback" |
+| D3 | An Agent's "not spam" correction is **never** written back to the operator's Gmail | Maintainer decision, 2026-08-02 |
 | D4 | Header scoring requires one strong or two weak signals; a lone weak signal never classifies | ⚠️ INFERRED — a conservative default, not a measured threshold |
 | D5 | `Auto-Submitted` is a loop-guard concern, not a spam signal | ⚠️ INFERRED |
 

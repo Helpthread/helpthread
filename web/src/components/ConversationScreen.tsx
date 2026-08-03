@@ -1637,7 +1637,7 @@ export function ConversationScreen({
                   ) : (
                     (thread.bodyText ?? '')
                   )}
-                  {/* HT-46 read path, TJ-approved addition beyond the design
+                  {/* HT-46 read path, maintainer-approved addition beyond the design
                       prototype (flagged for his sign-off). An empty list
                       renders nothing — zero layout shift either way. Signed
                       URLs expire, so this is always the URL exactly as the
