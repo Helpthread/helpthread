@@ -31,6 +31,14 @@ export interface InjectInboundOptions {
   /** Plain-text body. */
   text: string
   /**
+   * The transport's own message id — ingest's idempotency authority
+   * (inbound-ingestion.md §4). Omitted, a fresh one is generated, so each
+   * call is a distinct delivery. Supply the SAME value twice to replay one
+   * delivery and exercise dedup, which is otherwise unreachable from this
+   * harness.
+   */
+  providerMessageId?: string
+  /**
    * `In-Reply-To` for a reply into an existing thread. Omitted for a fresh
    * message, which is what makes the difference between
    * `conversation.created` + `message_received` and a bare
@@ -39,20 +47,34 @@ export interface InjectInboundOptions {
   inReplyTo?: string
 }
 
+/**
+ * Reject a header value carrying a line break. A bare CR or LF ends the
+ * header — and two end the header block — so an unescaped newline in a
+ * subject or address silently rewrites the rest of the message, including
+ * the body boundary. Dev-only input is still input.
+ */
+function headerValue(name: string, value: string): string {
+  if (/[\r\n]/.test(value)) {
+    throw new Error(`inject-inbound: ${name} must not contain a line break`)
+  }
+  return value
+}
+
 /** Build the RFC822 bytes for {@link injectInboundMessage}. Exported for tests that want to assert on the wire format rather than the outcome. */
 export function buildRawMessage(options: InjectInboundOptions, messageId: string): string {
   const headers = [
-    `From: ${options.from}`,
-    `To: ${options.to}`,
-    `Subject: ${options.subject}`,
-    `Message-ID: <${messageId}>`,
+    `From: ${headerValue('from', options.from)}`,
+    `To: ${headerValue('to', options.to)}`,
+    `Subject: ${headerValue('subject', options.subject)}`,
+    `Message-ID: <${headerValue('messageId', messageId)}>`,
     `Date: ${new Date().toUTCString()}`,
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset=utf-8',
   ]
   if (options.inReplyTo !== undefined) {
-    headers.push(`In-Reply-To: <${options.inReplyTo}>`)
-    headers.push(`References: <${options.inReplyTo}>`)
+    const inReplyTo = headerValue('inReplyTo', options.inReplyTo)
+    headers.push(`In-Reply-To: <${inReplyTo}>`)
+    headers.push(`References: <${inReplyTo}>`)
   }
   return `${headers.join('\r\n')}\r\n\r\n${options.text}\r\n`
 }
@@ -73,10 +95,13 @@ export async function injectInboundMessage(
     {
       content: { kind: 'inline', bytes: new TextEncoder().encode(raw) },
       mailboxId: options.mailboxId,
-      // A real provider's own id. Fabricated here, and unique per call, so
-      // two injections of identical text are two deliveries rather than one
-      // deduped replay.
-      providerMessageId: `dev-${randomUUID()}`,
+      // A real provider's own id. Generated per call by default, so two
+      // injections of identical text are two deliveries — but caller-
+      // supplied when replaying, because regenerating it unconditionally
+      // made a retried POST silently create a second conversation and a
+      // second webhook, and made the harness structurally unable to
+      // exercise dedup at all.
+      providerMessageId: options.providerMessageId ?? `dev-${randomUUID()}`,
       receivedAt: new Date(),
       // Nothing classified this message; 'unknown' is the honest answer and
       // keeps a synthetic message out of the spam status.

@@ -215,6 +215,16 @@ async function main(): Promise<void> {
   const apiBridge = createHttpBridge(api, baseUrl)
   const server = createServer((req, res) => {
     if (req.url === '/__dev/inbound' && req.method === 'POST') {
+      // Same Bearer gate every other route in this harness enforces. It is
+      // a loopback-only server, so this is not a production exposure — but
+      // "every request carries the token" should not have an exception
+      // carved into it by the one route that fabricates customer mail.
+      if (req.headers.authorization !== `Bearer ${API_TOKEN}`) {
+        res.statusCode = 401
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ error: 'missing or invalid bearer token' }))
+        return
+      }
       void (async () => {
         try {
           const chunks: Buffer[] = []
