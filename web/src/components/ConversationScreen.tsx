@@ -1638,7 +1638,7 @@ export function ConversationScreen({
                     (thread.bodyText ?? '')
                   )}
                   {/* HT-46 read path, maintainer-approved addition beyond the design
-                      prototype (flagged for his sign-off). An empty list
+                      prototype (flagged for maintainer sign-off). An empty list
                       renders nothing — zero layout shift either way. Signed
                       URLs expire, so this is always the URL exactly as the
                       API gave it, opened fresh in a new tab rather than

@@ -3,9 +3,10 @@
 **Status: PARTIALLY BUILT.** §3.1 and §4 are implemented and tested (the provider
 verdict, Gmail's half of it, and the status decision at ingest). §3.2 (header-derived
 signals), §5 (the reclassification loop) and §6 (operator controls) are specified but
-**not built**. Every blocking decision is now made — §5.3 (no writeback to the operator's
-mailbox) and §6 (on by default, with an off switch) were answered by the maintainer on
-2026-08-02 and are quoted in §7's ledger. What remains unbuilt is implementation work,
+**not built**. Every blocking decision is now made — §5.3 (corrections stay inside
+Helpthread, never written back to the operator's mailbox) and §6 (classification starts
+enabled and can be disabled) were answered by the maintainer on 2026-08-02 and are
+recorded in §7's ledger. What remains unbuilt is implementation work,
 not open questions.
 
 Companion to [inbound-ingestion.md](./inbound-ingestion.md), whose three invariants this
@@ -213,8 +214,8 @@ state is what absorbs that, and it is why allow-listing is not optional once §5
 
 ## 6. Operator controls (NOT BUILT)
 
-**On by default, with an off switch** (maintainer decision, 2026-08-02). Automatic
-classification applies to a newly connected mailbox with no setup, and
+**Enabled by default, with an operator switch** (maintainer decision, 2026-08-02).
+Automatic classification applies to a newly connected mailbox with no setup, and
 an operator who does not want it can turn it off.
 
 Three consequences follow, and none are built yet:
