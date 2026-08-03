@@ -40,9 +40,12 @@ import { createPasswordAuthProvider } from '../src/auth/password-provider.js'
 import type { AuthProvider } from '../src/auth/provider.js'
 import { createPgliteDb } from '../src/db/client.js'
 import { migrate } from '../src/db/migrate.js'
+import { createDevBlobStore } from '../src/dev/dev-blob-store.js'
 import { createDevEmailSender } from '../src/dev/dev-sender.js'
 import { createHttpBridge } from '../src/dev/http-adapter.js'
+import { injectInboundMessage } from '../src/dev/inject-inbound.js'
 import { seedDevData } from '../src/dev/seed.js'
+import { startWebhookWorker } from '../src/dev/webhook-worker.js'
 import { createImapConnectService } from '../src/mail/imap-connect.js'
 import type { Keyring } from '../src/mail/reply-token.js'
 import type { SenderResolver } from '../src/mail/sender-resolver.js'
@@ -52,9 +55,11 @@ import { verifySmtpConnection } from '../src/providers/adapters/smtp/index.js'
 import { createAgentStore } from '../src/store/agents.js'
 import { createAssistantStore } from '../src/store/assistants.js'
 import { createConversationStore } from '../src/store/conversations.js'
+import { createEventOutboxStore } from '../src/store/event-outbox.js'
 import { createImapConfigStore } from '../src/store/imap-config.js'
 import { createImapCredentialStore } from '../src/store/imap-credentials.js'
 import { createImapWatchStateStore } from '../src/store/imap-watch-state.js'
+import { createInboundDeliveryStore } from '../src/store/inbound-deliveries.js'
 import { createMailboxStore } from '../src/store/mailboxes.js'
 import { createSavedReplyStore } from '../src/store/saved-replies.js'
 import { createWebhookEndpointStore } from '../src/store/webhook-endpoints.js'
@@ -136,6 +141,18 @@ async function main(): Promise<void> {
     },
   }
 
+  // --- webhook delivery (HT-69) -------------------------------------------
+  // Production runs two passes on a schedule to move a webhook out of the
+  // engine: the outbox drain fans each committed event to its endpoints,
+  // and the queue drain signs and POSTs them. Without both, the engine
+  // writes to `event_outbox` and stops there — registering a webhook
+  // appears to work and nothing is ever delivered. See
+  // `src/dev/webhook-worker.ts`. Built here, above `createInboxApi`, so the
+  // API and the worker share one store and one queue: a webhook registered
+  // through the API is one the worker can see.
+  const webhookEndpointStore = createWebhookEndpointStore(db, DEV_TOKEN_ENC_KEY)
+  const queue = createPostgresQueue(db)
+
   // `assistants`, `webhooks`, and `savedReplies` are REQUIRED on
   // `InboxApiDeps`, and this file sits outside `tsconfig.json`'s `include`
   // (only `scripts/migrate.ts` is listed), so `npm run typecheck` never
@@ -154,9 +171,11 @@ async function main(): Promise<void> {
     assistants: { store: createAssistantStore(db) },
     webhooks: {
       // Same throwaway dev key as the IMAP credential store above — webhook
-      // secrets are encrypted at rest by the same AES-256-GCM path.
-      store: createWebhookEndpointStore(db, DEV_TOKEN_ENC_KEY),
-      queue: createPostgresQueue(db),
+      // secrets are encrypted at rest by the same AES-256-GCM path. The
+      // SAME store and queue instances the delivery worker below drains,
+      // so a webhook registered through the API is one the worker sees.
+      store: webhookEndpointStore,
+      queue,
     },
     savedReplies: { store: createSavedReplyStore(db), mailboxStore },
     imapConnect: {
@@ -166,8 +185,68 @@ async function main(): Promise<void> {
     },
   })
 
+  const webhookWorker = startWebhookWorker(
+    {
+      eventOutbox: createEventOutboxStore(db),
+      webhookEndpoints: webhookEndpointStore,
+      queue,
+    },
+    {
+      onActivity: ({ dispatched, delivered, failed }) => {
+        console.log(`[webhooks] dispatched ${dispatched}, delivered ${delivered}, failed ${failed}`)
+      },
+    },
+  )
+
+  // --- dev-only inbound injection -----------------------------------------
+  // `POST /__dev/inbound` with { mailboxId, from, to, subject, text } drives
+  // the REAL ingest pipeline, so a local run can produce a conversation and
+  // the `conversation.message_received` event that follows it. Deliberately
+  // namespaced under `/__dev/` and handled before the bridge, so it is
+  // visibly not part of the engine's API surface.
+  const ingestDeps = {
+    db,
+    inboundDeliveryStore: createInboundDeliveryStore(db),
+    blobStore: createDevBlobStore(),
+    keyring: KEYRING,
+  }
+
   const baseUrl = `http://127.0.0.1:${PORT}`
-  const server = createServer(createHttpBridge(api, baseUrl))
+  const apiBridge = createHttpBridge(api, baseUrl)
+  const server = createServer((req, res) => {
+    if (req.url === '/__dev/inbound' && req.method === 'POST') {
+      // Same Bearer gate every other route in this harness enforces. It is
+      // a loopback-only server, so this is not a production exposure — but
+      // "every request carries the token" should not have an exception
+      // carved into it by the one route that fabricates customer mail.
+      if (req.headers.authorization !== `Bearer ${API_TOKEN}`) {
+        res.statusCode = 401
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ error: 'missing or invalid bearer token' }))
+        return
+      }
+      void (async () => {
+        try {
+          const chunks: Buffer[] = []
+          for await (const chunk of req) chunks.push(Buffer.from(chunk))
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Parameters<
+            typeof injectInboundMessage
+          >[0]
+          const outcome = await injectInboundMessage(body, ingestDeps)
+          res.statusCode = 200
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(outcome))
+        } catch (err) {
+          console.error('[dev-api] inbound injection failed', err)
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }))
+        }
+      })()
+      return
+    }
+    apiBridge(req, res)
+  })
   // Bind explicitly to loopback — this dev harness must never listen on the
   // LAN (the default token is public knowledge, right there in this file).
   await new Promise<void>((resolve) => {
@@ -201,6 +280,9 @@ async function main(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()))
     })
+    // Stop the delivery loop and let any pass in flight finish, so nothing
+    // is mid-query against a database that is about to close.
+    await webhookWorker.stop()
     await db.close()
     process.exit(0)
   }
