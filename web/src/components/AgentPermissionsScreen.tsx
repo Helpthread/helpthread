@@ -2,13 +2,13 @@
 
 /**
  * `/manage/agents/{id}/permissions` — admin-only (HT-54 fidelity
- * correction, TJ's 2026-07-18 admin-IA review; specs/auth/agents-and-
+ * correction, the maintainer's 2026-07-18 admin-IA review; specs/auth/agents-and-
  * auth.md §6 "Mailbox access", §3.4). FreeScout-modelled: a heading naming
  * the target Agent, All/None quick links, one checkbox per mailbox (the
  * address as its label), and Save. **Admins have implicit access to every
  * mailbox** (FreeScout's own rule, spec §3.4) — an admin target renders the
  * note instead of checkboxes, never an editable (and misleading) list.
- * **NEW designed surface — requires TJ fidelity sign-off.**
+ * **NEW designed surface — requires maintainer fidelity sign-off.**
  */
 
 import type { CSSProperties } from 'react'

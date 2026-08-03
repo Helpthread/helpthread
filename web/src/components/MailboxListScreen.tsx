@@ -9,14 +9,14 @@
  * card-list structure/styling (address, a status pill, a "New inbox"
  * action) — no search here, since the list is expected to stay small.
  *
- * DECISION FLAGGED FOR TJ: the spec draft asked for address + PROVIDER +
+ * DECISION FLAGGED FOR THE MAINTAINER: the spec draft asked for address + PROVIDER +
  * status per card. `GET /api/v1/mailboxes` deliberately omits `provider`
  * (`src/api/agents.ts`'s `toMailboxJson` doc: "never `provider`... this
  * mapper is the one place that decides what crosses the wire", spec
  * §3.4/§6) — a documented decision predating this ticket. Rather than
  * silently widen that wire contract, this list shows address + status only
  * and flags the gap here; adding `provider` to `GET /mailboxes` is a
- * one-line follow-up if TJ wants the card to show it.
+ * one-line follow-up if the maintainer wants the card to show it.
  */
 
 import Link from 'next/link'

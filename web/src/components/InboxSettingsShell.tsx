@@ -18,7 +18,7 @@
  *   `resolveInboxSettingsSections` (`../lib/inbox-settings-sections.ts`),
  *   never hardcoded here — that registry IS the module injection point.
  *
- * DECISION FLAGGED FOR TJ: a mailbox has no separate "name" field today
+ * DECISION FLAGGED FOR THE MAINTAINER: a mailbox has no separate "name" field today
  * (`MailboxSummary` carries only `id`/`address`/`status`), so the bold
  * header line is the address itself; the muted-mono line beneath (matching
  * FolderNav's bold-label-then-mono-value header treatment) shows the

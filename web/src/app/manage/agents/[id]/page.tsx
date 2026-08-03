@@ -10,7 +10,7 @@ import { ApiError, getAgent, getMe } from '../../../../lib/api'
  * here rather than ever reaching that 403, matching the team-list page's
  * same "never render an engine 403 as a crash" posture.
  *
- * Moved off `/settings/team/{id}` per TJ's 2026-07-18 admin-IA fidelity
+ * Moved off `/settings/team/{id}` per the maintainer's 2026-07-18 admin-IA fidelity
  * review (HT-54): Team management is `Manage ▾`-scoped, not a Settings
  * subpage. Renders inside `AgentDetailShell` as the "Profile" section.
  */

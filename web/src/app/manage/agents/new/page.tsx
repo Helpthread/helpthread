@@ -14,7 +14,7 @@ export const metadata: Metadata = {
  * redirect (their own profile) instead, same UI-level posture as the team
  * list page.
  *
- * Moved off `/settings/team/new` per TJ's 2026-07-18 admin-IA fidelity
+ * Moved off `/settings/team/new` per the maintainer's 2026-07-18 admin-IA fidelity
  * review (HT-54) — see `manage/agents/page.tsx`'s doc comment.
  */
 export default async function NewAgentPage() {

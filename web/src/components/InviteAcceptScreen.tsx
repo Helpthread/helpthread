@@ -7,7 +7,7 @@
  * validates and consumes the token in the SAME atomic call that sets the
  * password), so an invalid/expired token is only discoverable at submit
  * time — the calm error state renders inline after that failed submit, not
- * as a pre-check. **NEW designed surface — requires TJ fidelity sign-off**
+ * as a pre-check. **NEW designed surface — requires maintainer fidelity sign-off**
  * (reuses `LoginScreen`'s documented `ds/` workarounds verbatim).
  */
 
