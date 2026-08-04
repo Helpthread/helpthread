@@ -4,171 +4,151 @@
  *
  * This is the ONE place `mintReplyMessageId` (`src/mail/reply-token.ts`) is
  * called on the write path: every outbound reply's `Message-ID` originates
- * here, and every later inbound reply's threading decision
- * (`decideThreading`, `src/mail/thread.ts`) is only as trustworthy as this
- * function's ordering.
+ * here, and every later inbound threading decision (`decideThreading`,
+ * `src/mail/thread.ts`) is only as trustworthy as this function's ordering.
  *
- * ## Ordering: persist, THEN send, THEN mark (specs/mail/sending.md §3)
+ * ## Ordering: persist, THEN send, THEN mark (sending.md §3)
  *
- * 1. Generate `threadId` (a CSPRNG UUID, `crypto.randomUUID()`) and mint
- *    `messageId` from it — the id/token knot's resolution (specs/mail/sending.md
- *    §2): the thread's own primary key must exist before the row is
- *    inserted, because the `Message-ID` embeds it, and the `Message-ID` is a
- *    column ON that same row.
+ * 1. Generate `threadId` (`crypto.randomUUID()`) and mint `messageId` from
+ *    it — the id/token knot's resolution (sending.md §2): the thread's
+ *    primary key must exist before the row is inserted, because the
+ *    `Message-ID` embeds it and is a column ON that same row.
  * 2. Persist the outbound thread with `delivery_status = 'pending'` via
  *    `ConversationStore.appendThread`.
  * 3. Only once persisted, call the `EmailSender`.
  * 4. Mark `'sent'` or `'failed'` depending on the outcome.
  *
- * Send-then-persist is deliberately rejected by the spec: a crash after a
- * successful send but before persisting would lose the outbound message
- * from the conversation entirely — an unrecoverable data loss the
- * persist-first ordering here structurally cannot produce. The worst this
- * ordering can do is leave a thread stuck at `'pending'` (truthful: "may or
- * may not have been delivered"), never a false `'sent'`.
+ * Send-then-persist is deliberately rejected: a crash after a successful
+ * send but before persisting would lose the outbound message from the
+ * conversation entirely. The worst this ordering can do is leave a thread
+ * stuck at `'pending'` — truthful ("may or may not have been delivered"),
+ * never a false `'sent'`.
  *
- * ## Retries reuse, never re-mint (specs/mail/sending.md §3)
+ * ## Retries reuse, never re-mint (sending.md §3)
  *
- * When the provider `send()` call fails, this function marks the thread
- * `'failed'` and returns a `{ reason: 'send-failed' }` result (it does not
- * throw — a rejected send is an expected outcome the caller must handle, not
- * an exception) — it does not swallow the failure, retry inline, or mint a
- * fresh token. A `failed` (or crash-orphaned `pending`) thread is meant to be
- * retried later using the SAME `threadId`/`messageId` already on the row —
- * either by a caller replaying the SAME `Idempotency-Key` (below), or by the
- * delivery worker's sweep (`src/mail/delivery-worker.ts`). Minting a fresh
- * token per attempt would spray multiple valid threading handles for one
- * logical message and risk a provider that de-dupes on `Message-ID` failing
- * to catch a double-send.
+ * When `send()` fails, this marks the thread `'failed'` and returns
+ * `{ reason: 'send-failed' }` — it does not throw (a rejected send is an
+ * expected outcome the caller must handle), does not swallow the failure,
+ * does not retry inline, and does not mint a fresh token. A `failed` (or
+ * crash-orphaned `pending`) thread is retried later using the SAME
+ * `threadId`/`messageId` already on the row — by a caller replaying the same
+ * `Idempotency-Key`, or by the delivery worker's sweep
+ * (`src/mail/delivery-worker.ts`). Minting a fresh token per attempt would
+ * spray multiple valid threading handles for one logical message and defeat
+ * a provider that de-dupes on `Message-ID`.
  *
- * Conversely, once the provider ACCEPTS the message, the delivery has
+ * Conversely, once the provider ACCEPTS the message the delivery has
  * happened — so a subsequent failure to record `'sent'` resolves to a
- * SUCCESS result, not a failure. Reporting an already-delivered message as
- * failed would be worse than a stale status row: it would invite a resend.
+ * SUCCESS result. Reporting an already-delivered message as failed would
+ * invite a resend.
  *
- * ## Send idempotency (HT-16)
+ * ## Send idempotency
  *
  * `SendReplyInput.idempotencyKey` is an OPTIONAL caller-supplied dedup key,
- * scoped per-conversation (`ConversationStore.appendThread`'s partial-unique-
- * index get-or-insert — see its doc comment and migration 003's). What
- * happens next depends on whether one was given and what it finds:
+ * scoped per-conversation (`ConversationStore.appendThread`'s
+ * partial-unique-index get-or-insert — see its doc and migration 003's):
  *
- * 1. **No key.** The original, pre-HT-16 flow, UNCHANGED: mint, persist
- *    fresh, send, mark via `setThreadDeliveryStatus`. Two calls with no key
- *    are two independent sends — this is a deliberate "no key ⇒ no dedup
- *    protection" contract (see the regression-pinning test in
- *    `send.test.ts`), not an oversight; callers that need at-most-once
+ * 1. **No key.** Mint, persist fresh, send, mark via
+ *    `setThreadDeliveryStatus`. Two keyless calls are two independent sends
+ *    — a deliberate "no key ⇒ no dedup protection" contract, pinned by a
+ *    regression test in `send.test.ts`. Callers needing at-most-once
  *    semantics must supply a key.
  * 2. **Key matches a row already `delivery_status: 'sent'`.** A replay after
  *    success: return that row's original `threadId`/`messageId` as a SUCCESS
  *    result, WITHOUT calling the sender again.
- * 3. **Key matches a `pending`/`failed` row** (freshly inserted by THIS call,
- *    or found pre-existing from an earlier attempt — both cases converge
- *    here). The row is CLAIMED (`ConversationStore.claimThreadForDelivery`)
- *    before any send is attempted, so a concurrent duplicate call with the
- *    SAME key — or the delivery worker sweeping the same row — cannot also
- *    send it while this attempt is in flight. If the claim fails, the row is
- *    re-read to tell WHY: if it is now `'sent'` (someone else's concurrent
- *    attempt delivered it between this call's get-or-insert snapshot and the
- *    claim — the same TOCTOU `claimThreadForDelivery`'s `delivery_status`
+ * 3. **Key matches a `pending`/`failed` row** (freshly inserted by THIS
+ *    call, or pre-existing from an earlier attempt — both converge here).
+ *    The row is CLAIMED (`ConversationStore.claimThreadForDelivery`) before
+ *    any send, so a concurrent duplicate call with the same key — or the
+ *    delivery worker sweeping the same row — cannot also send it. If the
+ *    claim fails the row is re-read to tell WHY: if it is now `'sent'`
+ *    (someone else delivered it between this call's get-or-insert snapshot
+ *    and the claim — the TOCTOU `claimThreadForDelivery`'s `delivery_status`
  *    re-check closes at the store layer), this resolves to the same
- *    success-replay result as case 2 above, never a resend. Otherwise
- *    (someone else genuinely still holds the lease) this resolves to
- *    `{ reason: 'retry-in-progress' }` — nothing is sent, nothing is
- *    re-attempted here. If the claim succeeds, delivery is attempted using
- *    the row's ALREADY-PERSISTED `messageId` and `sendEnvelope` (never
- *    re-minted, never recomputed — see below), via
- *    {@link attemptDeliveryOfClaimedThread}, which is the exact helper the
- *    delivery worker also calls.
+ *    success-replay as case 2, never a resend. Otherwise it resolves to
+ *    `{ reason: 'retry-in-progress' }` — nothing sent, nothing re-attempted.
+ *    If the claim succeeds, delivery uses the row's ALREADY-PERSISTED
+ *    `messageId` and `sendEnvelope` via {@link
+ *    attemptDeliveryOfClaimedThread}, the exact helper the delivery worker
+ *    also calls.
  *
- * The `sendEnvelope` snapshot (`{ to, cc?, subject, references? }`,
- * persisted once at insert, `src/store/conversations.ts`'s `SendEnvelope`)
- * is what makes a retry's mail byte-identical to the original attempt: it is
- * READ BACK verbatim, never recomputed from the conversation's current
- * thread list. Recomputing `references` on a retry could silently absorb an
- * inbound message that arrived between the original attempt and the retry —
- * exactly the kind of undocumented mail-semantics drift CHARTER.md invariant
- * #5 forbids. See migration 003's doc comment (`src/db/migrate.ts`) for the
- * full argument.
+ * The `sendEnvelope` snapshot (`{ to, cc?, subject, references? }`, persisted
+ * once at insert, `src/store/conversations.ts`'s `SendEnvelope`) is what
+ * makes a retry byte-identical to the original attempt: READ BACK verbatim,
+ * never recomputed from the conversation's current thread list. Recomputing
+ * `references` on a retry could silently absorb an inbound message that
+ * arrived in between — the mail-semantics drift CHARTER.md invariant #5
+ * forbids. See migration 003's doc comment for the full argument.
  *
  * ## Assumption: ids are canonical
  *
  * `conversationId` is expected to be a canonical (lowercase) id as produced
  * by the store — it is embedded verbatim into the token, so a non-canonical
- * spelling (e.g. an upper-cased UUID) would be what `decideThreading` later
- * recovers, even though the DB stores the canonical form. The store only ever
- * emits canonical ids and callers pass those straight through, so this holds
- * by construction; it is called out because the token carries the string, not
- * a parsed UUID.
+ * spelling would be what `decideThreading` later recovers, even though the
+ * DB stores the canonical form. Holds by construction; called out because
+ * the token carries the string, not a parsed UUID.
  *
- * ## References carries the reply token, not just Message-ID (HT-49)
+ * ## References carries the reply token, not just Message-ID
  *
- * Live production evidence (2026-07-17, first HT-44 run against real Gmail):
- * Gmail's `users.messages.send` accepted our verbatim-set `Message-ID` on the
- * request but REPLACED it on the wire with a Gmail-generated id
- * (`<CAKWkAL3...@mail.gmail.com>`) — confirmed from the raw copy Gmail itself
- * returned on reconcile of the sent message's self-echo. Every
- * `EmailSender` adapter is still required to transmit `OutboundEmail.messageId`
- * verbatim (`src/providers/email-sender.ts`'s module doc) — this is a
- * provider-side rewrite downstream of that verbatim transmission, not a
+ * Live production evidence (2026-07-17): Gmail's `users.messages.send`
+ * accepted our verbatim-set `Message-ID` on the request but REPLACED it on
+ * the wire with a Gmail-generated id (`<CAKWkAL3...@mail.gmail.com>`).
+ * Every `EmailSender` adapter is still required to transmit
+ * `OutboundEmail.messageId` verbatim (`src/providers/email-sender.ts`) —
+ * this is a provider-side rewrite downstream of that transmission, not a
  * violation of it, and no adapter change closes it. The customer's reply
- * therefore carried `In-Reply-To`/`References` pointing at GMAIL's id, with
- * our minted token nowhere on the wire — `decideThreading` correctly found no
- * verified token and (per invariant #5) started a NEW conversation instead of
- * appending, splitting the thread.
+ * therefore carried `In-Reply-To`/`References` pointing at GMAIL's id with
+ * our token nowhere on the wire, so `decideThreading` correctly found no
+ * verified token and started a NEW conversation, splitting the thread.
  *
  * `References`, unlike `Message-ID`, is NOT rewritten by Gmail — and an
  * RFC-5322-compliant reply's own `References` is built as
  * `{original References} + {original Message-ID}` (§3.6.4). So this function
  * appends its own freshly-minted `messageId` as the FINAL entry of the
- * outbound `References` chain, after any ancestor ids — giving the token a
- * second, provider-durable channel out onto the wire. When the customer
- * replies, their client's own References becomes
- * `[...ourReferences, gmailRewrittenId]` — i.e.
- * `[...ancestors, ourMintedToken, gmailRewrittenId]` — and `decideThreading`'s
- * existing newest-first scan (`src/mail/thread.ts`, `buildCandidates`) skips
- * the foreign trailing id (no token, not ours to judge) and finds our token
+ * outbound `References` chain, after any ancestor ids, giving the token a
+ * second, provider-durable channel onto the wire. The customer's reply then
+ * carries `[...ancestors, ourMintedToken, gmailRewrittenId]`, and
+ * `decideThreading`'s newest-first scan (`src/mail/thread.ts`,
+ * `buildCandidates`) skips the foreign trailing id and finds our token
  * immediately behind it. `In-Reply-To` is left untouched: it still names the
- * specific ancestor message being answered, not this reply's own id — see
- * `specs/mail/threading.md` §2a for the full spec of this fix, and
- * `specs/mail/sending.md`/`specs/api/agent-inbox-v1.md` §4a for the
- * corresponding header-derivation wording. Zero threading-decision code
- * changed: verified, not assumed — `src/mail/thread.ts` is untouched by this
- * fix, and a fixture reproducing tonight's exact failure (`src/mail/
- * ingest.test.ts`) threads correctly through the existing scan unmodified.
+ * specific ancestor being answered, not this reply's own id. See
+ * `specs/mail/threading.md` §2a, and `specs/mail/sending.md` /
+ * `specs/api/agent-inbox-v1.md` §4a for the header-derivation wording. No
+ * threading-decision code changed — `src/mail/thread.ts` is untouched, and a
+ * fixture reproducing the exact live failure (`src/mail/ingest.test.ts`)
+ * threads correctly through the existing scan unmodified.
  *
- * ## The reply token's own self-echo, and how it is suppressed (HT-49)
+ * ## The reply token's own self-echo, and how it is suppressed
  *
- * Putting a verifiable token in EVERY outbound reply's `References` (above)
- * has a sharp edge: some transports (Gmail, confirmed live) deliver the SENT
- * message back into the very mailbox it was sent from, where the reconcile
- * pipeline (`src/mail/gmail-reconcile.ts`) ingests it like any other inbound
+ * Putting a verifiable token in EVERY outbound reply's `References` has a
+ * sharp edge: some transports (Gmail, confirmed live) deliver the SENT
+ * message back into the mailbox it was sent from, where the reconcile
+ * pipeline (`src/mail/gmail-reconcile.ts`) ingests it like any inbound
  * message. `src/mail/ingest.ts`'s loop guard (`isOwnMessageReflection`) only
  * recognizes a reflection whose OWN `Message-ID` is our token — but Gmail
- * rewrites the wire `Message-ID` (this file's own module doc, above), so the
- * guard never fires for this transport. Without a second guard, that
- * self-echo carries our valid token as the LAST `References` entry,
- * `decideThreading` finds it and returns `'append'`, and the agent's own
- * reply gets stored a second time as a phantom `direction: 'inbound'`
- * message in the very conversation it belongs to — reopening it if it was
- * closed (`appendThreadInTx`, `src/store/conversations.ts`).
+ * rewrites that, so the guard never fires for this transport. Without a
+ * second guard the self-echo carries our valid token as the last
+ * `References` entry, `decideThreading` returns `'append'`, and the Agent's
+ * own reply is stored a second time as a phantom `direction: 'inbound'`
+ * message — reopening the conversation if it was closed (`appendThreadInTx`,
+ * `src/store/conversations.ts`).
  *
  * `selfEchoGuard` (optional — {@link SelfEchoGuardDeps}) closes this WITHOUT
  * touching `decideThreading` or adding a threading heuristic: immediately
  * after a successful send, if the sender returned a `providerMessageId`
  * (`EmailSendResult.providerMessageId` — Gmail's `body.id`, the SAME id
- * `gmail-reconcile.ts` will later see for this exact message during
- * `history.list`), this module resolves `input.from` to its `MailboxRecord`
+ * `gmail-reconcile.ts` will later see during `history.list`), this module
+ * resolves `input.from` to its `MailboxRecord`
  * (`MailboxStore.getMailboxByAddress`) and pre-seeds `(mailboxId,
  * providerMessageId)` as an already-`suppressed` row in the inbound delivery
- * ledger (`InboundDeliveryStore.preSuppressOwnSend`, `src/store/inbound-
- * deliveries.ts`). When reconcile later lists that SAME provider id and
- * calls `ingestInboundMessage`, its `claim()` finds the pre-seeded
- * `suppressed` row and reports the terminal outcome as-is — the existing
- * "do not double-process a terminal row" path, never a new code path in
- * `ingest.ts`. This is best-effort and never affects the send's own outcome
- * (the message is already delivered by the time this runs) — see {@link
- * suppressSelfEcho}'s doc comment for the failure modes this accepts.
+ * ledger (`InboundDeliveryStore.preSuppressOwnSend`,
+ * `src/store/inbound-deliveries.ts`). When reconcile later lists that same
+ * provider id and calls `ingestInboundMessage`, its `claim()` finds the
+ * pre-seeded `suppressed` row and reports the terminal outcome as-is — the
+ * existing "do not double-process a terminal row" path, never a new one in
+ * `ingest.ts`. Best-effort, and never affects the send's own outcome (the
+ * message is already delivered by the time this runs) — see {@link
+ * suppressSelfEcho} for the failure modes this accepts.
  */
 
 import { randomUUID } from 'node:crypto'

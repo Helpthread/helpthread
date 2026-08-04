@@ -1,253 +1,189 @@
 /**
  * `createGmailReconcileHandler` — the `QueueMessageHandler<GmailReconcileJob>`
- * that consumes the reconcile jobs the Gmail push webhook (HT-39, `src/api/
- * gmail-webhook.ts`) enqueues onto `GMAIL_RECONCILE_TOPIC`. This is HT-41:
+ * consuming the reconcile jobs the Gmail push webhook (`src/api/
+ * gmail-webhook.ts`) enqueues onto `GMAIL_RECONCILE_TOPIC`. This is
  * specs/mail/gmail-push.md §3's "history reconciliation and raw fetch" — the
  * ONLY place in this transport that calls `users.history.list`/
- * `users.messages.get`. Per inbound-ingestion.md §7, history reconciliation
- * is transport-specific (owned by gmail-push.md, not the provider-agnostic
- * pipeline), which is why this file — like `./gmail-oauth.ts` beside it —
- * lives in `src/mail/` as Gmail-specific orchestration rather than under
- * `src/providers/adapters/gmail/` as a thin single-purpose HTTP adapter.
+ * `users.messages.get`. History reconciliation is transport-specific
+ * (inbound-ingestion.md §7), which is why this lives in `src/mail/` as
+ * Gmail-specific orchestration rather than under
+ * `src/providers/adapters/gmail/` as a thin HTTP adapter.
  *
  * ## What one job run does, in order (gmail-push.md §3-§5)
  *
- * 1. Re-read the mailbox's CURRENT status — never trust the enqueue-time
- *    snapshot the job carries. Not `active` (or gone entirely) → ack,
- *    nothing fetched: a paused/needs_reconnect mailbox must not be swept.
- * 2. Acquire a live access token for it. A failure here is either the
- *    mailbox's grant being genuinely dead (the token service already
- *    marked it `needs_reconnect` — gmail-oauth.ts's `getAccessToken`
- *    contract — so retrying cannot help: ack) or transient (retry).
- * 3. Read the mailbox's STORED cursor — never the job's `historyId` (gmail-
- *    push.md §3: the notification's `historyId` is the NEW watermark;
- *    starting `history.list` from it would return nothing, since nothing
- *    is newer than the current state — the stored cursor is the source of
- *    truth). No stored cursor yet → ack (`watch()` seeds the baseline at
- *    connect — HT-40, gmail-connect.md §4 steps 4-5; HT-42 only renews it,
- *    gmail-connect.md §1, gmail-push.md §6). A push arriving before that
- *    baseline exists is a no-op here, not an error.
+ * 1. Re-read the mailbox's CURRENT status — never the enqueue-time snapshot
+ *    the job carries. Not `active` (or gone) → ack, nothing fetched: a
+ *    paused/needs_reconnect mailbox must not be swept.
+ * 2. Acquire a live access token. A failure here is either the grant being
+ *    genuinely dead (the token service already marked it `needs_reconnect`
+ *    — gmail-oauth.ts's `getAccessToken` contract — so retrying cannot
+ *    help: ack) or transient (retry).
+ * 3. Read the mailbox's STORED cursor — never the job's `historyId`
+ *    (gmail-push.md §3: the notification's `historyId` is the NEW
+ *    watermark; starting from it returns nothing). No stored cursor yet →
+ *    ack: `watch()` seeds the baseline at connect (gmail-connect.md §4
+ *    steps 4-5). A push arriving before that baseline exists is a no-op,
+ *    not an error.
  * 4. `history.list` from that cursor. A 404 means the cursor expired
  *    (gmail-push.md §5) — pause the mailbox, do NOT advance the cursor,
- *    ack (a human must rebaseline; retrying a 404 forever helps nobody).
- * 5. For each added message: first the self-echo filter (below) — a
- *    SENT-not-INBOX message is skipped with no `messages.get`/`ingest` call
- *    at all. Otherwise `messages.get?format=raw`. A 404 here means the
- *    message was deleted between list and get — skip it, nothing to ingest
- *    or retry. Raw bytes at or under `maxInlineRawBytes` are handed to
- *    `ingest` inline; larger ones are written to `blobStore` first and
- *    handed over as a `blobRef` — the OOM guard on the RAW MESSAGE itself
- *    (`RawMessageContent`'s own module doc, `src/providers/inbound-
- *    email.ts`, names exactly this "one large message inside a Gmail
- *    history batch" scenario), distinct from — and upstream of — the
- *    ingest pipeline's own, separate attachment-blob writes
- *    (inbound-ingestion.md §3).
+ *    ack (a human must rebaseline).
+ * 5. For each added message: the self-echo filter first (below) — a
+ *    SENT-not-INBOX message is skipped with no `messages.get`/`ingest` at
+ *    all. Otherwise `messages.get?format=raw`. A 404 here means the message
+ *    was deleted between list and get — skip it. Raw bytes at or under
+ *    `maxInlineRawBytes` go to `ingest` inline; larger ones are written to
+ *    `blobStore` first and handed over as a `blobRef` — the OOM guard on
+ *    the RAW MESSAGE itself (`RawMessageContent`'s doc in
+ *    `src/providers/inbound-email.ts` names this "one large message inside
+ *    a Gmail history batch" case), distinct from and upstream of the ingest
+ *    pipeline's own attachment-blob writes (inbound-ingestion.md §3).
  * 6. Advance the cursor to the new watermark, but ONLY if every message's
  *    ingest outcome is TERMINAL and durably ledgered: `stored`,
- *    `suppressed`, or `dead-letter` (see below for why `dead-letter` is
- *    included here — gmail-push.md §4's prose names only
- *    `stored`/`suppressed`). Any `failed`/`in-progress` outcome blocks the
- *    advance and the WHOLE batch is retried next attempt — dedup
- *    (inbound-ingestion.md §4, keyed on `(mailboxId, providerMessageId)`)
- *    makes re-listing/re-fetching the already-terminal messages free, so
- *    biasing to "retry the batch" over "skip the stuck message" never
- *    drops anything.
+ *    `suppressed`, or `dead-letter` (see below). Any `failed`/`in-progress`
+ *    outcome blocks the advance and the WHOLE batch retries next attempt —
+ *    dedup on `(mailboxId, providerMessageId)` (inbound-ingestion.md §4)
+ *    makes re-listing already-terminal messages free, so biasing to "retry
+ *    the batch" over "skip the stuck message" never drops anything.
  *
  * Any OTHER unexpected throw (network, timeout, a non-404 non-2xx from the
  * Gmail client, a `blobStore`/`ingest`/store failure) is caught at the top
- * and reported as `{ kind: 'retry' }` — never as `ack`, and never after
+ * and reported as `{ kind: 'retry' }` — never `ack`, and never after
  * advancing the cursor.
  *
- * ## The reconciliation lease (HT-48; gmail-push.md §6)
+ * ## The reconciliation lease (gmail-push.md §6)
  *
- * Between step 3 (a confirmed, non-null stored cursor) and step 4
- * (`history.list`), this run claims `mailboxId`'s reconciliation lease
- * (`GmailWatchStateStore.claimReconcileLease`, `claimed_until` on
+ * Between step 3 and step 4 this run claims `mailboxId`'s reconciliation
+ * lease (`GmailWatchStateStore.claimReconcileLease`, `claimed_until` on
  * `gmail_watch_state`, migration 016) — the inbound analogue of the
  * outbound delivery lease (`ConversationStore.claimThreadForDelivery`,
- * sending.md §3a). It exists ONLY to stop a push-triggered reconcile
- * (HT-41) and the daily sweep (HT-42) from doing the SAME `history.list`/
- * `messages.get` work concurrently when both land on one mailbox at once —
- * gmail-push.md §6 is explicit this is an efficiency guard, not a
- * correctness one: step 6's cursor-advance rule and the ingest pipeline's
- * dedup on `(mailboxId, providerMessageId)` (inbound-ingestion.md §4)
- * already make either ordering safe with no lease at all. Different
- * mailboxes never contend — the lease is keyed by `mailboxId`.
+ * sending.md §3a). It exists ONLY to stop a push-triggered reconcile and
+ * the daily sweep from doing the same `history.list`/`messages.get` work
+ * concurrently on one mailbox. It is an efficiency guard, not a correctness
+ * one: step 6's cursor rule and the ingest dedup already make either
+ * ordering safe with no lease at all. Different mailboxes never contend —
+ * the lease is keyed by `mailboxId`.
  *
- * A run that cannot claim the lease (another holder's `claimed_until` is
- * still in the future) does NOT ack — it returns `{ kind: 'retry',
- * backoffSeconds: DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS }` and does
- * no Gmail work of its own this attempt.
+ * A run that cannot claim it returns `{ kind: 'retry', backoffSeconds:
+ * DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS }` and does no Gmail work
+ * this attempt.
  *
- * ## Why a failed claim retries instead of acking
+ * **Why retry rather than ack.** "The holder will advance the cursor
+ * anyway" is false for anything arriving AFTER the holder's `history.list`
+ * snapshot, which fixes its batch and its eventual `newHistoryId` the
+ * moment it runs. Concretely: a sweep run claims the lease and lists up to
+ * `H1`, then spends the fetch/ingest phase on that batch; a new customer
+ * message arrives at `H2 > H1` and Gmail pushes for it; that push's job is
+ * consumed by a second run while the first still holds the lease, so its
+ * claim fails. Acking there discards the notification outright — the
+ * holder's `setCursor` only reaches `H1`, so `H2` waits for the next
+ * trigger, up to ~24h of silent latency on a quiet mailbox. The ingest
+ * dedup does not cover this: it guards against DOUBLING work, not against a
+ * snapshot predating a message. Retrying means the same job is redelivered
+ * after the holder has very likely released (see {@link
+ * DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS} for how the backoff is
+ * sized against `reconcileLeaseMs` and the queue's `maxAttempts`
+ * dead-letter ceiling), and its own `history.list` — from the cursor the
+ * holder just advanced to — picks up `H2` cheaply. In the common case
+ * (no new mail mid-run) the retry's list comes back empty.
  *
- * **Why not just ack?** The tempting reasoning is "the holder will advance
- * the cursor — there is nothing this run needs to do that the holder won't
- * already do." That reasoning is false for
- * anything that arrives AFTER the holder's `history.list` snapshot: the
- * holder's `listAddedMessageIds` call fixes its batch and its eventual
- * `newHistoryId` the moment it runs; a message that lands in Gmail's
- * history a moment later is invisible to that in-flight run and will not
- * be swept up by its cursor advance. Concretely — a sweep-triggered run
- * claims the lease and lists history up to `H1`, then spends the
- * fetch/ingest phase on that batch; a NEW customer message arrives at
- * `H2 > H1` and Gmail pushes a notification for it; that push's reconcile
- * job is consumed by a second run WHILE the first still holds the lease,
- * so the second run's claim fails. Acking there — as this handler used
- * to — discards that notification outright: the holder's `setCursor` only
- * advances to `H1`, so the message at `H2` is not reconciled until the
- * NEXT trigger (a further push, or the daily sweep, gmail-push.md §6) —
- * up to ~24h of silent added latency on an otherwise-quiet mailbox. This
- * is a correctness-adjacent latency regression, not covered by the
- * `(mailboxId, providerMessageId)` ingest dedup (inbound-ingestion.md §4),
- * which guards against DOUBLING work, not against a run's snapshot simply
- * predating the message. Returning `retry` with a short backoff instead
- * means the SAME job is redelivered after the holder has very likely
- * released (see {@link DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS} for
- * how the backoff is sized against `reconcileLeaseMs` and the queue's own
- * `maxAttempts` dead-letter ceiling); that retried attempt claims the
- * now-free lease and runs its OWN `history.list` from the cursor the
- * holder just advanced to, which trivially and cheaply picks up `H2`. The
- * lease therefore remains a pure efficiency guard in the COMMON case (no
- * new mail mid-run: the retry's `history.list` comes back empty, `newHistoryId`
- * unchanged) while no longer silently dropping the promptness of the RARE
- * arrives-mid-run case.
+ * The lease is released in a `finally` around steps 4-6, so it is released
+ * on every path out: happy-path ack, expired-cursor pause, blocked retry,
+ * and an unexpected throw — before that throw propagates to the top-level
+ * catch. Because the lease is purely an efficiency guard, the failure mode
+ * it must never produce is a mailbox locked out of reconciliation until the
+ * lease naturally expires. The release call is itself wrapped in a
+ * log-only try/catch: a release failure must not override this run's own
+ * `ack`/`retry` outcome, and the lease's own expiry remains the backstop
+ * for the one case a `finally` cannot help — the process being killed
+ * outright.
  *
- * The lease is released in a `finally` wrapped around steps 4-6, so it is
- * released on every path out of that block: the happy-path ack, the
- * expired-cursor pause, the blocked-retry (non-terminal ingest outcome),
- * AND an unexpected thrown error (network, Gmail client, ingest, store) —
- * release happens BEFORE the throw propagates to this handler's own
- * top-level catch. This is a deliberate choice: because the lease is purely
- * an efficiency guard (never a correctness one), the failure mode it must
- * never produce is "a mailbox that just threw is locked out of
- * reconciliation until the lease naturally expires" — releasing
- * immediately on every exit path, including a throw, means the NEXT
- * trigger (a fresh push, or tomorrow's sweep) can reconcile this mailbox
- * right away rather than waiting out `reconcileLeaseMs`. The release call
- * itself is wrapped in its own try/catch that only logs — a release
- * failure (a genuine DB error) must not override this run's own outcome
- * (`ack`/`retry`) with something else, and IS still covered by the lease's
- * own expiry as a backstop for the one case a `finally` block cannot help:
- * the process being killed outright before the `finally` ever runs.
+ * The release is scoped to the exact lease this run was granted
+ * (`claimReconcileLease`'s returned token, passed back to
+ * `releaseReconcileLease`) rather than an unconditional clear — see that
+ * store module's doc for the stale-holder scenario this closes.
  *
- * The release itself is now scoped to the exact lease this run was granted
- * (`GmailWatchStateStore.claimReconcileLease`'s returned token, passed back
- * to `releaseReconcileLease`) rather than an unconditional clear — see that
- * store module's doc comment for the stale-holder scenario (an overrunning
- * run's release clobbering a legitimate successor's live lease) this
- * closes.
+ * ## The self-echo filter
  *
- * ## The self-echo filter (HT-50)
+ * **Live-proven failure (2026-07-17):** `history.list` surfaces the
+ * mailbox's OWN outbound sends as `messagesAdded` entries exactly like
+ * genuine inbound mail. Ingesting one spawns a ghost `new` conversation
+ * "from" the desk's own address.
  *
- * **Live-proven failure (2026-07-17, first HT-44 live run):** `history.list`
- * surfaces the mailbox's OWN outbound sends — an Agent's reply, sent through
- * Gmail — as `messagesAdded` entries exactly like a genuine inbound message.
- * Ingesting one spawns a ghost `new` conversation "from" the desk's own
- * address, because nothing upstream of `ingest` had ever distinguished "a
- * message that arrived" from "a message we just sent that Gmail is
- * reflecting back through history."
+ * Before `messages.get`/`ingest`, check the `labelIds` {@link
+ * GmailHistoryClient.listAddedMessageIds} already carried: skip when `SENT`
+ * is present and `INBOX` is not, OR when `DRAFT` is present at all (see
+ * {@link isSelfEchoMessage}). This is a pure Gmail-label check on transport
+ * metadata, run before the raw bytes are fetched, so it never touches
+ * `parseInboundEmail` or `decideThreading` (charter invariant #5). It is
+ * unrelated to inbound-ingestion.md §5's loop suppression, which runs
+ * INSIDE the pipeline on a verifiable Message-ID/reply-token correlation —
+ * that rule is for "our mail bounced or was auto-answered"; this one is for
+ * "Gmail's own history conflates sent and received."
  *
- * The fix: before `messages.get`/`ingest` for a given added message, check
- * the `labelIds` {@link GmailHistoryClient.listAddedMessageIds} already
- * carried for it (`../providers/adapters/gmail/history.ts`'s module doc) —
- * skip when `SENT` is present and `INBOX` is not, OR when `DRAFT` is present
- * at all (see {@link isSelfEchoMessage}). This is a pure Gmail-label check,
- * not a mail-semantics decision: it runs entirely on transport metadata,
- * before the raw bytes are even fetched, so it never touches
- * `parseInboundEmail` or `decideThreading` (charter invariant #5) and is
- * unrelated to inbound-ingestion.md §5's own (different) loop-suppression
- * rule, which runs INSIDE the pipeline on a verifiable Message-ID/reply-token
- * correlation — that rule exists for the "our mail bounced or was
- * auto-answered" case; this one exists for "Gmail's own history conflates
- * sent and received."
+ * A self-ADDRESSED message (an Agent emailing the shared mailbox) carries
+ * BOTH `SENT` and `INBOX` and is deliberately NOT skipped: it is exactly
+ * the shape of a customer message, and skipping anything with `SENT` at all
+ * would drop it forever, which invariant #1 forbids.
  *
- * A self-ADDRESSED message (an Agent emailing the shared mailbox itself)
- * carries BOTH labels — `SENT` (we sent it) and `INBOX` (it also landed in
- * the inbox) — and is deliberately NOT skipped: it is exactly the shape of a
- * customer message and Gmail gives us no other signal to tell the two apart
- * at the transport layer. Getting this case wrong in the other direction —
- * skipping anything with `SENT` at all — would silently drop that message
- * forever, which invariant #1 forbids.
+ * **`DRAFT`:** an Agent hitting Reply in the Gmail web UI and typing for a
+ * while makes Gmail autosave that compose as a NEW message id on every
+ * pause, each carrying `labelIds: ["DRAFT"]` (no `SENT`, no `INBOX`) and
+ * each surfacing in `history.list` before anything is sent — every autosave
+ * would otherwise be ingested as a half-written "customer" message. Unlike
+ * the `SENT`/`INBOX` case this has no ambiguous edge: genuine inbound mail
+ * can never carry the system `DRAFT` label. The final SENT copy (a
+ * different message id) is still caught by the `SENT`-without-`INBOX`
+ * check.
  *
- * **`DRAFT` (HT-50):** the `SENT`/`INBOX` check alone leaves
- * a gap the initial version of this filter did not cover — an Agent hitting
- * Reply in the Gmail web UI and typing for a while. Gmail autosaves that
- * compose as a NEW message id on every pause, each carrying `labelIds:
- * ["DRAFT"]` (no `SENT`, no `INBOX`) and each surfacing in `history.list`
- * before the Agent ever sends anything — every autosave would otherwise be
- * ingested as a half-written "customer" message, potentially several per
- * reply. Unlike the `SENT`/`INBOX` case this has no ambiguous edge to
- * protect: genuine inbound mail can never carry the system `DRAFT` label, so
- * skipping on its presence alone is safe in the drop direction with no risk
- * to invariant #1. The final SENT copy (a different message id) is still
- * caught by the existing `SENT`-without-`INBOX` check.
- *
- * **Alternative considered and rejected:** track the Gmail message id
+ * **Alternative rejected:** track the Gmail message id
  * `users.messages.send` returns (`../providers/adapters/gmail/sender.ts`)
- * and skip exactly those ids on reconcile. This is more precise for sends
- * this engine itself issued, but it has a hole the label filter doesn't: an
- * Agent replying directly from the Gmail web UI (not through Helpthread's
- * own send path) produces a message this engine never minted an id for, so
- * it would sail through un-filtered and become the exact same ghost
- * conversation. `SENT`-not-`INBOX` (plus the `DRAFT` check above) catches
- * BOTH origins — our own API sends and an Agent's direct Gmail-UI replies,
- * autosaved drafts included — because Gmail applies these labels identically
- * regardless of which client sent or drafted the mail.
+ * and skip exactly those ids. More precise
+ * for sends this engine issued, but it has a hole the label filter does
+ * not: an Agent replying directly from the Gmail web UI produces a message
+ * this engine never minted an id for, which would sail through and become
+ * the same ghost conversation. The label check catches both origins.
  *
- * A skipped message is treated exactly like the existing "deleted between
- * list and get" case (step 5): no `ingest` call, so no `inbound_deliveries`
- * ledger row is ever created for it, and it contributes no outcome to the
- * batch that step 6's cursor-advance check inspects (gmail-push.md §4 scopes
- * "the batch" to messages actually handed to the pipeline for exactly this
- * reason) — the cursor still advances past it normally, and it can never
- * itself block or reclaim anything (nothing was ever leased or left
- * `in-progress` on its behalf, so HT-45's stuck-received reclaim has
- * nothing to reclaim here).
+ * A skipped message is treated exactly like "deleted between list and get":
+ * no `ingest` call, so no `inbound_deliveries` row, and no outcome
+ * contributed to the batch step 6 inspects (gmail-push.md §4 scopes "the
+ * batch" to messages actually handed to the pipeline). The cursor still
+ * advances past it, and it can never block or reclaim anything.
  *
- * **On the `SENT`+`INBOX` snapshot assumption (HT-50):**
- * this filter's `SENT`-without-`INBOX` check assumes a self-addressed send's
+ * **On the `SENT`+`INBOX` snapshot assumption:** the
+ * `SENT`-without-`INBOX` check assumes a self-addressed send's
  * `messagesAdded` record carries BOTH labels in one snapshot. If Gmail ever
- * instead records `SENT` at send time and applies `INBOX` via a LATER,
- * separate history event, this check alone would misread the message as a
- * pure self-echo and skip it — a silent, permanent drop, which invariant #1
- * forbids. `../providers/adapters/gmail/history.ts`'s `listAddedMessageIds`
- * hardens against exactly that ordering by also reading `labelsAdded`
- * history records for the same message id within the listed window and
- * merging their added-label deltas in — see that module's doc for the
- * mechanism. This has not been confirmed against a live self-addressed send
- * (flagged in this ticket's report as still open); the hardening below is a
- * defense against the *possible* split-record ordering, not a replacement
- * for that live verification.
+ * instead records `SENT` at send time and applies `INBOX` via a LATER
+ * history event, this check alone would misread it as a pure self-echo and
+ * skip it — a silent permanent drop, which invariant #1 forbids.
+ * `../providers/adapters/gmail/history.ts`'s `listAddedMessageIds` hardens
+ * against that ordering by also reading `labelsAdded` records for the same
+ * message id within the listed window and merging their deltas in. **This
+ * has not been confirmed against a live self-addressed send** — the
+ * hardening defends against a *possible* split-record ordering; it does not
+ * replace that verification.
  *
  * ## Never drop a message (charter §2; gmail-push.md §4)
  *
  * The cursor is the only thing that can make a message permanently
- * unreachable — advancing it past a message this run failed to durably
- * record would silently drop that message forever (the next
- * `history.list` starts AFTER it). Every path that cannot confirm every
- * message terminal returns `retry` WITHOUT advancing; the worst case is
- * redundant re-listing/re-fetching, never a skipped message.
+ * unreachable — advancing past a message this run failed to durably record
+ * drops it forever, since the next `history.list` starts AFTER it. Every
+ * path that cannot confirm every message terminal returns `retry` WITHOUT
+ * advancing; the worst case is redundant re-fetching, never a skipped
+ * message.
  *
- * ## `dead-letter` advances the cursor — a deliberate extension beyond
- * gmail-push.md §4's literal prose
+ * ## `dead-letter` advances the cursor — beyond gmail-push.md §4's prose
  *
- * gmail-push.md §4 says the cursor "advances only after the ingest
- * pipeline confirms every message HANDED TO IT is `stored` or `suppressed`,"
- * without mentioning `dead-letter`. This handler treats
- * `dead-letter` as ALSO cursor-advancing, because `dead-letter` (inbound-
- * ingestion.md §4) is itself a TERMINAL, durably-recorded ledger outcome —
- * "a message that exhausts its retry budget lands in dead-letter for
- * manual review — visible and recoverable, never silently dropped." The
- * never-drop invariant is about the message being durably recorded
- * SOMEWHERE reachable, not about it reaching `stored` specifically; a
- * dead-lettered message already satisfies that. Treating `dead-letter` as
- * NON-advancing instead would wedge the cursor on that one poison message
- * forever (every future reconcile run re-lists the same batch, re-fetches
- * the same message, gets the same permanent `dead-letter` outcome again,
- * and never advances past it) — which would also block every OTHER,
- * healthy message behind it in history order from ever being reached by a
- * FRESH batch. Flagged here explicitly for review, per this ticket's brief.
+ * §4 says the cursor advances only once every message handed to the
+ * pipeline is `stored` or `suppressed`, without mentioning `dead-letter`.
+ * This handler treats `dead-letter` as ALSO cursor-advancing, because it is
+ * itself a terminal, durably-recorded ledger outcome (inbound-ingestion.md
+ * §4: "visible and recoverable, never silently dropped"). The never-drop
+ * invariant is about the message being durably recorded somewhere
+ * reachable, not about reaching `stored` specifically. Treating it as
+ * non-advancing would wedge the cursor on that one poison message forever —
+ * every future run re-lists the same batch, gets the same permanent
+ * outcome, and never advances — which would also block every healthy
+ * message behind it in history order.
  */
 
 import type { GmailReconcileJob } from '../api/gmail-webhook.js'
