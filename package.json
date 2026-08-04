@@ -42,7 +42,8 @@
     "vitest": "4.1.10"
   },
   "workspaces": [
-    "web"
+    "web",
+    "cli"
   ],
   "overrides": {
     "postcss": "^8.5.18",
