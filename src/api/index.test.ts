@@ -1040,7 +1040,7 @@ describe('createInboxApi', () => {
       expect(sent).toHaveLength(0)
     })
 
-    it('an Idempotency-Key starting with the reserved draft: prefix is 400 validation_failed (HT-70 review fix — a raw reply key could otherwise collide with an engine-owned draft key of the same name)', async () => {
+    it('an Idempotency-Key starting with the reserved draft: prefix is 400 validation_failed (HT-70 — a raw reply key could otherwise collide with an engine-owned draft key of the same name)', async () => {
       const { store, api, sent } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
 
@@ -1238,7 +1238,7 @@ describe('createInboxApi', () => {
         ])
       })
 
-      // --- closed/spam-reopen interaction (F2 review fix) -----------------
+      // --- closed/spam-reopen interaction (F2) -----------------
       //
       // A reply to a closed/spam conversation reopens it SILENTLY (§4a's own
       // reopen rule — no event of its own), so thenSetStatus's `from` is
@@ -2946,7 +2946,7 @@ describe('createInboxApi', () => {
 
     /**
      * Create a real, active ADMIN Agent — both IMAP routes are admin-gated
-     * (HT-101 review fix, 2026-07-31), so the Bearer token alone no longer
+     * (HT-101, 2026-07-31), so the Bearer token alone no longer
      * reaches the handler.
      */
     async function adminAgentId(db: Db): Promise<string> {
@@ -3046,7 +3046,7 @@ describe('createInboxApi', () => {
 
     // Acts as an ADMIN deliberately. Sending these unauthenticated made both
     // calls 401 and the assertions pass vacuously — a handler that echoed the
-    // password in a 200 body would not have been caught (review, 2026-07-31).
+    // password in a 200 body would not have been caught (2026-07-31).
     // The point of this test is the SUCCESS path's body, so it has to reach it.
     it('never echoes the password anywhere in either response body', async () => {
       const { db } = await freshApi()
@@ -3092,7 +3092,7 @@ describe('createInboxApi', () => {
   })
 })
 
-describe('createInboxApi — hardening (Codex review)', () => {
+describe('createInboxApi — hardening', () => {
   const dummyStore = {} as unknown as ConversationStore
   const dummySender = createThrowingSender()
   // None of these tests ever exercise an /agents/*|/auth/* route, so a

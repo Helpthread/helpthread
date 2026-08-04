@@ -158,7 +158,7 @@ async function main(): Promise<void> {
   // (only `scripts/migrate.ts` is listed), so `npm run typecheck` never
   // catches their absence — the harness compiles under `tsx` and then fails
   // at `deps.assistants.store` the moment one of those routes is hit
-  // (review, 2026-07-25). Wired with the real stores over the same dev `db`.
+  // (2026-07-25). Wired with the real stores over the same dev `db`.
   const api = createInboxApi({
     store,
     apiToken: API_TOKEN,

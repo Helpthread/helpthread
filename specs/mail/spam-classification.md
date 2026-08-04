@@ -222,11 +222,10 @@ Three consequences follow, and none are built yet:
 
 - **The switch is per-mailbox, not global.** Mailboxes are connected independently and an
   operator may trust one provider's filtering and not another's. (INFERRED — the grain was
-  not specified in the decision above; per-mailbox is the author's reading, and it is a
+  not specified in the decision above; per-mailbox is an inference, and it is a
   two-way door.)
 - **Off means the verdict is not read at all**, not that it is read and ignored. A message
-  arriving at a mailbox with classification off is filed `active` regardless of its label,
-  exactly as before this spec existed.
+  arriving at a mailbox with classification off is filed `active` regardless of its label.
 - **The Spam folder distinguishes "filed automatically" from "an Agent filed this."**
   Without that, an operator cannot audit what the classifier did, and cannot tell a
   mistake of theirs from a mistake of ours. The storage for this does not exist yet —
@@ -235,13 +234,14 @@ Three consequences follow, and none are built yet:
 ## 7. Decision ledger
 
 Per the repo's provenance discipline, every normative choice above is marked with its
-source. Anything marked **INFERRED** is the author's judgment and has not been approved.
+source. Anything marked **INFERRED** is an inference drawn from existing specs and has not been
+approved.
 
 | # | Decision — in plain words | Source |
 |---|---|---|
 | — | Build the fix plus a spec for real auto-classification, rather than the fix alone | Maintainer decision, 2026-08-02 (chose fix-plus-spec over fix-only) |
 | — | Spam is never auto-classified in v1 | Prior accepted spec, agent-inbox-v1.md §3a |
-| D0 | Junk mail is stored and filed as `spam`, never dropped at intake | ⚠️ INFERRED — follows from inbound-ingestion.md §1's never-dropped invariant, but applying it to junk specifically is the author's reading |
+| D0 | Junk mail is stored and filed as `spam`, never dropped at intake | ⚠️ INFERRED — follows from inbound-ingestion.md §1's never-dropped invariant, but applying it to junk specifically is an inference |
 | D1 | Automatic spam classification is **on by default**, and an operator can **switch it off** | Maintainer decision, 2026-08-02 |
 | D1a | That switch is **per-mailbox** rather than global | ⚠️ INFERRED — the grain was not part of D1's answer. A two-way door |
 | D2 | A spam-verdict message whose reply token names a *deleted* conversation is filed as spam | ⚠️ INFERRED — the valid token argues it is a real customer; the deletion argues an Agent already discarded that thread. Uniform rule chosen for simplicity, not because the edge was decided |

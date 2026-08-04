@@ -630,7 +630,7 @@ Agent so the picker works regardless of who authored the library.
   `HELPTHREAD_API_TOKEN` Bearer auth, recorded here only because §5's prior security notes
   implied the UI itself had no auth story of its own. See §5's  bullet for the full
   justification.
-- **v1.1 (2026-07-17,  review fix).** `InboxApiDeps.selfEchoGuard` (optional, absent
+- **v1.1 (2026-07-17).** `InboxApiDeps.selfEchoGuard` (optional, absent
   by default): when present — and when the sender reports a provider message id for a
   resolvable outbound mailbox — the send path best-effort pre-seeds a successful reply's
   own sent-message echo as suppressed in the inbound delivery ledger, so a transport that

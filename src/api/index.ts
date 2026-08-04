@@ -285,7 +285,7 @@ export interface InboxApiDeps {
    */
   attachments?: { store: ThreadAttachmentStore; blobStore: BlobStore }
   /**
-   * The self-echo guard `sendReply` accepts (HT-49 review fix; `src/mail/
+   * The self-echo guard `sendReply` accepts (HT-49; `src/mail/
    * send.ts`'s `SelfEchoGuardDeps`): ABSENT BY DEFAULT — a deployment with no
    * self-reflecting transport configured (no Gmail mailbox connected) simply
    * never sets this, and reply-sending behaves exactly as before this guard
@@ -448,7 +448,7 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
     } else {
       // This await runs BEFORE the response-shaping try below, so a store
       // failure here must be contained locally or it escapes as an
-      // uncontrolled 500 (CodeRabbit #80) — same controlled shape as the
+      // uncontrolled 500 (PR #80) — same controlled shape as the
       // catch-all, never the host runtime's.
       let assistant: Awaited<ReturnType<typeof authenticateAssistantRequest>>
       try {

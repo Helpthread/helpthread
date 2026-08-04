@@ -157,12 +157,12 @@ export function createSenderResolver(deps: SenderResolverDeps): SenderResolver {
       // `SenderResolutionError`, aborting the ENTIRE sweep — one mailbox with
       // a bad key would stop outbound retries for every other mailbox.
       //
-      // ONLY `ImapCredentialDecryptError` is contained. An earlier revision
-      // caught every rejection here, which swept database faults into the same
-      // bucket: `runDeliveryWorker` marks a `SenderResolutionError` row
-      // `failed`, so a transient Postgres blip would have permanently failed
-      // outbound mail that merely needed retrying (review, 2026-07-31). A
-      // store fault must keep propagating and abort the sweep for a retry.
+      // ONLY `ImapCredentialDecryptError` is contained. Catching every
+      // rejection here would sweep database faults into the same bucket:
+      // `runDeliveryWorker` marks a `SenderResolutionError` row `failed`, so a
+      // transient Postgres blip would permanently fail outbound mail that
+      // merely needed retrying. A store fault must keep propagating and abort
+      // the sweep for a retry.
       const [config, password] = await Promise.all([
         imapConfigStore.getConfig(mailbox.id),
         imapCredentialStore.getPassword(mailbox.id).catch((cause: unknown) => {

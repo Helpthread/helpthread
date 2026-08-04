@@ -79,11 +79,11 @@
  * backoffSeconds: DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS }` and does
  * no Gmail work of its own this attempt.
  *
- * ## Why a failed claim retries instead of acking (correction, flagged in review)
+ * ## Why a failed claim retries instead of acking
  *
- * An earlier version of this handler acked on a failed claim, reasoning
- * "the holder will advance the cursor — there is nothing this run needs to
- * do that the holder won't already do." That reasoning is false for
+ * **Why not just ack?** The tempting reasoning is "the holder will advance
+ * the cursor — there is nothing this run needs to do that the holder won't
+ * already do." That reasoning is false for
  * anything that arrives AFTER the holder's `history.list` snapshot: the
  * holder's `listAddedMessageIds` call fixes its batch and its eventual
  * `newHistoryId` the moment it runs; a message that lands in Gmail's
@@ -170,7 +170,7 @@
  * skipping anything with `SENT` at all — would silently drop that message
  * forever, which invariant #1 forbids.
  *
- * **`DRAFT` (review round 2, HT-50):** the `SENT`/`INBOX` check alone leaves
+ * **`DRAFT` (HT-50):** the `SENT`/`INBOX` check alone leaves
  * a gap the initial version of this filter did not cover — an Agent hitting
  * Reply in the Gmail web UI and typing for a while. Gmail autosaves that
  * compose as a NEW message id on every pause, each carrying `labelIds:
@@ -205,7 +205,7 @@
  * `in-progress` on its behalf, so HT-45's stuck-received reclaim has
  * nothing to reclaim here).
  *
- * **On the `SENT`+`INBOX` snapshot assumption (review round 2, HT-50):**
+ * **On the `SENT`+`INBOX` snapshot assumption (HT-50):**
  * this filter's `SENT`-without-`INBOX` check assumes a self-addressed send's
  * `messagesAdded` record carries BOTH labels in one snapshot. If Gmail ever
  * instead records `SENT` at send time and applies `INBOX` via a LATER,

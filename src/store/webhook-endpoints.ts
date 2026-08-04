@@ -22,7 +22,7 @@
  * already-generated plaintext `secret` and only handles encrypting it at
  * rest.
  *
- * ## `create` is idempotent on `url` (HT-119 review fix, migration 031)
+ * ## `create` is idempotent on `url` (HT-119, migration 031)
  *
  * `url` now carries a unique index specifically so two callers racing to
  * register the SAME url (the module installer's `bootstrap_pending` step,

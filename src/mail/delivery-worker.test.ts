@@ -208,7 +208,7 @@ describe('runDeliveryWorker', () => {
     expect(sender.sent).toHaveLength(0)
   })
 
-  // HT-16 CodeRabbit fix: claimThreadForDelivery now re-checks delivery_status
+  // HT-16 fix: claimThreadForDelivery now re-checks delivery_status
   // (src/store/conversations.ts), not just the lease — this is the worker-level
   // regression for that fix, using the REAL claim (not a mocked always-null
   // one, unlike the TOCTOU test above) so it actually exercises the store's

@@ -93,7 +93,7 @@ export interface DeliveryWorkerDeps {
   senderResolver: SenderResolver
   /**
    * The same self-echo guard `sendReply` accepts (`./send.js`'s
-   * `SelfEchoGuardDeps`, HT-49 review fix) — a retried send through THIS
+   * `SelfEchoGuardDeps`, HT-49) — a retried send through THIS
    * worker's `attemptDeliveryOfClaimedThread` call is just as capable of
    * producing a self-echo as `sendReply`'s own retry path, so it needs the
    * same pre-suppression. ABSENT BY DEFAULT, a no-op when unset.
@@ -183,11 +183,10 @@ export async function runDeliveryWorker(
       // Refuse: treat it as an unresolvable row (failed below, sweep
       // continues), never a mismatched send.
       //
-      // An earlier revision justified this by "the mailbox was hard-deleted,
-      // so `mailbox_id` became null via ON DELETE SET NULL". That is no longer
-      // reachable and never should have been: migration 029 ships
-      // `ON DELETE RESTRICT` precisely so a mailbox owning conversations
-      // cannot be deleted (review, 2026-07-31). The guard still earns its
+      // Note this is NOT justified by "the mailbox was hard-deleted, so
+      // `mailbox_id` became null via ON DELETE SET NULL" — that path is not
+      // reachable: migration 029 ships `ON DELETE RESTRICT` precisely so a
+      // mailbox owning conversations cannot be deleted. The guard earns its
       // place for the cases that ARE reachable — a pre-028 conversation whose
       // `mailbox_id` is null resolving to a deployment default that differs
       // from what the original send used, or the default address itself being

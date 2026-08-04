@@ -13,7 +13,7 @@
  * operator's own database, encrypted, never in Resonant IQ's hands). This
  * store models that connection as a first-class row rather than a bare env
  * var precisely so the non-negotiable conditions from the two adversarial
- * design reviews have somewhere to attach: an immutable `team_id` every
+ * design constraints have somewhere to attach: an immutable `team_id` every
  * `module_installs` row can trust, a `connected_by_agent_id` for provenance,
  * and a `token_fingerprint` an operator can recognize without the engine
  * ever re-exposing the reversible secret.

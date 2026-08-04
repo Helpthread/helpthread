@@ -9,9 +9,9 @@
  *
  * ## Why compare-and-swap, not "read state, then update"
  *
- * The deploy orchestrator this store backs is, by condition 3 of the two
- * adversarial design reviews, "async by construction — never a DB
- * transaction across network calls." That means the SAME install can be
+ * The deploy orchestrator this store backs is, by design condition 3,
+ * "async by construction — never a DB transaction across network calls."
+ * That means the SAME install can be
  * picked up by more than one worker invocation: a serverless function that
  * timed out mid-step, then got redelivered by the queue; a reconciliation
  * sweep that finds a lapsed lease and reclaims it while the original

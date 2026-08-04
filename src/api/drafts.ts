@@ -225,7 +225,7 @@ export async function handleListDrafts(
  * Validated shape of the OPTIONAL "approve with edits" body (spec §6) —
  * parsed leniently: an absent or empty body means "no edit", never a `400`.
  *
- * HT-70 review fix (Codex): a PRESENT `bodyText` gets the SAME length bound
+ * HT-70: a PRESENT `bodyText` gets the SAME length bound
  * (`[MIN_BODY_LENGTH, MAX_BODY_LENGTH]`) `parseDraftBody` (draft-create,
  * above) and `parseReplyBody` (`src/api/conversations.ts`) already enforce
  * on their own required `bodyText`/`text` — without this, an Agent's edit
@@ -296,7 +296,7 @@ async function readApproveEditBody(
  * `409 retry_in_progress` — same shapes `handleReply` uses for the
  * equivalent outcomes.
  *
- * **HT-70 review fix (Codex): the checks below are a FAST PATH, not the
+ * **HT-70: the checks below are a FAST PATH, not the
  * authoritative gate.** This preflight read (`getConversationByThreadId`)
  * can go stale the instant a concurrent delete or spam-mark lands between
  * it and the write — the AUTHORITATIVE check is `approveDraft` →
@@ -367,7 +367,7 @@ export async function handleApproveDraft(
       )
     }
     if (result.reason === 'conversation-deleted') {
-      // The AUTHORITATIVE catch (HT-70 review fix, Codex): the preflight
+      // The AUTHORITATIVE catch (HT-70): the preflight
       // above said "not deleted", but resolveDraft's locked re-check found
       // otherwise at write time — same 404-shape as the preflight's own
       // (indistinguishable-from-nonexistent, §4d).

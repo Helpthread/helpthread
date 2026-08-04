@@ -435,7 +435,7 @@ export async function buildApp(
     // Passkeys (HT-75) — spread in only when configured (uiBaseUrl set),
     // matching agents.uiBaseUrl's own optional-field convention above.
     ...(webauthn !== undefined ? { webauthn } : {}),
-    // HT-49 review fix: Gmail delivers a sent reply's own copy back into the
+    // HT-49: Gmail delivers a sent reply's own copy back into the
     // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
     // it as a phantom inbound message (src/mail/send.ts's "The reply token's
     // own self-echo" section). Wired unconditionally here — every deployment
@@ -597,7 +597,7 @@ export async function buildApp(
         createImapClient,
         ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
       })
-      // `skipped` counts too (review, 2026-07-31). A mailbox skipped on every
+      // `skipped` counts too (2026-07-31). A mailbox skipped on every
       // tick — a lease stuck by a crashed run, a missing config, credential,
       // or baseline cursor — is an intake OUTAGE, not a quiet tick: mail is
       // arriving and nothing is collecting it. Gating the summary on

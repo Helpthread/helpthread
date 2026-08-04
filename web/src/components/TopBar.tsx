@@ -21,8 +21,8 @@
  * rail's gear, never here — specs/ui/admin-ia.md §1). Keyboard shortcuts
  * lives under Settings now (`SettingsScreen`), not here. The avatar menu is
  * **personal scope, and personal scope only** — Your Profile and Log out,
- * nothing else, ever (the first draft wrongly hung Team management off it;
- * that was the defect this correction fixes).
+ * nothing else, ever. Team management is global admin scope and belongs
+ * under `Manage ▾`, never here.
  */
 
 import Link from 'next/link'

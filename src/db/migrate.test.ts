@@ -1739,8 +1739,8 @@ describe('migrate', () => {
     // needs `_migrations` in one schema and the app tables in another, which
     // no code path here produces. So the body is replayed directly: this
     // guards the migration's own resolution rule against a future caller that
-    // does create that state, and it is the shape an earlier revision of this
-    // change got wrong.
+    // does create that state — the shape this resolution rule exists to
+    // handle.
     await db.query('CREATE SCHEMA decoy')
     await db.query('SET search_path TO decoy, public')
     const [{ first }] = await db.query<{ first: string }>('SELECT current_schema() AS first')

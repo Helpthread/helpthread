@@ -867,7 +867,7 @@ export interface ConversationStore {
    * requires" shape {@link setConversationStatus} uses for a missing/deleted
    * conversation.
    *
-   * **HT-70 review fix (Codex): the `action: 'approve'` branch IS the
+   * **HT-70: the `action: 'approve'` branch IS the
    * authoritative conversation-status check, not the API layer.** The API's
    * own preflight read (`src/api/drafts.ts`'s `handleApproveDraft`, via
    * `getConversationByThreadId`) is a stale snapshot the instant a
@@ -1438,7 +1438,7 @@ export function createConversationStore(db: Db): ConversationStore {
       // change that rolled back") — only on the 'sent' branch; 'failed'
       // fires nothing (not in spec §4's vocabulary).
       //
-      // Soft-delete carve-out (review fix, HT-69): mail delivery is NOT
+      // Soft-delete carve-out (HT-69): mail delivery is NOT
       // conversation-status-scoped — a thread claimed/leased before its
       // conversation was soft-deleted can still legitimately be delivered
       // and marked 'sent' here (charter invariant #1: never lose or corrupt
@@ -1756,7 +1756,7 @@ export function createConversationStore(db: Db): ConversationStore {
           return toStoredThread(row)
         }
 
-        // approve (spec §6 step 4 + HT-70 review fix, Codex — the TOCTOU
+        // approve (spec §6 step 4, HT-70 — the TOCTOU
         // close): lock the PARENT conversation row FIRST, inside this same
         // transaction, before touching the thread at all. The API's own
         // preflight read (src/api/drafts.ts's handleApproveDraft) is a
@@ -1792,8 +1792,8 @@ export function createConversationStore(db: Db): ConversationStore {
           return 'conversation-spam'
         }
         // 'closed' reopens to active in this SAME locked read-then-write
-        // (spec §6's reply-reopen invariant, folded in here from the prior
-        // review round) — 'pending' deliberately stays pending either way
+        // (spec §6's reply-reopen invariant) — 'pending' deliberately stays
+        // pending either way
         // (never auto-set — see the module doc), and every other status
         // (active) proceeds unchanged.
         if (parent.status === 'closed') {

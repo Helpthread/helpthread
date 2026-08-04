@@ -211,7 +211,7 @@ describe('WebAuthnStore', () => {
       expect(await store.deleteCredential(inserted.credential.id, agent2)).toBe('not_found')
     })
 
-    // --- The account-lockout TOCTOU (CodeRabbit, PR #94) ---------------------
+    // --- The account-lockout TOCTOU (PR #94) ---------------------
     //
     // Bug: the original `FOR UPDATE` scoped only to the TARGET row
     // (`id = $1 AND agent_id = $2`); the "does this Agent have another

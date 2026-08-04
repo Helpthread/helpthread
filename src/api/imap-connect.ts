@@ -18,10 +18,9 @@
  *
  * **The Bearer gate is NOT the only check.** Both handlers additionally
  * require an **admin acting Agent** ({@link requireAdmin}), because both make
- * the server dial an operator-supplied `host:port`. An earlier revision of
- * this heading described them as ordinary Bearer-gated routes and nothing
- * more — which is precisely the misreading that left them un-gated in the
- * first place (review, 2026-07-31). `web/src/lib/api.ts` sends
+ * the server dial an operator-supplied `host:port`. Describing them as
+ * ordinary Bearer-gated routes and nothing more is precisely the misreading
+ * that leaves them un-gated. `web/src/lib/api.ts` sends
  * `actingAgent: true` for both calls.
  *
  * ## The password is never echoed back
@@ -151,8 +150,8 @@ function validateConnectInput(
  * `Response` to send, or `null` when the caller may proceed.
  *
  * Both write endpoints take an operator-supplied `host`/`port` and make the
- * server open a connection to it. Left at service-Bearer-only — as an earlier
- * revision was, until an adversarial review caught it (2026-07-31) — any
+ * server open a connection to it. **Both therefore require an admin Agent, not
+ * the service Bearer token alone.** At service-Bearer-only, any
  * holder of the deployment's API token could use `/imap/check` as a network
  * probe against hosts and ports it can reach but the caller cannot,
  * distinguishing open from closed from filtered by the leg outcomes this

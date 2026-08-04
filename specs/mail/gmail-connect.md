@@ -324,8 +324,8 @@ the refresh's status check and token write are ONE guarded SQL statement
 `mailboxes` row), and the disconnect transaction takes that same row lock
 FIRST (the status flip is its first statement) — every interleaving either
 commits the refresh's row before disconnect's deletes sweep it, or writes
-nothing (a review fix, in two rounds: a JS-level re-check narrowed the
-race; moving the predicate into the write statement closed it). This
+nothing. A JS-level re-check alone only narrows that race; the predicate has
+to live in the write statement to close it. This
 idempotent path STILL re-runs the step-3 deletes on every call, as cheap
 defense-in-depth rather than a required recovery path. An unknown `address`
 is `404 not_found`.

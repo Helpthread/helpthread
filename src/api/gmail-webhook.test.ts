@@ -286,7 +286,7 @@ describe('handleGmailPushWebhook', () => {
       }),
     },
     {
-      // HT-47 review fix: this status value did not exist when the original
+      // HT-47: this status value did not exist when the original
       // `status !== 'active'` gate (an allowlist, not a denylist of the
       // three pre-HT-47 statuses) was written, but the gate already covers
       // it correctly — pinned here so a future rewrite of this check into an

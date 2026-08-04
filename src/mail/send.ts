@@ -137,7 +137,7 @@
  * fix, and a fixture reproducing tonight's exact failure (`src/mail/
  * ingest.test.ts`) threads correctly through the existing scan unmodified.
  *
- * ## The reply token's own self-echo, and how it is suppressed (HT-49 review fix)
+ * ## The reply token's own self-echo, and how it is suppressed (HT-49)
  *
  * Putting a verifiable token in EVERY outbound reply's `References` (above)
  * has a sharp edge: some transports (Gmail, confirmed live) deliver the SENT
@@ -243,7 +243,7 @@ export function assertLeaseExceedsSenderBound(sender: EmailSender, leaseMs: numb
 
 /**
  * Dependencies for the self-echo guard (module doc's "The reply token's own
- * self-echo" section, HT-49 review fix). Optional in {@link SendReplyDeps} —
+ * self-echo" section, HT-49). Optional in {@link SendReplyDeps} —
  * a deployment with no Gmail (or other self-reflecting) transport configured
  * simply never sets this, and every existing test/caller is unaffected: with
  * it absent, {@link suppressSelfEcho} is a complete no-op, byte-identical to

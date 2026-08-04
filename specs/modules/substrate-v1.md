@@ -316,13 +316,13 @@ to land in `specs/api/agent-inbox-v1.md` alongside implementation:
 ## 10. Changelog
 
 - **2026-07-18**: initial draft, following the module-catalog decision. Names
-  and resolves the charter-§4-vs-schema actor-model gap. Revised same day after
-  adversarial review against the shipped code (13 findings applied: approval-path
+  and resolves the charter-§4-vs-schema actor-model gap. Revised same day against the
+  shipped code: approval-path
   derivation specified instead of claiming `sendReply` reuse; draft/delivery CHECK made
   illegal-state-proof against migration 007's live constraint; thin events stripped of
   PII; soft-delete indistinguishability extended to drafts and events; agent-inbox-v1
   wire amendments made explicit; idempotency namespace scoped; author-identity
-  forward-carry specified). Same day: the additive-forward rule added (§1) with
+  forward-carry specified. Same day: the additive-forward rule added (§1) with
   `module` attribution on webhook endpoints (§5) — marketplace attaches, never
   retrofits (maintainer decision). Same day, during implementation: §2's CHECK predicate corrected
   for the three-valued-logic NULL trap (`IS NOT NULL` guards added; found by a failing

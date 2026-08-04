@@ -234,10 +234,12 @@ const ALL_DELIVERY_STATUSES: InboundDeliveryStatus[] = [
  * Read the database's applied-migration state. Split out and run FIRST because
  * every other check in this module queries an application table, and on a
  * database that has not been migrated those queries throw — burying the one
- * diagnostic that would have explained why (found by adversarial review,
- * 2026-08-02; the original version failed exactly the fresh-install case it
- * was written for, and its test passed only because it migrated first and
- * dropped `_migrations` afterwards, leaving every other table in place).
+ * diagnostic that would have explained why.
+ *
+ * The ordering is load-bearing and easy to get wrong: a version of this that
+ * runs the migration check later fails exactly the fresh-install case it
+ * exists for, and a test can still pass if it migrates first and drops
+ * `_migrations` afterwards, leaving every other table in place.
  *
  * Existence is checked in its OWN statement. A single
  * `CASE WHEN to_regclass(...) ... ELSE (SELECT max(id) FROM _migrations)`

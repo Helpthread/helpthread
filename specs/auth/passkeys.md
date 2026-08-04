@@ -1,20 +1,18 @@
 # Passkeys (WebAuthn) login for Agents
 
-Status: **draft.4** (2026-07-19). Extends the auth-provider seam
-`specs/auth/agents-and-auth.md`  built with exactly one provider,
+Status: **draft** (2026-07-19). Extends the auth-provider seam
+`specs/auth/agents-and-auth.md` built with exactly one provider,
 `password` — this is the second provider, and the first thing to actually
 exercise the seam's multi-provider extensibility (agents-and-auth.md §1, §4)
 with real code. Spec only: no migrations, no implementation. Every schema
 block below is a design artifact, not a runnable migration — same
-convention agents-and-auth.md's own `CREATE TABLE` blocks use. **draft.2**
-is a review-driven revision (lead-tier + Codex, 2026-07-19) — see the
-Changelog for the full list of what changed and why; nothing in draft.1
-survives unexamined, several conclusions reverse outright (§8 most
-notably). **draft.4** corrects a core-vs-marketplace classification error
-that survived drafts 1–3 unnoticed — see §1 and the Changelog.
+convention agents-and-auth.md's own `CREATE TABLE` blocks use.
+
+**Passkey login is core, not a marketplace module** (§1, §12) — the module
+catalog settled that on 2026-07-18.
 
 Read first: `specs/auth/agents-and-auth.md` §3.2 (`agent_auth_identities`
-— **amended in this same review round**, §2.1 below), §4 (the seam), §8
+— **amended by this spec**, §2.1 below), §4 (the seam), §8
 (session/acting-Agent trust), §9 (security posture); `specs/mail/
 gmail-connect.md` §2b (the signed-state, pre-auth pattern this spec's
 challenge tokens reuse); `src/auth/provider.ts`, `src/auth/
@@ -35,18 +33,11 @@ marketplace path." This matches the free-core line
 "Security hygiene is always free: passkey login (WebAuthn) is core,
 deliberately; baseline security hygiene belongs in core."
 
-**Corrected here, draft.4 (2026-07-19).** Drafts 1–3 of this spec carried a
-stale "licensed marketplace module... waiting-on-" framing — written
-*after* the catalog decision above but *before* `agents-and-auth.md` itself
-caught and fixed the identical staleness in its own text (PR #85,
-merged 2026-07-19, same day). This spec inherited the error rather than the
-fix; nothing downstream of §1 depended on the wrong framing (no code,
-schema, or endpoint in this spec is gated behind an entitlement check
-anywhere), so this is a documentation-only correction.  (the AGPL §7
-module exception) gates **in-process third-party modules and external
-contributions** — Google SSO, magic-link, and SAML/enterprise SSO remain
-marketplace and wait on it (agents-and-auth.md §11) — it does **not** gate
-first-party core code, and never gated this spec.
+**Passkey login is core**, so no code, schema, or endpoint in this spec sits behind
+an entitlement check. The AGPL §7 module exception gates **in-process third-party
+modules and external contributions** — Google SSO, magic-link, and SAML/enterprise
+SSO remain marketplace and wait on it (agents-and-auth.md §11) — it does **not**
+gate first-party core code, and does not gate anything here.
 
 This is still the second real provider to exercise the auth-provider seam
 (agents-and-auth.md §4) with real code beyond `password` — exactly as §4
@@ -72,17 +63,13 @@ Three new tables. Neither touches `agents` or `agent_auth_identities`.
 ### 2.1 Where credentials live — a new table, not `agent_auth_identities`
 
 **Decision: `webauthn_credentials`, not a row per credential in
-`agent_auth_identities`.** This is a deliberate departure from what
-agents-and-auth.md §3.2 itself originally anticipated: that section's
-`provider` column comment used to read `'password' (core); 'google',
-'passkey',... (marketplace)`, and its prose used to say "An Agent may have
-several rows (password + google + passkey)" — naming `passkey` as an
-example provider whose rows would live in `agent_auth_identities`, written
-before this spec existed. **§3.2 is corrected in this same review round**
-(agents-and-auth.md's own changelog, draft.6) to point here instead.
+`agent_auth_identities`.** This is a deliberate departure: `agent_auth_identities`
+is the general auth-provider table, and a reader would reasonably expect
+`provider='passkey'` rows to live there. **§3.2 of agents-and-auth.md is amended
+to point here instead** (see its changelog).
 
-Two reasons carry the departure — cardinality does **not**, and an earlier
-draft of this section wrongly claimed it did:
+Two reasons carry the departure. Cardinality is **not** one of them — nothing
+in `agent_auth_identities` restricts an Agent to a single `passkey` row:
 
 1. **Per-credential state that mutates on every use.** A WebAuthn credential
    carries a signature counter and a last-used timestamp that update on
@@ -104,8 +91,7 @@ draft of this section wrongly claimed it did:
    agents-and-auth.md §1's "zero core-schema change" promise for provider
    *additions* is written to prevent — a provider brings its own table.
 
-**Cardinality was never the real argument, and this section no longer
-claims it is.** Nothing in `agent_auth_identities`' schema restricts a
+**Cardinality is not the argument.** Nothing in `agent_auth_identities`' schema restricts a
 `provider='passkey'` value to one row per Agent — the partial unique index
 (`agent_auth_identities_one_password_per_agent`) is specific to `password`;
 several `passkey` rows would have been perfectly legal there. If reasons 1
@@ -172,16 +158,15 @@ ceremony run against an Agent's *own* existing credentials, distinct from
 `'authentication'` (anonymous login) and `'registration'` (enrolling a new
 credential).
 
-**Volume, honestly stated — corrected from draft.1.** Draft.1 claimed "volume
-tracks interactive login/registration events, not request volume" and used
-that to justify skipping any cleanup mechanism. That was wrong, not just
-imprecise: a row is minted on every `authentication/options` call, which
+**Volume, honestly stated.** Challenge-row volume does *not* track interactive
+login and registration events, and a cleanup mechanism cannot be skipped on
+that basis: a row is minted on every `authentication/options` call, which
 (§6.2) fires on every unauthenticated `/login` page mount that attempts
 conditional UI — not on completed login attempts, on page *views*. §6.2's
 staleness handling additionally re-mints on an interval below the challenge
 TTL for any tab left open, so one long-lived login tab mints several rows
-over its lifetime, not one. This is real request-volume. Retracted here
-rather than quietly patched.
+over its lifetime, not one. This is real request-volume, not
+interactive-event volume.
 
 **Fix: opportunistic purge on every mint, no cron.** Each `INSERT` that
 mints a new `webauthn_challenges` row (any of the three ceremonies) is
@@ -226,8 +211,8 @@ they want checked against, collapsing the protection to nothing.
 
 - **`rpId`** = the hostname (no scheme, no port) of `HELPTHREAD_UI_BASE_URL`
   — e.g. `inbox.example.com`, the deployed Agent Inbox's own host.
-  **Not** `desk.example.com`, the ENGINE's host — draft.1's worked
-  example used the wrong one. This is not a cosmetic mistake: WebAuthn
+  **Not** `desk.example.com`, the ENGINE's host. The distinction is not
+  cosmetic: WebAuthn
   ceremonies run in whatever browser tab is actually showing the login
   page, so the real, browser-reported origin is always the UI's,
   `inbox.example.com`, never the engine's — the engine is never loaded
@@ -816,12 +801,11 @@ even if somehow captured and forwarded.
 
 ## 8. Counter & clone-detection policy
 
-**Policy, revised from draft.1: exempt zero-history credentials; reject and
-alert on regression for every credential that has ever reported a nonzero
-counter.**
+**Policy: exempt zero-history credentials; reject and alert on regression for
+every credential that has ever reported a nonzero counter.**
 
-Draft.1 argued for log-only across the board, reasoning that most passkeys
-are synced and counter-incoherent. That reasoning proved too much: the
+**Why not log-only across the board?** The argument for it is that most passkeys
+are synced and counter-incoherent. That argument proves too much: the
 zero-counter exemption below already removes every credential that behaves
 that way — a synced/multi-device authenticator reporting `0` (WebAuthn's
 own sentinel for "does not implement a counter") never leaves the exempt
@@ -889,9 +873,6 @@ directly analogous column and check:
   forged-token detection's own "inspect the forged_token_detected log
   events" companion trail) — the DB column is what makes it *alertable*,
   the log line is what makes it *investigable*.
-
-This is a real behavior change from draft.1's log-only stance, and an
-honest reversal — stated plainly rather than silently revised.
 
 ## 9. Engine API (new)
 
@@ -1045,7 +1026,7 @@ footgun someone has to remember to re-derive later.
   support — `transports` simply records `hybrid` when reported — but no
   bespoke UI is designed around it here).
 - **No entitlement/licensing enforcement — none is needed.** Passkey login
-  is core (§1, corrected draft.4), not a paid module, so there is no
+  is core (§1), not a paid module, so there is no
   license check for anything in this spec to ever gate. Contrast a genuine
   marketplace provider (Google SSO, magic-link, SAML/enterprise SSO), which
   DOES wait on the §7 exception text and on entitlement infrastructure
@@ -1099,17 +1080,16 @@ recollection of the package's reputation.
 ## 14. Decision points for the maintainer
 
 1. **Credential storage: new `webauthn_credentials` table**, not rows in
-   `agent_auth_identities` — a deliberate departure from what agents-and-
-   auth.md §3.2 originally anticipated, corrected there in this same review
-   round. *(§2.1 — recommend as specified; the mutable per-use state and
-   column-shape mismatch carry it on their own — cardinality does not, and
-   this draft no longer claims it does.)*
+   `agent_auth_identities` — a deliberate departure, with agents-and-auth.md
+   §3.2 amended to match. *(§2.1 — recommend as specified; the mutable per-use
+   state and column-shape mismatch carry it on their own. Cardinality does
+   not.)*
 2. **Step-up re-authentication gates passkey enrollment** (password OR an
    existing passkey, bound to the session's `sub`, 5-minute TTL), plus a
    best-effort "new passkey added" notification email on every successful
-   registration — gating registration only, not rename/revoke. *(§5 —
-   added in this review round; recommend as specified. §10's finding —
-   sessions don't revoke — is exactly why both pieces are needed: step-up
+   registration — gating registration only, not rename/revoke. *(§5;
+   recommend as specified. §10's point that sessions do not revoke is
+   exactly why both pieces are needed: step-up
    stops a bare stolen session from minting new durable access, the email
    is the out-of-band signal if it happens anyway.)*
 3. **User verification: `'required'`**, not `'preferred'`. *(§6.3 —
@@ -1152,79 +1132,13 @@ recollection of the package's reputation.
 
 ## Changelog
 
-- **draft.4 (2026-07-19, engine-implementation review):** Corrects a
-  core-vs-marketplace classification error that survived drafts 1–3
-  unnoticed (§1, §12). Passkey login is core, not a licensed marketplace
-  module — the module catalog decided this on 2026-07-18
-  (the day before draft.1), and `agents-and-auth.md` §1 already
-  carries the corrected framing as of PR #85 (merged 2026-07-19,
-  the same day as draft.1–3 were written). This spec's own "licensed
-  marketplace module... waiting-on-" language was stale from the
-  moment it was written; caught during the engine-implementation
-  review, not by an independent re-read of the catalog. No prior draft's
-  technical content (schema, ceremonies, tokens, counter policy, endpoint
-  surface) depended on the marketplace framing — this is a documentation
-  correction only, not a design change.
-- **draft.3 (2026-07-19, CodeRabbit review, PR #88):** Three fixes. (1)
-  §6.2's counter check and its persistence are now specified as one atomic
-  unit — a `SELECT ... FOR UPDATE` re-read inside a transaction, not a
-  compare against the same stale row the cryptographic check used —
-  closing a race where two concurrent valid authentications could both
-  pass against a stale counter and the later write (even with the *lower*
-  counter) could silently overwrite a higher one already stored,
-  undermining §8's Tier 2 entirely; §8 cross-references the locked read so
-  "the stored maximum" means what it needs to mean. (2) `registration/
-  verify`'s optional `name` field is now explicitly reconciled with
-  `webauthn_credentials.name`'s `NOT NULL` (§2.1) — an omitted/blank name
-  gets a server-computed default (`"Passkey — {date}"`) before the insert,
-  stated in both the endpoint table (§9) and §6.1's prose, not left
-  implicit. (3) agents-and-auth.md §3.2's amendment (added in draft.2) is
-  itself corrected — it had cited "an Agent holding many credentials" as
-  one of the reasons passkeys need their own table, which is exactly the
-  cardinality argument §2.1 explicitly rejects; the amendment now cites
-  only the two reasons that hold (mutable per-use state, incompatible
-  column shape) and cross-references §2.1's own cardinality-neutral
-  stance.
-- **draft.2 (2026-07-19, lead-tier + Codex review):** Enrollment hardening
-  added — step-up re-authentication (§5, new section) gates
-  `registration/options` **and** `registration/verify`, plus a best-effort
-  "new passkey added" notification email on every successful registration
-  (§5.3); §10 now states plainly that sessions are stateless HMAC cookies
-  with no revocation, and that this is precisely why both mitigations
-  exist. Conditional-mediation staleness handling specified — proactive
-  re-mint on an interval below the TTL, plus a reactive `challenge_expired`
-  retry-once fallback for backgrounded-tab timer throttling (§6.2). The
-  `ceremony` discriminator is now enforced at both the application and
-  database layers, not just recorded (§7). Counter/clone policy reversed
-  from log-only to a two-tier exempt/reject-and-alert policy, with
-  rejections routed to the existing  `/internal/health` alertable
-  surface via a new `webauthn_credentials.sign_count_regression_at` column
-  (§8) — an honest correction of draft.1's own reasoning, not a quiet
-  patch. The challenge-row volume claim (§2.2) is corrected from "low,
-  interactive-event-scale" (false — a row mints on every login-page mount)
-  to an honest statement plus an opportunistic-purge fix, no cron. §3's
-  worked example corrected (`inbox.example.com`, the UI's own host — not
-  `desk.example.com`, the engine's), and a `localhost`-only,
-  no-IP-literal dev carve-out added. §2.1's justification corrected —
-  cardinality was never a valid reason to avoid `agent_auth_identities`
-  (nothing there restricts multiple `passkey` rows); the departure is now
-  argued on the two reasons that actually hold, and flagged explicitly
-  against agents-and-auth.md §3.2's own (now-corrected, that document's
-  draft.6) anticipation that passkeys would live there. Added: a
-  `userHandle`-vs-`agent_id` consistency check at authentication verify
-  (§6.2), a generic-`409` error contract for a `credential_id` already
-  claimed by a different Agent (§6.1), and `web/src/lib/api-types.ts`'s
-  descriptor-`kind` widening to §4.4's list of web-side changes. A new
-  scope note (§12) naming session revocation as a real, un-taken next step.
-- **draft.1 (2026-07-19):** initial contract — data model (§2:
-  `webauthn_credentials` as its own table, `webauthn_challenges` for
-  single-use), origin/RP-ID policy sourced from `HELPTHREAD_UI_BASE_URL`
-  (§3), the seam extension and its honest limit (options-minting sits
-  outside `AuthProvider`, §4), registration/authentication ceremonies with
-  UV `'required'` and attestation `'none'` (§6), the signed-token + DB-nonce
-  challenge lifecycle (§7), a log-only zero-counter-exempt clone policy
-  (§8, later reversed in draft.2), the endpoint surface and last-credential
-  guard (§9), security posture including the planted-passkey-survives-
-  password-rotation risk (§10), rollout (§11), scope (§12), the
-  `@simplewebauthn/server` license verification (§13), and decision points
-  (§14).
+- **2026-07-19** (PR #85, PR #88): initial version. Data model (§2: `webauthn_credentials` as its own
+  table, `webauthn_challenges` for single-use), origin/RP-ID policy sourced from
+  `HELPTHREAD_UI_BASE_URL` (§3), the seam extension and its honest limit — options-minting
+  sits outside `AuthProvider` (§4), step-up re-authentication gating registration (§5),
+  registration and authentication ceremonies with UV `'required'` and attestation `'none'`
+  (§6), the signed-token plus DB-nonce challenge lifecycle (§7), the two-tier
+  exempt/reject-and-alert counter and clone policy (§8), the endpoint surface and
+  last-credential guard (§9), security posture including the
+  planted-passkey-survives-password-rotation risk (§10), rollout (§11), scope (§12), the
+  `@simplewebauthn/server` license verification (§13), and decision points (§14).

@@ -1019,10 +1019,10 @@ CREATE TABLE assistants (
  * it in the same change"), so a default would only ever mask a hand-written
  * INSERT that forgot the column — exactly the kind of silent wrong-value
  * risk this schema's CHECK-heavy convention exists to avoid, not paper
- * over. (An earlier revision of this migration added `DEFAULT 'agent'` for
- * test-fixture convenience; reviewed and reverted — a masking default is
- * strictly worse than fixing the ~handful of raw-SQL fixtures that needed
- * an explicit value, see `src/db/migrate.test.ts`'s `threads` inserts.)
+ * over. **No `DEFAULT 'agent'`**, however convenient it would be for test
+ * fixtures: a masking default is strictly worse than giving the handful of
+ * raw-SQL fixtures an explicit value (see `src/db/migrate.test.ts`'s
+ * `threads` inserts).
  *
  * `threads_author_kind_direction_check` is the real invariant a default
  * would have masked: `(direction = 'inbound') = (author_kind = 'customer')`
@@ -1575,9 +1575,9 @@ BEGIN
   -- (current_schema()) — a shadowed search_path makes it land in the leading
   -- schema, find no applied rows, and re-bootstrap every table there, after
   -- which both rules agree. Divergence needs _migrations in one schema and
-  -- the app tables in another, which no path here produces. An earlier
-  -- revision used current_schema() and was caught in review; this keeps the
-  -- migration correct on its own terms rather than relying on that caller.
+  -- the app tables in another, which no path here produces. Resolving via
+  -- current_schema() would rely on the caller's search_path; this keeps the
+  -- migration correct on its own terms instead.
   SELECT n.nspname INTO STRICT target_schema
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -1729,7 +1729,7 @@ $migration027$;
  * `lease_token` is a per-claim `uuid`, and it — not `claimed_until` — is the
  * value a holder proves ownership with. Gmail's lease
  * (`GmailWatchStateStore.claimReconcileLease`) uses the rendered
- * `claimed_until::text` as its token, and an adversarial review of HT-101
+ * `claimed_until::text` as its token; HT-101
  * (2026-07-31) showed why that is too weak to fence a *write*: two successive
  * claims that land within one clock tick mint the SAME token, so a stale
  * holder's token compares equal to the live holder's and passes the check.
@@ -1812,8 +1812,7 @@ ALTER TABLE imap_watch_state ENABLE ROW LEVEL SECURITY;
  * Not `CASCADE`: the same "the record outlives the pointer" policy migration
  * 018 already applies to this table's `assignee_agent_id` — deleting a mailbox
  * must never delete customer conversations. The exact action is `RESTRICT`,
- * for the reasons in the section below; an earlier revision of this comment
- * said `SET NULL`, which is no longer what ships.
+ * for the reasons in the section below. **Not `SET NULL`.**
  *
  * No index: nothing yet queries "every conversation for mailbox X" — the
  * one planned reader (Stage 2b-ii's send path) looks up ONE conversation's
@@ -1824,8 +1823,7 @@ ALTER TABLE imap_watch_state ENABLE ROW LEVEL SECURITY;
  *
  * ## `ON DELETE RESTRICT`, not `SET NULL`
  *
- * An earlier revision used `ON DELETE SET NULL`, which an adversarial review
- * (2026-07-31) showed silently violates provenance. `NULL` already has a
+ * `ON DELETE SET NULL` silently violates provenance. `NULL` already has a
  * meaning here — "this conversation predates the column, so send from the
  * deployment default" (`../mail/sender-resolver.ts`'s `resolve(null)`).
  * `SET NULL` overloads that same value with a second, incompatible meaning:
@@ -2025,7 +2023,7 @@ ALTER TABLE conversations ADD COLUMN mailbox_id uuid REFERENCES mailboxes(id) ON
  * reaches storage, not stored verbatim on the (small but real) chance the
  * underlying Vercel API error string echoes request details back.
  *
- * ### `state` — the fourteen conditions from the two adversarial reviews
+ * ### `state` — the fourteen conditions
  *
  * `planned` (row exists, nothing attempted) → `credentials_issued` →
  * `project_created` → `artifact_uploaded` → `deployment_created` →
@@ -2156,7 +2154,7 @@ ALTER TABLE module_install_events ENABLE ROW LEVEL SECURITY;
 `
 
 /**
- * Migration 031 — `webhook_endpoints(url)` uniqueness (HT-119 review fix).
+ * Migration 031 — `webhook_endpoints(url)` uniqueness (HT-119).
  *
  * Before this, `WebhookEndpointStore.create` had no way to refuse two
  * endpoints pointed at the SAME url: two workers racing to bootstrap the
@@ -2219,7 +2217,7 @@ CREATE UNIQUE INDEX webhook_endpoints_url_unique ON webhook_endpoints (url);
 `
 
 /**
- * Migration 032 — `module_install_credential_escrow` (HT-119 review fix).
+ * Migration 032 — `module_install_credential_escrow` (HT-119).
  *
  * `module_install_events` (migration 030) is append-only and permanent by
  * design — exactly the wrong home for the ONE thing an install pipeline
@@ -2275,8 +2273,7 @@ ALTER TABLE module_install_credential_escrow ENABLE ROW LEVEL SECURITY;
 `
 
 /**
- * Migration 033 — `module_installs.state` gains `cleanup_pending` (HT-119
- * review fix).
+ * Migration 033 — `module_installs.state` gains `cleanup_pending` (HT-119).
  *
  * A terminal-failure transition (\`build_failed\` / \`verification_failed\` /
  * \`cleanup_required\`) always needs two things to be true first: any

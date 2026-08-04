@@ -51,12 +51,11 @@ knows:
   and nothing else — never whether the message is stored, which is invariant #3's to
   answer, not a classifier's. See [spam-classification.md](./spam-classification.md).
 
-> **Correction.** The interface as first drafted returns a `NormalizedInboundEmail`
-> — headers and body already parsed, attachments already blob-referenced. That is wrong
-> under invariant #1: it puts the parse *inside the provider*, before the engine, in a
-> provider-specific place, and hands attachment ownership to the transport.  changes
-> the seam to yield raw bytes + metadata; this spec describes the corrected contract, and
-> every transport is written against it.
+> **Why not a `NormalizedInboundEmail`** — headers and body already parsed,
+> attachments already blob-referenced? It breaks invariant #1: it puts the parse
+> *inside the provider*, before the engine, in a provider-specific place, and hands
+> attachment ownership to the transport. The seam yields raw bytes plus metadata
+> instead (HT-35), and every transport is written against that.
 
 ## 3. The ingest procedure
 

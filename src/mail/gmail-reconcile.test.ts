@@ -807,7 +807,7 @@ describe('createGmailReconcileHandler', () => {
     expect(ingest).not.toHaveBeenCalled()
   })
 
-  it('a disconnected mailbox is acked without acquiring a token or touching the Gmail client (HT-47 review fix, mirrors the paused case)', async () => {
+  it('a disconnected mailbox is acked without acquiring a token or touching the Gmail client (HT-47, mirrors the paused case)', async () => {
     const { store: mailboxStore } = fakeMailboxStore(activeMailbox({ status: 'disconnected' }))
     const getAccessToken = vi.fn(async () => 'token')
     const createHistoryClient = vi.fn()

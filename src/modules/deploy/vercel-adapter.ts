@@ -1,8 +1,7 @@
 /**
  * `createVercelDeployProvider` — the `DeployProvider` (`./provider.ts`)
  * implementation against Vercel's REST API, for the operator's OWN Vercel
- * account (HT-119; two adversarial design reviews, see CLAUDE.md's task
- * brief for this file).
+ * account (HT-119).
  *
  * ## The token is team-admin-equivalent — the allowlist is what bounds it
  *

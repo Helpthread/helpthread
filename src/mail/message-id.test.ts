@@ -66,7 +66,7 @@ describe('extractMessageIds', () => {
     expect(extractMessageIds('<a@b.test> <unterminated')).toEqual(['<a@b.test>'])
   })
 
-  // Codex: a `>` inside the msg-id's own quoted id-left / domain-literal must
+  // a `>` inside the msg-id's own quoted id-left / domain-literal must
   // not terminate it (RFC 5322 §3.6.4 / §3.4.1).
   it('a quoted id-left containing > does not terminate the msg-id', () => {
     expect(extractMessageIds('<"a>b"@example.test> <real@b.test>')).toEqual([

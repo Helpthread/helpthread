@@ -12,7 +12,7 @@
  * security-critical check, per spec §7's own "one mechanism, not several"
  * reasoning applied here to the sibling ceremony-verify problem.
  *
- * ## The TOCTOU fix (spec §6.2's draft.3 CodeRabbit fix)
+ * ## The TOCTOU fix (spec §6.2)
  *
  * The counter/clone comparison and the write that updates it happen inside
  * ONE transaction, against a `SELECT ... FOR UPDATE` re-read of the SAME
@@ -90,7 +90,7 @@ interface VerifyAuthenticationCeremonyParamsBase {
  * — the pre-consume check here and `consumeChallenge`'s `AND agent_id = $3`
  * — reopening the challenge-burn DoS the binding exists to close. No caller
  * ever did it, but nothing except this type stopped one from starting
- * (Codex review, PR #96). `authentication` takes `requireAgentId?: never`
+ * (PR #96). `authentication` takes `requireAgentId?: never`
  * for the mirror-image reason: its challenges are minted with
  * `agent_id IS NULL` (discoverable credential, spec §4.3), so binding one
  * would match no row and break every login.
@@ -132,7 +132,7 @@ export async function verifyAuthenticationCeremony(
   }
 
   // --- Step-up only: the challenge must have been minted FOR the acting
-  // Agent, checked BEFORE the consume below (Codex review, PR #94).
+  // Agent, checked BEFORE the consume below (PR #94).
   //
   // `requireAgentId` was previously enforced only against the resolved
   // credential's owner, further down — after the challenge row had already
