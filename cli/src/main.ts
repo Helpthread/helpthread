@@ -1,8 +1,10 @@
-#!/usr/bin/env node
 /**
  * `helpthread-module` CLI entrypoint (HT-116). Dispatches to `install` and
  * `verify`; everything else lives in the other files in this directory so
- * it can be unit-tested without a process/TTY.
+ * it can be unit-tested without a process/TTY. No shebang here — the built
+ * `cli/dist/main.js` (HT-121, `cli/scripts/build.mjs`) gets one from
+ * esbuild's `banner` option, which is the only copy that actually needs to
+ * be executable.
  */
 import { ArgsError, INSTALL_HELP, parseInstallArgs, parseVerifyArgs, VERIFY_HELP } from './args.js'
 import { InstallError, runInstall } from './install.js'
