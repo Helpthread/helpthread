@@ -6,10 +6,10 @@
 
 > ## Status of the three blocking questions (updated 2026-07-31, HT-101)
 >
-> Adversarial review (2026-07-20) found three gaps, all of which sit on the
-> **mail-semantics invariant** (CHARTER.md §2). HT-101 answered two and
-> *contained* the third. The original text of each is preserved below; this
-> box records what shipped against it.
+> Three gaps sit on the **mail-semantics invariant** (CHARTER.md §2). HT-101
+> answered two and *contained* the third. This box records the status of each;
+> the questions themselves are stated in full below, because one of them is
+> still open.
 >
 > | # | Question | Status after HT-101 |
 > |---|---|---|
@@ -28,7 +28,7 @@
 > underlying identity problem open. **A durable answer is still owed** before
 > IMAP intake can be called complete.
 >
-> ### Original text of the three questions
+> ### The three questions in full
 >
 > **1. Self-echo suppression has no mechanism on SMTP+IMAP.**
 > `src/store/inbound-deliveries.ts`'s `preSuppressOwnSend` pre-seeds the
@@ -79,7 +79,7 @@ There is also no UI for connecting a mailbox. The operator runs a raw `curl` aga
 
 ## 2. What the spike established (2026-07-20, verified live)
 
-**GMAIL scheduled reconciliation already ships — not a generic scheduled fetch.** This distinction is load-bearing and the earlier wording blurred it. What exists today is Gmail *history* reconciliation: a cursor-based `history.list` walk against the Gmail API. It proves that cursor-driven, cron-triggered intake is architecturally sound and already in production, which is what the charter amendment rests on. It does **not** provide a byte of the IMAP UID-cursor fetch this document specifies — that adapter, its cursor semantics, its `UIDVALIDITY` handling, and its idempotency key are all new work, and substantial. Read the paragraph below as "the pattern is proven," never as "the transport is built."
+**GMAIL scheduled reconciliation already ships — not a generic scheduled fetch.** The distinction is load-bearing and easy to blur. What exists today is Gmail *history* reconciliation: a cursor-based `history.list` walk against the Gmail API. It proves that cursor-driven, cron-triggered intake is architecturally sound and already in production, which is what the charter amendment rests on. It does **not** provide a byte of the IMAP UID-cursor fetch this document specifies — that adapter, its cursor semantics, its `UIDVALIDITY` handling, and its idempotency key are all new work, and substantial. Read the paragraph below as "the pattern is proven," never as "the transport is built."
 
 `runGmailWatchMaintenance` (`src/mail/gmail-watch-maintenance.ts`, the daily cron in `vercel.json`) performs "a bounded reconciliation sweep" that enqueues *the same reconcile job the push path enqueues*. That job (`src/mail/gmail-reconcile.ts`) reads the mailbox's **stored cursor** — explicitly never the push notification's `historyId` — then calls `history.list` followed by `messages.get?format=raw`. It takes only `mailboxId` from the job payload; the payload's `historyId` is logged and never acted on.
 
@@ -99,7 +99,7 @@ not a reason to change the threading model.
 
 **Outbound needs no NEW DNS.** Replies go through the operator's own mail server, so they are signed by whatever DKIM that server already uses, from its IPs, under its existing SPF record. Every provider-webhook alternative considered (Postmark, Resend, SES, Cloudflare) requires the operator to add records for a *new* sending identity; this transport requires none.
 
-Stated precisely, because the earlier wording overclaimed: this does **not** guarantee deliverability. It inherits whatever the operator's domain already has. A domain with no SPF, a broken DKIM selector, or a `p=reject` DMARC record misaligned with its own sender will deliver just as badly through Helpthread as it does through the operator's normal mail client — the point is that we add no new DNS burden, not that we fix an existing one. Where deliverability is already broken, that is the operator's pre-existing mail configuration and should be diagnosed as such rather than as a Helpthread fault.
+Stated precisely: this does **not** guarantee deliverability. It inherits whatever the operator's domain already has. A domain with no SPF, a broken DKIM selector, or a `p=reject` DMARC record misaligned with its own sender will deliver just as badly through Helpthread as it does through the operator's normal mail client — the point is that we add no new DNS burden, not that we fix an existing one. Where deliverability is already broken, that is the operator's pre-existing mail configuration and should be diagnosed as such rather than as a Helpthread fault.
 
 ## 3. Provider support
 

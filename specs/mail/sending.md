@@ -70,8 +70,7 @@ will not double-deliver a retried send.
 
 §3's "retries reuse, never re-mint" rule describes what a retry must DO once
 one is recognized; this section is how a retry gets recognized and kept safe
-under concurrency, closing the concurrency gap identified in an earlier version of this spec
-left open.
+under concurrency — the gap §3's rule leaves open on its own.
 
 **Caller-supplied idempotency key, scoped per conversation.** A caller that
 needs at-most-once delivery (the Agent Inbox API, `agent-inbox-v1.md` §4a)

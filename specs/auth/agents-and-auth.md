@@ -1,6 +1,6 @@
 # Agents & Authentication
 
-Status: **draft** (2026-07-18, amended 2026-07-19 — see Changelog draft.6–.7) — the contract for
+Status: **draft** (2026-07-18, amended 2026-07-19 — see Changelog) — the contract for
 real per-Agent identity, login, and user management, replacing the single shared operator
 password that shipped as a deliberate placeholder. Authored native (Helpthread's own
 domain model); the experience follows Helpthread's own information architecture and design system
@@ -117,8 +117,8 @@ CREATE UNIQUE INDEX agent_auth_identities_one_password_per_agent
   Agent record is re-created if the email must change.
 - A marketplace `google` module inserts `provider='google', subject=<google sub>,
   secret_hash=NULL` — **no core migration**. The seam (§4) is the only code that reads this
-  table by provider. **Amended :** a `passkey` (WebAuthn) module does **not** use this
-  table, despite an earlier draft of this section anticipating it would. WebAuthn's
+  table by provider. **Amended:** a `passkey` (WebAuthn) module does **not** use this
+  table. WebAuthn's
   per-credential mutable state (a signature counter, transports, backup flags) has no analog
   in this table's shape (one row, one optional secret hash, per identity) — it gets its own
   table instead (`webauthn_credentials`; `specs/auth/passkeys.md` §2.1, which is explicit that
@@ -156,8 +156,8 @@ Agent ids") and how  was handled.
 ### 3.4 Per-Agent mailbox scoping — **grants managed now, enforcement deferred** (§12.4, decided)
 
 Helpthread scopes each Agent to specific mailboxes and already carries `mailbox_id`
-throughout. Originally decided as schema-only; **superseded the same day by the maintainer's fidelity
-review**: the grants are real, managed data now — auto-granted at Agent creation, read and
+throughout. **Superseding the original schema-only scope (maintainer decision,
+2026-07-18)**: the grants are real, managed data — auto-granted at Agent creation, read and
 written through the §6 endpoints and the per-Agent Permissions screen (§7). What remains
 deferred is *enforcement of conversation visibility*, per the pinned semantics below.
 
@@ -309,8 +309,8 @@ Response envelopes (as built): a single Agent rides as `{ agent }` (`/setup`,
 `{ agents }`, and provider discovery as `{ providers, needsSetup }` — object envelopes
 throughout, extensible without breaking clients, matching the wrapped shapes below.
 
-- **`GET /api/v1/agents`** (any active Agent) → `{ agents: Agent[] }`. *(Amended during implementation:
-  was admin-only in the draft, but the assignee UI — any Agent may assign any Agent, §5 —
+- **`GET /api/v1/agents`** (any active Agent) → `{ agents: Agent[] }`. *(Not admin-only:
+  the assignee UI — any Agent may assign any Agent, §5 —
   needs the roster to render names and offer choices; an admin-only list would make a
   non-admin's assignee menu impossible. The roster carries no secrets (no identities, no
   hashes). Every mutation below remains admin-gated.)*
@@ -537,7 +537,9 @@ is retired (§8).
 3. **Provisioning:** both — invite-primary (via the core `EmailSender`) + admin-set-password
    fallback. *(Recommended.)*
 4. **Per-Agent mailbox scoping (§3.4):** model the `agent_mailbox_access` table in this
-   migration; no scoping behavior or UI. *(Confirmed — maintainer, 2026-07-18.)*
+   migration; no scoping behavior or UI. *(Confirmed — maintainer, 2026-07-18;
+   **superseded the same day** — §3.4 now manages real grants, and only
+   conversation-visibility enforcement stays deferred.)*
 5. **Profile fields (§3.1):** lean v1 — name, email, password, role, disable, **timezone**;
    avatar, job title, phone, alternate-emails, language, time-format **deferred**. *(Open.)*
 6. **Acting-Agent trust model (§8):** the web asserts the Agent id under the service token,
@@ -545,61 +547,58 @@ is retired (§8).
 
 ## Changelog
 
-- **draft.6 (2026-07-19, catalog reconciliation):** flagged by CodeRabbit on PR #82 —
-  this spec (written 2026-07-18, pre-dating the module catalog) classified passkey login as
-  a marketplace-only add-on; the catalog decision the same day made passkey login core,
-  security hygiene, never paid. Reclassified
-  throughout (§1, §3.2, §11): passkey is core, just not yet built — it will land as a second
-  **core** auth provider on the §4 seam, not a marketplace module. Google SSO, magic-link,
-  and SAML/enterprise SSO remain marketplace, unchanged. The provider-abstraction
-  architecture (§3.2, §4) is unaffected — it already supports multiple core providers, not
-  just marketplace ones.
-- **draft.7 (2026-07-19,  passkey spec review):** §3.2 corrected — a `passkey`/WebAuthn
-  provider does **not** use `agent_auth_identities` (an earlier draft of this section said it
-  would); it gets its own table, `webauthn_credentials`, specified in `specs/auth/passkeys.md`
-  §2.1. No schema or behavior change to anything in THIS spec — a same-day correction of a
-  forward-reference this section made before the passkey spec existed to contradict it,
-  caught by that spec's own review. **Amended same-day (CodeRabbit, PR #88):** this entry's
-  own first pass cited "an Agent holding many credentials" as one of the reasons — that is
-  the cardinality argument `specs/auth/passkeys.md` §2.1 explicitly rejects (nothing here
-  restricts `provider='passkey'` to one row per Agent); the rationale now cites only the two
-  reasons that hold, mutable per-use state and the incompatible column shape.
-- **draft.5 (2026-07-18, maintainer fidelity review):** mailbox-access semantics pinned and the
-  Permissions UI pulled forward (§3.4): admins implicit-all, auto-grant-on-create,
-  admin-only grant endpoints (§6: `GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes`);
-  conversation-visibility enforcement explicitly deferred to the multi-mailbox increment
-  (conversations carry no `mailbox_id` yet).
-- **draft.4 (2026-07-18,  build):** `GET /agents` opened to any active Agent (was
-  admin-only) — the assignee UI needs the roster; mutations stay admin-gated (§6).
-- **draft.3 (2026-07-18):** status is a closed lifecycle (CodeRabbit round 2): PATCH may
-  only toggle `active`↔`disabled`; `invited` exits solely via invite acceptance (or
-  delete/re-create); password writes on an `invited` Agent are refused (§6) — closing the
-  incoherent states (credential-less `active`, permanently-stranded invite, unusable
-  password) an unconstrained `status` field permitted.
-- **draft.2 (2026-07-18):** decisions resolved for the build (the maintainer's go-ahead):
-  `agent_mailbox_access` is modelled now, schema-only, no behavior (§3.4, §12.4 confirmed);
-  the acting-Agent header rule pinned per-endpoint — required on `/agents/*`, `/auth/me`,
-  and `PUT .../assignee`; other inbox endpoints stay bearer-only this increment, with the
-  disabled-Agent consequence stated (§8).
-- **draft.1 (2026-07-18):** review fixes from PR #69 (CodeRabbit): the admin-set-password
-  path creates Agents directly `active` (resolving the `invited`-status contradiction — an
-  Agent whose login is uniformly 401'd at `invited` could never "activate on first login"),
-  and is named honestly (admin-set, not temporary; forced-change deferred, §11);
-  one-password-identity-per-Agent becomes a partial unique index plus an identity-service
-  check (§3.2); `/setup` and the last-admin guard are serialized with `pg_advisory_xact_lock`
-  (guard predicates alone race under READ COMMITTED — both concurrent callers see the same
-  snapshot); vocabulary nit in §2.
-- **draft (2026-07-18):** initial contract — data model (§3), auth-provider seam (§4), roles
-  (§5), engine API (§6), UI screens (§7), session/trust/provisioning (§8), security (§9),
-  rollout (§10). Replaces the former single-operator password as planned.
-  Hardened after an independent adversarial review against the codebase/charter: the session
-  refresh path threads `sub` (was silently dropping identity mid-session); the acting-Agent
-  header is specified as a real `api.ts` change with a per-endpoint rule and an engine-side
-  status/existence re-check (bounding disabled/deleted Agents whose cookie is still valid);
-  `/setup`, last-admin, and invite-accept are atomic (no check-then-act races); login returns a
-  uniform `401` for unknown/wrong/invited/disabled (no status leak); the temp-password path
-  transitions to `active`; the §7 boundary claim is scoped to the interface + provider-agnostic
-  schema (not a plugin loader) and adds an identity-service seam so modules never write core
-  tables directly; invites use the `EmailSender` *transport* (not `sendReply`) with a distinct
-  `hti.` token prefix; email is immutable in v1; the bearer-token-bypasses-role-checks boundary
-  is stated plainly.
+- **2026-07-19** (PR #82, PR #88): **Passkey login reclassified from marketplace to core**
+  (§1, §3.2, §11).
+  The module catalog made passkey login core the previous day — security hygiene is never
+  paid — so it lands as a second **core** auth provider on the §4 seam rather than a
+  marketplace module. Google SSO, magic-link, and SAML/enterprise SSO remain marketplace,
+  unchanged. The provider-abstraction architecture (§3.2, §4) is unaffected; it already
+  supports multiple core providers.
+
+  **§3.2 corrected: a `passkey`/WebAuthn provider does not use `agent_auth_identities`.**
+  It gets its own table, `webauthn_credentials` (`specs/auth/passkeys.md` §2.1). Two reasons
+  carry it — mutable per-use state (signature counter, transports, backup flags) and an
+  incompatible column shape. **Cardinality is not one of them**: nothing in
+  `agent_auth_identities` restricts an Agent to a single `passkey` row. Nothing defined
+  by *this* spec changes — `webauthn_credentials` is specified in `passkeys.md` §2.1, not
+  here.
+
+- **2026-07-18** (PR #69): initial contract — data model (§3), auth-provider seam (§4), roles (§5),
+  engine API (§6), UI screens (§7), session/trust/provisioning (§8), security (§9), rollout
+  (§10). Replaces the former single-operator password as planned. Refined the same day:
+
+  - **Mailbox access pinned** (§3.4, §6): admins implicit-all, auto-grant-on-create,
+    admin-only grant endpoints (`GET /mailboxes`, `GET`/`PUT /agents/{id}/mailboxes`).
+    `agent_mailbox_access` holds **real managed grants**, not a schema-only placeholder —
+    §3.4 supersedes the earlier schema-only scope. What stays deferred is *enforcement*:
+    conversation-visibility filtering waits for the multi-mailbox increment, since
+    conversations carry no `mailbox_id` yet (§12.4).
+  - **`GET /agents` opened to any active Agent** (§6) — the assignee UI needs the roster.
+    Mutations stay admin-gated.
+  - **`status` is a closed lifecycle** (§6): PATCH may only toggle `active`↔`disabled`;
+    `invited` exits solely via invite acceptance, or delete and re-create; password writes
+    on an `invited` Agent are refused. This closes the incoherent states an unconstrained
+    `status` field permitted — credential-less `active`, permanently-stranded invite,
+    unusable password.
+  - **The acting-Agent header rule is pinned per endpoint** (§8): required on `/agents/*`,
+    `/auth/me`, and `PUT .../assignee`; other inbox endpoints stay bearer-only this
+    increment, with the disabled-Agent consequence stated.
+  - **Admin-set-password creates Agents directly `active`** (§11), resolving the
+    `invited`-status contradiction: an Agent whose login is uniformly 401'd at `invited`
+    could never activate on first login. Named honestly as admin-set, not temporary;
+    forced-change deferred.
+  - **One password identity per Agent** (§3.2) is a partial unique index plus an
+    identity-service check.
+  - **`/setup` and the last-admin guard are serialized** with `pg_advisory_xact_lock` —
+    guard predicates alone race under READ COMMITTED, since both concurrent callers see
+    the same snapshot.
+  - **Hardening**: the session refresh path threads `sub` (it was silently dropping
+    identity mid-session); the acting-Agent header is a real `api.ts` change with an
+    engine-side status and existence re-check, bounding disabled or deleted Agents whose
+    cookie is still valid; `/setup`, last-admin, and invite-accept are atomic, with no
+    check-then-act races; login returns a uniform `401` for unknown, wrong, invited, and
+    disabled, leaking no status; the §7 boundary claim is scoped to the interface plus a
+    provider-agnostic schema — not a module loader — and adds an identity-service seam so
+    modules never write core tables directly; invites use the `EmailSender` *transport*,
+    not `sendReply`, with a distinct `hti.` token prefix; email is immutable in v1; and the
+    bearer-token-bypasses-role-checks boundary is stated plainly.

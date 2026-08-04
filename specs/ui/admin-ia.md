@@ -9,7 +9,8 @@ system govern the interface.
 ## 1. The three-scope rule (load-bearing)
 
 Every navigation affordance belongs to exactly one scope. Mixing scopes is a fidelity
-defect (the first draft hung team management off the avatar menu — wrong).
+defect: team management, for instance, is global admin and does not belong on the personal
+avatar menu.
 
 | Scope | Entry point | Belongs here |
 |---|---|---|

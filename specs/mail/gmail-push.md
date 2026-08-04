@@ -225,8 +225,8 @@ here the cursor itself is unrecoverable.)
   that cannot claim it (another holder's lease is still live) does **not** ack — it returns
   `retry` with a short `backoffSeconds` hint
   (`DEFAULT_RECONCILE_LEASE_RETRY_BACKOFF_SECONDS`, `src/mail/gmail-reconcile.ts`) and does
-  no Gmail work of its own that attempt. Acking on a failed claim (an earlier version of
-  this handler's behavior) is unsafe: the holder's `history.list` snapshot is fixed the
+  no Gmail work of its own that attempt. Acking on a failed claim is unsafe: the holder's
+  `history.list` snapshot is fixed the
   moment it runs, so a message that arrives in Gmail's history *after* that snapshot is
   invisible to the holder's own cursor advance — acking the notification for it would drop
   it on the floor until the next trigger (a further push, or the next daily sweep), up to
