@@ -1,139 +1,124 @@
 /**
- * The queued installer (HT-119) — one `QueueMessageHandler<ModuleInstallJob>`
- * that drives ONE `module_installs` row through the lifecycle
+ * The queued installer — one `QueueMessageHandler<ModuleInstallJob>` driving
+ * ONE `module_installs` row through the lifecycle
  * `../../store/module-installs.ts` defines, composing every Foundation-phase
  * piece: `ModuleInstallStore`'s fenced state machine, `VercelConnectionStore`
- * for the operator's own credential, a `DeployProvider` for the actual
- * hosting calls, the marketplace catalog client for the verified artifact,
+ * for the operator's own credential, a `DeployProvider` for the hosting
+ * calls, the marketplace catalog client for the verified artifact,
  * `AssistantStore` + `WebhookEndpointStore` for the credentials the deployed
- * module needs, and `./challenge.ts` for the possession proof that gates
+ * module needs, and `./challenge.ts` for the possession proof gating
  * activation.
  *
  * ## Why a `for (;;) { switch (install.state) }` loop, not one job per state
  *
- * Each state's handling below is one focused function: perform whatever
- * side effect that step needs (a network call, a mint, a challenge), then
- * attempt exactly one fenced `ModuleInstallStore.transition`. When a step
- * succeeds, the loop immediately falls through to the NEXT state in the
- * SAME invocation — there is no reason to round-trip through the queue
- * again just to re-read a row this worker already holds a valid lease on.
- * The loop stops (returns a `QueueHandlerResult`) at the first point that
- * genuinely needs to wait on something external: `build_pending` returns
- * `retry` until the deployment is `'ready'` (Vercel's own build time is not
- * this worker's to control), a lost fence returns `ack` (module doc below),
- * and every terminal state returns `ack` immediately. This keeps "resumable
- * and idempotent at every step" literal: a fresh `QueueMessage` delivered
- * after a crash re-enters this same loop from whatever state the LAST
- * successful transition left behind, and picks up exactly where it left
- * off — never re-doing a step whose transition already committed, never
- * skipping one that didn't.
+ * Each state's handling is one focused function: perform that step's side
+ * effect (a network call, a mint, a challenge), then attempt exactly one
+ * fenced `ModuleInstallStore.transition`. On success the loop falls through
+ * to the NEXT state in the SAME invocation — no reason to round-trip through
+ * the queue to re-read a row this worker already holds a valid lease on. It
+ * stops at the first point that genuinely needs to wait on something
+ * external: `build_pending` returns `retry` until the deployment is
+ * `'ready'` (Vercel's build time is not this worker's to control), a lost
+ * fence returns `ack`, and every terminal state `ack`s immediately. This
+ * makes "resumable and idempotent at every step" literal: a fresh
+ * `QueueMessage` after a crash re-enters the loop from whatever state the
+ * last successful transition left behind — never re-doing a step whose
+ * transition committed, never skipping one that didn't.
  *
  * ## The claim comes first — a loser performs ZERO side effects
  *
- * A fence token that merely sits readable on the row is not a lease: N
- * concurrent deliveries of the same install can all read the SAME valid
- * token, all pass their own CAS precondition check (in sequence, one after
- * another), and all perform a real side effect — a mint, a hosting API
- * call — before any of them attempts to WRITE. Only the final database
- * write ever serialized; everything upstream of it did not. This handler
- * closes that by calling `../../store/module-installs.ts`'s
- * `ModuleInstallStore.claim` FIRST, before touching anything else — a
- * refused claim (`'lease_held'`: someone else's lease is still live) `ack`s
- * immediately, having made no network call, no mint, no provider call, not
- * merely having lost a race afterward. A refused claim with `'not_found'`
- * dead-letters (the row is gone, nothing left to do, ever). See that
- * store's own module doc, "claim", for the lease mechanics.
+ * A fence token merely sitting readable on the row is not a lease: N
+ * concurrent deliveries can all read the SAME valid token, all pass their
+ * own CAS precondition in sequence, and all perform a real side effect — a
+ * mint, a hosting API call — before any attempts to WRITE. Only the final
+ * write is serialized; everything upstream is not. This handler calls
+ * `ModuleInstallStore.claim` FIRST, before touching anything else: a refused
+ * claim (`'lease_held'`) `ack`s immediately, having made no network call, no
+ * mint, no provider call. A refused claim with `'not_found'` dead-letters —
+ * the row is gone, nothing left to do. See that store's module doc for the
+ * lease mechanics.
  *
  * ## A stale worker loses, it does not retry the same step
  *
- * Every transition attempt goes through {@link tryTransition}, which turns
- * a refused `ModuleInstallStore.transition` into the loop's exit: `reason:
- * 'not_found'` dead-letters (the row is gone, nothing left to do, ever);
- * `'state_mismatch'` or `'lease_stale'` (a *fenced* worker was preempted by
- * a newer one — a reclaim after a lapsed lease, or, in principle, an
- * overlapping delivery of the same message) simply `ack`s: this worker's
- * OWN work up to its last successful transition is still durably recorded,
- * and whichever worker now holds the fence is responsible for continuing.
- * Retrying here would either duplicate the side effect this worker already
- * performed (if it raced ahead of the winner) or fight the winner for the
- * row (if it fell behind) — neither is ever correct, so this worker simply
- * stops. See `../../store/module-installs.ts`'s own module doc for why
- * `transition` is CAS-fenced in the first place. {@link failInstall}
- * applies the SAME discipline to the terminal-failure path: it attempts
- * its fenced transition FIRST and only revokes credentials / disables a
- * recorded webhook endpoint when that transition actually won — a stale
- * worker taking a failure branch must never be able to disable the
- * Assistant of an install that is advancing fine under the worker that
- * actually holds the fence.
+ * Every transition goes through {@link tryTransition}, which turns a refused
+ * `ModuleInstallStore.transition` into the loop's exit. `'not_found'`
+ * dead-letters. `'state_mismatch'` or `'lease_stale'` — a fenced worker
+ * preempted by a newer one, via a reclaim after a lapsed lease or an
+ * overlapping delivery — simply `ack`s: this worker's own work up to its
+ * last successful transition is durably recorded, and whichever worker now
+ * holds the fence continues. Retrying would either duplicate the side effect
+ * this worker already performed (if it raced ahead) or fight the winner (if
+ * it fell behind); neither is ever correct.
  *
- * ## What "async by construction" means for THIS file specifically
+ * {@link failInstall} applies the SAME discipline to the terminal-failure
+ * path: it attempts its fenced transition FIRST and only revokes credentials
+ * or disables a recorded webhook endpoint once that transition actually won.
+ * A stale worker taking a failure branch must never disable the Assistant of
+ * an install advancing fine under the worker that holds the fence.
  *
- * No step below ever opens a `Db.transaction` around a network call —
- * every persisted write here is a SEPARATE `ModuleInstallStore.transition`
- * call, issued only AFTER the network call it records has already
- * returned. Two remote-resource-creation steps (`project_created`,
- * `deployment_created`) are consequently vulnerable to the "crash between
- * call and persist" orphan case the ticket brief names explicitly — this
- * file's answer to each is documented at its own step function, because
- * `../deploy/provider.ts` (owned by a sibling change, not this file) has
- * no `getProjectByName`/`getDeploymentByX` lookup a true reconciliation
- * could use. See {@link stepProjectCreated}'s doc for the deterministic-
- * name mitigation this file uses instead, and {@link
- * stepDeploymentCreated}'s doc for why a duplicate DEPLOYMENT (as opposed
- * to a duplicate PROJECT) is an accepted, bounded cost rather than a
- * safety violation.
+ * ## What "async by construction" means here
  *
- * ## Credentials: minted in memory, persisted to `assistants` only AFTER
- * winning the fence
+ * No step opens a `Db.transaction` around a network call — every persisted
+ * write is a SEPARATE `ModuleInstallStore.transition`, issued only AFTER the
+ * network call it records has returned. The two remote-resource-creation
+ * steps (`project_created`, `deployment_created`) are consequently
+ * vulnerable to the "crash between call and persist" orphan case, because
+ * `../deploy/provider.ts` has no `getProjectByName`/`getDeploymentByX`
+ * lookup a true reconciliation could use. See {@link stepProjectCreated} for
+ * the deterministic-name mitigation used instead, and {@link
+ * stepDeploymentCreated} for why a duplicate DEPLOYMENT (as opposed to a
+ * duplicate PROJECT) is an accepted, bounded cost rather than a safety
+ * violation.
+ *
+ * ## Credentials: minted in memory, persisted only AFTER winning the fence
  *
  * {@link stepCredentialsIssued} mints the Assistant this module's runtime
- * will authenticate as, and a webhook signing secret, ENTIRELY IN MEMORY —
- * it writes NOTHING to `assistants` before attempting its fenced
- * transition. This ordering is load-bearing, not stylistic: writing the
- * Assistant row before the CAS is what let two concurrent deliveries mint
- * T1/T2 and each unconditionally overwrite `assistants.token_hash` with
- * their own, independent of which one (if either) actually won the
- * transition — an install could reach `'active'` with an audit trail
+ * authenticates as, plus a webhook signing secret, ENTIRELY IN MEMORY — it
+ * writes NOTHING to `assistants` before its fenced transition. This ordering
+ * is load-bearing: writing the Assistant row before the CAS is what would
+ * let two concurrent deliveries mint T1/T2 and each unconditionally
+ * overwrite `assistants.token_hash`, independent of which (if either) won
+ * the transition — an install could reach `'active'` with an audit trail
  * recording T1 while `assistants` recognizes only T2, a green install that
- * is silently dead. Only after `tryTransition` reports a win does
- * {@link ensureAssistantMatchesCredentials} touch the `assistants` table,
- * and it always writes the hash of the token that transition ACTUALLY
- * recorded (recovered from the ciphertext, never from a variable a losing
- * attempt might have re-minted) — so the row `assistants` ends up holding
- * is, by construction, the same one the winning `credentials_issued` event
- * describes. The plaintext token/secret are carried forward (across
- * possibly many queue deliveries, until they are baked into the
- * deployment's env vars and later into the real `webhook_endpoints` row)
- * as envelope-encrypted bytes on the `credentials_issued` audit event's
- * `detail` column — the one column `../../store/module-installs.ts`'s own
- * doc names as the place for exactly this ("a challenge nonce" is its own
- * example of ephemeral, step-scoped material belonging there). Re-entering
- * the `credentials_issued` state after a crash between "transition
- * committed" and "assistants row written" re-runs
- * {@link ensureAssistantMatchesCredentials} from the recorded ciphertext —
- * this is what makes that write idempotent-and-recoverable rather than a
- * second crash-window this file merely moved instead of closing. See
- * {@link deterministicAssistantId}'s doc for why re-running it is a
+ * is silently dead.
+ *
+ * Only after {@link tryTransition} reports a win does {@link
+ * ensureAssistantMatchesCredentials} touch `assistants`, and it always writes
+ * the hash of the token that transition ACTUALLY recorded — recovered from
+ * the ciphertext, never from a variable a losing attempt may have re-minted
+ * — so the row `assistants` ends up holding is by construction the one the
+ * winning `credentials_issued` event describes.
+ *
+ * The plaintext token and secret are carried forward across possibly many
+ * queue deliveries, until baked into the deployment's env vars and later a
+ * real `webhook_endpoints` row, as envelope-encrypted bytes on the
+ * `credentials_issued` audit event's `detail` column — the column
+ * `../../store/module-installs.ts` names for exactly this ephemeral,
+ * step-scoped material. Re-entering `credentials_issued` after a crash
+ * between "transition committed" and "assistants row written" re-runs {@link
+ * ensureAssistantMatchesCredentials} from the recorded ciphertext, which is
+ * what makes that write recoverable rather than a second crash window merely
+ * moved. See {@link deterministicAssistantId} for why re-running it is a
  * ROTATE, never a duplicate `create`.
  *
  * ## Candidate-then-cutover, concretely
  *
- * `../deploy/provider.ts` has no "promote"/"alias" call — `createDeployment`
- * is the only way this file can make a deployment reachable at all, so
- * traffic to the deployment's OWN url exists from the moment `build_pending`
- * resolves to `'ready'`. What this file actually controls — and what non-
- * negotiable condition 5 is actually protecting, per its own text ("a
- * mistyped or hostile URL silently receives another customer's conversation
- * events") — is whether that URL is ever REGISTERED to receive real
- * conversation events at all. No `webhook_endpoints` row is created until
- * {@link stepBootstrapPending}'s challenge succeeds; before that point
- * `../../webhooks/outbox-drain.ts` has nothing to fan events out to at this
- * URL, full stop. On an update of an already-`active` install, the OLD
- * `webhook_endpoints` row (pointed at the previous deployment) is left
- * untouched and continues serving real deliveries until the NEW row is
- * created — recorded via `previous_active_deployment_id` — so a failed
- * verification never interrupts live delivery to the version already
- * proven to work.
+ * `../deploy/provider.ts` has no promote/alias call — `createDeployment` is
+ * the only way to make a deployment reachable, so traffic to the
+ * deployment's OWN url exists the moment `build_pending` resolves to
+ * `'ready'`. What this file controls, and what the non-negotiable condition
+ * actually protects against ("a mistyped or hostile URL silently receives
+ * another customer's conversation events"), is whether that URL is ever
+ * REGISTERED to receive real conversation events. No `webhook_endpoints` row
+ * exists until {@link stepBootstrapPending}'s challenge succeeds; before
+ * that, `../../webhooks/outbox-drain.ts` has nothing to fan events out to at
+ * this URL.
+ *
+ * On an update of an already-`active` install, the OLD `webhook_endpoints`
+ * row (pointed at the previous deployment) is left untouched and keeps
+ * serving real deliveries until the NEW row is created — recorded via
+ * `previous_active_deployment_id` — so a failed verification never
+ * interrupts live delivery to the version already proven to work.
  */
 
 import { createHash, randomBytes } from 'node:crypto'
