@@ -253,7 +253,7 @@ export interface ModuleInstallerDeps {
    * of the SAME install.
    */
   enqueueInstallJob(job: ModuleInstallJob, delaySeconds: number): Promise<void>
-  /** 32-byte key encrypting the transiently-carried plaintext credentials on the `credentials_issued` audit event (module doc's "Credentials" section) — decoded once at the composition root via `../../store/token-crypto.ts`'s `decodeEncryptionKey`, same convention as every other store in this codebase that calls `encrypt`/`decrypt` directly. */
+  /** 32-byte key encrypting the transiently-carried plaintext credentials escrowed in `module_install_credential_escrow` (module doc's "Credentials" section) — decoded once at the composition root via `../../store/token-crypto.ts`'s `decodeEncryptionKey`, same convention as every other store in this codebase that calls `encrypt`/`decrypt` directly. */
   encryptionKey: Buffer
 }
 
@@ -847,7 +847,8 @@ async function ensureEndpointActive(
 /**
  * Mint the Assistant this module's runtime authenticates as, and a fresh
  * webhook signing secret, then persist an ENCRYPTED envelope of both
- * (module doc's "Credentials" section) on this transition's audit event.
+ * (module doc's "Credentials" section) into `module_install_credential_escrow`
+ * — this transition's audit event records only the escrow row's id.
  *
  * Safe to re-run: {@link deterministicAssistantId} means a retry after a
  * crash (transition never persisted, so `install.state` is still
