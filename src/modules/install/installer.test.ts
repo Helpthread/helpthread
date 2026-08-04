@@ -168,17 +168,13 @@ function fakeCatalog(): InstallCatalogClient {
   }
 }
 
-/** A challenge transport that always answers correctly — reads the real, DB-committed webhook secret back off the install's audit trail (mirrors `installer.ts`'s own `loadIssuedCredentials`) so the fake genuinely proves possession rather than being told the answer out of band. */
+/** A challenge transport that always answers correctly — reads the real, DB-committed webhook secret back off the install's credential-escrow row (mirrors `installer.ts`'s own `loadIssuedCredentials`) so the fake genuinely proves possession rather than being told the answer out of band. */
 function correctChallengeSend(installs: ModuleInstallStore, installId: string) {
   return async (_url: string, body: string) => {
     const { nonce } = JSON.parse(body) as { nonce: string }
-    const events = await installs.listEvents(installId)
-    const event = [...events].reverse().find((e) => e.toState === 'credentials_issued')
-    if (event === undefined) throw new Error('no credentials_issued event yet')
-    const detail = event.detail as { credentialCiphertext: string }
-    const envelope = JSON.parse(
-      decrypt(Buffer.from(detail.credentialCiphertext, 'base64'), CREDENTIAL_KEY),
-    ) as {
+    const ciphertext = await installs.getCredentialEscrow(installId)
+    if (ciphertext === null) throw new Error('no credential-escrow row yet')
+    const envelope = JSON.parse(decrypt(ciphertext, CREDENTIAL_KEY)) as {
       webhookSecret: string
     }
     const signature = createHmac('sha256', envelope.webhookSecret).update(nonce).digest('hex')
@@ -755,6 +751,267 @@ describe('createModuleInstallHandler', () => {
 
     const final = await fixtures.installs.get(install.id)
     expect(final?.state).toBe('active')
+  })
+
+  // Credential escrow (migration 032) — the audit trail never carries
+  // decryptable credential material, and the escrow row's lifetime tracks
+  // the install's own need to recover in-flight credentials.
+  it('the credentials_issued audit event never carries ciphertext or key material', async () => {
+    const fixtures = await freshFixtures()
+    const install = await fixtures.installs.create(newInstallInput(fixtures.connectionId))
+    const { provider } = createFakeDeployProvider()
+    const deps = baseDeps(fixtures, provider, {
+      challenge: { send: correctChallengeSend(fixtures.installs, install.id) },
+    })
+    await createModuleInstallHandler(deps)(
+      makeMessage({ installId: install.id, operatorEnvVars: { THIRD_PARTY_KEY: 'x' } }),
+    )
+
+    const events = await fixtures.installs.listEvents(install.id)
+    const credEvent = events.find((e) => e.toState === 'credentials_issued')
+    const detail = credEvent?.detail as Record<string, unknown>
+    expect(Object.keys(detail).sort()).toEqual(['assistantId', 'credentialEscrowId'])
+    // The escrow id is opaque — nowhere near long/rich enough to itself be
+    // usable ciphertext, but assert the shape directly rather than by size.
+    expect(typeof detail.credentialEscrowId).toBe('string')
+  })
+
+  it('deletes the credential-escrow row once the install reaches active', async () => {
+    const fixtures = await freshFixtures()
+    const install = await fixtures.installs.create(newInstallInput(fixtures.connectionId))
+    const { provider } = createFakeDeployProvider()
+    const deps = baseDeps(fixtures, provider, {
+      challenge: { send: correctChallengeSend(fixtures.installs, install.id) },
+    })
+    await createModuleInstallHandler(deps)(
+      makeMessage({ installId: install.id, operatorEnvVars: { THIRD_PARTY_KEY: 'x' } }),
+    )
+    const final = await fixtures.installs.get(install.id)
+    expect(final?.state).toBe('active')
+    expect(await fixtures.installs.getCredentialEscrow(install.id)).toBeNull()
+  })
+
+  it('deletes the credential-escrow row once the install reaches a terminal failure state', async () => {
+    const fixtures = await freshFixtures()
+    const install = await fixtures.installs.create(newInstallInput(fixtures.connectionId))
+    const { provider } = createFakeDeployProvider({ buildStates: ['error'] })
+    const deps = baseDeps(fixtures, provider)
+    const result = await createModuleInstallHandler(deps)(
+      makeMessage({ installId: install.id, operatorEnvVars: {} }),
+    )
+    expect(result.kind).toBe('deadLetter')
+    const final = await fixtures.installs.get(install.id)
+    expect(final?.state).toBe('build_failed')
+    expect(await fixtures.installs.getCredentialEscrow(install.id)).toBeNull()
+  })
+
+  it('a crash right after credentials_issued commits still recovers the SAME credentials from escrow on retry', async () => {
+    const fixtures = await freshFixtures()
+    const install = await fixtures.installs.create(newInstallInput(fixtures.connectionId))
+    const { provider } = createFakeDeployProvider()
+
+    let crashed = false
+    const crashyInstalls: ModuleInstallStore = {
+      ...fixtures.installs,
+      async transition(id, from, to, fence, options) {
+        const result = await fixtures.installs.transition(id, from, to, fence, options)
+        if (!crashed && from === 'planned' && to === 'credentials_issued' && result.ok) {
+          crashed = true
+          throw new Error('simulated crash right after credentials_issued committed')
+        }
+        return result
+      },
+    }
+    const crashyDeps = baseDeps(fixtures, provider, { installs: crashyInstalls })
+    await expect(
+      createModuleInstallHandler(crashyDeps)(
+        makeMessage({ installId: install.id, operatorEnvVars: {} }),
+      ),
+    ).rejects.toThrow('simulated crash')
+
+    const afterCrash = await fixtures.installs.get(install.id)
+    expect(afterCrash?.state).toBe('credentials_issued')
+    // The escrow write committed in the SAME transaction as the state
+    // transition — a crash after the transition commits can never observe
+    // the state advanced with no escrow row to recover from.
+    expect(await fixtures.installs.getCredentialEscrow(install.id)).not.toBeNull()
+
+    // The crashed worker's own lease is still held under the token its
+    // (real, committed) transition minted — simulate it naturally lapsing
+    // rather than waiting out the real TTL, the same technique the
+    // existing `endpoint_verified`-crash test above uses.
+    await fixtures.db.query(
+      `UPDATE module_installs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`,
+      [install.id],
+    )
+
+    // A fresh delivery recovers the SAME credentials well enough to
+    // complete the whole pipeline — if it had re-minted a different token,
+    // the possession challenge (which reads the webhook secret straight
+    // out of escrow) would sign with a value the deployed module was never
+    // actually given, and the install would end at verification_failed.
+    const recoveredDeps = baseDeps(fixtures, provider, {
+      challenge: { send: correctChallengeSend(fixtures.installs, install.id) },
+    })
+    const recovered = await createModuleInstallHandler(recoveredDeps)(
+      makeMessage({ installId: install.id, operatorEnvVars: { THIRD_PARTY_KEY: 'x' } }),
+    )
+    expect(recovered).toEqual({ kind: 'ack' })
+    const final = await fixtures.installs.get(install.id)
+    expect(final?.state).toBe('active')
+  })
+
+  // Fenced, retryable cleanup (migration 033) — a transient failure
+  // revoking/disabling must never be silently absorbed into a terminal
+  // state that isn't actually true yet.
+  it('a revocation failure during cleanup leaves the install retryable at cleanup_pending, not silently terminal', async () => {
+    const fixtures = await freshFixtures()
+    const install = await fixtures.installs.create(newInstallInput(fixtures.connectionId))
+    const { provider } = createFakeDeployProvider({ buildStates: ['error'] })
+
+    let shouldFail = true
+    const flakyAssistants: AssistantStore = {
+      ...fixtures.assistants,
+      async patch(id, patch) {
+        if (shouldFail) {
+          shouldFail = false
+          throw new Error('simulated transient DB failure revoking the assistant')
+        }
+        return fixtures.assistants.patch(id, patch)
+      },
+    }
+    const deps = baseDeps(fixtures, provider, { assistants: flakyAssistants })
+    const result = await createModuleInstallHandler(deps)(
+      makeMessage({ installId: install.id, operatorEnvVars: {} }),
+    )
+    expect(result.kind).toBe('retry')
+
+    const afterFailedCleanup = await fixtures.installs.get(install.id)
+    expect(afterFailedCleanup?.state).toBe('cleanup_pending')
+
+    // The Assistant this install minted is still ACTIVE — the cleanup that
+    // was supposed to disable it never actually completed.
+    const assistantsAfterFirstAttempt = await fixtures.assistants.list()
+    expect(assistantsAfterFirstAttempt[0].status).toBe('active')
+
+    // The lease is still held under `cleanup_pending`'s own token (only a
+    // FULLY completed cleanup releases it — see `finalizeCleanup`'s doc);
+    // simulate it naturally lapsing rather than waiting out the real TTL.
+    await fixtures.db.query(
+      `UPDATE module_installs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`,
+      [install.id],
+    )
+
+    // A later delivery retries the SAME cleanup — this time it succeeds —
+    // and only THEN reaches the real terminal state.
+    const recoveredDeps = baseDeps(fixtures, provider, { assistants: flakyAssistants })
+    const recovered = await createModuleInstallHandler(recoveredDeps)(
+      makeMessage({ installId: install.id, operatorEnvVars: {} }),
+    )
+    expect(recovered.kind).toBe('deadLetter')
+    const final = await fixtures.installs.get(install.id)
+    expect(final?.state).toBe('build_failed')
+    expect((await fixtures.assistants.list())[0].status).toBe('disabled')
+  })
+
+  it('a permanent failure disables a previously-recorded webhook endpoint before reaching its terminal state', async () => {
+    const fixtures = await freshFixtures()
+    const install0 = await fixtures.installs.create(newInstallInput(fixtures.connectionId))
+    const endpoint = await fixtures.webhookEndpoints.create({
+      url: 'https://module-cleanup-seed.example.test',
+      secret: 'secret-x',
+      events: [],
+      module: 'qa-scoring',
+      status: 'active',
+    })
+
+    // Seed an `endpoint_verified` audit event recording THIS install's own
+    // endpoint, then rewind the row's current state back to `build_pending`
+    // — `disableRecordedEndpoint` reads the id from history regardless of
+    // the install's CURRENT state, so this reproduces "an endpoint this
+    // install verified earlier in its life" without needing a second
+    // reachable failure state after `endpoint_verified` (v1's pipeline has
+    // none: the only step after that one is the `active` CAS).
+    let install = install0
+    for (const [from, to] of [
+      ['planned', 'credentials_issued'],
+      ['credentials_issued', 'project_created'],
+      ['project_created', 'artifact_uploaded'],
+      ['artifact_uploaded', 'deployment_created'],
+      ['deployment_created', 'build_pending'],
+    ] as const) {
+      const result = await fixtures.installs.transition(install.id, from, to, install.leaseToken)
+      if (!result.ok) throw new Error(`seeding failed at ${from} -> ${to}`)
+      install = result.install
+    }
+    const seeded = await fixtures.installs.transition(
+      install.id,
+      'build_pending',
+      'endpoint_verified',
+      install.leaseToken,
+      { detail: { webhookEndpointId: endpoint.id } },
+    )
+    if (!seeded.ok) throw new Error('seeding endpoint_verified failed')
+    const rewound = await fixtures.installs.transition(
+      seeded.install.id,
+      'endpoint_verified',
+      'build_pending',
+      seeded.install.leaseToken,
+    )
+    if (!rewound.ok) throw new Error('rewinding to build_pending failed')
+
+    // No remoteDeploymentId was ever recorded, so `build_pending`'s own
+    // step refuses permanently before ever touching the fake provider —
+    // any failInstall call exercises the cleanup path this test cares
+    // about, regardless of which reason triggered it.
+    const { provider } = createFakeDeployProvider()
+    const deps = baseDeps(fixtures, provider)
+    const result = await createModuleInstallHandler(deps)(
+      makeMessage({ installId: install0.id, operatorEnvVars: {} }),
+    )
+    expect(result.kind).toBe('deadLetter')
+
+    const final = await fixtures.installs.get(install0.id)
+    expect(final?.state).toBe('build_failed')
+
+    const endpoints = await fixtures.webhookEndpoints.list()
+    expect(endpoints.find((e) => e.id === endpoint.id)?.status).toBe('disabled')
+  })
+
+  // Fenced lease renewal (module doc's own long-running-step gap) — a
+  // worker that has lost the fence mid-step must abort before its next
+  // remote call, never complete a step whose remote side effect a NEWER
+  // worker might already be duplicating.
+  it('a lease renewal that loses the fence aborts before the next provider call', async () => {
+    const fixtures = await freshFixtures()
+    const install = await fixtures.installs.create(newInstallInput(fixtures.connectionId))
+    const { provider, calls } = createFakeDeployProvider()
+
+    const fenceLostInstalls: ModuleInstallStore = {
+      ...fixtures.installs,
+      async renew() {
+        return false
+      },
+    }
+    const deps = baseDeps(fixtures, provider, { installs: fenceLostInstalls })
+    const result = await createModuleInstallHandler(deps)(
+      makeMessage({ installId: install.id, operatorEnvVars: { THIRD_PARTY_KEY: 'x' } }),
+    )
+
+    // createProject (credentials_issued -> project_created) has no
+    // renewal checkpoint of its own — it's the first remote call after a
+    // fresh claim, still well inside the claim-time lease — so it still
+    // runs once. `artifact_uploaded`'s renewal check, right before the
+    // catalog download, is the first to see the lost fence and aborts —
+    // uploadArtifact/createDeployment/getDeploymentState must never run.
+    expect(result).toEqual({ kind: 'ack' })
+    expect(calls.createProject).toBe(1)
+    expect(calls.uploadArtifact).toBe(0)
+    expect(calls.createDeployment).toBe(0)
+    expect(calls.getDeploymentState).toBe(0)
+
+    const final = await fixtures.installs.get(install.id)
+    expect(final?.state).toBe('project_created')
   })
 
   it('an update with no drift is a no-op ack', async () => {

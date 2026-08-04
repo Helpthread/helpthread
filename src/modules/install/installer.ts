@@ -351,29 +351,36 @@ export function deterministicAssistantId(installId: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
 }
 
-// --- credential envelope (carried on the credentials_issued event) --------
+// --- credential envelope (carried on the credential-escrow row) -----------
 
 interface CredentialEnvelope {
   assistantToken: string
   webhookSecret: string
 }
 
-function encodeCredentialCiphertext(envelope: CredentialEnvelope, key: Buffer): string {
-  return Buffer.from(encrypt(JSON.stringify(envelope), key)).toString('base64')
+/** Raw ciphertext bytes, ready for `ModuleInstallStore.transition`'s `credentialCiphertext` option — migration 032's `module_install_credential_escrow`, never the permanent `module_install_events` table. */
+function encodeCredentialCiphertext(envelope: CredentialEnvelope, key: Buffer): Uint8Array {
+  return encrypt(JSON.stringify(envelope), key)
 }
 
-function decodeCredentialCiphertext(ciphertextBase64: string, key: Buffer): CredentialEnvelope {
-  const plaintext = decrypt(Buffer.from(ciphertextBase64, 'base64'), key)
+function decodeCredentialCiphertext(ciphertext: Uint8Array, key: Buffer): CredentialEnvelope {
+  const plaintext = decrypt(ciphertext, key)
   return JSON.parse(plaintext) as CredentialEnvelope
 }
 
 /**
  * Recover the plaintext credentials {@link stepCredentialsIssued} minted for
- * `installId`, by reading them back off that install's own audit trail —
- * see the module doc's "Credentials" section for why this is where they
- * live instead of a dedicated column. Throws if no `credentials_issued`
- * event exists (a caller bug: every step after `planned` requires this to
- * have already run).
+ * `installId` — the Assistant id from that install's own audit trail (never
+ * secret, safe to keep there), the actual token/secret bytes from migration
+ * 032's credential-escrow row (`ModuleInstallStore.getCredentialEscrow`),
+ * which is where the ONLY decryptable copy lives once the audit event no
+ * longer carries it. Throws if no `credentials_issued` event exists (a
+ * caller bug: every step after `planned` requires this to have already
+ * run) or if the escrow row is already gone — the latter means this install
+ * has already reached `active` or a terminal state (migration 032's doc
+ * comment: the row is deleted the moment the recovery need it exists for
+ * ends), so a caller reaching here for such an install is a bug, not a
+ * transient failure.
  */
 async function loadIssuedCredentials(
   installs: ModuleInstallStore,
@@ -387,8 +394,15 @@ async function loadIssuedCredentials(
       `installer: install ${installId} has no 'credentials_issued' event to recover credentials from`,
     )
   }
-  const detail = event.detail as { assistantId: string; credentialCiphertext: string }
-  const envelope = decodeCredentialCiphertext(detail.credentialCiphertext, encryptionKey)
+  const detail = event.detail as { assistantId: string }
+  const ciphertext = await installs.getCredentialEscrow(installId)
+  if (ciphertext === null) {
+    throw new Error(
+      `installer: install ${installId} has no credential-escrow row to recover credentials from — ` +
+        'it has already reached active or a terminal state, where this row no longer exists',
+    )
+  }
+  const envelope = decodeCredentialCiphertext(ciphertext, encryptionKey)
   return {
     assistantId: detail.assistantId,
     assistantToken: envelope.assistantToken,
@@ -504,21 +518,69 @@ async function tryTransition(
   return { stop: { kind: 'ack' } }
 }
 
-/** Revoke the Assistant this install minted, if any — module doc's "revokes credentials it minted for an install that never went active." Never throws: a failure permanently is failing anyway, and a missing/already-disabled Assistant is not itself an error. */
+/**
+ * Extend this install's lease immediately before a long-running remote
+ * call this step is about to make (an artifact upload, a deployment
+ * create, a build-state poll), and report whether the fence still holds.
+ *
+ * `ModuleInstallStore.transition`'s CAS protects every DATABASE write this
+ * file makes, but it protects nothing else: the claim-time lease
+ * ({@link INSTALL_CLAIM_TTL_SECONDS}, five minutes) was sized for one
+ * invocation's ordinary round trips, not for whatever a slow catalog
+ * download, a large multi-file upload, or a stalled Vercel API call
+ * actually takes. An invocation that runs long enough for its lease to
+ * lapse can have another worker legitimately reclaim the row while THIS
+ * one is still mid-flight — and unlike a lost database CAS, a REMOTE side
+ * effect already in progress does not get undone by losing the race
+ * afterward: this call is what lets a step notice the loss BEFORE making
+ * that remote call, rather than after.
+ *
+ * A caller that gets `{ stop }` back must abort immediately — return the
+ * `ack` inside without performing the provider call it was about to make.
+ * Same posture as {@link tryTransition}'s stale-worker branch: this
+ * worker's own prior work is already durably committed, and whichever
+ * worker now holds the fence is responsible for continuing.
+ */
+async function renewLeaseOrAbort(
+  deps: ModuleInstallerDeps,
+  install: ModuleInstallRecord,
+): Promise<{ ok: true } | { stop: QueueHandlerResult }> {
+  const renewed = await deps.installs.renew(
+    install.id,
+    install.leaseToken,
+    INSTALL_CLAIM_TTL_SECONDS,
+  )
+  if (renewed) return { ok: true }
+  return { stop: { kind: 'ack' } }
+}
+
+/**
+ * Revoke the Assistant this install minted, if any — module doc's "revokes
+ * credentials it minted for an install that never went active." A missing
+ * or already-disabled Assistant is not an error (`AssistantStore.patch`
+ * returns `null` for an id it doesn't find, never throws for that) — but a
+ * genuine failure (a transient DB error, most plausibly) is left to
+ * PROPAGATE, not swallowed: {@link finalizeCleanup} is what decides what a
+ * thrown error here means for the install's state, and it can only make
+ * that call if the error actually reaches it.
+ */
 async function revokeIssuedCredentials(
   deps: ModuleInstallerDeps,
   installId: string,
 ): Promise<void> {
   const assistantId = deterministicAssistantId(installId)
-  try {
-    await deps.assistants.patch(assistantId, { status: 'disabled' })
-  } catch {
-    // Best-effort — the install is already headed to a terminal failure
-    // state regardless of whether this cleanup step itself succeeds.
-  }
+  await deps.assistants.patch(assistantId, { status: 'disabled' })
 }
 
-/** Disable the webhook endpoint {@link stepBootstrapPending} recorded for `installId`, if any — the requirement that a failed install never leaves a live endpoint receiving real customer events. Reads the `webhookEndpointId` off the `endpoint_verified` audit event (the one place it is ever recorded); a no-op if that event doesn't exist (the install never got that far). Never throws — same best-effort posture as {@link revokeIssuedCredentials}. */
+/**
+ * Disable the webhook endpoint {@link stepBootstrapPending} recorded for
+ * `installId`, if any — the requirement that a failed install never leaves
+ * a live endpoint receiving real customer events. Reads the
+ * `webhookEndpointId` off the `endpoint_verified` audit event (the one
+ * place it is ever recorded); a no-op if that event doesn't exist (the
+ * install never got that far). Propagates a genuine failure exactly like
+ * {@link revokeIssuedCredentials} — see that function's doc.
+ */
 async function disableRecordedEndpoint(
   deps: ModuleInstallerDeps,
   installId: string,
@@ -528,48 +590,133 @@ async function disableRecordedEndpoint(
   const webhookEndpointId = (event?.detail as { webhookEndpointId?: string } | undefined)
     ?.webhookEndpointId
   if (webhookEndpointId === undefined) return
-  try {
-    await deps.webhookEndpoints.patch(webhookEndpointId, { status: 'disabled' })
-  } catch {
-    // Best-effort — see revokeIssuedCredentials's same reasoning.
-  }
+  await deps.webhookEndpoints.patch(webhookEndpointId, { status: 'disabled' })
 }
 
 /**
- * Move `install` to a terminal failure state, recording `reason` — the
+ * Read back the reason/target-state a {@link failInstall} call recorded on
+ * its `cleanup_pending` transition — the ONE place {@link finalizeCleanup}
+ * (whether run inline by `failInstall` itself, or resumed by a fresh
+ * delivery re-entering the `cleanup_pending` state below) gets to find out
+ * what it's finishing. Throws if no such event exists — a caller bug: this
+ * is only ever reached for an install already in `cleanup_pending`, which
+ * cannot happen without one.
+ */
+async function loadCleanupTarget(
+  installs: ModuleInstallStore,
+  installId: string,
+): Promise<{
+  reason: string
+  targetState: 'build_failed' | 'verification_failed' | 'cleanup_required'
+}> {
+  const events = await installs.listEvents(installId)
+  const event = [...events].reverse().find((e) => e.toState === 'cleanup_pending')
+  if (event === undefined) {
+    throw new Error(
+      `installer: install ${installId} reached cleanup_pending with no cleanup_pending event recorded — this is a bug, not a transient failure`,
+    )
+  }
+  const detail = event.detail as {
+    reason: string
+    targetState: 'build_failed' | 'verification_failed' | 'cleanup_required'
+  }
+  return detail
+}
+
+/**
+ * Finish a failure already fenced into `cleanup_pending` (migration 033):
+ * revoke any minted Assistant, disable any bootstrapped webhook endpoint,
+ * and — ONLY once both have actually succeeded — commit the fenced
+ * transition onward into the install's real terminal state.
+ *
+ * ## A cleanup failure leaves the row here, retryable and visible ()
+ *
+ * `revokeIssuedCredentials`/`disableRecordedEndpoint` no longer swallow
+ * their own errors (see their docs) — a thrown error here means the
+ * install stays at `cleanup_pending` and this function reports `retry`,
+ * never `deadLetter`. The alternative — catching and reporting done
+ * anyway — is exactly the bug this state exists to close: a transient DB
+ * failure would otherwise leave a still-active Assistant token or a
+ * still-live webhook endpoint sitting behind an install that reads as
+ * fully, terminally handled. A later delivery re-enters this SAME
+ * function (the `cleanup_pending` case in the handler's switch, below)
+ * and retries both steps — idempotently, since `patch` on an
+ * already-disabled row is a no-op.
+ *
+ * `install` must already be in `cleanup_pending` when this is called.
+ */
+async function finalizeCleanup(
+  deps: ModuleInstallerDeps,
+  install: ModuleInstallRecord,
+): Promise<QueueHandlerResult> {
+  const { reason, targetState } = await loadCleanupTarget(deps.installs, install.id)
+
+  try {
+    await revokeIssuedCredentials(deps, install.id)
+    await disableRecordedEndpoint(deps, install.id)
+  } catch {
+    return { kind: 'retry', backoffSeconds: backoffSeconds(install.attempt) }
+  }
+
+  const result = await deps.installs.transition(
+    install.id,
+    'cleanup_pending',
+    targetState,
+    install.leaseToken,
+    {
+      detail: { reason },
+      // The recovery need this row exists for is over the instant the
+      // install is genuinely terminal — see migration 032's doc comment.
+      deleteCredentialEscrow: true,
+    },
+  )
+  if (result.ok) {
+    await deps.installs.release(install.id, result.install.leaseToken).catch(() => {})
+  }
+  return { kind: 'deadLetter', reason }
+}
+
+/**
+ * Move `install` toward a terminal failure state, recording `reason` — the
  * shared tail of every PERMANENT failure branch below.
  *
- * ## Fence FIRST, side effects only on a win ()
+ * ## Fence into `cleanup_pending` FIRST, side effects only on a win ()
  *
- * The fenced `transition` is attempted BEFORE any credential/endpoint
- * cleanup, and that cleanup runs ONLY when the transition actually won.
- * The reverse order — revoke, then attempt the transition — let a STALE
- * worker (one whose view of `install` predates a newer worker completing
- * the install for real) disable the Assistant of a healthy, `active`
- * install: the stale worker's revoke would run unconditionally, and only
- * afterward would its transition attempt discover it had lost the race,
- * by which point the damage was already done and the audit trail shows no
- * failure event to explain it. Whether or not the transition wins, this
- * function still reports `deadLetter` for the CURRENT delivery — either
- * this worker recorded the failure for real, or a newer worker has
- * already moved the row past this worker's stale view of it, and either
- * way there is nothing further for THIS invocation to do (module doc's "a
- * stale worker loses" section).
+ * The fenced `transition` into `cleanup_pending` is attempted BEFORE any
+ * credential/endpoint cleanup, and that cleanup ({@link finalizeCleanup})
+ * runs ONLY when the transition actually won. The reverse order — revoke,
+ * then attempt the transition — let a STALE worker (one whose view of
+ * `install` predates a newer worker completing the install for real)
+ * disable the Assistant of a healthy, `active` install: the stale worker's
+ * revoke would run unconditionally, and only afterward would its
+ * transition attempt discover it had lost the race, by which point the
+ * damage was already done and the audit trail shows no failure event to
+ * explain it. When the transition into `cleanup_pending` itself is
+ * refused, this function still reports `deadLetter` for the CURRENT
+ * delivery — either a newer worker has already moved the row past this
+ * worker's stale view of it, and either way there is nothing further for
+ * THIS invocation to do (module doc's "a stale worker loses" section).
+ *
+ * ## Cleanup itself is never best-effort ()
+ *
+ * See {@link finalizeCleanup}'s doc: a real cleanup failure (never a race
+ * loss — this function already won its fence by the time cleanup runs)
+ * leaves the install retryable at `cleanup_pending`, visible and
+ * inspectable, rather than reporting a terminal state that isn't true yet.
  *
  * ## Releases its OWN lease on a win ()
  *
- * A winning `transition` re-mints `lease_token` (every CAS does), but this
- * function is called from deep inside a step — its caller returns
- * `deadLetter` immediately afterward without ever assigning the loop's
- * `install` variable to the transition's NEW record. The handler's `finally`
- * therefore releases using the STALE, PRE-transition `leaseToken`, which
- * matches nothing (module doc's "claim" section: a fenceToken mismatch is
- * silently ignored, exactly like a losing CAS) — a terminal row would keep
- * `lease_expires_at` set for the full TTL even though nothing is ever going
- * to reclaim it. Releasing HERE, with the token the winning transition
- * actually just minted, closes that gap directly; the outer `finally`'s
- * later attempt with the old token is then a harmless, already-covered
- * no-op.
+ * A winning transition re-mints `lease_token` (every CAS does), but this
+ * function's caller returns immediately afterward without ever assigning
+ * the loop's `install` variable to the transition's NEW record. The
+ * handler's `finally` therefore releases using the STALE, PRE-transition
+ * `leaseToken`, which matches nothing (module doc's "claim" section: a
+ * fenceToken mismatch is silently ignored, exactly like a losing CAS) — a
+ * terminal row would keep `lease_expires_at` set for the full TTL even
+ * though nothing is ever going to reclaim it. {@link finalizeCleanup}
+ * releases using the token its OWN winning transition just minted, closing
+ * that gap directly; the outer `finally`'s later attempt with the old
+ * token is then a harmless, already-covered no-op.
  */
 async function failInstall(
   deps: ModuleInstallerDeps,
@@ -580,18 +727,16 @@ async function failInstall(
   const result = await deps.installs.transition(
     install.id,
     install.state,
-    toState,
+    'cleanup_pending',
     install.leaseToken,
     {
-      detail: { reason },
+      detail: { reason, targetState: toState },
     },
   )
-  if (result.ok) {
-    await revokeIssuedCredentials(deps, install.id)
-    await disableRecordedEndpoint(deps, install.id)
-    await deps.installs.release(install.id, result.install.leaseToken).catch(() => {})
+  if (!result.ok) {
+    return { kind: 'deadLetter', reason }
   }
-  return { kind: 'deadLetter', reason }
+  return finalizeCleanup(deps, result.install)
 }
 
 /**
@@ -714,7 +859,8 @@ async function stepCredentialsIssued(
     'credentials_issued',
     install.leaseToken,
     {
-      detail: { assistantId, credentialCiphertext },
+      detail: { assistantId },
+      credentialCiphertext,
     },
   )
 }
@@ -830,6 +976,12 @@ async function stepArtifactUploaded(
     }
   }
 
+  // Renew before the download/extract/upload sequence below, which can
+  // legitimately run long enough to outlast the claim-time lease —
+  // {@link renewLeaseOrAbort}'s own doc.
+  const renewal = await renewLeaseOrAbort(deps, install)
+  if ('stop' in renewal) return { retry: renewal.stop }
+
   const download = await deps.catalog.downloadArtifact({
     slug: install.moduleSlug,
     version: install.desiredReleaseVersion,
@@ -931,6 +1083,12 @@ async function stepArtifactUploaded(
     }
   }
 
+  // Renew again immediately before the sequential setEnvVars/uploadArtifact
+  // calls — extraction (above) may itself have taken a while, and the
+  // upload is the single longest-running remote call this step makes.
+  const preUploadRenewal = await renewLeaseOrAbort(deps, install)
+  if ('stop' in preUploadRenewal) return { retry: preUploadRenewal.stop }
+
   try {
     await provider.setEnvVars({ teamId, projectId: remoteProjectId, vars })
     const uploadResult = await provider.uploadArtifact({
@@ -1005,6 +1163,11 @@ async function stepDeploymentCreated(
       ),
     }
   }
+
+  // Renew before the deployment-create call — {@link renewLeaseOrAbort}'s
+  // own doc.
+  const renewal = await renewLeaseOrAbort(deps, install)
+  if ('stop' in renewal) return { retry: renewal.stop }
 
   try {
     const result = await provider.createDeployment({
@@ -1092,6 +1255,13 @@ async function stepPollBuild(
       ),
     }
   }
+
+  // Renew before each poll — {@link renewLeaseOrAbort}'s own doc. Each poll
+  // is ordinarily its own short-lived invocation (the 15s re-enqueue
+  // below), but a slow or hanging Vercel API response must not be allowed
+  // to silently outlive the claim-time lease either.
+  const renewal = await renewLeaseOrAbort(deps, install)
+  if ('stop' in renewal) return { retry: renewal.stop }
 
   const state = await provider.getDeploymentState({
     teamId,
@@ -1471,6 +1641,12 @@ export function createModuleInstallHandler(
               'endpoint_verified',
               'active',
               install.leaseToken,
+              {
+                // The credential-escrow row's recovery need ends the
+                // instant the module's real credentials are live in its
+                // own deployment — migration 032's doc comment.
+                deleteCredentialEscrow: true,
+              },
             )
             if ('stop' in outcome) return outcome.stop
             install = outcome.install
@@ -1491,6 +1667,13 @@ export function createModuleInstallHandler(
             // an at-least-once redelivery of a job whose prior attempt
             // already finished. Nothing to do.
             return { kind: 'ack' }
+
+          // A previous delivery fenced a failure into `cleanup_pending`
+          // (migration 033) but the revoke/disable cleanup itself didn't
+          // finish (see `finalizeCleanup`'s doc) — resume exactly that,
+          // never re-attempting the original failed step.
+          case 'cleanup_pending':
+            return await finalizeCleanup(deps, install)
 
           // 'build_failed' | 'verification_failed' | 'rollback_pending' |
           // 'cleanup_required' | 'abandoned' — every terminal (or awaiting-

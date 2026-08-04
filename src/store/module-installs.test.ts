@@ -314,6 +314,91 @@ describe('ModuleInstallStore', () => {
     expect(reclaimed.ok).toBe(true)
   })
 
+  it('renew extends the lease without rotating the fence token', async () => {
+    const { store, connectionId } = await freshStore()
+    const install = await store.create(newInstallInput(connectionId))
+    const claimed = await store.claim(install.id, 5)
+    expect(claimed.ok).toBe(true)
+    if (!claimed.ok) throw new Error('expected ok')
+
+    const renewed = await store.renew(install.id, claimed.install.leaseToken, 300)
+    expect(renewed).toBe(true)
+
+    const after = await store.get(install.id)
+    expect(after?.leaseToken).toBe(claimed.install.leaseToken)
+    expect(after?.leaseExpiresAt?.getTime() ?? 0).toBeGreaterThan(Date.now() + 60_000)
+
+    // The SAME fence token still authorizes a transition — proof `renew`
+    // never re-minted it the way `claim`/`transition` both do.
+    const transitioned = await store.transition(
+      install.id,
+      'planned',
+      'credentials_issued',
+      claimed.install.leaseToken,
+    )
+    expect(transitioned.ok).toBe(true)
+  })
+
+  it('renew refuses a fence token that does not match the row', async () => {
+    const { store, connectionId } = await freshStore()
+    const install = await store.create(newInstallInput(connectionId))
+    await store.claim(install.id, 300)
+
+    const renewed = await store.renew(install.id, '00000000-0000-0000-0000-000000000000', 300)
+    expect(renewed).toBe(false)
+  })
+
+  it('a credentialCiphertext transition escrows the ciphertext and records only its id on the event', async () => {
+    const { store, connectionId } = await freshStore()
+    const install = await store.create(newInstallInput(connectionId))
+    const ciphertext = new Uint8Array([1, 2, 3, 4, 5])
+
+    const result = await store.transition(
+      install.id,
+      'planned',
+      'credentials_issued',
+      install.leaseToken,
+      { detail: { assistantId: 'a1' }, credentialCiphertext: ciphertext },
+    )
+    expect(result.ok).toBe(true)
+
+    const escrowed = await store.getCredentialEscrow(install.id)
+    expect(escrowed).toEqual(ciphertext)
+
+    const events = await store.listEvents(install.id)
+    const event = events.find((e) => e.toState === 'credentials_issued')
+    const detail = event?.detail as { assistantId: string; credentialEscrowId: string }
+    expect(detail.assistantId).toBe('a1')
+    expect(detail.credentialEscrowId).toBeTruthy()
+    expect(JSON.stringify(detail)).not.toContain('1,2,3,4,5')
+  })
+
+  it('deleteCredentialEscrow removes the escrow row in the same transition', async () => {
+    const { store, connectionId } = await freshStore()
+    const install = await store.create(newInstallInput(connectionId))
+    const ciphertext = new Uint8Array([9, 9, 9])
+    const issued = await store.transition(
+      install.id,
+      'planned',
+      'credentials_issued',
+      install.leaseToken,
+      { credentialCiphertext: ciphertext },
+    )
+    expect(issued.ok).toBe(true)
+    if (!issued.ok) throw new Error('expected ok')
+    expect(await store.getCredentialEscrow(install.id)).toEqual(ciphertext)
+
+    const failed = await store.transition(
+      install.id,
+      'credentials_issued',
+      'build_failed',
+      issued.install.leaseToken,
+      { deleteCredentialEscrow: true },
+    )
+    expect(failed.ok).toBe(true)
+    expect(await store.getCredentialEscrow(install.id)).toBeNull()
+  })
+
   it('module_installs.vercel_connection_id enforces the FK to vercel_connections', async () => {
     const { db: rawDb, agentId } = await freshStore()
     await expect(

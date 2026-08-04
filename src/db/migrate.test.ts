@@ -75,6 +75,8 @@ describe('migrate', () => {
       { id: 29, name: 'conversation_mailbox_id' },
       { id: 30, name: 'module_deployer' },
       { id: 31, name: 'webhook_endpoints_url_unique' },
+      { id: 32, name: 'module_install_credential_escrow' },
+      { id: 33, name: 'module_installs_cleanup_pending_state' },
     ])
   })
 
@@ -116,6 +118,8 @@ describe('migrate', () => {
       { id: 29 },
       { id: 30 },
       { id: 31 },
+      { id: 32 },
+      { id: 33 },
     ])
   })
 

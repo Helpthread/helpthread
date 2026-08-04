@@ -117,10 +117,15 @@
 import type { Db, SqlValue } from '../db/client.js'
 
 /**
- * The install lifecycle (migration 030's CHECK constraint, spelled
- * identically). See that migration's doc comment, "the fourteen
- * conditions" section, for what each state means and which failure/
- * recovery branches exist. This module deliberately does NOT encode which
+ * The install lifecycle (migration 030's CHECK constraint, extended by
+ * migration 033 to add `cleanup_pending`, spelled identically). See
+ * migration 030's doc comment, "the fourteen conditions" section, for what
+ * each of the original states means and which failure/recovery branches
+ * exist, and migration 033's doc comment for `cleanup_pending` specifically
+ * — the fenced, retryable stop `src/modules/install/installer.ts`'s
+ * `failInstall` passes through before a terminal-failure transition, so
+ * that revoking a minted Assistant or disabling a bootstrapped endpoint is
+ * never merely best-effort. This module deliberately does NOT encode which
  * `toState`s are reachable from which `fromState` — that transition TABLE
  * is the orchestrator's concern (a later ticket), not this store's; this
  * store only guarantees that WHATEVER transition the orchestrator asks
@@ -141,6 +146,7 @@ export type ModuleInstallState =
   | 'rollback_pending'
   | 'cleanup_required'
   | 'abandoned'
+  | 'cleanup_pending'
 
 /** A Vercel Build Output API deployment target — the platform's own vocabulary (migration 030's doc comment). */
 export type ModuleInstallEnvironment = 'production' | 'preview'
@@ -262,6 +268,26 @@ export interface TransitionOptions {
   remoteProjectId?: string | null
   /** The `remoteDeploymentId` counterpart of {@link TransitionOptions.remoteProjectId}, set at `artifact_uploaded` -> `deployment_created`. */
   remoteDeploymentId?: string | null
+  /**
+   * When given, atomically upserts (keyed by `installId` — migration 032's
+   * `module_install_credential_escrow` is one row per install, ever) this
+   * install's credential-escrow row, in the SAME transaction as the state
+   * write, and records the escrowed row's own id as `credentialEscrowId` on
+   * the event's `detail` (merged in alongside whatever {@link
+   * TransitionOptions.detail} the caller supplies). Ciphertext itself is
+   * never part of `detail` — this is precisely what keeps it out of the
+   * permanent, append-only `module_install_events` table (migration 032's
+   * doc comment).
+   */
+  credentialCiphertext?: Uint8Array
+  /**
+   * When `true`, deletes this install's credential-escrow row (if any) in
+   * the SAME transaction as the state write. The recovery need that row
+   * exists for ends the moment the install reaches a state from which it
+   * will never again need to recover in-flight credentials — `active`, or
+   * any terminal failure state (migration 032's doc comment).
+   */
+  deleteCredentialEscrow?: boolean
 }
 
 /** Why a {@link ModuleInstallStore.claim} call was refused — see the module doc's "claim" section. */
@@ -311,6 +337,16 @@ export interface ModuleInstallStore {
   listEvents(installId: string): Promise<ModuleInstallEvent[]>
 
   /**
+   * Read back `installId`'s credential-escrow ciphertext (migration 032),
+   * decrypting nothing — the caller (`src/modules/install/installer.ts`)
+   * owns the encryption key and the envelope format. `null` if no escrow
+   * row exists: either none was ever written, or it was already deleted
+   * because the install reached `active` or a terminal state (see {@link
+   * TransitionOptions.deleteCredentialEscrow}).
+   */
+  getCredentialEscrow(installId: string): Promise<Uint8Array | null>
+
+  /**
    * Atomically claim `installId` for the next `ttlSeconds`, minting a
    * fresh `lease_token` and setting `lease_expires_at` — the module doc's
    * "claim" section. Succeeds only when no unexpired lease is currently
@@ -322,6 +358,24 @@ export interface ModuleInstallStore {
    * not exist at all.
    */
   claim(installId: string, ttlSeconds: number): Promise<ClaimResult>
+
+  /**
+   * Extend `installId`'s lease for another `ttlSeconds`, WITHOUT re-minting
+   * `lease_token` — unlike {@link ModuleInstallStore.claim} and {@link
+   * ModuleInstallStore.transition}, a renewal must never invalidate the
+   * very fence its own caller is mid-use of. Fenced on `fenceToken`
+   * matching the row's CURRENT `lease_token`: returns `false` the instant
+   * another worker's claim or transition has already reclaimed this row —
+   * exactly the signal a long-running remote operation (an artifact
+   * upload, a build poll) needs in order to know it must abort rather than
+   * complete, since finishing after losing the fence would duplicate
+   * whatever side effect the new owner is already performing. See
+   * `src/modules/install/installer.ts`'s call sites for where this is
+   * actually used, and this store's own module doc's "the fence" section
+   * for why CAS on the DATABASE alone is not enough to protect a REMOTE
+   * side effect that can outlive one claim's TTL.
+   */
+  renew(installId: string, fenceToken: string, ttlSeconds: number): Promise<boolean>
 
   /**
    * Release the lease {@link ModuleInstallStore.claim} minted for
@@ -542,6 +596,26 @@ export function createModuleInstallStore(db: Db): ModuleInstallStore {
           }
         }
 
+        // Escrow write/delete happens in this SAME transaction as the state
+        // write and the audit event insert below — see migration 032's doc
+        // comment. Ciphertext is never placed on `detail`; only the
+        // escrowed row's own id is, when a write happened.
+        let eventDetail = (options?.detail ?? {}) as Record<string, unknown>
+        if (options?.credentialCiphertext !== undefined) {
+          const escrowed = await tx.query<{ id: string }>(
+            `INSERT INTO module_install_credential_escrow (install_id, ciphertext)
+             VALUES ($1, $2)
+             ON CONFLICT (install_id) DO UPDATE SET ciphertext = EXCLUDED.ciphertext
+             RETURNING id`,
+            [installId, Buffer.from(options.credentialCiphertext)],
+          )
+          eventDetail = { ...eventDetail, credentialEscrowId: escrowed[0].id }
+        } else if (options?.deleteCredentialEscrow) {
+          await tx.query('DELETE FROM module_install_credential_escrow WHERE install_id = $1', [
+            installId,
+          ])
+        }
+
         await tx.query(
           `INSERT INTO module_install_events (install_id, from_state, to_state, actor_agent_id, detail)
            VALUES ($1, $2, $3, $4, $5)`,
@@ -550,7 +624,7 @@ export function createModuleInstallStore(db: Db): ModuleInstallStore {
             fromState,
             toState,
             options?.actorAgentId ?? null,
-            JSON.stringify(options?.detail ?? {}),
+            JSON.stringify(eventDetail),
           ],
         )
 
@@ -564,6 +638,15 @@ export function createModuleInstallStore(db: Db): ModuleInstallStore {
         [installId],
       )
       return rows.map(toEventRecord)
+    },
+
+    async getCredentialEscrow(installId) {
+      const rows = await db.query<{ ciphertext: Uint8Array }>(
+        'SELECT ciphertext FROM module_install_credential_escrow WHERE install_id = $1',
+        [installId],
+      )
+      const row = rows[0]
+      return row === undefined ? null : new Uint8Array(Buffer.from(row.ciphertext))
     },
 
     async claim(installId, ttlSeconds) {
@@ -595,6 +678,17 @@ export function createModuleInstallStore(db: Db): ModuleInstallStore {
         }
         return { ok: false, reason: 'lease_held' }
       })
+    },
+
+    async renew(installId, fenceToken, ttlSeconds) {
+      const rows = await db.query<{ id: string }>(
+        `UPDATE module_installs
+         SET lease_expires_at = now() + ($3 * interval '1 second'), updated_at = now()
+         WHERE id = $1 AND lease_token = $2
+         RETURNING id`,
+        [installId, fenceToken, ttlSeconds],
+      )
+      return rows.length > 0
     },
 
     async release(installId, fenceToken) {

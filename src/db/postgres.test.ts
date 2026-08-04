@@ -309,6 +309,7 @@ describe('createPostgresDb with a schema option', () => {
       'inbound_deliveries',
       'mailbox_oauth_tokens',
       'mailboxes',
+      'module_install_credential_escrow',
       'module_install_events',
       'module_installs',
       'queue_jobs',

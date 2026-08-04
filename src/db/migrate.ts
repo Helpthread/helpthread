@@ -2174,6 +2174,95 @@ CREATE UNIQUE INDEX webhook_endpoints_url_unique ON webhook_endpoints (url);
 `
 
 /**
+ * Migration 032 — `module_install_credential_escrow` (HT-119 review fix).
+ *
+ * `module_install_events` (migration 030) is append-only and permanent by
+ * design — exactly the wrong home for the ONE thing an install pipeline
+ * needs to carry across a crash before its Assistant token and webhook
+ * signing secret are baked into the deployed module's env vars: a
+ * recoverable, plaintext-decryptable copy of those credentials. Recording
+ * that ciphertext on an audit event means it never leaves, ever, even
+ * though the recovery need it exists for ends the moment the install
+ * reaches `active` (the secret is now live in the deployment) or any
+ * terminal state (there is nothing left to recover into).
+ *
+ * This table holds exactly that recoverable copy, and nothing else:
+ *
+ * - `install_id uuid NOT NULL UNIQUE REFERENCES module_installs(id) ON
+ *   DELETE CASCADE` — one row per install, ever. `UNIQUE` is what makes
+ *   `src/store/module-installs.ts`'s escrow upsert (`ON CONFLICT
+ *   (install_id) DO UPDATE`) coalesce onto the SAME row rather than
+ *   accumulating one per mint attempt; `ON DELETE CASCADE` (unlike
+ *   `vercel_connections.connected_by_agent_id`'s `RESTRICT`) is correct
+ *   here because this row's only reason to exist is the install it
+ *   belongs to — nothing else in this schema ever references it back.
+ * - `ciphertext bytea NOT NULL` — the SAME `iv || authTag || ciphertext`
+ *   envelope `src/store/token-crypto.ts` already defines for every other
+ *   encrypted-at-rest secret in this codebase (migrations 010, 028, 030's
+ *   `vercel_connections.token_ciphertext`), reused rather than reinvented.
+ * - `created_at timestamptz NOT NULL DEFAULT now()` — informational only;
+ *   nothing reads it to decide when to expire a row. Deletion is driven by
+ *   the install's own lifecycle (see below), never by age.
+ *
+ * The row is written (via `ModuleInstallStore.transition`'s
+ * `credentialCiphertext` option, in the SAME transaction as the
+ * `credentials_issued` state write) and deleted (via that same method's
+ * `deleteCredentialEscrow` option, in the SAME transaction as the
+ * transition into `active` or into any terminal failure state) — never by
+ * a standalone statement outside a fenced transition, so this row's
+ * lifetime is always exactly as long as, and no longer than, the recovery
+ * need it exists for.
+ *
+ * RLS, per migration 030's own standing rule for every table this pipeline
+ * introduces: created after migration 027's blanket lockdown, so it is
+ * enabled explicitly here, and a `bytea` column holding decryptable
+ * credential material is exactly the kind of thing that must never be
+ * reachable through the PostgREST Data API.
+ */
+const MIGRATION_032_MODULE_INSTALL_CREDENTIAL_ESCROW = `
+CREATE TABLE module_install_credential_escrow (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  install_id   uuid NOT NULL UNIQUE REFERENCES module_installs(id) ON DELETE CASCADE,
+  ciphertext   bytea NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE module_install_credential_escrow ENABLE ROW LEVEL SECURITY;
+`
+
+/**
+ * Migration 033 — `module_installs.state` gains `cleanup_pending` (HT-119
+ * review fix).
+ *
+ * A terminal-failure transition (\`build_failed\` / \`verification_failed\` /
+ * \`cleanup_required\`) always needs two things to be true first: any
+ * Assistant this install minted is disabled, and any webhook endpoint it
+ * bootstrapped is disabled. Landing directly on the terminal state and
+ * treating that cleanup as best-effort meant a transient failure in either
+ * step (most plausibly a DB hiccup, since neither is a remote Vercel call)
+ * was silently swallowed — the row read as fully, terminally handled while
+ * a credential that should have been revoked was still live.
+ *
+ * \`cleanup_pending\` is the fenced, RETRYABLE stop between "this install
+ * has failed" and "cleanup has actually finished": \`src/modules/install/
+ * installer.ts\`'s \`failInstall\` transitions into it first, and only
+ * transitions onward to the real terminal state once revoking the
+ * Assistant and disabling the endpoint have BOTH actually succeeded. A
+ * failure at that point leaves the row here — inspectable, and picked up
+ * again by the next delivery — rather than reporting a clean terminal
+ * state that isn't true yet.
+ */
+const MIGRATION_033_MODULE_INSTALLS_CLEANUP_PENDING_STATE = `
+ALTER TABLE module_installs DROP CONSTRAINT module_installs_state_check;
+ALTER TABLE module_installs ADD CONSTRAINT module_installs_state_check CHECK (state IN (
+  'planned', 'credentials_issued', 'project_created',
+  'artifact_uploaded', 'deployment_created', 'build_pending',
+  'build_failed', 'bootstrap_pending', 'endpoint_verified',
+  'active', 'verification_failed', 'rollback_pending',
+  'cleanup_required', 'abandoned', 'cleanup_pending'
+));
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -2333,6 +2422,16 @@ const MIGRATIONS: Migration[] = [
     id: 31,
     name: 'webhook_endpoints_url_unique',
     sql: MIGRATION_031_WEBHOOK_ENDPOINTS_URL_UNIQUE,
+  },
+  {
+    id: 32,
+    name: 'module_install_credential_escrow',
+    sql: MIGRATION_032_MODULE_INSTALL_CREDENTIAL_ESCROW,
+  },
+  {
+    id: 33,
+    name: 'module_installs_cleanup_pending_state',
+    sql: MIGRATION_033_MODULE_INSTALLS_CLEANUP_PENDING_STATE,
   },
 ]
 

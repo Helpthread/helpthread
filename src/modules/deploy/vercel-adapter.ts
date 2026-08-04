@@ -181,7 +181,26 @@ function assertSafeId(id: string, label: string): void {
 
 // --- hostile-artifact rejection (non-negotiable condition 4) -----------
 
-const BUILD_CONFIG_KEYS = ['buildCommand', 'installCommand', 'devCommand', 'ignoreCommand'] as const
+/**
+ * The exact set of `.vercel/output/config.json` keys a prebuilt Build
+ * Output API v3 bundle may declare — an ALLOWLIST, not a denylist of
+ * known-dangerous keys. Vercel's config.json schema is a vendor surface
+ * this adapter does not control and that grows over time; a denylist would
+ * have to be updated every time Vercel adds a field capable of doing
+ * something beyond "serve these static files," and would silently admit
+ * any such key until someone thought to ban it by name. An allowlist fails
+ * safe instead: a key this adapter has never heard of — today's `crons`,
+ * or whatever Vercel adds next — is refused by default, not admitted by
+ * omission.
+ *
+ * - `version` — the Build Output API schema version this file is written
+ *   against. Vercel requires it; it carries no behavior of its own.
+ * - `routes` — path-level routing (rewrites/redirects/headers) a prebuilt
+ *   static export commonly needs to serve correctly. It can redirect or
+ *   rewrite a request path; it cannot invoke a build or schedule a
+ *   function.
+ */
+const ALLOWED_BUILD_OUTPUT_CONFIG_KEYS: ReadonlySet<string> = new Set(['version', 'routes'])
 
 function tryParseJsonObject(data: Uint8Array): Record<string, unknown> | undefined {
   let parsed: unknown
@@ -196,55 +215,50 @@ function tryParseJsonObject(data: Uint8Array): Record<string, unknown> | undefin
 }
 
 /**
- * Refuse an artifact that carries its own build settings, install
- * commands, or cron entries — a module release is a prebuilt Vercel Build
- * Output API v3 bundle (module doc), and any of these is a module author
- * (or a forged/corrupted artifact — the manifest signature covers
- * INTEGRITY, never INTENT, per `../artifact/manifest.ts`'s own doc)
- * trying to make the operator's hosting account do something beyond
- * "serve these prebuilt files": run arbitrary install/build shell
- * commands, or schedule its own recurring compute.
+ * Refuse an artifact that could smuggle build/install directives, cron
+ * entries, or unreviewed routing behavior into the operator's hosting
+ * account — a module release is a prebuilt Vercel Build Output API v3
+ * bundle (module doc), and never has a legitimate reason to declare either
+ * of the two files this function inspects, by exact location:
  *
- * Two files are inspected, both by exact expected location:
- *
- * - A root `vercel.json` (or a `vercel.json` at any nesting level — the
- *   check is by basename, not just the root, since Vercel's own tooling
- *   only reads the root one but an artifact author could be probing for a
- *   parser that's more lenient than "root only") declaring any of
- *   {@link BUILD_CONFIG_KEYS} or a `crons` array.
- * - The Build Output API's own `.vercel/output/config.json` declaring a
- *   `crons` array — the one field in that otherwise-inert config file
- *   that can make Vercel run something on a schedule.
- *
- * A `vercel.json`/`config.json` that fails to parse as a JSON object is
- * NOT treated as evidence of anything by this function — a malformed
- * config file is caught by Vercel's own deployment step, and this
- * function's only job is refusing artifacts that clearly ask for a build,
- * not general JSON validation.
+ * - `vercel.json`, at ANY path in the artifact (basename match, not just
+ *   the root — Vercel's own tooling only reads the root one, but an
+ *   artifact author could be probing for a parser more lenient than
+ *   "root only"). This file exists to configure a BUILD; a prebuilt
+ *   artifact has no build to configure, so its presence at all — content
+ *   unexamined, even unparseable — is refused. Checking its keys instead
+ *   of its existence would mean maintaining a list of every dangerous key
+ *   Vercel's `vercel.json` schema has or will ever have; refusing the file
+ *   outright needs no such list.
+ * - The Build Output API's own `.vercel/output/config.json`, checked
+ *   against {@link ALLOWED_BUILD_OUTPUT_CONFIG_KEYS}: any key outside that
+ *   allowlist is refused, and a file that fails to parse as a JSON object
+ *   is refused rather than silently passed through — a config file this
+ *   adapter cannot understand is never treated as equivalent to an absent
+ *   one.
  */
 export function assertPrebuiltArtifactOnly(files: readonly DeployFile[]): void {
   for (const file of files) {
     const basename = file.path.split('/').pop() ?? file.path
-    const isRootOrNestedVercelJson = basename === 'vercel.json'
-    const isBuildOutputConfig = file.path === '.vercel/output/config.json'
-    if (!isRootOrNestedVercelJson && !isBuildOutputConfig) continue
+    if (basename === 'vercel.json') {
+      throw new HostileArtifactError(
+        `refusing artifact: '${file.path}' — a prebuilt Build Output API artifact has no legitimate need for a 'vercel.json' at any location; this adapter deploys prebuilt output only and never invokes a build`,
+      )
+    }
+    if (file.path !== '.vercel/output/config.json') continue
 
     const obj = tryParseJsonObject(file.data)
-    if (!obj) continue
-
-    if (isRootOrNestedVercelJson) {
-      for (const key of BUILD_CONFIG_KEYS) {
-        if (key in obj) {
-          throw new HostileArtifactError(
-            `refusing artifact: '${file.path}' declares '${key}' — this adapter deploys prebuilt output only and never invokes a build`,
-          )
-        }
-      }
-    }
-    if ('crons' in obj) {
+    if (!obj) {
       throw new HostileArtifactError(
-        `refusing artifact: '${file.path}' declares 'crons' — an installed module may not schedule its own recurring compute on the operator's hosting account`,
+        `refusing artifact: '${file.path}' is not valid JSON — a config file this adapter cannot parse is refused, not silently ignored`,
       )
+    }
+    for (const key of Object.keys(obj)) {
+      if (!ALLOWED_BUILD_OUTPUT_CONFIG_KEYS.has(key)) {
+        throw new HostileArtifactError(
+          `refusing artifact: '${file.path}' declares '${key}', which is not on this adapter's config.json allowlist (${[...ALLOWED_BUILD_OUTPUT_CONFIG_KEYS].join(', ')}) — see this function's doc for why an allowlist, not a denylist`,
+        )
+      }
     }
   }
 }

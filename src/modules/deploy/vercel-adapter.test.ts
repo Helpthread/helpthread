@@ -102,8 +102,48 @@ describe('assertPrebuiltArtifactOnly', () => {
     expect(() => assertPrebuiltArtifactOnly(files)).toThrow(HostileArtifactError)
   })
 
-  it('does not treat an unparseable vercel.json as evidence of anything', () => {
+  it('rejects an unparseable vercel.json outright — presence alone is refused, content is never examined', () => {
     const files: DeployFile[] = [{ path: 'vercel.json', data: Buffer.from('not json {{{') }]
+    expect(() => assertPrebuiltArtifactOnly(files)).toThrow(HostileArtifactError)
+  })
+
+  it('rejects a vercel.json with no build keys at all — a prebuilt artifact has no legitimate use for the file', () => {
+    const files: DeployFile[] = [{ path: 'vercel.json', data: Buffer.from(JSON.stringify({})) }]
+    expect(() => assertPrebuiltArtifactOnly(files)).toThrow(HostileArtifactError)
+  })
+
+  it('rejects a nested vercel.json at any depth, regardless of content', () => {
+    const files: DeployFile[] = [
+      { path: 'a/b/c/vercel.json', data: Buffer.from(JSON.stringify({ innocuous: true })) },
+    ]
+    expect(() => assertPrebuiltArtifactOnly(files)).toThrow(HostileArtifactError)
+  })
+
+  it('rejects .vercel/output/config.json declaring a key outside the allowlist', () => {
+    const files: DeployFile[] = [
+      {
+        path: '.vercel/output/config.json',
+        data: Buffer.from(JSON.stringify({ version: 3, wildcard: [{ domain: 'evil.example' }] })),
+      },
+    ]
+    expect(() => assertPrebuiltArtifactOnly(files)).toThrow(HostileArtifactError)
+  })
+
+  it('rejects a malformed .vercel/output/config.json rather than ignoring it', () => {
+    const files: DeployFile[] = [
+      { path: '.vercel/output/config.json', data: Buffer.from('not json {{{') },
+    ]
+    expect(() => assertPrebuiltArtifactOnly(files)).toThrow(HostileArtifactError)
+  })
+
+  it('accepts a legitimate prebuilt artifact using only allowlisted config.json keys', () => {
+    const files: DeployFile[] = [
+      {
+        path: '.vercel/output/config.json',
+        data: Buffer.from(JSON.stringify({ version: 3, routes: [{ src: '/(.*)', dest: '/$1' }] })),
+      },
+      { path: '.vercel/output/static/index.html', data: Buffer.from('<html></html>') },
+    ]
     expect(() => assertPrebuiltArtifactOnly(files)).not.toThrow()
   })
 })
