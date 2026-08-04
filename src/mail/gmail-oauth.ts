@@ -77,11 +77,19 @@
  * ## No cross-call refresh locking
  *
  * If two `getAccessToken` calls for the SAME mailbox race while its cached
- * token is stale, both may independently POST a refresh. Wasted work, not a
- * correctness bug: Google does not invalidate the loser's freshly-issued
- * token, both calls return a valid one, and the store's last write wins for
- * what gets cached next. A single-flight guard would be a reasonable
- * follow-up if refresh volume ever makes the duplicates matter.
+ * token is stale, both may independently POST a refresh with the same stored
+ * refresh token. In Google's usual behavior — no refresh-token rotation —
+ * this is only wasted work: the previous ACCESS token is not invalidated when
+ * a new one is issued, both calls return a valid token, and the store's last
+ * write wins for what gets cached next.
+ *
+ * **It is not harmless if Google DOES rotate the refresh token on that
+ * refresh.** A rotated refresh token invalidates its predecessor, so the
+ * loser's in-flight POST can come back `invalid_grant` — which this module
+ * treats as a dead grant and marks the mailbox `needs_reconnect`, even though
+ * the winner just refreshed it successfully. A per-mailbox single-flight
+ * guard (or distinguishing "stale-because-rotated" from a genuinely dead
+ * grant before marking) is the real fix; it is not built here.
  *
  * ## Never resurrect a disconnected mailbox's token row
  *

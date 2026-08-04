@@ -91,10 +91,12 @@
  *
  * The plaintext token and secret are carried forward across possibly many
  * queue deliveries, until baked into the deployment's env vars and later a
- * real `webhook_endpoints` row, as envelope-encrypted bytes on the
- * `credentials_issued` audit event's `detail` column — the column
- * `../../store/module-installs.ts` names for exactly this ephemeral,
- * step-scoped material. Re-entering `credentials_issued` after a crash
+ * real `webhook_endpoints` row, as envelope-encrypted bytes in
+ * `module_install_credential_escrow` (migration 032) — one row per install,
+ * deletable — with only the escrowed row's `credentialEscrowId` recorded on
+ * the `credentials_issued` audit event's `detail`. Ciphertext deliberately
+ * never lands in `module_install_events`, which is append-only and permanent.
+ * Re-entering `credentials_issued` after a crash
  * between "transition committed" and "assistants row written" re-runs {@link
  * ensureAssistantMatchesCredentials} from the recorded ciphertext, which is
  * what makes that write recoverable rather than a second crash window merely
