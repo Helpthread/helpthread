@@ -60,6 +60,20 @@ describe('parseInstallArgs', () => {
       /--catalog requires a value/,
     )
   })
+
+  it("rejects an option token used as another option's value, instead of silently accepting it", () => {
+    // Without this check, `--dir --force` sets dir="--force" and swallows
+    // the next option token entirely rather than reporting a mistake.
+    expect(() => parseInstallArgs(['draft-assistant', '--dir', '--force'])).toThrow(
+      /--dir requires a value/,
+    )
+    expect(() => parseInstallArgs(['draft-assistant', '--catalog', '--version'])).toThrow(
+      /--catalog requires a value/,
+    )
+    expect(() => parseInstallArgs(['draft-assistant', '--version', '-h'])).toThrow(
+      /--version requires a value/,
+    )
+  })
 })
 
 describe('parseVerifyArgs', () => {
@@ -94,5 +108,14 @@ describe('parseVerifyArgs', () => {
     expect(() =>
       parseVerifyArgs(['--manifest', 'a.manifest.json', '--signature', 'a.sig']),
     ).toThrow(/missing required argument: <tarball>/)
+  })
+
+  it("rejects an option token used as another option's value", () => {
+    expect(() => parseVerifyArgs(['a.tar.gz', '--manifest', '--signature', 'a.sig'])).toThrow(
+      /--manifest requires a value/,
+    )
+    expect(() =>
+      parseVerifyArgs(['a.tar.gz', '--manifest', 'a.manifest.json', '--signature', '--help']),
+    ).toThrow(/--signature requires a value/)
   })
 })

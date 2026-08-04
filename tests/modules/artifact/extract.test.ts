@@ -5,7 +5,8 @@ import { gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   MAX_ENTRY_COUNT,
-  MAX_SINGLE_FILE_BYTES,
+  MAX_GUNZIP_OUTPUT_BYTES,
+  MAX_PATH_LENGTH,
   MAX_TOTAL_UNCOMPRESSED_BYTES,
   safeExtract,
   sha256Hex,
@@ -83,6 +84,20 @@ describe('safeExtract: path safety refusals', () => {
     const tar = buildTarGz([regularFile('a.txt', 'one'), regularFile('a.txt', 'two')])
     await expect(safeExtract(tar, destDir)).rejects.toThrow(/duplicate entry/)
   })
+
+  it('writes nothing when a LATER entry fails validation, even though earlier entries were individually valid', async () => {
+    // The whole archive's entries must be validated before any file is
+    // written — otherwise a refusal discovered partway through leaves a
+    // half-extracted tree on disk: legitimate-looking files from earlier
+    // entries, silently missing whatever came after the bad one.
+    const tar = buildTarGz([
+      regularFile('good1.txt', 'fine'),
+      regularFile('good2.txt', 'also fine'),
+      regularFile('../escape.txt', 'evil'),
+    ])
+    await expect(safeExtract(tar, destDir)).rejects.toThrow(/path-traversal/)
+    expect(fs.readdirSync(destDir)).toEqual([])
+  })
 })
 
 describe('safeExtract: forbidden entry types', () => {
@@ -127,36 +142,78 @@ describe('safeExtract: caps', () => {
     await expect(safeExtract(tar, destDir)).rejects.toThrow(/maximum entry count/)
   }, 30_000)
 
+  // The refusals below use small INJECTED caps (see ExtractCaps) rather
+  // than the real, much larger compiled-in MAX_* constants. Exercising the
+  // real 512 MiB cap would mean allocating hundreds of MiB in a unit test
+  // just to prove a refusal message fires — expensive and slow for no
+  // extra coverage, since the comparison logic being tested doesn't care
+  // what the numbers are.
+  const SMALL_CAPS = {
+    maxGunzipOutputBytes: 8192,
+    maxTotalUncompressedBytes: 2048,
+    maxEntryCount: 1000,
+    maxSingleFileBytes: 1024,
+    maxPathLength: MAX_PATH_LENGTH,
+  }
+
   it('refuses a single file exceeding the maximum single-file size', async () => {
-    const oversized = Buffer.alloc(MAX_SINGLE_FILE_BYTES + 1)
+    const oversized = Buffer.alloc(SMALL_CAPS.maxSingleFileBytes + 1)
     const tar = buildTarGz([{ name: 'huge.bin', typeflag: '0', content: oversized }])
-    await expect(safeExtract(tar, destDir)).rejects.toThrow(/maximum single-file size/)
-  }, 60_000)
+    await expect(safeExtract(tar, destDir, SMALL_CAPS)).rejects.toThrow(/maximum single-file size/)
+  })
 
   it('refuses an archive exceeding the maximum total uncompressed size', async () => {
-    // Four files right at the single-file cap (536,870,912 bytes total,
-    // exactly MAX_TOTAL_UNCOMPRESSED_BYTES — not yet over), plus one more
-    // byte to push the running total over the top. Zero-filled buffers so
-    // gzip does this in well under a second despite the raw size.
+    // Two files right at the single-file cap (not yet over the total), plus
+    // a third tiny one to push the running total over the top.
     const entries = [
-      { name: 'f0.bin', typeflag: '0' as const, content: Buffer.alloc(MAX_SINGLE_FILE_BYTES) },
-      { name: 'f1.bin', typeflag: '0' as const, content: Buffer.alloc(MAX_SINGLE_FILE_BYTES) },
-      { name: 'f2.bin', typeflag: '0' as const, content: Buffer.alloc(MAX_SINGLE_FILE_BYTES) },
-      { name: 'f3.bin', typeflag: '0' as const, content: Buffer.alloc(MAX_SINGLE_FILE_BYTES) },
-      { name: 'f4.bin', typeflag: '0' as const, content: Buffer.alloc(1) },
+      {
+        name: 'f0.bin',
+        typeflag: '0' as const,
+        content: Buffer.alloc(SMALL_CAPS.maxSingleFileBytes),
+      },
+      {
+        name: 'f1.bin',
+        typeflag: '0' as const,
+        content: Buffer.alloc(SMALL_CAPS.maxSingleFileBytes),
+      },
+      { name: 'f2.bin', typeflag: '0' as const, content: Buffer.alloc(1) },
     ]
-    expect(entries.slice(0, 4).reduce((sum, e) => sum + e.content.length, 0)).toBe(
-      MAX_TOTAL_UNCOMPRESSED_BYTES,
+    expect(entries.slice(0, 2).reduce((sum, e) => sum + e.content.length, 0)).toBe(
+      SMALL_CAPS.maxTotalUncompressedBytes,
     )
     const tar = buildTarGz(entries)
-    await expect(safeExtract(tar, destDir)).rejects.toThrow(
-      // zlib now refuses DURING decompression (maxOutputLength) rather than
-      // after allocating the whole thing, so the message comes from that
-      // guard — which is the point: a cap enforced after allocation is not a
-      // cap. Matching on the shared "decompresses to more than" wording.
-      /decompresses to more than/,
+    await expect(safeExtract(tar, destDir, SMALL_CAPS)).rejects.toThrow(
+      // The gzip-stream cap is deliberately larger than the total-content
+      // cap to absorb tar header/padding overhead, so this
+      // content-sized-exactly-over-the-cap archive decompresses fine and is
+      // instead refused by the per-entry running-total check.
+      /maximum total uncompressed size/,
     )
-  }, 60_000)
+  })
+
+  it('refuses DURING decompression when the raw stream itself exceeds the gzip-stream cap, before any per-entry size check runs', async () => {
+    // Content alone (ignoring header overhead) already exceeds the
+    // gzip-stream cap, so zlib's own `maxOutputLength` must refuse this
+    // while decompressing — a cap enforced only after allocating the whole
+    // thing is not a cap. Uses a fresh, still-tiny cap set so the
+    // gzip-stream ceiling is the one actually hit, not the total-content one.
+    const gunzipCaps = {
+      ...SMALL_CAPS,
+      maxGunzipOutputBytes: 512,
+      maxTotalUncompressedBytes: 10 * 1024 * 1024, // generous, so this isn't what refuses
+    }
+    const oversized = Buffer.alloc(gunzipCaps.maxGunzipOutputBytes + 1024)
+    const tar = buildTarGz([{ name: 'huge.bin', typeflag: '0', content: oversized }])
+    await expect(safeExtract(tar, destDir, gunzipCaps)).rejects.toThrow(/decompresses to more than/)
+  })
+
+  it('the real compiled-in caps are consistent: the gzip-stream ceiling is larger than the total-content ceiling', () => {
+    // This is the invariant the two-cap split exists to guarantee — if it
+    // regresses, a legitimate many-small-files archive right at the
+    // content cap would spuriously fail during decompression instead of
+    // (correctly) not failing at all.
+    expect(MAX_GUNZIP_OUTPUT_BYTES).toBeGreaterThan(MAX_TOTAL_UNCOMPRESSED_BYTES)
+  })
 })
 
 describe('safeExtract: happy path (control case proving the refusals above are real refusals, not a broken extractor)', () => {

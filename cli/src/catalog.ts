@@ -21,6 +21,21 @@ export type FetchLike = (
   status: number
   json(): Promise<unknown>
   arrayBuffer(): Promise<ArrayBuffer>
+  /**
+   * Optional streaming body. When present, {@link fetchTarball} reads it
+   * incrementally so the size cap is enforced as bytes arrive, never
+   * after the whole body is already in memory. Typed as `unknown` because
+   * the two shapes real callers hand in are not related by a common TS
+   * interface: Node's global `fetch` supplies a web `ReadableStream`
+   * (which DOES support `for await`  at runtime via `Symbol.asyncIterator`,
+   * despite `lib.dom.d.ts` not declaring it), while a test double may
+   * supply a plain `AsyncIterable`. `fetchTarball` feature-detects at
+   * runtime rather than the type system picking one shape and rejecting
+   * the other. Real `fetch` always provides this; a test double may omit
+   * it and fall back to `arrayBuffer()`.
+   */
+  body?: unknown
+  headers?: { get(name: string): string | null }
 }>
 
 /** One published version of a catalog module, as `GET /api/v1/modules` returns it. */
@@ -62,6 +77,38 @@ export class CatalogError extends Error {
   }
 }
 
+/**
+ * Validate that `body` has the shape {@link CatalogResponse} requires
+ * before any caller trusts it. A cast (`as CatalogResponse`) lets a
+ * malformed or unexpected response body — an HTML error page, a truncated
+ * JSON object, a future-shaped API — flow silently into `findModule` and
+ * `resolveVersion`, which then fail with confusing errors far from the
+ * actual cause. Failing here, at the boundary, names the real problem.
+ */
+function assertCatalogResponse(body: unknown): asserts body is CatalogResponse {
+  if (
+    typeof body !== 'object' ||
+    body === null ||
+    !Array.isArray((body as { modules?: unknown }).modules)
+  ) {
+    throw new CatalogError(
+      "catalog response is malformed: expected an object with a 'modules' array",
+    )
+  }
+  for (const mod of (body as { modules: unknown[] }).modules) {
+    if (
+      typeof mod !== 'object' ||
+      mod === null ||
+      typeof (mod as { slug?: unknown }).slug !== 'string' ||
+      !Array.isArray((mod as { versions?: unknown }).versions)
+    ) {
+      throw new CatalogError(
+        "catalog response is malformed: a module entry is missing a string 'slug' or array 'versions'",
+      )
+    }
+  }
+}
+
 /** GET `{catalogOrigin}/api/v1/modules`. */
 export async function fetchCatalog(
   catalogOrigin: string,
@@ -71,7 +118,9 @@ export async function fetchCatalog(
   if (!res.ok) {
     throw new CatalogError(`catalog request failed: HTTP ${res.status}`)
   }
-  return (await res.json()) as CatalogResponse
+  const body = await res.json()
+  assertCatalogResponse(body)
+  return body
 }
 
 /** Find a module by slug, or `undefined`. */
@@ -182,7 +231,22 @@ export async function requestDownloadUrl(
       `download request failed: ${detail}. A 401 usually means the license key was rejected; a 410 means that release was yanked.`,
     )
   }
-  return (await res.json()) as DownloadResponse
+  const body = await res.json()
+  if (
+    typeof body !== 'object' ||
+    body === null ||
+    typeof (body as { downloadUrl?: unknown }).downloadUrl !== 'string' ||
+    (body as { downloadUrl: string }).downloadUrl.trim() === ''
+  ) {
+    // Without this check a missing/empty `downloadUrl` flows straight into
+    // `fetchTarball`, which then requests the literal string "undefined" —
+    // a failure whose real cause (a malformed marketplace response) is
+    // nowhere near the resulting error message.
+    throw new CatalogError(
+      "download response is malformed: expected a non-empty string 'downloadUrl'",
+    )
+  }
+  return body as DownloadResponse
 }
 
 /**
@@ -196,12 +260,70 @@ export async function requestDownloadUrl(
  */
 export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 
-/** GET the signed URL a successful `requestDownloadUrl` returned, and return the raw tarball bytes, refusing anything over {@link MAX_ARTIFACT_BYTES}. */
+/**
+ * Runtime feature-detection for a fetch response body: accepts either a
+ * plain `AsyncIterable<Uint8Array>` (what a test double supplies) or a
+ * web `ReadableStream<Uint8Array>` (what Node's global `fetch` actually
+ * returns) — both support `for await`, but only the former is declared
+ * `AsyncIterable` in `lib.dom.d.ts`, so this narrows by checking for
+ * `Symbol.asyncIterator` at runtime rather than by static type.
+ */
+function asAsyncIterable(body: unknown): AsyncIterable<Uint8Array> | null {
+  if (body != null && typeof body === 'object' && Symbol.asyncIterator in body) {
+    return body as AsyncIterable<Uint8Array>
+  }
+  return null
+}
+
+/**
+ * GET the signed URL a successful `requestDownloadUrl` returned, and
+ * return the raw tarball bytes, refusing anything over
+ * {@link MAX_ARTIFACT_BYTES}.
+ *
+ * The cap is enforced against the running total as chunks arrive, not
+ * against the fully-buffered result — a hostile or compromised signed-URL
+ * host can otherwise exhaust memory with an oversized or endless body long
+ * before a post-hoc length check ever runs. `Content-Length` is used only
+ * as an early, best-effort reject (the server also controls that header,
+ * so it is never trusted on its own); the byte-by-byte check as the body
+ * streams in is the actual cap.
+ */
 export async function fetchTarball(url: string, fetchImpl: FetchLike): Promise<Buffer> {
   const res = await fetchImpl(url)
   if (!res.ok) {
     throw new CatalogError(`tarball download failed: HTTP ${res.status}`)
   }
+
+  const contentLengthHeader = res.headers?.get('content-length')
+  if (contentLengthHeader) {
+    const declared = Number.parseInt(contentLengthHeader, 10)
+    if (Number.isFinite(declared) && declared > MAX_ARTIFACT_BYTES) {
+      throw new CatalogError(
+        `refusing the download: declared Content-Length ${declared} bytes exceeds the ${MAX_ARTIFACT_BYTES}-byte ceiling for a module artifact.`,
+      )
+    }
+  }
+
+  const iterableBody = asAsyncIterable(res.body)
+  if (iterableBody != null) {
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for await (const chunk of iterableBody) {
+      total += chunk.byteLength
+      if (total > MAX_ARTIFACT_BYTES) {
+        throw new CatalogError(
+          `refusing the download: exceeded the ${MAX_ARTIFACT_BYTES}-byte ceiling for a module artifact before the body finished.`,
+        )
+      }
+      chunks.push(chunk)
+    }
+    return Buffer.concat(chunks.map((c) => Buffer.from(c)))
+  }
+
+  // No streaming body available (e.g. a test double supplying only
+  // `arrayBuffer()`) — fall back to buffer-then-check. Real `fetch`
+  // always provides `body`, so this path is not the production case the
+  // streaming cap above protects.
   const arrayBuffer = await res.arrayBuffer()
   if (arrayBuffer.byteLength > MAX_ARTIFACT_BYTES) {
     throw new CatalogError(

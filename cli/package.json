@@ -1,7 +1,7 @@
 {
   "name": "helpthread-module",
   "version": "0.1.0",
-  "private": false,
+  "private": true,
   "type": "module",
   "license": "AGPL-3.0-only",
   "description": "Install and offline-verify Helpthread module release artifacts.",

@@ -75,8 +75,14 @@ export async function runInstall(options: InstallOptions, deps: InstallDeps): Pr
   deps.log(`   Resolved ${mod.name} @ ${versionEntry.version}`)
 
   deps.log('2. License key required.')
-  const licenseKey = process.env.HELPTHREAD_LICENSE_KEY ?? (await deps.getLicenseKey())
-  if (!licenseKey) {
+  // `?? ""` treats an EXPORTED-BUT-EMPTY env var as present, which would
+  // skip the prompt and fail later with a confusing "no license key
+  // provided" instead of just asking. Whitespace-only counts as absent too
+  // (a stray blank export is the same operator mistake).
+  const envLicenseKey = process.env.HELPTHREAD_LICENSE_KEY
+  const licenseKey =
+    envLicenseKey && envLicenseKey.trim() !== '' ? envLicenseKey : await deps.getLicenseKey()
+  if (!licenseKey || licenseKey.trim() === '') {
     throw new InstallError('no license key provided')
   }
 
@@ -113,6 +119,16 @@ export async function runInstall(options: InstallOptions, deps: InstallDeps): Pr
     )
   }
   if (servedEntry !== versionEntry) {
+    // An explicit `--version` pin is explicit operator intent — silently
+    // installing a different version defeats the entire point of pinning
+    // (e.g. reproducing a known-good deploy). Only the UNPINNED
+    // resolution (latest / entitlement-decides) may substitute silently;
+    // that behavior and its notice are unchanged below.
+    if (options.version) {
+      throw new InstallError(
+        `refusing to install: --version ${versionEntry.version} was requested, but this license is entitled to ${servedEntry.version}. Re-run without --version to accept the entitled version, or use a license entitled to ${versionEntry.version}.`,
+      )
+    }
     deps.log(
       `   NOTE: your license entitles you to ${servedEntry.version}, not ${versionEntry.version}. Installing ${servedEntry.version}.`,
     )
@@ -218,6 +234,18 @@ async function installVerifiedArtifact({
     throw new InstallError(`extracted module is missing module.config.json at ${configPath}`)
   }
   const config = parseModuleConfig(fsImpl.readFileSync(configPath, 'utf8'))
+  // `parseModuleConfig` validates shape only — it explicitly does not
+  // cross-check `module` against anything, leaving that to a caller with
+  // both values. This is that caller: the manifest's `module` is the one
+  // claim already bound to a verified signature (checked above), so a
+  // `module.config.json` naming a different module inside an otherwise
+  // authentic, correctly-slotted tarball is still a real mismatch worth
+  // refusing, not a cosmetic one.
+  if (config.module !== verification.manifest.module) {
+    throw new InstallError(
+      `refusing to install: module.config.json declares module '${config.module}' but the verified manifest describes '${verification.manifest.module}'.`,
+    )
+  }
   deps.log('')
   deps.log(renderEnvSummary(config))
 
@@ -227,13 +255,25 @@ async function installVerifiedArtifact({
 }
 
 function prepareDestDir(fsImpl: typeof fs, destDir: string, force: boolean): void {
-  const exists = fsImpl.existsSync(destDir)
-  if (!exists) {
+  // `lstatSync`, not `statSync`: `stat` follows a symlink and reports on
+  // whatever it points to, so a destination that is ITSELF a symlink would
+  // pass `isDirectory()` and, under `--force`, have its target's contents
+  // deleted — before `safeExtract`'s own symlink check ever runs. Checking
+  // the link (not its target) here means the destructive branch below can
+  // never even be reached for a symlinked destination.
+  let lstat: fs.Stats
+  try {
+    lstat = fsImpl.lstatSync(destDir)
+  } catch {
     fsImpl.mkdirSync(destDir, { recursive: true })
     return
   }
-  const stat = fsImpl.statSync(destDir)
-  if (!stat.isDirectory()) {
+  if (lstat.isSymbolicLink()) {
+    throw new InstallError(
+      `extraction target is a symlink, which would place files outside it: ${destDir}`,
+    )
+  }
+  if (!lstat.isDirectory()) {
     throw new InstallError(`extraction target exists and is not a directory: ${destDir}`)
   }
   const isEmpty = fsImpl.readdirSync(destDir).length === 0

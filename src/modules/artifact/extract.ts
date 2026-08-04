@@ -48,8 +48,25 @@ export class UnsafeArchiveError extends Error {
 // bomb or a runaway entry count to something that fails fast instead of
 // exhausting disk or memory.
 
-/** Total uncompressed bytes across every entry. 512 MiB comfortably covers a serverless bundle plus static assets with headroom, while still refusing a bomb that expands orders of magnitude past a plausible module. */
+/** Total uncompressed bytes across every entry's DATA (file contents only, not tar headers/padding). 512 MiB comfortably covers a serverless bundle plus static assets with headroom, while still refusing a bomb that expands orders of magnitude past a plausible module. */
 export const MAX_TOTAL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+/**
+ * Ceiling on the raw decompressed TAR byte stream handed to `gunzipSync`,
+ * kept as its own constant rather than reusing {@link MAX_TOTAL_UNCOMPRESSED_BYTES}
+ * directly. The two caps measure different things: this one bounds the
+ * full stream — every 512-byte USTAR header plus padding, for every entry,
+ * on top of file data — while the total-uncompressed cap bounds only file
+ * *content* bytes, checked entry-by-entry below. Sharing one constant
+ * between them means an archive with many small files could be refused for
+ * exceeding a "content" cap it never actually reached, purely because
+ * header/padding overhead pushed the raw stream over it — a spurious
+ * refusal with a misleading "decompresses to more than" message. The
+ * 32 MiB of headroom comfortably covers header overhead even at
+ * {@link MAX_ENTRY_COUNT} entries (20,000 × up to 1,023 bytes of
+ * header+padding ≈ 20 MiB) while remaining a hard, bounded ceiling — not a
+ * loophole for a decompression bomb.
+ */
+export const MAX_GUNZIP_OUTPUT_BYTES = MAX_TOTAL_UNCOMPRESSED_BYTES + 32 * 1024 * 1024
 /** Total number of entries (files + directories). 20,000 covers even a `node_modules`-heavy bundle; archives with more are refused rather than iterated indefinitely. */
 export const MAX_ENTRY_COUNT = 20_000
 /** Bytes for any single file. 128 MiB — larger than any plausible individual asset in a serverless module bundle. */
@@ -143,17 +160,39 @@ function* readTarEntries(tar: Buffer): Generator<{ entry: TarEntry; data: Buffer
   }
 }
 
+/** The size/count ceilings {@link safeExtract} enforces, injectable so tests can exercise a refusal without actually allocating hundreds of MiB. Production callers never pass this — the exported `MAX_*` constants above are the real, compiled-in defaults. */
+export interface ExtractCaps {
+  maxGunzipOutputBytes: number
+  maxTotalUncompressedBytes: number
+  maxEntryCount: number
+  maxSingleFileBytes: number
+  maxPathLength: number
+}
+
+const DEFAULT_CAPS: ExtractCaps = {
+  maxGunzipOutputBytes: MAX_GUNZIP_OUTPUT_BYTES,
+  maxTotalUncompressedBytes: MAX_TOTAL_UNCOMPRESSED_BYTES,
+  maxEntryCount: MAX_ENTRY_COUNT,
+  maxSingleFileBytes: MAX_SINGLE_FILE_BYTES,
+  maxPathLength: MAX_PATH_LENGTH,
+}
+
 /**
  * Extract a `.tar.gz` module release into `destDir`. Rejects, each with a
  * distinct message: absolute paths, `..` traversal, non-normalized paths,
  * symlinks, hardlinks, devices/FIFOs, PAX extended headers, duplicate
  * entries, and any entry that would resolve outside `destDir`. Enforces
- * the caps above. `destDir` must already exist and be empty (a non-empty
- * destination could mean a partially-extracted or hostile pre-seeded
- * directory — the caller decides whether to create/clear it first, this
- * function never does).
+ * the caps above (or `caps`, when a caller supplies smaller ones — see
+ * {@link ExtractCaps}). `destDir` must already exist and be empty (a
+ * non-empty destination could mean a partially-extracted or hostile
+ * pre-seeded directory — the caller decides whether to create/clear it
+ * first, this function never does).
  */
-export async function safeExtract(tarballBytes: Buffer, destDir: string): Promise<string[]> {
+export async function safeExtract(
+  tarballBytes: Buffer,
+  destDir: string,
+  caps: ExtractCaps = DEFAULT_CAPS,
+): Promise<string[]> {
   // `lstat`, not `stat`: a symlinked destination passes an `isDirectory()`
   // check while every containment check below reasons about the LINK's
   // path, so writes land wherever the link points — outside the boundary
@@ -186,13 +225,13 @@ export async function safeExtract(tarballBytes: Buffer, destDir: string): Promis
     // highly-compressible archive — a few KB of zeros expands to gigabytes —
     // exhausts memory during decompression, i.e. BEFORE any size check
     // could run. A cap that is only enforced after allocation is not a cap.
-    tar = gunzipSync(tarballBytes, { maxOutputLength: MAX_TOTAL_UNCOMPRESSED_BYTES })
+    tar = gunzipSync(tarballBytes, { maxOutputLength: caps.maxGunzipOutputBytes })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     // zlib signals the cap as a buffer-size error; say what actually happened.
     if (/maxOutputLength|buffer/i.test(message)) {
       throw new UnsafeArchiveError(
-        `refusing the archive: it decompresses to more than ${MAX_TOTAL_UNCOMPRESSED_BYTES} bytes`,
+        `refusing the archive: it decompresses to more than ${caps.maxGunzipOutputBytes} bytes`,
       )
     }
     throw new UnsafeArchiveError(`not a valid gzip stream: ${message}`)
@@ -210,8 +249,10 @@ export async function safeExtract(tarballBytes: Buffer, destDir: string): Promis
 
   for (const { entry, data } of readTarEntries(tar)) {
     entryCount += 1
-    if (entryCount > MAX_ENTRY_COUNT) {
-      throw new UnsafeArchiveError(`archive exceeds the maximum entry count (${MAX_ENTRY_COUNT})`)
+    if (entryCount > caps.maxEntryCount) {
+      throw new UnsafeArchiveError(
+        `archive exceeds the maximum entry count (${caps.maxEntryCount})`,
+      )
     }
 
     const { name, size, typeflag } = entry
@@ -219,9 +260,9 @@ export async function safeExtract(tarballBytes: Buffer, destDir: string): Promis
     if (name.length === 0) {
       throw new UnsafeArchiveError('archive contains an entry with an empty path')
     }
-    if (name.length > MAX_PATH_LENGTH) {
+    if (name.length > caps.maxPathLength) {
       throw new UnsafeArchiveError(
-        `archive entry path exceeds ${MAX_PATH_LENGTH} characters: '${name.slice(0, 80)}...'`,
+        `archive entry path exceeds ${caps.maxPathLength} characters: '${name.slice(0, 80)}...'`,
       )
     }
     if (typeflag === 'g' || typeflag === 'x') {
@@ -278,15 +319,15 @@ export async function safeExtract(tarballBytes: Buffer, destDir: string): Promis
 
     if (isDirectory) continue
 
-    if (size > MAX_SINGLE_FILE_BYTES) {
+    if (size > caps.maxSingleFileBytes) {
       throw new UnsafeArchiveError(
-        `archive entry '${name}' (${size} bytes) exceeds the maximum single-file size (${MAX_SINGLE_FILE_BYTES})`,
+        `archive entry '${name}' (${size} bytes) exceeds the maximum single-file size (${caps.maxSingleFileBytes})`,
       )
     }
     totalBytes += size
-    if (totalBytes > MAX_TOTAL_UNCOMPRESSED_BYTES) {
+    if (totalBytes > caps.maxTotalUncompressedBytes) {
       throw new UnsafeArchiveError(
-        `archive exceeds the maximum total uncompressed size (${MAX_TOTAL_UNCOMPRESSED_BYTES})`,
+        `archive exceeds the maximum total uncompressed size (${caps.maxTotalUncompressedBytes})`,
       )
     }
 

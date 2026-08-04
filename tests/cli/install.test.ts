@@ -64,13 +64,25 @@ function fakeFetch(
 }
 
 let workDir: string
+let savedLicenseKeyEnv: string | undefined
 
 beforeEach(() => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ht116-install-'))
+  // Explicitly unset (not "assume unset") — `runInstall` reads
+  // $HELPTHREAD_LICENSE_KEY directly, so any test relying on the
+  // env-var/prompt branching would otherwise pass or fail depending on
+  // whatever happens to be exported in the developer's or CI's shell.
+  savedLicenseKeyEnv = process.env.HELPTHREAD_LICENSE_KEY
+  delete process.env.HELPTHREAD_LICENSE_KEY
 })
 
 afterEach(() => {
   fs.rmSync(workDir, { recursive: true, force: true })
+  if (savedLicenseKeyEnv === undefined) {
+    delete process.env.HELPTHREAD_LICENSE_KEY
+  } else {
+    process.env.HELPTHREAD_LICENSE_KEY = savedLicenseKeyEnv
+  }
 })
 
 describe('runInstall: full success path (fake catalog + locally-signed fixture artifact)', () => {
@@ -173,7 +185,9 @@ describe('runInstall: full success path (fake catalog + locally-signed fixture a
       },
       {
         fetchImpl,
-        getLicenseKey: async () => 'unused-because-env-var-set',
+        // $HELPTHREAD_LICENSE_KEY is explicitly unset in `beforeEach`, so
+        // this callback is what actually supplies the key here.
+        getLicenseKey: async () => 'test-license-key',
         log: (line) => logs.push(line),
         trustStore: { [keypair.keyId]: keypair.publicKeyB64url },
       },
@@ -653,5 +667,300 @@ describe('runInstall: a signature proves authenticity, not identity', () => {
     expect(logs.join('\n')).not.toContain('SUPERSECRETVALUE')
     // The machine-readable code still survives, so the message stays useful.
     expect(thrown).toContain('unauthorized')
+  })
+})
+
+/** Build a minimal, correctly-signed catalog + tarball fixture for a single module/version, so the tests below don't each hand-roll the manifest/signature plumbing. */
+function buildSignedFixture(opts: {
+  moduleSlug: string
+  version: string
+  moduleConfigModule?: string
+}) {
+  const keypair = makeTestKeypair()
+  const tarball = buildTarGz([
+    regularFile(
+      'module.config.json',
+      JSON.stringify({
+        schemaVersion: 1,
+        module: opts.moduleConfigModule ?? opts.moduleSlug,
+        env: [],
+      }),
+    ),
+  ])
+  const sha256 = sha256Hex(tarball)
+  const manifest = canonicalizeManifest({
+    schema: 'helpthread-module-manifest/1',
+    module: opts.moduleSlug,
+    semver: opts.version,
+    artifactSha256: sha256,
+    artifactBytes: tarball.length,
+    sourceRevision: 'abc1234',
+    minEngineApi: '1.0.0',
+    builtAt: '2026-08-04T00:00:00.000Z',
+    keyId: keypair.keyId,
+  })
+  const signature = keypair.sign(manifest)
+  const versionEntry = {
+    version: opts.version,
+    checksumSha256: sha256,
+    publishedAt: '2026-08-04T00:00:00.000Z',
+    manifest,
+    manifestSignature: signature,
+    manifestKeyId: keypair.keyId,
+    minEngineApi: '1.0.0',
+    yanked: false,
+  }
+  const catalog: CatalogResponse = {
+    generatedAt: '2026-08-04T00:00:00.000Z',
+    modules: [
+      {
+        slug: opts.moduleSlug,
+        name: opts.moduleSlug,
+        summary: 'test',
+        cluster: 'test',
+        latestVersion: opts.version,
+        changelogUrl: 'https://example.test/changelog',
+        priceUsd: 0,
+        billingInterval: 'year',
+        docsUrl: 'https://example.test/docs',
+        versions: [versionEntry],
+      },
+    ],
+  }
+  return { keypair, tarball, catalog, versionEntry }
+}
+
+describe('runInstall: an empty $HELPTHREAD_LICENSE_KEY is treated as absent', () => {
+  // The catalog lookup runs BEFORE the license-key step, so these fixtures
+  // must include the requested module — otherwise the run fails at "module
+  // not found" and never reaches the code path under test. The download
+  // endpoint is deliberately left unauthorized (401): the point of each
+  // test is only that `getLicenseKey` was called at all, proving the env
+  // var was NOT treated as a present key; what happens after the prompt
+  // (an ordinary auth failure here) is incidental.
+  it('prompts instead of failing when the env var is set but empty', async () => {
+    process.env.HELPTHREAD_LICENSE_KEY = ''
+    const fixture = buildSignedFixture({ moduleSlug: 'fixture-module', version: '1.0.0' })
+    const fetchImpl = fakeFetch({
+      'https://catalog.example/api/v1/modules': () => ({
+        ok: true,
+        status: 200,
+        json: fixture.catalog,
+      }),
+      'https://catalog.example/api/v1/download': () => ({
+        ok: false,
+        status: 401,
+        json: { error: { code: 'unauthorized' } },
+      }),
+    })
+    let promptCalled = false
+    await expect(
+      runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'https://catalog.example',
+          version: undefined,
+          dir: path.join(workDir, 'nonexistent'),
+          force: false,
+        },
+        {
+          fetchImpl,
+          getLicenseKey: async () => {
+            promptCalled = true
+            return 'k'
+          },
+          log: () => {},
+        },
+      ),
+      // An ordinary 401 from the catalog, not an InstallError — proving
+      // this run actually reached the download step (and thus the prompt)
+      // rather than failing earlier for an unrelated reason.
+    ).rejects.toThrow(/download request failed/)
+    expect(promptCalled).toBe(true)
+  })
+
+  it('prompts instead of failing when the env var is whitespace-only', async () => {
+    process.env.HELPTHREAD_LICENSE_KEY = '   '
+    const fixture = buildSignedFixture({ moduleSlug: 'fixture-module', version: '1.0.0' })
+    const fetchImpl = fakeFetch({
+      'https://catalog.example/api/v1/modules': () => ({
+        ok: true,
+        status: 200,
+        json: fixture.catalog,
+      }),
+      'https://catalog.example/api/v1/download': () => ({
+        ok: false,
+        status: 401,
+        json: { error: { code: 'unauthorized' } },
+      }),
+    })
+    let promptCalled = false
+    await expect(
+      runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'https://catalog.example',
+          version: undefined,
+          dir: path.join(workDir, 'nonexistent'),
+          force: false,
+        },
+        {
+          fetchImpl,
+          getLicenseKey: async () => {
+            promptCalled = true
+            return 'k'
+          },
+          log: () => {},
+        },
+      ),
+    ).rejects.toThrow(/download request failed/)
+    expect(promptCalled).toBe(true)
+  })
+})
+
+describe('runInstall: an explicit --version pin is never silently substituted', () => {
+  it('refuses when entitlement serves a different version than the one pinned', async () => {
+    const fixture1 = buildSignedFixture({ moduleSlug: 'fixture-module', version: '1.0.0' })
+    const fixture2 = buildSignedFixture({ moduleSlug: 'fixture-module', version: '2.0.0' })
+    const catalog: CatalogResponse = {
+      generatedAt: 'x',
+      modules: [
+        {
+          ...fixture2.catalog.modules[0],
+          versions: [fixture2.versionEntry, fixture1.versionEntry],
+        },
+      ],
+    }
+    const fetchImpl = fakeFetch({
+      'https://catalog.example/api/v1/modules': () => ({ ok: true, status: 200, json: catalog }),
+      // Operator pinned 2.0.0; entitlement serves 1.0.0 instead.
+      'https://catalog.example/api/v1/download': () => ({
+        ok: true,
+        status: 200,
+        json: { downloadUrl: 'https://signed.example/x.tar.gz', version: '1.0.0' },
+      }),
+      'https://signed.example/x.tar.gz': () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: toArrayBuffer(fixture1.tarball),
+      }),
+    })
+    await expect(
+      runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'https://catalog.example',
+          version: '2.0.0',
+          dir: path.join(workDir, 'pinned'),
+          force: false,
+        },
+        {
+          fetchImpl,
+          getLicenseKey: async () => 'k',
+          log: () => {},
+          trustStore: { [fixture1.keypair.keyId]: fixture1.keypair.publicKeyB64url },
+        },
+      ),
+    ).rejects.toThrow(/--version 2\.0\.0 was requested.*entitled to 1\.0\.0/s)
+  })
+})
+
+describe('runInstall: --force never deletes through a symlinked destination', () => {
+  it('refuses before deleting anything when the destination is a symlink to a real directory', async () => {
+    const realDir = path.join(workDir, 'real-target')
+    fs.mkdirSync(realDir)
+    fs.writeFileSync(path.join(realDir, 'do-not-delete.txt'), 'precious')
+    const symlinkDest = path.join(workDir, 'symlink-dest')
+    fs.symlinkSync(realDir, symlinkDest, 'dir')
+
+    const fixture = buildSignedFixture({ moduleSlug: 'fixture-module', version: '1.0.0' })
+    const fetchImpl = fakeFetch({
+      'https://catalog.example/api/v1/modules': () => ({
+        ok: true,
+        status: 200,
+        json: fixture.catalog,
+      }),
+      'https://catalog.example/api/v1/download': () => ({
+        ok: true,
+        status: 200,
+        json: { downloadUrl: 'https://signed.example/x.tar.gz' },
+      }),
+      'https://signed.example/x.tar.gz': () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: toArrayBuffer(fixture.tarball),
+      }),
+    })
+
+    await expect(
+      runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'https://catalog.example',
+          version: undefined,
+          dir: symlinkDest,
+          force: true,
+        },
+        {
+          fetchImpl,
+          getLicenseKey: async () => 'k',
+          log: () => {},
+          trustStore: { [fixture.keypair.keyId]: fixture.keypair.publicKeyB64url },
+        },
+      ),
+    ).rejects.toThrow(/symlink/)
+
+    // The real directory's contents must survive: --force must never
+    // delete through the link before refusing it.
+    expect(fs.existsSync(path.join(realDir, 'do-not-delete.txt'))).toBe(true)
+  })
+})
+
+describe('runInstall: module.config.json must name the same module the verified manifest describes', () => {
+  it('refuses when module.config.json declares a different module than the signed manifest', async () => {
+    const fixture = buildSignedFixture({
+      moduleSlug: 'fixture-module',
+      version: '1.0.0',
+      moduleConfigModule: 'a-completely-different-module',
+    })
+    const fetchImpl = fakeFetch({
+      'https://catalog.example/api/v1/modules': () => ({
+        ok: true,
+        status: 200,
+        json: fixture.catalog,
+      }),
+      'https://catalog.example/api/v1/download': () => ({
+        ok: true,
+        status: 200,
+        json: { downloadUrl: 'https://signed.example/x.tar.gz' },
+      }),
+      'https://signed.example/x.tar.gz': () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: toArrayBuffer(fixture.tarball),
+      }),
+    })
+    await expect(
+      runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'https://catalog.example',
+          version: undefined,
+          dir: path.join(workDir, 'config-mismatch'),
+          force: false,
+        },
+        {
+          fetchImpl,
+          getLicenseKey: async () => 'k',
+          log: () => {},
+          trustStore: { [fixture.keypair.keyId]: fixture.keypair.publicKeyB64url },
+        },
+      ),
+    ).rejects.toThrow(/module.config.json declares module 'a-completely-different-module'/)
   })
 })

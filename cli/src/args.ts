@@ -56,15 +56,21 @@ export function parseInstallArgs(argv: string[]): InstallOptions | HelpRequested
         return { help: true }
       case '--catalog':
         catalogOrigin = argv[++i]
-        if (!catalogOrigin) throw new ArgsError('--catalog requires a value')
+        if (!catalogOrigin || catalogOrigin.startsWith('-')) {
+          throw new ArgsError('--catalog requires a value')
+        }
         break
       case '--version':
         version = argv[++i]
-        if (!version) throw new ArgsError('--version requires a value')
+        if (!version || version.startsWith('-')) {
+          throw new ArgsError('--version requires a value')
+        }
         break
       case '--dir':
         dir = argv[++i]
-        if (!dir) throw new ArgsError('--dir requires a value')
+        if (!dir || dir.startsWith('-')) {
+          throw new ArgsError('--dir requires a value')
+        }
         break
       case '--force':
         force = true
@@ -118,11 +124,15 @@ export function parseVerifyArgs(argv: string[]): VerifyOptions | HelpRequested {
         return { help: true }
       case '--manifest':
         manifestPath = argv[++i]
-        if (!manifestPath) throw new ArgsError('--manifest requires a value')
+        if (!manifestPath || manifestPath.startsWith('-')) {
+          throw new ArgsError('--manifest requires a value')
+        }
         break
       case '--signature':
         signaturePath = argv[++i]
-        if (!signaturePath) throw new ArgsError('--signature requires a value')
+        if (!signaturePath || signaturePath.startsWith('-')) {
+          throw new ArgsError('--signature requires a value')
+        }
         break
       default:
         if (arg.startsWith('-')) {

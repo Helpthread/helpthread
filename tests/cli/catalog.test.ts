@@ -7,6 +7,7 @@ import {
   fetchCatalog,
   fetchTarball,
   findModule,
+  MAX_ARTIFACT_BYTES,
   requestDownloadUrl,
   resolveVersion,
 } from '../../cli/src/catalog.js'
@@ -20,6 +21,8 @@ function fakeFetch(
     status: number
     json?: unknown
     arrayBuffer?: ArrayBuffer
+    body?: AsyncIterable<Uint8Array> | null
+    contentLength?: string
   },
 ): FetchLike {
   return async (url, init) => {
@@ -29,6 +32,11 @@ function fakeFetch(
       status: result.status,
       json: async () => result.json,
       arrayBuffer: async () => result.arrayBuffer ?? new ArrayBuffer(0),
+      body: result.body,
+      headers: {
+        get: (name) =>
+          name.toLowerCase() === 'content-length' ? (result.contentLength ?? null) : null,
+      },
     }
   }
 }
@@ -98,6 +106,24 @@ describe('fetchCatalog', () => {
     const fetchImpl = fakeFetch(() => ({ ok: false, status: 500 }))
     await expect(fetchCatalog('https://marketplace.example', fetchImpl)).rejects.toThrow(
       CatalogError,
+    )
+  })
+
+  it('throws CatalogError on a malformed body instead of returning a broken cast', async () => {
+    const fetchImpl = fakeFetch(() => ({ ok: true, status: 200, json: { not: 'a catalog' } }))
+    await expect(fetchCatalog('https://marketplace.example', fetchImpl)).rejects.toThrow(
+      /malformed/,
+    )
+  })
+
+  it('throws CatalogError when a module entry is missing required fields', async () => {
+    const fetchImpl = fakeFetch(() => ({
+      ok: true,
+      status: 200,
+      json: { generatedAt: 'x', modules: [{ name: 'no slug or versions' }] },
+    }))
+    await expect(fetchCatalog('https://marketplace.example', fetchImpl)).rejects.toThrow(
+      /malformed/,
     )
   })
 })
@@ -210,6 +236,20 @@ describe('requestDownloadUrl', () => {
       expect(String(err)).not.toContain('sk_super_secret_value')
     }
   })
+
+  it('throws CatalogError when downloadUrl is missing, rather than requesting the literal "undefined"', async () => {
+    const fetchImpl = fakeFetch(() => ({ ok: true, status: 200, json: {} }))
+    await expect(
+      requestDownloadUrl('https://marketplace.example', fetchImpl, 'k', 'draft-assistant', '0.3.0'),
+    ).rejects.toThrow(/downloadUrl/)
+  })
+
+  it('throws CatalogError when downloadUrl is an empty string', async () => {
+    const fetchImpl = fakeFetch(() => ({ ok: true, status: 200, json: { downloadUrl: '' } }))
+    await expect(
+      requestDownloadUrl('https://marketplace.example', fetchImpl, 'k', 'draft-assistant', '0.3.0'),
+    ).rejects.toThrow(/downloadUrl/)
+  })
 })
 
 describe('fetchTarball', () => {
@@ -223,5 +263,58 @@ describe('fetchTarball', () => {
   it('throws CatalogError on a non-ok response', async () => {
     const fetchImpl = fakeFetch(() => ({ ok: false, status: 403 }))
     await expect(fetchTarball('https://signed.example/x', fetchImpl)).rejects.toThrow(CatalogError)
+  })
+
+  it('aborts a streamed body as soon as the running total exceeds the cap, without buffering it all', async () => {
+    const CHUNK_SIZE = 1024 * 1024 // 1 MiB
+    // Enough chunks to exceed the cap several times over — proves the
+    // abort is early, not a coincidence of the exact chunk count.
+    const totalChunksIfUnbounded = Math.ceil(MAX_ARTIFACT_BYTES / CHUNK_SIZE) * 4
+    let chunksProduced = 0
+    const body: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            if (chunksProduced >= totalChunksIfUnbounded) {
+              return { done: true, value: undefined }
+            }
+            chunksProduced += 1
+            return { done: false, value: new Uint8Array(CHUNK_SIZE) }
+          },
+        }
+      },
+    }
+    const fetchImpl = fakeFetch(() => ({ ok: true, status: 200, body }))
+    await expect(fetchTarball('https://signed.example/huge', fetchImpl)).rejects.toThrow(
+      /exceeded the .*-byte ceiling/,
+    )
+    // The generator was never drained to completion — the abort happened
+    // partway through, well before all `totalChunksIfUnbounded` chunks
+    // (which alone would be ~256 MiB, 4x the cap) were ever produced.
+    expect(chunksProduced).toBeLessThan(totalChunksIfUnbounded)
+  })
+
+  it('rejects early from a declared Content-Length over the cap, without reading the body', async () => {
+    let bodyRead = false
+    const body: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            bodyRead = true
+            return { done: false, value: new Uint8Array(1024) }
+          },
+        }
+      },
+    }
+    const fetchImpl = fakeFetch(() => ({
+      ok: true,
+      status: 200,
+      body,
+      contentLength: String(MAX_ARTIFACT_BYTES + 1),
+    }))
+    await expect(fetchTarball('https://signed.example/huge', fetchImpl)).rejects.toThrow(
+      /Content-Length/,
+    )
+    expect(bodyRead).toBe(false)
   })
 })
