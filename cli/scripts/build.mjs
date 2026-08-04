@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, mkdirSync } from 'node:fs'
+import { chmodSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // Bundles `cli/src/main.ts` — and everything it imports, including the
@@ -23,6 +23,14 @@ import { build } from 'esbuild'
 const cliRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const outfile = join(cliRoot, 'dist', 'main.js')
 
+// Wipe `dist/` before rebuilding rather than overwriting `main.js` in
+// place. `files` in package.json admits the whole directory, so anything
+// that ever lands here — a stale bundle from an older entry point, a
+// sourcemap from a debugging session, a file dropped by hand — would be
+// published silently. `npm publish` does not run the test suite, so the
+// allowlist test cannot catch it either. Starting from an empty directory
+// makes the published contents a function of this script alone.
+rmSync(dirname(outfile), { recursive: true, force: true })
 mkdirSync(dirname(outfile), { recursive: true })
 
 await build({

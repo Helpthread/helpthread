@@ -1,8 +1,11 @@
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { execFile, execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
+import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import { TRUST_STORE } from '../../cli/src/trust-store.js'
+
+const execFileAsync = promisify(execFile)
 
 // HT-121: `cli/` is meant to be publishable on its own — a package
 // containing only `cli/**` must install and run with no repo-relative
@@ -98,4 +101,30 @@ describe('cli bundle (HT-121)', () => {
       expect(p).not.toMatch(/\.test\./)
     }
   })
+})
+
+describe('the build starts from an empty dist/', () => {
+  /**
+   * `files` in cli/package.json admits the whole `dist/` directory, and
+   * `npm publish` runs no tests — so anything that ever lands there ships
+   * silently. The build must therefore wipe the directory rather than
+   * overwrite one file inside it, making the published contents a function
+   * of the build script alone.
+   */
+  it('removes a stray file left in dist/ instead of publishing it', async () => {
+    const distDir = path.join(cliDir, 'dist')
+    const stray = path.join(distDir, 'stray-do-not-ship.js')
+
+    mkdirSync(distDir, { recursive: true })
+    writeFileSync(stray, '// left behind by an earlier build or by hand\n')
+    expect(existsSync(stray)).toBe(true)
+
+    await execFileAsync(process.execPath, [path.join(cliDir, 'scripts', 'build.mjs')], {
+      cwd: repoRoot,
+    })
+
+    expect(existsSync(stray)).toBe(false)
+    // ...and the real bundle is still there afterwards.
+    expect(existsSync(path.join(distDir, 'main.js'))).toBe(true)
+  }, 60_000)
 })
