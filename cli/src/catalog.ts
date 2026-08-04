@@ -120,7 +120,7 @@ export function resolveVersion(
   )
 }
 
-/** The marketplace's signed-download response. ASSUMPTION (undocumented at the time of writing, no valid license key was available to observe a real 200 — see cli/README section "download contract assumption"): a JSON body naming a time-limited signed URL to GET the tarball bytes from. */
+/** The marketplace's signed-download response, confirmed against the service's own handler: `{version, downloadUrl, expiresAt, checksumSha256}`. Only `downloadUrl` and `version` are consumed here; the artifact's integrity comes from the signed manifest, never from fields in this response. */
 export interface DownloadResponse {
   downloadUrl: string
   /**
@@ -140,11 +140,10 @@ export interface DownloadResponse {
 /**
  * POST `{catalogOrigin}/api/v1/download` with the license key as a bearer
  * token, naming the module and version. Returns the signed download URL
- * on success. On a non-2xx response, throws with the marketplace's own
- * error message when present (the live endpoint returns
- * `{"error":{"code":...,"message":...}}` for at least the unauthorized
- * case — verified against the real deployment) — but the license key
- * itself never appears in the thrown message.
+ * on success. On a non-2xx response, throws using ONLY the status and a
+ * pattern-checked error CODE from the body — never the server's own
+ * message text; see the comment at that branch for why this request in
+ * particular must not echo remote strings.
  */
 export async function requestDownloadUrl(
   catalogOrigin: string,
@@ -162,26 +161,52 @@ export async function requestDownloadUrl(
     body: JSON.stringify({ module: moduleSlug, version }),
   })
   if (!res.ok) {
+    // Only the CODE is taken from the response, never the message. This is
+    // the one request that carries the license key, and the server fully
+    // controls its own error body — a compromised or hostile marketplace
+    // could echo the key back inside `error.message`, which would then be
+    // printed to the terminal and into any shell transcript or CI log. The
+    // code is a short machine token from a known vocabulary; the
+    // human-readable text is generated locally instead.
     let detail = `HTTP ${res.status}`
     try {
-      const body = (await res.json()) as { error?: { code?: string; message?: string } }
-      if (body?.error?.message) {
-        detail = `${detail} (${body.error.code ?? 'error'}: ${body.error.message})`
+      const body = (await res.json()) as { error?: { code?: string } }
+      const code = body?.error?.code
+      if (typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code)) {
+        detail = `${detail} (${code})`
       }
     } catch {
       // Non-JSON error body — fall back to the bare status.
     }
-    throw new CatalogError(`download request failed: ${detail}`)
+    throw new CatalogError(
+      `download request failed: ${detail}. A 401 usually means the license key was rejected; a 410 means that release was yanked.`,
+    )
   }
   return (await res.json()) as DownloadResponse
 }
 
-/** GET the signed URL a successful `requestDownloadUrl` returned, and return the raw tarball bytes. */
+/**
+ * Hard ceiling on a downloaded artifact, enforced locally rather than
+ * trusted from `Content-Length` (which the server also controls). Without
+ * it, a hostile or compromised signed-URL host can exhaust memory with an
+ * endless response body long before any digest or signature check runs —
+ * verification cannot protect a process that already died reading the
+ * input. 64 MiB is ~700x the current reference module and still far below
+ * anything that threatens a laptop.
+ */
+export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
+
+/** GET the signed URL a successful `requestDownloadUrl` returned, and return the raw tarball bytes, refusing anything over {@link MAX_ARTIFACT_BYTES}. */
 export async function fetchTarball(url: string, fetchImpl: FetchLike): Promise<Buffer> {
   const res = await fetchImpl(url)
   if (!res.ok) {
     throw new CatalogError(`tarball download failed: HTTP ${res.status}`)
   }
   const arrayBuffer = await res.arrayBuffer()
+  if (arrayBuffer.byteLength > MAX_ARTIFACT_BYTES) {
+    throw new CatalogError(
+      `refusing the download: ${arrayBuffer.byteLength} bytes exceeds the ${MAX_ARTIFACT_BYTES}-byte ceiling for a module artifact.`,
+    )
+  }
   return Buffer.from(arrayBuffer)
 }

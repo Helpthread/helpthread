@@ -13,6 +13,8 @@ import * as path from 'node:path'
 import { parseModuleConfig, safeExtract } from '../../src/modules/artifact/index.js'
 import type { InstallOptions } from './args.js'
 import {
+  type CatalogModule,
+  type CatalogModuleVersion,
   DEFAULT_CATALOG_ORIGIN,
   type FetchLike,
   fetchCatalog,
@@ -122,18 +124,53 @@ export async function runInstall(options: InstallOptions, deps: InstallDeps): Pr
   const tmpTarballPath = path.join(tmpDir, `${mod.slug}-${servedEntry.version}.tar.gz`)
   fsImpl.writeFileSync(tmpTarballPath, tarballBytes)
 
-  const cleanupTempFile = () => {
+  // Everything from here runs inside try/finally: this is PAID, proprietary
+  // software sitting in a world-readable temp directory, and any failure
+  // below — a refused destination, a bad archive entry, a missing config —
+  // would otherwise leave it there indefinitely. Cleanup must not depend on
+  // reaching a particular branch.
+  try {
+    await installVerifiedArtifact({
+      deps,
+      fsImpl,
+      trustStore,
+      options,
+      mod,
+      servedEntry,
+      tarballBytes,
+    })
+  } finally {
     try {
       fsImpl.rmSync(tmpDir, { recursive: true, force: true })
     } catch {
       // best-effort cleanup
     }
   }
+}
 
+interface VerifiedInstallArgs {
+  deps: InstallDeps
+  fsImpl: typeof fs
+  trustStore: Readonly<Record<string, string>>
+  options: InstallOptions
+  mod: CatalogModule
+  servedEntry: CatalogModuleVersion
+  tarballBytes: Buffer
+}
+
+/** Verify-then-extract, split out so the caller's `finally` owns temp-file cleanup on every path. */
+async function installVerifiedArtifact({
+  deps,
+  fsImpl,
+  trustStore,
+  options,
+  mod,
+  servedEntry,
+  tarballBytes,
+}: VerifiedInstallArgs): Promise<void> {
   deps.log('5. Verifying checksum, size, and signature against the compiled-in trust store...')
   const trustedKeyPresent = trustStore[servedEntry.manifestKeyId] !== undefined
   if (!trustedKeyPresent) {
-    cleanupTempFile()
     throw new InstallError(
       `refusing to install: manifest keyId '${servedEntry.manifestKeyId}' is not in this CLI's trust store`,
     )
@@ -145,9 +182,26 @@ export async function runInstall(options: InstallOptions, deps: InstallDeps): Pr
     trustStore,
   )
   if (!verification.ok) {
-    cleanupTempFile()
     throw new InstallError(
       `refusing to install: verification failed (${verification.code}): ${verification.message}`,
+    )
+  }
+
+  // A valid signature proves the artifact is AUTHENTIC. It does not prove
+  // it is the artifact that was ASKED FOR — every first-party release is
+  // signed by the same key, so a compromised marketplace could answer a
+  // request for module A, version X with a genuinely-signed module B,
+  // version Y and every check above would pass. Bind the verified
+  // manifest's own claims to what was requested; this is the difference
+  // between "someone we trust signed this" and "this is what we ordered".
+  if (verification.manifest.module !== mod.slug) {
+    throw new InstallError(
+      `refusing to install: asked for '${mod.slug}' but the signed manifest describes '${verification.manifest.module}'. The artifact is authentic but it is not the module requested.`,
+    )
+  }
+  if (verification.manifest.semver !== servedEntry.version) {
+    throw new InstallError(
+      `refusing to install: expected version ${servedEntry.version} but the signed manifest describes ${verification.manifest.semver}. The artifact is authentic but it is not the version served.`,
     )
   }
   deps.log('   Verified.')
@@ -156,7 +210,6 @@ export async function runInstall(options: InstallOptions, deps: InstallDeps): Pr
   deps.log(`6. Extracting to ${destDir}...`)
   prepareDestDir(fsImpl, destDir, options.force)
   const written = await safeExtract(tarballBytes, destDir)
-  cleanupTempFile()
   deps.log(`   Extracted ${written.length} file(s).`)
 
   deps.log('7. Reading module.config.json...')

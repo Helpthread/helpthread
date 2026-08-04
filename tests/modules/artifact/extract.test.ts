@@ -149,7 +149,13 @@ describe('safeExtract: caps', () => {
       MAX_TOTAL_UNCOMPRESSED_BYTES,
     )
     const tar = buildTarGz(entries)
-    await expect(safeExtract(tar, destDir)).rejects.toThrow(/maximum total uncompressed size/)
+    await expect(safeExtract(tar, destDir)).rejects.toThrow(
+      // zlib now refuses DURING decompression (maxOutputLength) rather than
+      // after allocating the whole thing, so the message comes from that
+      // guard — which is the point: a cap enforced after allocation is not a
+      // cap. Matching on the shared "decompresses to more than" wording.
+      /decompresses to more than/,
+    )
   }, 60_000)
 })
 

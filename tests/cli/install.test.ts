@@ -484,3 +484,174 @@ describe('runInstall: the marketplace decides which version you get', () => {
     expect(printed).toContain('entitles you to 1.0.0')
   })
 })
+
+describe('runInstall: a signature proves authenticity, not identity', () => {
+  /**
+   * Every first-party release is signed by the same key, so "the signature
+   * verifies" cannot distinguish the module you ordered from a different
+   * one the marketplace chose to send. A compromised catalog that swaps a
+   * genuinely-signed artifact must still be refused.
+   */
+  it('refuses a validly-signed artifact for a DIFFERENT module', async () => {
+    const keypair = makeTestKeypair()
+
+    // A real, correctly-signed release — of the wrong module.
+    const otherTarball = buildTarGz([regularFile('index.js', 'console.log("other")')])
+    const otherManifest = canonicalizeManifest({
+      schema: 'helpthread-module-manifest/1',
+      module: 'a-different-module',
+      semver: '1.0.0',
+      artifactSha256: sha256Hex(otherTarball),
+      artifactBytes: otherTarball.length,
+      sourceRevision: 'abc1234',
+      minEngineApi: '1.0.0',
+      builtAt: '2026-08-04T00:00:00.000Z',
+      keyId: keypair.keyId,
+    })
+
+    const catalog: CatalogResponse = {
+      generatedAt: '2026-08-04T00:00:00.000Z',
+      modules: [
+        {
+          slug: 'fixture-module',
+          name: 'Fixture Module',
+          summary: 'test',
+          cluster: 'test',
+          latestVersion: '1.0.0',
+          changelogUrl: 'https://example.test/changelog',
+          priceUsd: 0,
+          billingInterval: 'year',
+          docsUrl: 'https://example.test/docs',
+          versions: [
+            {
+              version: '1.0.0',
+              checksumSha256: sha256Hex(otherTarball),
+              publishedAt: '2026-08-04T00:00:00.000Z',
+              // The catalog serves the OTHER module's manifest + signature:
+              // both are internally consistent and verify perfectly.
+              manifest: otherManifest,
+              manifestSignature: keypair.sign(otherManifest),
+              manifestKeyId: keypair.keyId,
+              minEngineApi: '1.0.0',
+              yanked: false,
+            },
+          ],
+        },
+      ],
+    }
+
+    const fetchImpl = fakeFetch({
+      'https://catalog.example/api/v1/modules': () => ({ ok: true, status: 200, json: catalog }),
+      'https://catalog.example/api/v1/download': () => ({
+        ok: true,
+        status: 200,
+        json: { downloadUrl: 'https://signed.example/other.tar.gz', version: '1.0.0' },
+      }),
+      'https://signed.example/other.tar.gz': () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: toArrayBuffer(otherTarball),
+      }),
+    })
+
+    const destDir = path.join(workDir, 'substituted')
+    await expect(
+      runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'https://catalog.example',
+          version: undefined,
+          dir: destDir,
+          force: false,
+        },
+        {
+          fetchImpl,
+          getLicenseKey: async () => 'unused',
+          log: () => {},
+          trustStore: { [keypair.keyId]: keypair.publicKeyB64url },
+        },
+      ),
+    ).rejects.toThrow(/not the module requested/)
+
+    // Nothing was written.
+    expect(fs.existsSync(path.join(destDir, 'index.js'))).toBe(false)
+  })
+
+  it('never lets the marketplace echo the license key back into an error', async () => {
+    // A hostile endpoint returning the key inside its own error message:
+    // that string must not reach the thrown error, the terminal, or a log.
+    const licenseKey = 'ht_lic_00000000-0000-0000-0000-000000000000_SUPERSECRETVALUE'
+    const catalog: CatalogResponse = {
+      generatedAt: '2026-08-04T00:00:00.000Z',
+      modules: [
+        {
+          slug: 'fixture-module',
+          name: 'Fixture Module',
+          summary: 'test',
+          cluster: 'test',
+          latestVersion: '1.0.0',
+          changelogUrl: 'https://example.test/changelog',
+          priceUsd: 0,
+          billingInterval: 'year',
+          docsUrl: 'https://example.test/docs',
+          versions: [
+            {
+              version: '1.0.0',
+              checksumSha256: 'x'.repeat(64),
+              publishedAt: '2026-08-04T00:00:00.000Z',
+              manifest: '{}',
+              manifestSignature: 'sig',
+              manifestKeyId: 'riq-2026',
+              minEngineApi: '1.0.0',
+              yanked: false,
+            },
+          ],
+        },
+      ],
+    }
+
+    const fetchImpl = fakeFetch({
+      'https://catalog.example/api/v1/modules': () => ({ ok: true, status: 200, json: catalog }),
+      'https://catalog.example/api/v1/download': () => ({
+        ok: false,
+        status: 401,
+        json: {
+          error: {
+            code: 'unauthorized',
+            message: `your key ${licenseKey} was rejected`,
+          },
+        },
+      }),
+    })
+
+    const logs: string[] = []
+    let thrown = ''
+    try {
+      await runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'https://catalog.example',
+          version: undefined,
+          dir: path.join(workDir, 'leak'),
+          force: false,
+        },
+        {
+          fetchImpl,
+          getLicenseKey: async () => licenseKey,
+          log: (line) => logs.push(line),
+        },
+      )
+    } catch (err) {
+      thrown = err instanceof Error ? err.message : String(err)
+    }
+
+    expect(thrown).not.toBe('')
+    expect(thrown).not.toContain('SUPERSECRETVALUE')
+    expect(thrown).not.toContain(licenseKey)
+    expect(logs.join('\n')).not.toContain('SUPERSECRETVALUE')
+    // The machine-readable code still survives, so the message stays useful.
+    expect(thrown).toContain('unauthorized')
+  })
+})

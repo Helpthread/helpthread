@@ -154,11 +154,23 @@ function* readTarEntries(tar: Buffer): Generator<{ entry: TarEntry; data: Buffer
  * function never does).
  */
 export async function safeExtract(tarballBytes: Buffer, destDir: string): Promise<string[]> {
+  // `lstat`, not `stat`: a symlinked destination passes an `isDirectory()`
+  // check while every containment check below reasons about the LINK's
+  // path, so writes land wherever the link points — outside the boundary
+  // this function exists to enforce. Refusing the link outright is the
+  // cheap, complete answer; a caller wanting to extract into a symlinked
+  // location can resolve it themselves and pass the real path, which makes
+  // the containment checks true again.
   let stat: fs.Stats
   try {
-    stat = fs.statSync(destDir)
+    stat = fs.lstatSync(destDir)
   } catch {
     throw new UnsafeArchiveError(`extraction target does not exist: ${destDir}`)
+  }
+  if (stat.isSymbolicLink()) {
+    throw new UnsafeArchiveError(
+      `extraction target is a symlink, which would place files outside it: ${destDir}`,
+    )
   }
   if (!stat.isDirectory()) {
     throw new UnsafeArchiveError(`extraction target is not a directory: ${destDir}`)
@@ -169,11 +181,21 @@ export async function safeExtract(tarballBytes: Buffer, destDir: string): Promis
 
   let tar: Buffer
   try {
-    tar = gunzipSync(tarballBytes)
+    // `maxOutputLength` makes zlib itself refuse past the cap instead of
+    // allocating first and letting us check afterwards. Without it a small,
+    // highly-compressible archive — a few KB of zeros expands to gigabytes —
+    // exhausts memory during decompression, i.e. BEFORE any size check
+    // could run. A cap that is only enforced after allocation is not a cap.
+    tar = gunzipSync(tarballBytes, { maxOutputLength: MAX_TOTAL_UNCOMPRESSED_BYTES })
   } catch (err) {
-    throw new UnsafeArchiveError(
-      `not a valid gzip stream: ${err instanceof Error ? err.message : String(err)}`,
-    )
+    const message = err instanceof Error ? err.message : String(err)
+    // zlib signals the cap as a buffer-size error; say what actually happened.
+    if (/maxOutputLength|buffer/i.test(message)) {
+      throw new UnsafeArchiveError(
+        `refusing the archive: it decompresses to more than ${MAX_TOTAL_UNCOMPRESSED_BYTES} bytes`,
+      )
+    }
+    throw new UnsafeArchiveError(`not a valid gzip stream: ${message}`)
   }
 
   const resolvedDest = path.resolve(destDir)

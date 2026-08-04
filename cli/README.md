@@ -28,15 +28,20 @@ out of scope for HT-116.
 
 ## `install`'s download contract
 
-`POST /api/v1/download` on the marketplace requires a valid license key,
-which this repo does not hold. The success response shape was not directly
-observable while building this CLI — only the `401` error shape
-(`{"error":{"code":"unauthorized","message":"..."}}`, verified against the
-live deployment) was. `install` assumes a `200` response body of
-`{"downloadUrl": "<signed URL>"}`, GETs that URL, and treats its bytes as
-the tarball. If the real contract differs, `cli/src/catalog.ts`'s
-`requestDownloadUrl`/`DownloadResponse` is the only place that needs to
-change.
+`POST /api/v1/download` returns
+`{version, downloadUrl, expiresAt, checksumSha256}` — confirmed against the
+service's own handler. `install` consumes two of those fields:
+`downloadUrl` (GET it for the bytes) and `version`, which is authoritative
+because entitlement can serve an older release than the one requested — a
+lapsed license receives the version its snapshot names.
+
+Nothing in that response is trusted for integrity. The artifact's identity
+comes from the signed manifest alone: after download, `install` checks the
+digest, the byte length, the signature against the compiled-in trust store,
+**and** that the manifest's own `module` and `semver` match what was asked
+for and served. A valid signature proves an artifact is authentic; it does
+not prove it is the one you ordered, since every first-party release shares
+a signing key.
 
 ## Trust store
 

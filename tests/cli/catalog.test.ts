@@ -180,7 +180,7 @@ describe('requestDownloadUrl', () => {
     expect(result).toEqual({ downloadUrl: 'https://signed.example/x' })
   })
 
-  it('surfaces the marketplace error message without leaking the license key', async () => {
+  it('reports the error CODE but never the server-supplied message text', async () => {
     const fetchImpl = fakeFetch(() => ({
       ok: false,
       status: 401,
@@ -194,7 +194,10 @@ describe('requestDownloadUrl', () => {
         'draft-assistant',
         '0.3.0',
       ),
-    ).rejects.toThrow(/unauthorized: Missing or invalid license key\./)
+      // The code survives (useful, machine-generated, short). The server's
+      // free-text message does not — this is the one request carrying the
+      // license key, and a hostile endpoint controls that string.
+    ).rejects.toThrow(/unauthorized/)
     try {
       await requestDownloadUrl(
         'https://marketplace.example',
