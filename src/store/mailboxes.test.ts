@@ -134,7 +134,7 @@ describe('createMailboxStore', () => {
     await expect(store.markNeedsReconnect(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
   })
 
-  it('does NOT downgrade a disconnected mailbox — guard holds, silent no-op, no throw (review fix)', async () => {
+  it('does NOT downgrade a disconnected mailbox — guard holds, silent no-op, no throw', async () => {
     const { db, store } = await freshStore()
     const mailboxId = await insertMailbox(db, { status: 'disconnected' })
 
@@ -227,7 +227,7 @@ describe('createMailboxStore', () => {
     await expect(store.markPaused(RANDOM_UUID)).rejects.toThrow(/no mailbox/)
   })
 
-  it('markPaused does NOT downgrade a disconnected mailbox — guard holds, silent no-op, no throw (review fix)', async () => {
+  it('markPaused does NOT downgrade a disconnected mailbox — guard holds, silent no-op, no throw', async () => {
     const { db, store } = await freshStore()
     const mailboxId = await insertMailbox(db, { status: 'disconnected' })
 
@@ -284,7 +284,7 @@ describe('createMailboxStore', () => {
     expect(rows[0].status).toBe('disconnected')
   })
 
-  it('markDisconnected PARTICIPATES in the caller-supplied tx — a rollback takes the status write with it (review fix)', async () => {
+  it('markDisconnected PARTICIPATES in the caller-supplied tx — a rollback takes the status write with it', async () => {
     const { db, store } = await freshStore()
     const mailboxId = await insertMailbox(db, { status: 'needs_reconnect' })
 
@@ -372,7 +372,7 @@ describe('createMailboxStore', () => {
       expect(rows).toHaveLength(1)
     })
 
-    // HT-101 review fix (CodeRabbit, 2026-07-31). This block previously
+    // HT-101 (2026-07-31): This block previously
     // asserted the OPPOSITE — that a reconnect overwrites `provider` from
     // `EXCLUDED.provider` — which encoded the defect as a requirement. Letting
     // an IMAP connect convert a Gmail-connected address left that mailbox

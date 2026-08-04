@@ -137,9 +137,8 @@ export async function fetchImapInboundMessages(
   const client = createClient()
   // `connect()` is INSIDE the try, so a failure part-way through the handshake
   // (TLS up, AUTH rejected) still reaches the `finally` and releases whatever
-  // socket was allocated. Outside it — as an earlier revision had it (review,
-  // 2026-07-31) — a rejected login leaked the connection, and the cron retries
-  // every 2 minutes forever.
+  // socket was allocated. Outside it, a rejected login leaks the connection —
+  // and the cron retries every 2 minutes forever.
   try {
     await client.connect()
     const mailbox = await client.selectInbox()
@@ -183,7 +182,7 @@ export async function fetchImapInboundMessages(
     // throw, and a throw HERE would overwrite an in-flight AUTH rejection with
     // a meaningless close error, or reject a fetch whose messages were already
     // retrieved. The guarantee belongs at the call site, not in one
-    // implementation's good behaviour (review, 2026-07-31).
+    // implementation's good behaviour (2026-07-31).
     try {
       await client.close()
     } catch {

@@ -91,7 +91,7 @@ describe('revokeToken', () => {
   it('throws on a non-2xx, without leaking the token — even when the error body ECHOES the token back', async () => {
     const secretToken = 'super-secret-refresh-token-do-not-leak'
     // A revocation error body can reflect the submitted request — token
-    // included (review fix: bounding the body's length does not redact it).
+    // included (bounding the body's length does not redact it).
     // This fixture proves the thrown error is built without reading the
     // body at all.
     const { fetchImpl } = fakeRevokeEndpoint(
@@ -353,7 +353,7 @@ describe('createGmailDisconnectService', () => {
     expect(mailboxRows[0].status).toBe('disconnected')
   })
 
-  it('a repeat disconnect on an already-disconnected mailbox cleans up a RESURRECTED token row (review fix: the idempotent no-op path re-runs the step-3 deletes)', async () => {
+  it('a repeat disconnect on an already-disconnected mailbox cleans up a RESURRECTED token row (the idempotent no-op path re-runs the step-3 deletes)', async () => {
     const {
       db,
       mailboxStore,

@@ -35,11 +35,11 @@
  * invariant forbids — threading would end up depending on how faithfully a
  * given provider happened to preserve headers we never controlled.
  *
- * This is a correction (HT-35) of the interface as first drafted, which
- * returned a `NormalizedInboundEmail` — headers and body already parsed,
- * attachments already blob-referenced — putting the parse inside the
- * provider and handing attachment ownership to the transport. See
- * specs/mail/inbound-ingestion.md §2's "Correction (HT-35)" note.
+ * **Why not return a `NormalizedInboundEmail`** — headers and body already
+ * parsed, attachments already blob-referenced? That puts the parse inside the
+ * provider and hands attachment ownership to the transport, which is exactly
+ * the coupling this interface exists to avoid (HT-35). See
+ * specs/mail/inbound-ingestion.md §2.
  *
  * A provider MAY still need to interpret its OWN transport envelope to do
  * its job — e.g. a Gmail-push adapter reads a Pub/Sub JSON body to learn a

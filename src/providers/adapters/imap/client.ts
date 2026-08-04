@@ -13,13 +13,15 @@
  * a real `ImapFlow`) so that even this file's UID-discovery/bounding logic —
  * the part that talks to imapflow — is exercised by `./client.test.ts` with a
  * fake flow modelling real-world mailbox shapes (sparse UIDs, high base UIDs,
- * gaps, out-of-order FETCH responses). An earlier draft bounded the fetch with
- * a raw UID *range* (`sinceUid+1 : sinceUid+max`); that silently stalled on any
- * mailbox whose next real UID sat above `sinceUid+max` (expunged history, or a
- * UIDVALIDITY reset onto a high-UID epoch) — the fetch returned nothing, the
- * cursor never advanced, and new mail was never ingested (CHARTER.md §2's
- * never-drop invariant). The fix (see `uidFetchRawSince`) discovers the ACTUAL
- * new UIDs via `SEARCH` and bounds by message COUNT, never by UID arithmetic.
+ * gaps, out-of-order FETCH responses).
+ *
+ * **Why not bound the fetch by a raw UID range** (`sinceUid+1 : sinceUid+max`)?
+ * It stalls silently on any mailbox whose next real UID sits above
+ * `sinceUid+max` — expunged history, or a UIDVALIDITY reset onto a high-UID
+ * epoch. The fetch returns nothing, the cursor never advances, and new mail is
+ * never ingested (CHARTER.md §2's never-drop invariant). So `uidFetchRawSince`
+ * discovers the ACTUAL new UIDs via `SEARCH` and bounds by message COUNT, never
+ * by UID arithmetic.
  *
  * ## Raw bytes only — `BODY.PEEK[]`, zero transformation
  *
@@ -347,7 +349,7 @@ export function createImapClient(
     // would replace a real outcome — including a SUCCESSFUL fetch — with a
     // cleanup error, discarding a batch that was already ingested. imapflow's
     // own `close()` can throw synchronously on an already-broken connection,
-    // which the previous revision left unguarded (review, 2026-07-31).
+    // so the call is guarded.
     async close() {
       if (!flow) return
       try {

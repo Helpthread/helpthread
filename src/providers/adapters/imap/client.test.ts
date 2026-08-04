@@ -288,7 +288,7 @@ describe('createImapClient.uidFetchRawSince', () => {
   })
 })
 
-// HT-101 review fix (CodeRabbit, 2026-07-31). A single shared `secure` flag was
+// HT-101 (2026-07-31): A single shared `secure` flag was
 // fed to BOTH the IMAP and SMTP legs. Every connect-UI preset pairs IMAP on 993
 // with SMTP on 465 or 587, so an Outlook/iCloud preset (`smtpPort: 587`,
 // `secure: false`) made the IMAP leg attempt STARTTLS against an implicit-TLS

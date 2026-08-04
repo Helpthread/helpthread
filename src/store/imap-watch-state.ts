@@ -52,11 +52,10 @@
  *
  * This deliberately DIVERGES from `GmailWatchStateStore
  * .claimReconcileLease`, which returns the rendered `claimed_until::text`.
- * An earlier revision mirrored that statement-for-statement, and an
- * adversarial review (2026-07-31) showed it too weak: two claims landing in
+ * Mirroring it statement-for-statement is too weak: two claims landing in
  * the same clock tick mint the SAME timestamp, so a stale holder's token
- * compares equal to the live holder's and passes the check. A test written
- * to prove the fence instead reproduced the collision. Gmail's lease has the
+ * compares equal to the live holder's and passes the check — a test written
+ * to prove the fence reproduces the collision instead. Gmail's lease has the
  * same weakness (filed separately) but a smaller blast radius — its token
  * guards only release, never a cursor advance.
  *
@@ -88,7 +87,7 @@ export interface ImapWatchStateStore {
    * ## SACRED — a stale holder must not write a cursor
    *
    * Fencing here is not defensive tidiness; without it the UIDVALIDITY-reset
-   * quarantine is escapable (found by an adversarial review, 2026-07-31).
+   * quarantine is escapable (2026-07-31).
    * Run A claims a lease and fetches under `uidValidity: 7`, then spends
    * longer than `leaseMs` ingesting. Run B reclaims the expired lease,
    * observes `uidValidity: 8`, and pauses the mailbox — the SACRED "pause,

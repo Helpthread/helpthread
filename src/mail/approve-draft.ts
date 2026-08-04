@@ -112,7 +112,7 @@ export interface ApproveDraftInput {
  * - `not-a-draft` — no matching `awaiting_review` row (unknown id, already
  *   resolved, or a genuine race between the API layer's snapshot and this
  *   call landing between the lock and the thread UPDATE).
- * - `conversation-deleted` / `conversation-spam` (HT-70 review fix, Codex)
+ * - `conversation-deleted` / `conversation-spam` (HT-70)
  *   — `ConversationStore.resolveDraft`'s locked, authoritative re-check
  *   found the conversation deleted or marked spam AT WRITE TIME, regardless
  *   of what `input.conversation` (the API layer's own, possibly-stale

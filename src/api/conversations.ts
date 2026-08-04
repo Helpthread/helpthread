@@ -448,7 +448,7 @@ export async function handleReply(
       `Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters.`,
     )
   }
-  // HT-70 review fix (Opus): a reply's idempotency key is stored RAW — unlike
+  // HT-70: a reply's idempotency key is stored RAW — unlike
   // a draft's, which the engine itself prefixes (`ConversationStore.appendDraft`
   // stores it as `` `draft:${key}` ``, src/store/conversations.ts). Without
   // this check, a caller-supplied reply key literally spelled e.g. `draft:abc`

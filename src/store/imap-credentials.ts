@@ -44,7 +44,7 @@ import { decrypt, encrypt } from './token-crypto.js'
  * database fault, deliberately: callers contain THIS (one mailbox is
  * misconfigured; the others are fine) while letting a store fault propagate,
  * because a transient database problem must be retried, not recorded as a
- * permanent per-mailbox failure (review, 2026-07-31).
+ * permanent per-mailbox failure (2026-07-31).
  *
  * Carries no ciphertext and no key material — only which mailbox.
  */

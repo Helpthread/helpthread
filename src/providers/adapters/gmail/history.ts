@@ -61,7 +61,7 @@
  * message it can't confirm.
  *
  * ## Folding in `labelsAdded` — hardening against a split SENT/INBOX
- * snapshot (review round 2, HT-50)
+ * snapshot (HT-50)
  *
  * The reconcile handler's self-echo filter assumes a self-addressed send's
  * `messagesAdded` record already carries BOTH `SENT` and `INBOX` in one

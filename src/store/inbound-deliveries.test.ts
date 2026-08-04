@@ -160,7 +160,7 @@ describe('createInboundDeliveryStore', () => {
     await expect(store.markDeadLetter(RANDOM_UUID, 'x', 0)).rejects.toThrow(/no delivery with id/)
   })
 
-  // --- HT-45 review fix: the `attempts` fence (must-fix). -------------------
+  // --- HT-45: the `attempts` fence (must-fix). -------------------
 
   it('a mark* write whose claimed-attempts fence no longer matches throws LeaseLostError, and does NOT touch the row', async () => {
     const { db, store, mailboxId } = await freshStore()
@@ -292,7 +292,7 @@ describe('createInboundDeliveryStore', () => {
     expect(reclaimed.delivery.id).toBe(first.delivery.id)
     expect(reclaimed.delivery.status).toBe('received')
     // Unlike the failed-row reclaim above, a received-lease reclaim DOES bump
-    // attempts (HT-45 review fix): a lapsed lease is itself evidence of an
+    // attempts (HT-45): a lapsed lease is itself evidence of an
     // abandoned attempt, and the new value becomes the next owner's fence
     // (module doc's "The fence" section) — see the ingest-level dead-letter
     // test in src/mail/ingest.test.ts for why this must count toward the
@@ -401,7 +401,7 @@ describe('createInboundDeliveryStore', () => {
     ).rejects.toThrow(/no delivery with id/)
   })
 
-  // --- HT-49 review fix: preSuppressOwnSend --------------------------------
+  // --- HT-49: preSuppressOwnSend --------------------------------
 
   it('preSuppressOwnSend on a fresh key creates an already-suppressed row that claim() then reports as terminal, never re-ingesting it', async () => {
     const { store, mailboxId } = await freshStore()

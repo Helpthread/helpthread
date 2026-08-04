@@ -49,7 +49,7 @@ export default async function ShellLayout({ children }: { children: ReactNode })
   // The mailbox list feeds ONE affordance — the gear menu — but this layout
   // wraps the entire inbox and conversation surface. An engine error here used
   // to propagate to the error boundary and take the folder rail, the counts,
-  // and the conversation view with it (review, 2026-07-31): the whole app lost
+  // and the conversation view with it (2026-07-31): the whole app lost
   // to a decoration. Degrade to an inert gear instead, which `FolderNav`
   // already supports via `mailbox: null`.
   //

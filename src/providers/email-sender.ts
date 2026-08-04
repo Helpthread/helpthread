@@ -41,7 +41,7 @@
  * threading authority and is never compared against `messageId` — the two
  * ids serve entirely different purposes and must not be confused.
  *
- * As of HT-49's review fix, `src/mail/send.ts` ALSO reads this field for one
+ * As of HT-49, `src/mail/send.ts` ALSO reads this field for one
  * additional purpose that is likewise not threading authority: when present,
  * it pre-seeds this exact send's self-echo as suppressed in the inbound
  * delivery ledger (`InboundDeliveryStore.preSuppressOwnSend`), because it is

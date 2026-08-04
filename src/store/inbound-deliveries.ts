@@ -96,7 +96,7 @@
  * `attempts` off the claim result and dead-letters immediately, before
  * spending another parse/store cycle on a message proven to keep crashing.
  *
- * ## The fence: `attempts` doubles as a claim generation (HT-45 review fix)
+ * ## The fence: `attempts` doubles as a claim generation (HT-45)
  *
  * A lease is advisory, not exclusive: nothing stops a slow-but-still-alive
  * owner from finishing its work and committing *after* another worker has
@@ -148,7 +148,7 @@
  * — just sharing a column with the failure-path's error text rather than
  * owning a dedicated one.
  *
- * ## Pre-seeded suppression (HT-49 review fix): suppressing before a claim exists
+ * ## Pre-seeded suppression (HT-49): suppressing before a claim exists
  *
  * Every mark* method above requires a row already `claim()`-ed to `received`
  * — the ordinary "ingest ran, then decided to suppress" order. {@link

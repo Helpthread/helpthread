@@ -341,7 +341,7 @@ describe('createSenderResolver', () => {
     await expect(resolver.resolve(null)).rejects.toMatchObject({ code: 'mailbox-not-found' })
   })
 
-  // HT-101 review fix (Codex adversarial pass, 2026-07-31). A decrypt failure
+  // HT-101 (2026-07-31): A decrypt failure
   // must be contained per-mailbox, but the FIRST version of that fix caught
   // every rejection — sweeping database faults into the same bucket.
   // `runDeliveryWorker` marks a `SenderResolutionError` row `failed`, so a

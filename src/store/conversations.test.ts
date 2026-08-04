@@ -1055,7 +1055,7 @@ describe('createConversationStore', () => {
       expect(await store.claimThreadForDelivery(threadId, 30_000)).toBeNull()
     })
 
-    // --- HT-16 CodeRabbit fix: claim re-checks delivery_status, not just the lease ---
+    // --- HT-16 fix: claim re-checks delivery_status, not just the lease ---
 
     it('claimThreadForDelivery returns null for a row already marked "sent", even with a free lease (closes the sent-row reclaim double-send)', async () => {
       const { store } = await freshStore()
@@ -1749,7 +1749,7 @@ describe('createConversationStore', () => {
         expect(resolved.draftResolvedAt).toBeInstanceOf(Date)
       })
 
-      it('approve on a CLOSED conversation reopens it to active (HT-70 review fix — the normal reply-reopen rule applies at approval time)', async () => {
+      it('approve on a CLOSED conversation reopens it to active (HT-70 — the normal reply-reopen rule applies at approval time)', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)
         const agentId = await createTestAgent(db)
@@ -1830,7 +1830,7 @@ describe('createConversationStore', () => {
         expect((await store.getConversation(conversationId))?.status).toBe('pending')
       })
 
-      it('approve on a DELETED conversation is refused (conversation-deleted), leaving the draft row completely untouched (HT-70 review fix, Codex — the TOCTOU close)', async () => {
+      it('approve on a DELETED conversation is refused (conversation-deleted), leaving the draft row completely untouched (HT-70 — the TOCTOU close)', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)
         const agentId = await createTestAgent(db)
@@ -1865,7 +1865,7 @@ describe('createConversationStore', () => {
         })
       })
 
-      it('approve on a SPAM conversation is refused (conversation-spam), leaving the draft row completely untouched (HT-70 review fix, Codex — the TOCTOU close)', async () => {
+      it('approve on a SPAM conversation is refused (conversation-spam), leaving the draft row completely untouched (HT-70 — the TOCTOU close)', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)
         const agentId = await createTestAgent(db)
@@ -2516,7 +2516,7 @@ describe('createConversationStore', () => {
       expect(events[0].data).toEqual({ threadId: sentThread.threadId, authorKind: 'agent' })
     })
 
-    it("a thread stranded 'pending'/claimed when its conversation is soft-deleted still delivers ('sent' recorded) but fires NO event (spec §4's absolute soft-delete exclusion, review fix)", async () => {
+    it("a thread stranded 'pending'/claimed when its conversation is soft-deleted still delivers ('sent' recorded) but fires NO event (spec §4's absolute soft-delete exclusion)", async () => {
       const { db, store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())
       const strandedThread = await store.appendThread(conversationId, newThread())

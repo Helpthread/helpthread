@@ -266,7 +266,7 @@ describe('approveDraft', () => {
     expect(sender.sent).toHaveLength(0)
   })
 
-  it('conversation-deleted: a STALE conversation snapshot (pre-delete) is still refused — resolveDraft re-checks fresh, under lock (HT-70 TOCTOU fix, Codex)', async () => {
+  it('conversation-deleted: a STALE conversation snapshot (pre-delete) is still refused — resolveDraft re-checks fresh, under lock (HT-70 TOCTOU fix)', async () => {
     const { store, db: testDb } = await freshStore()
     const assistantId = await createTestAssistant(testDb)
     const agentId = await createTestAgent(testDb)
@@ -295,7 +295,7 @@ describe('approveDraft', () => {
     expect(draftThread?.messageId).toBeNull()
   })
 
-  it('conversation-spam: a STALE conversation snapshot (pre-spam-mark) is still refused — resolveDraft re-checks fresh, under lock (HT-70 TOCTOU fix, Codex)', async () => {
+  it('conversation-spam: a STALE conversation snapshot (pre-spam-mark) is still refused — resolveDraft re-checks fresh, under lock (HT-70 TOCTOU fix)', async () => {
     const { store, db: testDb } = await freshStore()
     const assistantId = await createTestAssistant(testDb)
     const agentId = await createTestAgent(testDb)

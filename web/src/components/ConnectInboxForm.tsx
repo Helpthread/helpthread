@@ -199,7 +199,7 @@ function domainFromAddress(address: string): string | null {
       .toLowerCase()
       // A trailing dot is a legal fully-qualified DNS name (`outlook.com.`) and
       // resolves to the same host, so leaving it on let an address slip past
-      // both maps — no preset AND no OAuth notice (review, 2026-07-31).
+      // both maps — no preset AND no OAuth notice (2026-07-31).
       .replace(/\.+$/, '')
   )
 }
@@ -435,7 +435,7 @@ export function ConnectInboxForm({
         {/* `htmlFor` only when the id it names actually exists — the locked
             (reconnect) branch renders a plain div, so an unconditional
             `htmlFor` pointed at nothing, breaking the label association for
-            screen readers and click-to-focus (review, 2026-07-31). */}
+            screen readers and click-to-focus (2026-07-31). */}
         {lockAddress ? (
           <FieldLabel>Email address</FieldLabel>
         ) : (
@@ -480,7 +480,7 @@ export function ConnectInboxForm({
             above. A reconnect screen is where an operator is MOST likely to
             retry a stored Outlook mailbox that has never been able to
             authenticate, and hiding the reason there was exactly backwards
-            (review, 2026-07-31). The stored host/port values are left visible
+            (2026-07-31). The stored host/port values are left visible
             rather than cleared — this screen exists to review them, and
             blanking a locked form would destroy the context it is for. */}
         {oauthOnlyLabel !== undefined && (

@@ -343,7 +343,7 @@ describe('determinism & distinctness', () => {
   })
 })
 
-// --- keyring validation (Codex/CodeRabbit adversarial findings) -----------
+// --- keyring validation (hardening) -----------
 
 describe('keyring validation', () => {
   it('duplicate keyId in the ring → throws (rotation must use a new keyId)', () => {
@@ -416,7 +416,7 @@ describe('isReplyTokenShaped', () => {
   })
 })
 
-// --- non-string mint inputs (CodeRabbit: RegExp.test coerces) -------------
+// --- non-string mint inputs (RegExp.test coerces) -------------
 
 describe('non-string mint inputs are rejected', () => {
   it('non-string conversationId → throws (not silently coerced)', () => {
@@ -430,7 +430,7 @@ describe('non-string mint inputs are rejected', () => {
   })
 })
 
-// --- malformed mail domains (Codex/CodeRabbit) ---------------------------
+// --- malformed mail domains -----------------------------
 
 describe('malformed mail domains → throw', () => {
   for (const bad of ['..', '.', 'a..b', '-x.test', 'x-.test', 'a.', '.a']) {

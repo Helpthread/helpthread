@@ -513,7 +513,7 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
       expect(sent[0].text).toBe('Edited before sending.')
     })
 
-    describe('approve-with-edits body validation (HT-70 review fix, Codex — same bound as draft-create/reply)', () => {
+    describe('approve-with-edits body validation (HT-70 — same bound as draft-create/reply)', () => {
       it('an empty-string bodyText override is 400 validation_failed; nothing is delivered', async () => {
         const { api, store, agentStore, assistantStore, sent } = await freshApi()
         const agent = await createActiveAgent(agentStore)
@@ -632,7 +632,7 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
       expect(res.status).toBe(409)
     })
 
-    it('approving a draft on a CLOSED conversation reopens it to active, end to end (Opus review fix)', async () => {
+    it('approving a draft on a CLOSED conversation reopens it to active, end to end', async () => {
       const { api, agentStore, store, assistantStore } = await freshApi()
       const agent = await createActiveAgent(agentStore)
       const { token } = await createActiveAssistant(assistantStore)
@@ -653,7 +653,7 @@ describe('Drafts API + Assistant capability gate (HT-70)', () => {
       expect(conversation?.status).toBe('active')
     })
 
-    describe('TOCTOU: the preflight is a stale read, resolveDraft is the authoritative gate (HT-70 review fix, Codex)', () => {
+    describe('TOCTOU: the preflight is a stale read, resolveDraft is the authoritative gate (HT-70)', () => {
       /**
        * Build a SECOND `createInboxApi` instance sharing the same
        * `db`/`agentStore`/`assistantStore`/`sent`, but whose

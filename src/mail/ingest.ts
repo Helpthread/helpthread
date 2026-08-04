@@ -78,7 +78,7 @@ import { decideThreading, type ThreadingDecision } from './thread.js'
 /**
  * How many failed-or-abandoned processing attempts (`InboundDeliveryStore`'s
  * `attempts` — every `markFailed`/`markDeadLetter`, AND every `received`-row
- * lease reclaim, HT-45 review fix) a delivery may accumulate before this
+ * lease reclaim, HT-45) a delivery may accumulate before this
  * pipeline gives up and marks it `dead-letter` for manual review (spec §4:
  * "a message that exhausts its retry budget"). Migration 012's doc comment
  * (`src/db/migrate.ts`) deliberately leaves this policy to "the worker that
@@ -360,7 +360,7 @@ async function processClaimedDelivery(
     providerMessageId: delivery.providerMessageId,
   }
 
-  // --- Lease-reclaim retry budget (HT-45 review fix). A `received`-row
+  // --- Lease-reclaim retry budget (HT-45). A `received`-row
   // lease reclaim bumps `attempts` (src/store/inbound-deliveries.ts's "The
   // fence" section) precisely so a message that hard-crashes the process on
   // every attempt — never reaching a recorded `failed`/`dead-letter` outcome
@@ -782,7 +782,7 @@ async function writeParsedEmail(
 
   const appended = await appendThreadInTx(tx, decision.conversationId, firstMessage)
   if (appended.ok) {
-    // Gated on `created` (review fix, module doc above): a replay
+    // Gated on `created` (module doc above): a replay
     // (`created: false`) must never re-fire the event with a fresh eventId.
     if (appended.created) {
       await appendOutboxEventInTx(tx, {

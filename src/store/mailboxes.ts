@@ -89,10 +89,10 @@ export interface MailboxRecord {
  *
  * ## The message says "not supported", NOT "disconnect it first"
  *
- * An earlier revision told the operator to disconnect and retry. That
- * instruction was false (caught in review, 2026-07-31):
- * {@link MailboxStore.markDisconnected} only sets `status`, leaving `provider`
- * exactly as it was, so the retry hits this same conflict forever. Worse,
+ * **Why not tell the operator to disconnect and retry?** Because that
+ * instruction would be false: {@link MailboxStore.markDisconnected} only sets
+ * `status`, leaving `provider` exactly as it was, so the retry hits this same
+ * conflict forever. Worse,
  * disconnect does not remove the OLD transport's sidecar rows either, so even
  * if the predicate allowed it, the stale-sidecar double-intake this guard
  * exists to prevent would come straight back.
@@ -207,9 +207,9 @@ export interface MailboxStore {
    * ## SACRED — a reconnect NEVER changes `provider`
    *
    * Throws {@link MailboxProviderConflictError} when a row already exists for
-   * `address` under a DIFFERENT provider. An earlier revision wrote
-   * `provider = EXCLUDED.provider` unconditionally, which let an IMAP connect
-   * silently convert a Gmail-connected mailbox: the row flipped to
+   * `address` under a DIFFERENT provider. Writing
+   * `provider = EXCLUDED.provider` unconditionally would let an IMAP connect
+   * silently convert a Gmail-connected mailbox: the row flips to
    * `provider: 'imap'` while its `mailbox_oauth_tokens` row and
    * `gmail_watch_state` cursor stayed behind. The mailbox then satisfied BOTH
    * intake paths at once — `runImapFetch` selects on `provider === 'imap'`,

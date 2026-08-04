@@ -486,10 +486,10 @@ describe('runHealthCheck', () => {
 
     // A GENUINELY empty database — nothing migrated, no application tables at
     // all. This is the fresh-install case, and the one the diagnostic exists
-    // for. An earlier version of this test migrated first and then dropped only
-    // `_migrations`, which left every other table in place and so proved
-    // nothing: the real code threw `relation "queue_jobs" does not exist`
-    // before ever reaching the schema check (adversarial review, 2026-08-02).
+    // for. Migrating first and then dropping only `_migrations` would leave
+    // every other table in place and prove nothing — the real code throws
+    // `relation "queue_jobs" does not exist` before ever reaching the schema
+    // check. The database has to be genuinely empty.
     it('DIAGNOSES a completely empty database rather than throwing on the first missing table', async () => {
       const database = await createPgliteDb()
       db = database

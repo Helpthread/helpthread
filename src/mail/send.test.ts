@@ -592,7 +592,7 @@ describe('sendReply thenSetStatus (HT-78, "Send & Close")', () => {
   })
 })
 
-// --- self-echo guard (HT-49 review fix) -------------------------------------
+// --- self-echo guard (HT-49) -------------------------------------
 //
 // Gmail delivers a sent reply's own copy back into the SAME mailbox it was
 // sent from; without this guard, the reply token this fix (HT-49) puts in
@@ -603,7 +603,7 @@ describe('sendReply thenSetStatus (HT-78, "Send & Close")', () => {
 // suppressed row's shape (and `claim()`'s later behavior against it) is
 // verified, not assumed.
 
-describe('sendReply self-echo guard (HT-49 review fix)', () => {
+describe('sendReply self-echo guard (HT-49)', () => {
   let db: Db | undefined
 
   afterEach(async () => {
@@ -968,9 +968,9 @@ describe('sendReply idempotency (HT-16)', () => {
     expect(conversation?.threads.filter((t) => t.direction === 'outbound')).toHaveLength(1)
   })
 
-  // --- HT-16 CodeRabbit fix: sent-row reclaim double-send ---------------------
+  // --- HT-16 fix: sent-row reclaim double-send ---------------------
   //
-  // CodeRabbit (Major): claimThreadForDelivery's WHERE clause checked only the
+  // claimThreadForDelivery's WHERE clause checked only the
   // lease, not delivery_status. Interleaving: a keyed sendReply's get-or-insert
   // snapshot observes a row as 'pending'/'failed', but by the time it calls
   // claimThreadForDelivery, a concurrent attempt has already delivered the
