@@ -64,6 +64,12 @@
  *    cursor: the exact watermark `history.list` resumes from. Using
  *    `getProfile`'s separately-read `historyId` could straddle the arm and
  *    miss or replay a sliver of history.
+ *
+ *    **Skipped entirely when push is not configured** (`topicName ===
+ *    undefined`): there is no topic to arm against and the bounded scheduled
+ *    fetch is the transport, so the baseline comes from step 3's existing
+ *    `getProfile()` response instead — no extra API call, and nothing to
+ *    straddle, since there is no arm. `watch_expiration` is then unset.
  * 5. **Persist**, now that the grant is proven usable — three writes keyed by
  *    the resolved mailbox: {@link MailboxStore.upsertConnectedMailbox}
  *    (upsert BY ADDRESS, so a reconnect reactivates the existing row rather
@@ -116,7 +122,8 @@
  *   module mints and stores only the FIRST refresh token that service later
  *   reads.
  * - **`watch()` renewal + the reconciliation lease** → gmail-push.md §6. This
- *   module arms `watch()` exactly once, at connect.
+ *   module arms `watch()` at most once, at connect — and not at all when push
+ *   is unconfigured (step 4).
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'

@@ -42,6 +42,14 @@
  * SUCCESS result. Reporting an already-delivered message as failed would
  * invite a resend.
  *
+ * Note the asymmetry this leaves: `send()` rejecting does NOT prove the
+ * provider refused the message. A timeout, an aborted signal, or a failure
+ * reading the response body all surface here identically to a real
+ * rejection, and any of them can follow a send the provider actually
+ * accepted. Such a row is marked `'failed'` and retried like any other,
+ * which is precisely why delivery is at-least-once rather than
+ * at-most-once (sending.md §3a).
+ *
  * ## Send idempotency
  *
  * `SendReplyInput.idempotencyKey` is an OPTIONAL caller-supplied dedup key,
