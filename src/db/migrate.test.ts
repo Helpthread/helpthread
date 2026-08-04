@@ -73,6 +73,8 @@ describe('migrate', () => {
       { id: 27, name: 'lock_down_data_api' },
       { id: 28, name: 'imap_transport' },
       { id: 29, name: 'conversation_mailbox_id' },
+      { id: 30, name: 'module_deployer' },
+      { id: 31, name: 'webhook_endpoints_url_unique' },
     ])
   })
 
@@ -112,6 +114,8 @@ describe('migrate', () => {
       { id: 27 },
       { id: 28 },
       { id: 29 },
+      { id: 30 },
+      { id: 31 },
     ])
   })
 
