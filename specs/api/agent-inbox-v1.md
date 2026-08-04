@@ -1,38 +1,28 @@
 # Agent Inbox API v1
 
-Status: accepted; **amended to v1.1 on 2026-07-11** — the contract additions
-the Agent Inbox UI was designed against,
-adopted as the v1 build target (§7 changelog). Helpthread's first public API, designed
-**native** — on Helpthread's own domain model, not reverse-engineered from any other
-helpdesk's wire format. (It supersedes the earlier `conversations-v1.md` draft, which was
-shaped for a legacy-consumer cutover that no longer applies — see the project history.)
+Status: accepted; **amended to v1.1 on 2026-07-11** — the contract additions the Agent
+Inbox UI was designed against, adopted as the v1 build target (§7). Helpthread's first
+public API, designed **native** — on Helpthread's own domain model, not reverse-engineered
+from any other helpdesk's wire format.
 
 ## 1. Purpose
 
-This is the **Agent side**: the surface an Agent (today, a single operator) uses to work
-the inbox — see what has come in, read a conversation, and act on it. It is the API under
-the Agent inbox UI (the charter's "Public APIs and events" rule), and the loop Helpthread is dogfooded
-through: mail lands → Agent sees it → Agent replies.
+This is the **Agent side**: the surface an Agent uses to work the inbox — see what has come
+in, read a conversation, and act on it. It is the API under the Agent inbox UI (the
+charter's "Public APIs and events" rule), and the loop Helpthread is dogfooded through:
+mail lands → Agent sees it → Agent replies.
 
-v1 is deliberately single-Agent: there is no per-Agent identity, no teams. The Bearer
-token authenticates *the deployment's one operator*, not a user among many. The v1.1
-`assignee` flag (§4f) is deliberately shaped to need no identity — `'me' | null` — so the
-inbox's "Mine" folder works without inventing users. Multi-Agent identity is a later
-increment, added when there is a second Agent.
+v1 is deliberately single-Agent: no per-Agent identity, no teams. The Bearer token
+authenticates *the deployment's one operator*. The v1.1 `assignee` flag (§4f) is shaped to
+need no identity — `'me' | null` — so the inbox's "Mine" folder works without inventing
+users. Multi-Agent identity is a later increment.
 
-This document covers the whole v1 surface. The read paths and conventions are in §3;
-write paths are in §4; §4a includes send idempotency and appends the reply's own minted
-id to `References` because a provider—Gmail, confirmed live—can rewrite `Message-ID`
-on send (see threading.md §2a).
-The v1.1 additions include the status model, `preview` and `number`, notes, tags,
-deletion, assignment, and open tracking.
+Read paths and conventions are in §3; write paths in §4.
 
-Rollout note: **the status-model change is the one breaking increment** — existing status values are
-renamed and the list filter's meaning changes, so backend and UI adopt it together (a
-coordinated rollout, deliberately first in the sequence; dogfood-only means the
-coordination is a single deploy). Every other addition is
-additive with a nullable/empty default, and the UI degrades per-field for those —
-partial deployment of the additive increments is safe.
+Rollout note: **the status-model change is the one breaking increment** — existing status
+values are renamed and the list filter's meaning changes, so backend and UI adopt it
+together in a single deploy. Every other addition is additive with a nullable/empty
+default, and the UI degrades per-field, so partial deployment of those is safe.
 
 ## 2. Domain model (native)
 
@@ -72,11 +62,11 @@ interface ThreadView {
   bodyText: string | null
   bodyHtml: string | null    // ⚠ UNTRUSTED, UNSANITIZED — see §5
   deliveryStatus: 'pending' | 'sent' | 'failed' | null
-                             // outbound only; null otherwise. : the invariant widens
-                             // — an outbound thread's deliveryStatus is ALSO null while it
-                             // is an unapproved or discarded draft (draftStatus below is
-                             // 'awaiting_review' or 'discarded'); a draft becomes eligible
-                             // for pending/sent/failed only once approved.
+                             // outbound only; null otherwise. An outbound thread's
+                             // deliveryStatus is ALSO null while it is an unapproved or
+                             // discarded draft (draftStatus below is 'awaiting_review' or
+                             // 'discarded'); a draft becomes eligible for
+                             // pending/sent/failed only once approved.
   customerViewedAt: string | null
                              // v1.1: outbound only, and only when open tracking is
                              // enabled (§4g) — first time the customer viewed the reply;
@@ -88,13 +78,13 @@ interface ThreadView {
                              // — same posture as open tracking, §4g)
   createdAt: string          // ISO-8601
   authorKind: 'customer' | 'agent' | 'assistant'
-                             //  (specs/plugins/substrate-v1.md §2, §7): who authored
+                             // (specs/modules/substrate-v1.md §2, §7): who authored
                              // this thread — 'customer' for inbound mail, 'agent' for
                              // human-authored outbound/notes, 'assistant' for an
-                             // AI-authored draft (specs/plugins/substrate-v1.md §3, §6)
+                             // AI-authored draft (specs/modules/substrate-v1.md §3, §6)
   draftStatus: 'awaiting_review' | 'approved' | 'discarded' | null
                              // A draft's lifecycle state; null for every non-draft
-                             // thread (specs/plugins/substrate-v1.md §2, §6)
+                             // thread (specs/modules/substrate-v1.md §2, §6)
 }
 
 interface AttachmentView {
@@ -107,79 +97,69 @@ interface AttachmentView {
 ```
 
 **Status semantics (v1.1).** `active` is the working state — inbound mail creates
-conversations `active` (with one exception, below), and v1.0's `open` rows migrate to
-`active`. `pending` is an Agent
-statement that the conversation is parked awaiting something outside the inbox (a
-customer, a third party, a release); nothing sets it automatically in v1, and it still
-counts as open work (§3a). `closed` is resolved. `spam` is junk an Agent has thrown out
-of the inbox — **or, since 2026-08-02, a brand-new conversation filed as junk at intake
-because the transport's own classifier already called it spam**
-([spam-classification.md](../mail/spam-classification.md) §4). Status pills in the UI:
-Active = accent, Pending = warn, Closed = dim, Spam = critical.
+conversations `active` (with one exception below), and v1.0's `open` rows migrate to
+`active`. `pending` means an Agent parked the conversation awaiting something outside the
+inbox; nothing sets it automatically in v1, and it still counts as open work (§3a).
+`closed` is resolved. `spam` is junk an Agent threw out — **or, since 2026-08-02, a
+brand-new conversation filed as junk at intake because the transport's own classifier
+already called it spam** ([spam-classification.md](../mail/spam-classification.md) §4).
+Status pills in the UI: Active = accent, Pending = warn, Closed = dim, Spam = critical.
 
-That intake classification is narrow, and two boundaries matter. It applies **only when
-the conversation is created** — it is never read for a message that threads onto an
-existing conversation, so it can neither re-file nor rescue one. And it never decides
-whether a message is *stored*: junk is filed under a different status, never dropped
-(inbound-ingestion.md §1). The reopen rule below is unaffected by it and still governs
-existing conversations — including one filed as `spam` at intake, which a reply reopens
-to `active` like any other. See spam-classification.md §4.2 for the full interaction.
+That intake classification is narrow in two ways. It applies **only when the conversation
+is created** — never read for a message threading onto an existing conversation, so it can
+neither re-file nor rescue one. And it never decides whether a message is *stored*: junk is
+filed under a different status, never dropped (inbound-ingestion.md §1). A conversation
+filed `spam` at intake is reopened to `active` by a reply like any other. See
+spam-classification.md §4.2.
 
-**Snooze exception to "pending is never cleared automatically" (v1.1).** A snooze
-is a TIMED `pending` — `pending` plus a `snoozedUntil` timestamp (§4b) — and it is the
-ONE case where `pending` clears itself: a periodic wake pass flips a snoozed conversation
-`pending` → `active` (clearing `snoozedUntil`) once `now >= snoozedUntil`, with no Agent
-action. Inbound mail on a snoozed conversation ALSO wakes it early, the same way inbound
-mail reopens a `closed`/`spam` conversation (§4a). **Plain `pending` — no `snoozedUntil`
-— is unaffected: it still stays `pending` forever until an Agent changes it, exactly as
-originally specified.** The snooze exception is additive and narrowly scoped to rows that
-opted in with a timestamp; it does not change plain-pending semantics at all.
+**Snooze exception to "pending is never cleared automatically" (v1.1).** A snooze is a
+TIMED `pending` — `pending` plus a `snoozedUntil` timestamp (§4b) — and it is the ONE case
+where `pending` clears itself: a periodic wake pass flips a snoozed conversation `pending` →
+`active` (clearing `snoozedUntil`) once `now >= snoozedUntil`, with no Agent action.
+Inbound mail on a snoozed conversation ALSO wakes it early, the same way inbound mail
+reopens a `closed`/`spam` conversation (§4a). **Plain `pending` — no `snoozedUntil` — is
+unaffected: it stays `pending` until an Agent changes it.**
 
-**`number`** is assigned from a per-deployment monotone sequence at conversation
-creation (existing rows are backfilled in creation order by the relevant migration). It
-exists for humans — inbox rows, notifications, "re: #482" in conversation — and is
-display-only: every path parameter remains the uuid, and `number` is never accepted as
-an identifier anywhere in this API.
+**`number`** is assigned from a per-deployment monotone sequence at conversation creation
+(existing rows backfilled in creation order by the relevant migration). It exists for humans
+— inbox rows, notifications, "re: #482" — and is display-only: every path parameter remains
+the uuid, and `number` is never accepted as an identifier anywhere in this API.
 
-**`preview`** is derived at read time, not stored: the most recent thread with a
-non-null `bodyText` (any direction — notes included; this is an Agent-only surface),
-whitespace collapsed to single spaces, trimmed, first 120 characters; `''` when no
-thread has text. **Draft handling:** `preview` and `threadCount` both ignore an unresolved or
-discarded draft (`draftStatus IN ('awaiting_review', 'discarded')`) — a draft is not
-conversation content until an Agent approves it, so it contributes to neither the
-count nor the latest-body derivation. An `'approved'` draft (i.e. sent mail) counts and
-can become the preview like any other outbound thread. Conversation detail (§3b) still
-returns the draft ROW itself in `threads` regardless of its status — only the
-summary-level `preview`/`threadCount` derivations exclude it.
+**`preview`** is derived at read time, not stored: the most recent thread with a non-null
+`bodyText` (any direction — notes included; this is an Agent-only surface), whitespace
+collapsed to single spaces, trimmed, first 120 characters; `''` when no thread has text.
+**Draft handling:** `preview` and `threadCount` both ignore an unresolved or discarded draft
+(`draftStatus IN ('awaiting_review', 'discarded')`) — a draft is not conversation content
+until an Agent approves it. An `'approved'` draft (i.e. sent mail) counts and can become the
+preview like any other outbound thread. Conversation detail (§3b) still returns the draft
+ROW itself in `threads` regardless of status — only the summary-level derivations exclude
+it.
 
-Ids are **UUID strings**, verbatim as the store generates them — the uuid is canonical
-and `number` is a human-facing convenience, not a surrogate key. There is no `customer`
-entity in v1 (a conversation carries a `customerEmail` string) and no mailbox. Each is
-added when a real need appears, not preemptively.
+Ids are **UUID strings**, verbatim as the store generates them. There is no `customer`
+entity in v1 (a conversation carries a `customerEmail` string) and no mailbox. Each is added
+when a real need appears, not preemptively.
 
 ## 3. Conventions (apply to every endpoint, reads and writes)
 
 - **Base path:** `/api/v1`.
 - **Format:** JSON in and out, `Content-Type: application/json`. (One exception: the
-  open-tracking pixel, §4g, responds `image/gif` — it is fetched by mail clients, not
-  API consumers.)
+  open-tracking pixel, §4g, responds `image/gif` — it is fetched by mail clients, not API
+  consumers.)
 - **Auth:** `Authorization: Bearer <token>` on every request, compared against the
   configured service token (`HELPTHREAD_API_TOKEN`) with a **constant-time** comparison
   (length-guarded, as `src/mail/reply-token.ts` already does). A missing, malformed, or
   wrong token is `401 unauthorized` with a generic message — the response never reveals
-  which of those it was. (The open-tracking pixel, §4g, is the one deliberate exception
-  to Bearer auth — it is fetched by customer mail clients and carries its own rules.)
-  **This is still the API's only auth model — with one addition.** The Agent
-  Inbox web app now requires an operator to sign in before it will render any page, but
-  that is a web-layer door in front of this same Bearer token, not a second API auth
-  mechanism — see §5 for the full justification.  (specs/plugins/substrate-v1.md
-  §3) DOES add a genuine second credential class, checked ALONGSIDE the service Bearer
-  token, never replacing it: a per-Assistant token (`ht_asst_<assistantId>_<secret>`),
-  verified before routing under the same constant-time discipline (parse the embedded
-  id → single-row lookup → constant-time digest compare). An Assistant's capability set
-  is fixed and narrow (read conversations, create drafts, create notes — spec §3) and
-  enforced at one gate, distinct from every Agent-facing endpoint this document
-  describes.
+  which. (The open-tracking pixel, §4g, is the one deliberate exception to Bearer auth.)
+
+  **One genuine second credential class exists** (specs/modules/substrate-v1.md §3): a
+  per-Assistant token (`ht_asst_<assistantId>_<secret>`), checked ALONGSIDE the service
+  Bearer token, never replacing it — verified before routing under the same constant-time
+  discipline (parse the embedded id → single-row lookup → constant-time digest compare). An
+  Assistant's capability set is fixed and narrow (read conversations, create drafts, create
+  notes) and enforced at one gate, distinct from every Agent-facing endpoint here.
+
+  The Agent Inbox web app also requires a sign-in before it renders any page, but that is a
+  web-layer door in front of this same Bearer token, not a second API auth model — see §5.
 - **Never cache:** every response carries `Cache-Control: no-store`. This is authenticated
   support data; no edge or CDN copy, ever.
 - **Error envelope:**
@@ -190,18 +170,17 @@ added when a real need appears, not preemptively.
   `method_not_allowed`, `send_failed`, `retry_in_progress`, `server_error`); `message` is
   user-safe and MUST NEVER contain an internal detail — no stack, no SQL, no upstream body,
   no id it wasn't given. HTTP status pairs with `code`: 400 `validation_failed`, 401
-  `unauthorized`, 404 `not_found`, 405 `method_not_allowed`, 409 `retry_in_progress` (§4a,
-   — a concurrent delivery attempt for the same `Idempotency-Key` already holds the
-  lease), 500 `server_error`, 502 `send_failed` (§4a, the provider rejected an outbound
-  reply).
+  `unauthorized`, 404 `not_found`, 405 `method_not_allowed`, 409 `retry_in_progress` (§4a —
+  a concurrent delivery attempt for the same `Idempotency-Key` already holds the lease), 500
+  `server_error`, 502 `send_failed` (§4a, the provider rejected an outbound reply).
 - **Unknown routes / methods:** an unmatched path is `404 not_found`; a known path with an
-  unsupported method is `405` (with an `Allow` header). Both still require auth first — an
+  unsupported method is `405` (with an `Allow` header). Both require auth first — an
   unauthenticated request gets `401` before routing details leak.
 
 ## 3a. `GET /api/v1/conversations` — the inbox list
 
-Lists conversations for the inbox, **most-recently-active first** (`updatedAt` desc, `id`
-desc as a stable tiebreak).
+Lists conversations **most-recently-active first** (`updatedAt` desc, `id` desc as a stable
+tiebreak).
 
 | query param | type | default | notes |
 |---|---|---|---|
@@ -216,284 +195,241 @@ interface ConversationListResponse {
 }
 ```
 
-**Pagination is keyset, not offset:** the `cursor` opaquely encodes the `(updatedAt, id)`
-of the last item returned, and the next page selects rows ordered before it. This stays
-correct and cheap even as conversations are added or reordered between page fetches (an
-offset would skip or duplicate). The cursor is opaque to the client — treated as a token to
-echo back, never parsed.
+**Pagination is keyset, not offset:** the `cursor` opaquely encodes the `(updatedAt, id)` of
+the last item returned, and the next page selects rows ordered before it. This stays correct
+and cheap as conversations are added or reordered between page fetches (an offset would skip
+or duplicate). The cursor is opaque to the client — echoed back, never parsed.
 
 ## 3b. `GET /api/v1/conversations/{id}` — one conversation with its threads
 
 Returns a `ConversationDetail` — the conversation plus its `threads`, oldest-first. `404
-not_found` if `{id}` is not a conversation (or is a `deleted` one — a deleted conversation
-is indistinguishable from a nonexistent one to this API, on purpose).
+not_found` if `{id}` is not a conversation, or is a `deleted` one — a deleted conversation
+is indistinguishable from a nonexistent one to this API, on purpose.
 
-**Draft handling:** `threads` includes draft rows (`draftStatus` non-null) for Agent/service
-callers, at every lifecycle stage — the timeline shows an `awaiting_review`/`discarded`
-draft alongside real mail, distinguishable by `authorKind: 'assistant'` and
-`draftStatus`. An Assistant caller reads the same endpoint and sees its own drafts
-through it too (no separate read surface). Only the summary-level `preview`/
-`threadCount` derivations exclude an unresolved/discarded draft (§2) — the full
-`threads` array is never filtered by draft status.
+**Draft handling:** `threads` includes draft rows (`draftStatus` non-null) at every
+lifecycle stage — the timeline shows an `awaiting_review`/`discarded` draft alongside real
+mail, distinguishable by `authorKind: 'assistant'` and `draftStatus`. An Assistant caller
+reads the same endpoint and sees its own drafts through it (no separate read surface). Only
+the summary-level `preview`/`threadCount` derivations exclude an unresolved/discarded draft
+(§2); the `threads` array is never filtered by draft status.
 
 ## 4. Write paths
 
 ### 4a. `POST /api/v1/conversations/{id}/replies` — the Agent replies
 
-**Header:** `Idempotency-Key` is **REQUIRED** on every call  — a non-empty,
-caller-chosen string, scoped per-conversation. This is a deliberate breaking change from
-the earlier shape of this endpoint; it has no external consumer yet (this API is
-dogfood-only — CHARTER.md "dogfooded first"), so tightening the contract here has no
-compatibility cost. The header is **trimmed of leading/trailing whitespace before any
-other check**, so `" key "` and `"key"` are the same idempotency key — a caller whose
-client or proxy adds incidental whitespace does not silently get a second send. The
-**trimmed** value is what is validated, stored, and passed through to `sendReply`: it
-must be non-empty and **at most 255 characters** after trimming. A missing header, a
-header that is empty (or all whitespace) after trimming, or a trimmed value over 255
-characters is `400 validation_failed`, checked before the body is parsed.
+**Header:** `Idempotency-Key` is **REQUIRED** — a non-empty, caller-chosen string, scoped
+per-conversation. The header is **trimmed of leading/trailing whitespace before any other
+check**, so `" key "` and `"key"` are the same key and a client or proxy adding incidental
+whitespace does not silently get a second send. The **trimmed** value is what is validated,
+stored, and passed to `sendReply`: non-empty and **at most 255 characters**. A missing
+header, one empty after trimming, or a trimmed value over 255 characters is `400
+validation_failed`, checked before the body is parsed.
 
 Body: `{ text: string; html?: string; thenSetStatus?: 'closed' | 'pending' }` — `text`
-1–5000 chars, server-enforced; `html` optional; `thenSetStatus` optional (v1.1,
-"Send & Close" — see below). The Agent supplies only the message; every mail header is
-DERIVED server-side from the conversation, so the client never sets recipients or
-threading headers:
+1–5000 chars, server-enforced; `html` optional; `thenSetStatus` optional (v1.1, "Send &
+Close"). The Agent supplies only the message; every mail header is DERIVED server-side, so
+the client never sets recipients or threading headers:
 
 - **`to`** = the conversation's `customerEmail`.
 - **`from`** = the deployment's configured support address (`supportAddress` dep).
-- **`subject`** = the conversation's `subject`, prefixed with `Re:` plus a space if it
-  isn't already (case-insensitive check — never double-prefix to `Re: Re:`).
-- **`In-Reply-To`** = the `messageId` of the conversation's most-recent INBOUND thread (the
-  customer message being answered), if it has one; omitted when no prior message-id exists
-  (e.g. an inbound message that arrived without a `Message-ID`).
+- **`subject`** = the conversation's `subject`, prefixed with `Re:` plus a space if it isn't
+  already (case-insensitive — never double-prefix to `Re: Re:`).
+- **`In-Reply-To`** = the `messageId` of the conversation's most-recent INBOUND thread, if it
+  has one; omitted when no prior message-id exists.
 - **`References`** = the `messageId`s of all prior threads in chronological order that have
   one, followed by this reply's OWN freshly-minted `messageId` as the FINAL entry — appended
-  by `sendReply` itself (`src/mail/send.ts`), unconditionally, even when no prior thread has a
-  `messageId` at all (a first reply then gets a one-element `References: [messageId]`, never
-  omitted the way `In-Reply-To` can be). These are for the customer's mail client to thread
-  the reply in THEIR inbox — Helpthread's own threading never depends on them (it is
-  outbound-token-anchored; threading.md §2) — but the reply's own minted id riding in
-  `References` is now load-bearing in one specific way (threading.md §2a): some
-  providers (Gmail, confirmed live) rewrite the wire `Message-ID` to their own generated id,
-  so `References` — which such providers do NOT rewrite — is the channel that actually gets
-  the signed token back into the customer's reply when that happens.
+  by `sendReply` (`src/mail/send.ts`) unconditionally, even when no prior thread has a
+  `messageId` (a first reply gets a one-element `References: [messageId]`, never omitted the
+  way `In-Reply-To` can be). These exist for the customer's mail client to thread the reply
+  in THEIR inbox — Helpthread's own threading never depends on them (it is
+  outbound-token-anchored; threading.md §2). The reply's own minted id riding in `References`
+  is load-bearing in one specific way (threading.md §2a): some providers (Gmail, confirmed
+  live) rewrite the wire `Message-ID` to their own id, so `References` — which such providers
+  do NOT rewrite — is the channel that actually gets the signed token back into the
+  customer's reply.
 
-The handler then calls `sendReply` (`src/mail/send.ts`), passing the `Idempotency-Key` value
-through. `sendReply` mints the reply token into the outbound `Message-ID` (on a genuinely
-new send), persists the outbound thread with a snapshot of its envelope
-(`send_envelope`: `to`/`cc`/`subject`/`references`, `sending.md` §3a), and sends via the
-injected `EmailSender`.
+The handler then calls `sendReply`, passing the `Idempotency-Key` through. `sendReply` mints
+the reply token into the outbound `Message-ID` (on a genuinely new send), persists the
+outbound thread with a snapshot of its envelope (`send_envelope`:
+`to`/`cc`/`subject`/`references`, sending.md §3a), and sends via the injected `EmailSender`.
 
-**`thenSetStatus` — "Send & Close" (v1.1).** An optional `'closed' | 'pending'` in
-the request body. When present, the conversation's status is ALSO set to it, applied in
-the SAME database transaction as the reply's persist, immediately after it — BEFORE the
-network send, matching this endpoint's existing persist→send→mark ordering (the status
-change is a property of the PERSIST step, not the delivery outcome). This is purely a
-conversation-status side effect: it never touches the reply's mail content, envelope, or
-threading headers, and the wire message sent is byte-identical whether or not
-`thenSetStatus` is present. Applies ONLY on a genuinely new send — never on an
-idempotency-key replay (§4a's own replay rule, immediately below, applies unchanged: a
-replay touches the conversation not at all). Fires `conversation.status_changed`
-transactionally, through the exact same store code path §4b's `PATCH` uses, `from` set to
-the conversation's status FROM BEFORE THIS WHOLE OPERATION (captured prior to any reply
-reopening it — see below). Any `snoozed_until` the conversation had is cleared (this
-endpoint never accepts a `snoozedUntil` of its own — only §4b's `PATCH` does).
+**`thenSetStatus` — "Send & Close" (v1.1).** When present, the conversation's status is ALSO
+set to it, applied in the SAME database transaction as the reply's persist, immediately
+after it and BEFORE the network send — matching this endpoint's persist→send→mark ordering
+(the status change is a property of the PERSIST step, not the delivery outcome). It never
+touches the reply's mail content, envelope, or threading headers; the wire message is
+byte-identical either way. Applies ONLY on a genuinely new send, never on a replay. Fires
+`conversation.status_changed` transactionally through the same store path §4b's `PATCH`
+uses, with `from` set to the conversation's status FROM BEFORE THIS WHOLE OPERATION. Any
+`snoozed_until` is cleared (this endpoint never accepts a `snoozedUntil` of its own — only
+§4b's `PATCH` does).
 
-**Not identical to a two-step reply-then-`PATCH`, and deliberately so.** A reply to a
-`closed`/`spam` conversation reopens it (§4a's own reopen rule, above) — silently, no
-event of its own, exactly as an ordinary reply already does. `thenSetStatus`'s `from` is
-the conversation's status captured BEFORE that reopen, not the transient `active` it
-passes through — this is MORE correct than a two-step sequence (reply, then a separate
-`PATCH`) would report, since a separate `PATCH` call can only see the ALREADY-reopened
-`active` state and would report `from: 'active'` regardless of what the conversation
-actually was. Two concrete consequences: replying to a `closed` conversation with
-`thenSetStatus: 'closed'` fires **no** `status_changed` at all (the net status never
-changed — `closed` in, `closed` out — even though it silently passed through `active`
-internally); replying to a `closed` conversation with `thenSetStatus: 'pending'` fires
-`status_changed` with `from: 'closed'`, never `from: 'active'`. A caller reading the event
-log therefore sees the conversation's REAL prior state, not an artifact of the reopen
-implementation.
+**Not identical to a two-step reply-then-`PATCH`, deliberately.** A reply to a `closed`/`spam`
+conversation reopens it silently, with no event of its own. `thenSetStatus`'s `from` is the
+status captured BEFORE that reopen, not the transient `active` it passes through — more
+correct than a separate `PATCH` call, which could only see the already-reopened `active`
+state. Two consequences: replying to a `closed` conversation with `thenSetStatus: 'closed'`
+fires **no** `status_changed` at all (net status unchanged); replying to a `closed`
+conversation with `thenSetStatus: 'pending'` fires `status_changed` with `from: 'closed'`,
+never `from: 'active'`.
 
 **Replay semantics: same key + same conversation = same logical send, never re-diffed
 against the body.** If a call reuses a key already recorded against this conversation, the
-NEW request's body is irrelevant — the response reflects the ORIGINAL attempt's outcome:
+NEW body is irrelevant — the response reflects the ORIGINAL attempt's outcome:
 
-- If the original attempt already succeeded (`delivery_status: 'sent'`), this call returns
-  `201` with that SAME `ThreadView` again, WITHOUT invoking the sender a second time.
-- If the original attempt is `pending`/`failed`, this call attempts delivery using the
-  ORIGINAL row's stored `messageId` and `send_envelope` — never the replay call's own
-  `to`/`subject`/`references`, even if they differ (sending.md §3a's snapshot rule) — after
-  first claiming that row's delivery lease.
-- If the lease could not be claimed (another attempt — a concurrent replay, or the delivery
-  worker, sending.md §3a — currently holds it), this call sends nothing and returns
+- Original already succeeded (`delivery_status: 'sent'`) → `201` with that SAME `ThreadView`,
+  WITHOUT invoking the sender again.
+- Original is `pending`/`failed` → attempt delivery using the ORIGINAL row's stored
+  `messageId` and `send_envelope`, never the replay call's own `to`/`subject`/`references`
+  even if they differ (sending.md §3a's snapshot rule), after first claiming that row's
+  delivery lease.
+- Lease unclaimable (a concurrent replay, or the delivery worker) → send nothing, return
   `409 retry_in_progress`.
 
 Outcomes:
 - **`201`** with the created (or, on a replay after success, the ORIGINAL) `ThreadView`. A
-  reply to a `closed` or `spam` conversation **reopens** it to `active` (v1.1,  — the
-  store's append policy) — only on the call that actually creates the row, not on a replay.
-- **`400 validation_failed`** on a missing/empty `Idempotency-Key` header, or a body that
-  violates the limits.
+  reply to a `closed` or `spam` conversation **reopens** it to `active` (v1.1 — the store's
+  append policy), only on the call that actually creates the row, not on a replay.
+- **`400 validation_failed`** on a missing/empty `Idempotency-Key`, or a body violating the
+  limits.
 - **`404 not_found`** if the conversation is missing or `deleted` — no message is sent; a
-  reply token minted before the append resolves is simply discarded (mirrors §3b). This
-  applies even to a KEYED REPLAY of a key whose original attempt already succeeded: if the
-  conversation has since been deleted, the replay call returns `404`, not the original
-  `201`. Replay-of-original-outcome does not survive a conversation delete — there is no
-  mail-safety impact, since the original send already happened regardless of what a later
-  replay call observes.
-- **`409 retry_in_progress`**  — the delivery lease for this `Idempotency-Key` is
-  currently held by another in-flight attempt; nothing was sent by this call. The caller
-  should retry the SAME key later, not mint a new one (a new key would create an
-  independent send, defeating the point of the dedup key).
-- **`502 send_failed`** if the provider rejects the message — nothing was delivered.
-  `sendReply` returns a `send-failed` result (it does not throw): the outbound thread is
-  left `delivery_status = 'failed'` (retryable — by a replay with the same key, or the
-  delivery worker's sweep, sending.md §3a — with the same Message-ID) — or, if even that
-  mark fails, stuck `pending`. The response therefore says only that the reply *could not
-  be delivered* — never a specific persisted state, never a raw provider error. This is the
-  one outcome where an undelivered reply is surfaced to the caller distinctly from an
-  internal error. (Note the asymmetry: once the provider ACCEPTS the message it is
-  delivered, so a subsequent failure to record `'sent'` is NOT a `send_failed` — it resolves
-  to `201`, since reporting a delivered message as failed would invite a resend.)
+  reply token minted before the append resolves is discarded (mirrors §3b). This applies
+  even to a KEYED REPLAY of a key whose original attempt succeeded: if the conversation has
+  since been deleted, the replay returns `404`, not the original `201`. There is no
+  mail-safety impact — the original send already happened.
+- **`409 retry_in_progress`** — the delivery lease for this `Idempotency-Key` is held by
+  another in-flight attempt; nothing was sent. The caller should retry the SAME key later,
+  not mint a new one (a new key would create an independent send).
+- **`502 send_failed`** if the provider rejects the message — nothing delivered. `sendReply`
+  returns a `send-failed` result (it does not throw): the outbound thread is left
+  `delivery_status = 'failed'` (retryable by a same-key replay or the delivery worker's
+  sweep, with the same Message-ID) — or, if even that mark fails, stuck `pending`. The
+  response says only that the reply *could not be delivered* — never a specific persisted
+  state, never a raw provider error. Note the asymmetry: once the provider ACCEPTS the
+  message it is delivered, so a subsequent failure to record `'sent'` resolves to `201`, not
+  `send_failed` — reporting a delivered message as failed would invite a resend.
 
 ### 4b. `PATCH /api/v1/conversations/{id}` — set status (+ snooze, v1.1)
 
 Body: `{ status: ConversationStatus; snoozedUntil?: string }` — `status` any of `active`,
-`pending`, `closed`, `spam` (v1.1); `snoozedUntil` an optional ISO-8601 timestamp
-(v1.1). Returns the updated `ConversationSummary` (`200`) and bumps `updatedAt`
-(a status change is activity — the conversation resurfaces in its folder). The store's
-`setConversationStatus(id, status, options)` **excludes `deleted`** (a deleted conversation is not
-reachable through this endpoint): missing or deleted → `404 not_found`; a body whose
-`status` is not one of the four values (notably `deleted`, which is not settable here) →
-`400 validation_failed`.
+`pending`, `closed`, `spam`; `snoozedUntil` an optional ISO-8601 timestamp. Returns the
+updated `ConversationSummary` (`200`) and bumps `updatedAt` (a status change is activity —
+the conversation resurfaces in its folder). The store's `setConversationStatus(id, status,
+options)` **excludes `deleted`**: missing or deleted → `404 not_found`; a `status` outside
+the four values (notably `deleted`) → `400 validation_failed`.
 
 **Snooze (`snoozedUntil`).** Legal ONLY alongside `status: 'pending'` — present with any
 other status is `400 validation_failed` (a snooze IS a timed `pending`, not an independent
-concept; see §2's snooze exception to "pending is never cleared automatically"). Must
-parse as a valid timestamp, or `400 validation_failed`. Sending `{status: 'pending'}`
-WITHOUT `snoozedUntil` is "plain pending" (the original, un-timed meaning, unchanged) and
-CLEARS any snooze the conversation previously had — un-snoozing by re-PATCHing plain
-`pending` is a real, expected use of this same body shape. `snoozedUntil` is `null` in
-the response (`ConversationSummary.snoozedUntil`) for every status other than a timed
-`pending`.
+concept). Must parse as a valid timestamp, or `400 validation_failed`. Sending `{status:
+'pending'}` WITHOUT `snoozedUntil` is plain pending and CLEARS any existing snooze —
+un-snoozing by re-PATCHing plain `pending` is an expected use of this body shape.
+`snoozedUntil` is `null` in the response for every status other than a timed `pending`.
 
-A snoozed conversation wakes itself two ways, both ending in `status: 'active'` and
-`snoozedUntil: null` — but the two are NOT event-identical, and deliberately so: each
-reports through the SAME event a structurally-equivalent non-timed transition already
-uses, rather than both being forced through one shape.
+A snoozed conversation wakes two ways, both ending in `status: 'active'` and `snoozedUntil:
+null` — but they are NOT event-identical, deliberately: each reports through the SAME event
+a structurally-equivalent non-timed transition already uses.
 
 - **Timer wake.** A periodic engine-internal pass flips it once `now >= snoozedUntil`, no
-  Agent action, via `setConversationStatus` — the exact same write path (and therefore the
-  exact same event) an Agent's own `PATCH` to `active` uses. Fires
-  `conversation.status_changed` (`from: 'pending', to: 'active'`).
-- **Inbound wake.** Inbound customer mail on a snoozed conversation wakes it immediately —
-  the same "the customer came back" reasoning §4a's closed/spam reopen already uses,
-  applied to a snoozed `pending` conversation instead, and reported the SAME way that
-  reopen already is: through `conversation.message_received`'s existing `reopened: true`
-  field (spec §4's vocabulary table), NOT `conversation.status_changed` — an inbound reopen
-  has never fired `status_changed` (§2's original framing: only an Agent's `PATCH` does),
-  and a snoozed conversation's inbound wake is the same kind of reopen, not a new one.
-  Scoped to genuinely inbound mail only: an Agent's own outbound reply or an internal note
-  to a snoozed conversation never wakes it early.
+  Agent action, via `setConversationStatus` — the same write path (and event) an Agent's own
+  `PATCH` to `active` uses. Fires `conversation.status_changed` (`from: 'pending', to:
+  'active'`).
+- **Inbound wake.** Inbound customer mail wakes it immediately — the same "the customer came
+  back" reasoning §4a's closed/spam reopen uses, and reported the same way: through
+  `conversation.message_received`'s existing `reopened: true` field, NOT
+  `conversation.status_changed`. An inbound reopen has never fired `status_changed`, and a
+  snoozed conversation's inbound wake is the same kind of reopen. Scoped to genuinely inbound
+  mail only: an Agent's own outbound reply or internal note never wakes it early.
 
 ### 4c. `POST /api/v1/conversations/{id}/notes` — internal note (v1.1)
 
-An internal note is Agent-only context on a conversation. **It is never emailed and
-never touches the send path**: no reply token is minted, no outbox row is created, and
-the delivery worker never sees it — a `note` row existing anywhere near `sendReply` is a
-bug, and  adds a test asserting the boundary under the charter's "Conversation integrity" rule.
+An internal note is Agent-only context on a conversation. **It is never emailed and never
+touches the send path**: no reply token is minted, no outbox row created, and the delivery
+worker never sees it — a `note` row anywhere near `sendReply` is a bug, asserted by a test
+under the charter's "Conversation integrity" rule.
 
-Body: `{ text: string }` — 1–5000 chars, server-enforced; no `html` (notes are plain
-text in v1). Outcomes:
+Body: `{ text: string }` — 1–5000 chars, server-enforced; no `html` (notes are plain text in
+v1). Outcomes:
 
-- **`201`** with the created `ThreadView`: `direction: 'note'`, `from` = the support
-  address, `bodyHtml: null`, `deliveryStatus: null`, `customerViewedAt: null`. Bumps
-  `updatedAt` (a note is activity; the conversation resurfaces in the inbox) but **never
-  changes `status`** — noting a closed conversation does not reopen it.
-- **`400 validation_failed`** on a body that violates the limits.
+- **`201`** with the created `ThreadView`: `direction: 'note'`, `from` = the support address,
+  `bodyHtml: null`, `deliveryStatus: null`, `customerViewedAt: null`. Bumps `updatedAt` (a
+  note is activity) but **never changes `status`** — noting a closed conversation does not
+  reopen it.
+- **`400 validation_failed`** on a body violating the limits.
 - **`404 not_found`** if the conversation is missing or `deleted`.
 
 ### 4d. `DELETE /api/v1/conversations/{id}` — soft delete (v1.1)
 
-Marks the conversation `deleted`. **`204`** with an empty body on success; `404
-not_found` if the conversation is missing or already deleted. From that point the
-conversation is indistinguishable from one that never existed, on every endpoint —
-list, get, replies (including keyed replays, §4a), notes, tags, assignee, PATCH. A
-deleted conversation is not restorable through this API, and a reply token minted
-against it starts a fresh conversation (threading.md's existing deleted-conversation
-rule). The UI pairs this with a two-step arm (press → solid critical "Confirm" →
-auto-disarm) rather than a modal.
+Marks the conversation `deleted`. **`204`** with an empty body on success; `404 not_found` if
+missing or already deleted. From that point it is indistinguishable from one that never
+existed on every endpoint — list, get, replies (including keyed replays, §4a), notes, tags,
+assignee, PATCH. Not restorable through this API, and a reply token minted against it starts
+a fresh conversation (threading.md's deleted-conversation rule). The UI pairs this with a
+two-step arm (press → solid critical "Confirm" → auto-disarm) rather than a modal.
 
 ### 4e. `PUT /api/v1/conversations/{id}/tags` — replace the tag set (v1.1)
 
-Body: `{ tags: string[] }` — **replace-set semantics**: the request's array becomes the
-conversation's whole tag set (send `[]` to clear). Each entry is trimmed, lowercased,
-then the array is de-duplicated preserving first-occurrence order. After trimming, each
-tag must be 1–40 characters; a non-array body, a non-string entry, an empty-after-trim
-entry, or an over-length entry is `400 validation_failed`. Returns the updated
-`ConversationSummary` (`200`). Does **not** bump `updatedAt` — tagging is metadata, not
-activity. Missing or deleted conversation → `404 not_found`. There is no tag-filtered
-listing in v1 — tags are display and organization until a real query need appears.
+Body: `{ tags: string[] }` — **replace-set semantics**: the request's array becomes the whole
+tag set (send `[]` to clear). Each entry is trimmed, lowercased, then the array is
+de-duplicated preserving first-occurrence order. After trimming, each tag must be 1–40
+characters; a non-array body, non-string entry, empty-after-trim entry, or over-length entry
+is `400 validation_failed`. Returns the updated `ConversationSummary` (`200`). Does **not**
+bump `updatedAt` — tagging is metadata, not activity. Missing or deleted → `404 not_found`.
+There is no tag-filtered listing in v1.
 
 ### 4f. `PUT /api/v1/conversations/{id}/assignee` — claim or release (v1.1)
 
-Body: `{ assignee: 'me' | null }` — `null` means "Anyone". Anything else is
-`400 validation_failed`. Returns the updated `ConversationSummary` (`200`). Does **not**
-bump `updatedAt`. Missing or deleted conversation → `404 not_found`.
+Body: `{ assignee: 'me' | null }` — `null` means "Anyone". Anything else is `400
+validation_failed`. Returns the updated `ConversationSummary` (`200`). Does **not** bump
+`updatedAt`. Missing or deleted → `404 not_found`.
 
-This is deliberately NOT identity: `'me'` is the deployment's one operator (the Bearer
-token holder), stored as a flag, not a user id. It exists so the UI's "Mine" folder
-works in v1; the multi-Agent increment replaces `'me'` with real Agent ids and this
-endpoint's body shape is expected to change then (that is an acceptable v2 break —
-dogfood-only, same reasoning as 's).
+This is deliberately NOT identity: `'me'` is the deployment's one operator (the Bearer token
+holder), stored as a flag, not a user id. It exists so the UI's "Mine" folder works in v1;
+the multi-Agent increment replaces `'me'` with real Agent ids and this body shape is expected
+to change then — an acceptable v2 break while dogfood-only.
 
-### 4g. Open tracking — `customerViewedAt` (v1.1,; config-gated, default OFF)
+### 4g. Open tracking — `customerViewedAt` (v1.1; config-gated, default OFF)
 
 Open tracking records the first time a customer's mail client fetched a tracking pixel
 embedded in an outbound reply, surfacing it as `customerViewedAt` on that outbound
 `ThreadView`.
 
-**It is off by default, as a deliberate stance, not an oversight.** Open-tracking pixels
-are telemetry on customers, which sits uneasily with the ownership-and-trust positioning
-this project exists for. The operator must explicitly enable it in deployment
-configuration (an `InboxApiDeps`-level flag plus the deployment's public base URL, pinned
-by). While disabled — the shipped default — no pixel is injected, the field is
-always `null`, and outbound mail is **byte-identical** to pre-v1.1 behavior:  must
-prove text bodies, headers, and threading unchanged against the existing fixtures
-(charter's "Conversation integrity" rule), and that enabling it alters only the HTML body.
+**It is off by default as a deliberate stance, not an oversight.** Open-tracking pixels are
+telemetry on customers, which sits uneasily with the ownership-and-trust positioning this
+project exists for. The operator must explicitly enable it in deployment configuration (an
+`InboxApiDeps`-level flag plus the deployment's public base URL). While disabled — the
+shipped default — no pixel is injected, the field is always `null`, and outbound mail is
+**byte-identical** to pre-v1.1 behavior: text bodies, headers, and threading must be proven
+unchanged against the existing fixtures (charter's "Conversation integrity" rule), and
+enabling it must alter only the HTML body.
 
 When enabled:
 
-- The send path (§4a) injects a pixel URL into the outbound **HTML body only** (a
-  text-only reply gets no pixel — never fabricate an HTML part just to track). The URL
-  carries an **unguessable, signed credential bound to the outbound thread** — the same
-  keyring/HMAC pattern reply tokens already use (`src/mail/reply-token.ts`), NEVER the
-  bare thread uuid: a guessable identifier would let anyone who learns (or enumerates)
-  an id forge a "customer viewed" signal. The exact route and token format are pinned by
-   against that requirement.
-- The pixel endpoint is the API's one **unauthenticated** surface, fetched by customer
-  mail clients. Its contract: always respond `200` with `Content-Type: image/gif`, a
-  fixed 1×1 gif body, and `Cache-Control: no-store` (a cached pixel would suppress the
-  very fetch it exists to observe) — valid token or not, identical either way (no
-  existence or validity leak); record only the FIRST view's timestamp for a valid token
-  (idempotent — later hits change nothing); set no cookies and record nothing beyond
-  that single timestamp.
-- `customerViewedAt` remains `null` until a view is recorded; it is always `null` for
-  inbound threads and notes.
+- The send path (§4a) injects a pixel URL into the outbound **HTML body only** — a text-only
+  reply gets no pixel; never fabricate an HTML part just to track. The URL carries an
+  **unguessable, signed credential bound to the outbound thread** — the same keyring/HMAC
+  pattern reply tokens use (`src/mail/reply-token.ts`), NEVER the bare thread uuid: a
+  guessable identifier would let anyone who learns or enumerates an id forge a "customer
+  viewed" signal.
+- The pixel endpoint is the API's one **unauthenticated** surface, fetched by customer mail
+  clients. Its contract: always respond `200` with `Content-Type: image/gif`, a fixed 1×1 gif
+  body, and `Cache-Control: no-store` (a cached pixel would suppress the very fetch it exists
+  to observe) — valid token or not, identical either way (no existence or validity leak);
+  record only the FIRST view's timestamp for a valid token (idempotent); set no cookies and
+  record nothing beyond that timestamp.
+- `customerViewedAt` remains `null` until a view is recorded; always `null` for inbound
+  threads and notes.
 
 Both §4a write paths grow `InboxApiDeps` with what `sendReply` needs — `sender`
 (`EmailSender`), `keyring`, `mailDomain`, and `supportAddress` — injected at deploy time
-alongside `store` and `apiToken`;  adds the open-tracking configuration described
-above.
+alongside `store` and `apiToken`, plus the open-tracking configuration above.
 
 ### 4h. Saved replies & macros (v1.1)
 
 A saved reply is a per-mailbox, reusable message definition an Agent can post as a reply
-body; a "macro" is the same row carrying `actions` — a set of state changes the CLIENT
-also applies once the reply is sent. **The engine stores DEFINITIONS ONLY.** Applying a
-macro's `actions` — posting the body via §4a, then calling §4b/§4e/§4f as needed — is
-entirely a client-side composition of endpoints this API already exposes. This feature
-adds zero new mail or status semantics of its own; it is bookkeeping plus the existing
-write paths.
+body; a "macro" is the same row carrying `actions` — state changes the CLIENT also applies
+once the reply is sent. **The engine stores DEFINITIONS ONLY.** Applying a macro's `actions`
+— posting the body via §4a, then calling §4b/§4e/§4f as needed — is entirely a client-side
+composition of endpoints this API already exposes. Zero new mail or status semantics.
 
 ```ts
 interface SavedReply {
@@ -514,153 +450,113 @@ interface SavedReply {
 ```
 
 **`GET /api/v1/mailboxes/{id}/saved-replies`** — any ACTIVE acting Agent (the reply
-composer's picker needs the list for every Agent, not just admins). Returns
-`{ savedReplies: SavedReply[] }`, ordered by `sortOrder` then creation order. Unknown
-`{id}` → `404 not_found`.
+composer's picker needs the list for every Agent, not just admins). Returns `{ savedReplies:
+SavedReply[] }`, ordered by `sortOrder` then creation order. Unknown `{id}` → `404
+not_found`.
 
-**`POST /api/v1/mailboxes/{id}/saved-replies`** — admin only, v1. Body:
-`{ name: string; bodyText: string; bodyHtml?: string; actions?: {...}; sortOrder?: number }`
-— `name`/`bodyText` required (limits above); `bodyHtml`/`actions`/`sortOrder` optional.
-`201` with the created `SavedReply`. Unknown mailbox → `404 not_found`; a body violating
-the limits, or an `actions` object with an unrecognized key or an invalid `setStatus`
-value → `400 validation_failed`.
+**`POST /api/v1/mailboxes/{id}/saved-replies`** — admin only, v1. Body: `{ name: string;
+bodyText: string; bodyHtml?: string; actions?: {...}; sortOrder?: number }` —
+`name`/`bodyText` required (limits above); the rest optional. `201` with the created
+`SavedReply`. Unknown mailbox → `404 not_found`; a body violating the limits, or an `actions`
+object with an unrecognized key or invalid `setStatus`, → `400 validation_failed`.
 
-**`PATCH /api/v1/mailboxes/{id}/saved-replies/{replyId}`** — admin only, v1. Body: any
-subset of `{ name, bodyText, bodyHtml, actions, sortOrder }` — only the fields present are
-changed. `200` with the updated `SavedReply`. `{replyId}` not found, or found but under a
-DIFFERENT mailbox than `{id}`, → `404 not_found` (the same "no such row reachable through
-this path" shape as everywhere else in this API — never a cross-mailbox edit).
+**`PATCH /api/v1/mailboxes/{id}/saved-replies/{replyId}`** — admin only, v1. Body: any subset
+of `{ name, bodyText, bodyHtml, actions, sortOrder }`; only present fields change. `200` with
+the updated `SavedReply`. `{replyId}` not found, or found but under a DIFFERENT mailbox than
+`{id}`, → `404 not_found` — never a cross-mailbox edit.
 
-**`DELETE /api/v1/mailboxes/{id}/saved-replies/{replyId}`** — admin only, v1. Hard delete
-(no soft-delete concept for a saved reply — it carries no customer data). `204` on
-success; `404 not_found` for an unknown or cross-mailbox `{replyId}` (same rule as PATCH).
+**`DELETE /api/v1/mailboxes/{id}/saved-replies/{replyId}`** — admin only, v1. Hard delete (a
+saved reply carries no customer data). `204` on success; `404 not_found` for an unknown or
+cross-mailbox `{replyId}`.
 
-Role gate is deliberately admin-only for every write in v1 — a future increment may relax
-authoring to any Agent, but that is outside this specification. `GET` is open to every
-Agent so the picker works regardless of who authored the library.
+Writes are admin-only in v1; a future increment may relax authoring to any Agent. `GET` is
+open to every Agent so the picker works regardless of who authored the library.
 
 ## 5. Security notes
 
 - **`bodyHtml` is untrusted and unsanitized.** The parser stores inbound HTML verbatim,
-  `<script>` and all (specs/mail/threading.md §5; a fixture confirmed a stored `<script>`).
-  This API returns it as-is — which is safe as JSON, but **any UI that renders it MUST
-  sanitize first** (e.g. DOMPurify), or it is a stored-XSS vector against the Agent. This
-  contract carries to the inbox UI, whose design renders sanitized HTML in an
-  isolated container; a server-side sanitized variant is a candidate hardening. Flagged,
-  not solved, here.
-- **Notes are Agent-only, permanently.** `direction: 'note'` rows ride the same
-  `ThreadView` shape as mail, but they must never leave the Agent surface: any future
-  customer-side API, webhook, or export MUST exclude them. Stated here so the boundary
-  is on record before any such surface exists.
-- **No existence leak.** Not-found and not-authorized are distinct status codes (404 vs
-  401) but neither response body distinguishes "never existed" from "deleted" or from "you
-  can't see it" — messages are generic. The open-tracking pixel (§4g) extends the same
-  rule to its unauthenticated surface: `200` + gif regardless of token validity.
-- **The Bearer token is a service credential.** It grants the whole inbox. It is compared
-  in constant time and read only from server configuration, never logged.
-- **UI session auth  is a web-layer door in front of this same token, not a second
-  auth model.** Before, the Agent Inbox web app had no login at all — every request
-  it made carried the deployment's `HELPTHREAD_API_TOKEN` and nothing distinguished one
-  browser tab from another.  adds an operator password (`HELPTHREAD_UI_PASSWORD`)
-  and a signed session cookie (`web/src/lib/session.ts`, checked by `web/src/middleware.ts`
-  on every route) that the browser must hold before the UI will render anything. This
-  changes nothing about the API described in this document:
-  - The API still authenticates every request by `HELPTHREAD_API_TOKEN` alone (constant-time
-    Bearer comparison, above) and has no knowledge of UI sessions, passwords, or cookies —
-    `web/src/lib/api.ts` still reads the token from server env and sends it exactly as
-    before. Anything holding the token can still call the API directly, session or no
-    session; that was already true (the token is a service credential, not tied to a
-    browser) and  doesn't change it.
-  - The session cookie carries no identity beyond "an operator signed in" (`{v, iat}`,
-    nothing else) — v1 is still single-Agent (§1, §6), so there is nothing for it to be an
-    identity FOR yet. It answers "is anyone allowed to look at this browser tab's inbox",
-    which is a strictly web-layer question the API was never positioned to answer (a
-    server-to-server Bearer token can't gate "is a human currently present").
-  - Multi-Agent identity (§6, "No multi-Agent identity, teams, or per-user authorization")
-    remains out of scope and unaffected. When it lands, it is expected to REPLACE this
-    single shared password with real per-Agent accounts, not extend it —  is
-    deliberately the smallest thing that closes the "anyone with the URL sees the inbox"
-    gap for a single operator, not a first draft of multi-user auth.
+  `<script>` and all (threading.md §5; a fixture confirmed a stored `<script>`). This API
+  returns it as-is — safe as JSON, but **any UI that renders it MUST sanitize first** (e.g.
+  DOMPurify), or it is a stored-XSS vector against the Agent. The inbox UI renders sanitized
+  HTML in an isolated container; a server-side sanitized variant is a candidate hardening.
+  Flagged, not solved, here.
+- **Notes are Agent-only, permanently.** `direction: 'note'` rows ride the same `ThreadView`
+  shape as mail, but must never leave the Agent surface: any future customer-side API,
+  webhook, or export MUST exclude them. Stated here so the boundary is on record before any
+  such surface exists.
+- **No existence leak.** Not-found and not-authorized are distinct status codes (404 vs 401),
+  but neither body distinguishes "never existed" from "deleted" or from "you can't see it".
+  The open-tracking pixel (§4g) extends the same rule to its unauthenticated surface: `200` +
+  gif regardless of token validity.
+- **The Bearer token is a service credential.** It grants the whole inbox. Compared in
+  constant time, read only from server configuration, never logged.
+- **Web-app login is a web-layer door in front of this same token, not a second auth model.**
+  The API authenticates every request by `HELPTHREAD_API_TOKEN` alone and has no knowledge of
+  UI sessions or cookies; anything holding the token can call the API directly, session or
+  no. **The current session and identity contract lives in `specs/auth/agents-and-auth.md` §8
+  — read it rather than this bullet**, which predates real per-Agent identity.
 
 ## 6. What v1 is NOT
 
 - No multi-Agent identity, teams, or per-user authorization (the single-Agent `assignee`
   flag, §4f, is deliberately not identity).
-- No customer-side / self-service surface (a separate future API, designed native when
-  there are customers to serve).
+- No customer-side / self-service surface (a separate future API, designed native when there
+  are customers to serve).
 - No mailbox management, no search, no realtime, no webhooks-out, no tag-filtered listing.
-- No attachment upload on reply yet ( wired the READ side — inbound attachments
-  surfaced via `ThreadView.attachments` — but an Agent still cannot attach a file to an
-  outbound reply).
+- No attachment upload on reply — the READ side is wired (`ThreadView.attachments`), but an
+  Agent still cannot attach a file to an outbound reply.
 - Framework-agnostic by construction: handlers are `Request → Response`; a Vercel/Next
   adapter is a thin deploy-time wrapper, not part of this spec.
 
 ## 7. Changelog
 
-- **v1.1 (2026-07-19, // — "inbox basics").** Three additive features, none
-  breaking:
-  - **Saved replies & macros (§4h).** New `/api/v1/mailboxes/{id}/saved-replies`
-    (+ `/{replyId}`) surface. Engine stores definitions only; applying a macro's `actions`
-    is a client-side composition of §4a/§4b/§4e/§4f — zero new mail or status semantics.
-  - **Snooze (§2, §4b).** `ConversationSummary` gains `snoozedUntil`; `PATCH
-    .../status` gains the optional `snoozedUntil` field, legal only alongside
-    `status: 'pending'`. A snooze wakes itself on a timer OR on inbound customer mail
-    (§2's "snoozed exception to `pending` is never cleared automatically" amendment) —
-    both routes end in `active`/`null`, but report through DIFFERENT events: the timer
-    wake fires `conversation.status_changed` (the same `setConversationStatus` path an
-    Agent's own `PATCH` uses); the inbound wake reports through `conversation.
-    message_received`'s existing `reopened: true` field, exactly like every other
-    inbound reopen (§4a) — never `status_changed`.
-  - **Send & close (§4a).** `POST .../replies` gains the optional
-    `thenSetStatus: 'closed' | 'pending'` field — applied transactionally alongside the
-    reply's persist, never touching mail content/envelope/threading. Fires
-    `conversation.status_changed` through the same store path §4b uses.
-- **v1.1.** Wire-contract amendments from specs/plugins/substrate-v1.md §7
-  (drafts kept in `threads` rather than a separate table): `ThreadView` gains
-  `authorKind` and `draftStatus` (§2); the `deliveryStatus` invariant widens (outbound
-  stays `null` while a draft is unapproved or discarded, §2); `preview`/`threadCount`
-  ignore an unresolved or discarded draft (§2); conversation detail (§3b) still returns
-  every draft row regardless of status; and §3's auth-model statement is amended — a
-  second, per-Assistant credential class now authenticates alongside the service Bearer
-  token, for the fixed, narrow Assistant capability set specs/plugins/substrate-v1.md §3
-  defines.
-- **v1.1 (2026-07-17).** Documented the Agent Inbox web app's new operator login
-  (§3, §5) — a session cookie the UI now requires before rendering any page. No API
-  behavior changed: this is a web-layer addition in front of the unchanged
-  `HELPTHREAD_API_TOKEN` Bearer auth, recorded here only because §5's prior security notes
-  implied the UI itself had no auth story of its own. See §5's  bullet for the full
-  justification.
-- **v1.1 (2026-07-17).** `InboxApiDeps.selfEchoGuard` (optional, absent
-  by default): when present — and when the sender reports a provider message id for a
-  resolvable outbound mailbox — the send path best-effort pre-seeds a successful reply's
-  own sent-message echo as suppressed in the inbound delivery ledger, so a transport that
-  reflects sent mail back into its own mailbox (Gmail, confirmed live) normally does not
-  re-ingest it as a phantom inbound message — a consequence of the `References` change
-  below now carrying a verifiable token into that self-echo too. Best-effort, not a
-  guarantee: reconcile can win the documented pre-seeding race and ingest that one echo
-  first (`inbound-ingestion.md` §5, "Known residual"). See
-  `src/mail/send.ts`'s "The reply token's own self-echo" section for the full mechanism.
-  No other §4a behavior changed; a deployment that leaves this absent behaves exactly as
-  before.
+- **v1.1 (2026-07-19) — "inbox basics".** Three additive features:
+  - **Saved replies & macros (§4h).** New `/api/v1/mailboxes/{id}/saved-replies` (+
+    `/{replyId}`) surface. Engine stores definitions only; applying a macro's `actions` is a
+    client-side composition of §4a/§4b/§4e/§4f.
+  - **Snooze (§2, §4b).** `ConversationSummary` gains `snoozedUntil`; `PATCH` gains the
+    optional `snoozedUntil`, legal only alongside `status: 'pending'`. A snooze wakes on a
+    timer OR on inbound customer mail — both end in `active`/`null`, but report through
+    DIFFERENT events: the timer wake fires `conversation.status_changed`; the inbound wake
+    reports through `conversation.message_received`'s `reopened: true`, like every other
+    inbound reopen.
+  - **Send & close (§4a).** `POST .../replies` gains the optional `thenSetStatus: 'closed' |
+    'pending'`, applied transactionally alongside the reply's persist, never touching mail
+    content, envelope, or threading.
+- **v1.1.** Wire-contract amendments from specs/modules/substrate-v1.md §7 (drafts kept in
+  `threads` rather than a separate table): `ThreadView` gains `authorKind` and `draftStatus`
+  (§2); the `deliveryStatus` invariant widens (outbound stays `null` while a draft is
+  unapproved or discarded, §2); `preview`/`threadCount` ignore an unresolved or discarded
+  draft (§2); conversation detail (§3b) still returns every draft row; and §3's auth-model
+  statement is amended — a per-Assistant credential class now authenticates alongside the
+  service Bearer token.
+- **v1.1 (2026-07-17).** Documented the Agent Inbox web app's operator login (§3, §5). No API
+  behavior changed.
+- **v1.1 (2026-07-17).** `InboxApiDeps.selfEchoGuard` (optional, absent by default): when
+  present — and when the sender reports a provider message id for a resolvable outbound
+  mailbox — the send path best-effort pre-seeds a successful reply's own sent-message echo as
+  suppressed in the inbound delivery ledger, so a transport that reflects sent mail back into
+  its own mailbox (Gmail, confirmed live) normally does not re-ingest it as a phantom inbound
+  message. Best-effort, not a guarantee: reconcile can win the documented pre-seeding race
+  and ingest that one echo first (inbound-ingestion.md §5, "Known residual"). See
+  `src/mail/send.ts`'s "The reply token's own self-echo" section. A deployment leaving this
+  absent behaves exactly as before.
 - **v1.1 (2026-07-17).** §4a's `References` derivation now appends the reply's own
   freshly-minted `messageId` as the final entry, after the derived ancestor chain — fixing
-  live-observed thread splits where a provider (Gmail, confirmed) rewrites the outbound
-  wire `Message-ID`, discarding the token from its one prior channel. See
-  threading.md §2a and sending.md §4 for the full mechanism; no other §4a behavior changed.
-- **v1.1 (2026-07-16).** `ThreadView.attachments`: inbound attachment metadata +
-  a signed `BlobStore` URL, `[]` by default and config-gated (absent `attachments` deps
-  at the composition root, §4's `InboxApiDeps`, same posture as open tracking) — a
-  deployment that hasn't wired a `ThreadAttachmentStore` + `BlobStore` never surfaces
-  attachments. No attachment upload on reply (§6, unchanged).
-- **v1.1 (2026-07-11).** Adopted the contract the Agent Inbox UI was designed
-  against (the Claude Design prototype's `mock-api.js`, whose additions were each marked
-  `CONTRACT ADDITION`), after review of the drift between the designed surface and v1.0.
-  Additions, each with its implementation ticket: status model
-  `active/pending/closed/spam` with folder-semantics listing and spam-reopen;
-  `preview` + `number` on summaries; internal notes; tags; soft
-  delete endpoint; single-Agent assignee; config-gated open tracking,
-  default off. One place the prototype does NOT govern: its mock simplifies §4a's
-  replay model (no delivery lease, no `409 retry_in_progress`) — the shipped
-  semantics stand, and the UI must handle the 409.
-- **v1.0.** Accepted;  (reads + conventions),  (writes), then  amended
-  §4a with required `Idempotency-Key`, lease-based replay, and `409 retry_in_progress`.
+  live-observed thread splits where a provider (Gmail, confirmed) rewrites the outbound wire
+  `Message-ID`, discarding the token from its one prior channel. See threading.md §2a and
+  sending.md §4.
+- **v1.1 (2026-07-16).** `ThreadView.attachments`: inbound attachment metadata + a signed
+  `BlobStore` URL, `[]` by default and config-gated (absent `attachments` deps at the
+  composition root, same posture as open tracking) — a deployment that hasn't wired a
+  `ThreadAttachmentStore` + `BlobStore` never surfaces attachments. No attachment upload on
+  reply (§6, unchanged).
+- **v1.1 (2026-07-11).** Adopted the contract the Agent Inbox UI was designed against (the
+  Claude Design prototype's `mock-api.js`, whose additions were each marked `CONTRACT
+  ADDITION`). Additions: status model `active/pending/closed/spam` with folder-semantics
+  listing and spam-reopen; `preview` + `number` on summaries; internal notes; tags; soft
+  delete; single-Agent assignee; config-gated open tracking, default off. One place the
+  prototype does NOT govern: its mock simplifies §4a's replay model (no delivery lease, no
+  `409 retry_in_progress`) — the shipped semantics stand, and the UI must handle the 409.
+- **v1.0.** Accepted: reads + conventions, then writes, then §4a amended with required
+  `Idempotency-Key`, lease-based replay, and `409 retry_in_progress`.

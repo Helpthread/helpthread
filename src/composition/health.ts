@@ -1,14 +1,14 @@
 /**
- * The internal health check (HT-44, specs/mail/inbound-ingestion.md §6;
- * runbook Part G) — one point-in-time report over everything the inbound
- * pipeline needs to stay alive, served by the CRON_SECRET-guarded
- * `GET /api/v1/internal/health` (`./app.ts`) and designed so a dumb HTTP
- * monitor becomes the alerter: the endpoint answers **200 when `ok`, 503
- * when any alert is tripped**, so status-code polling (UptimeRobot, Checkly,
- * a curl in cron — anything that can send one header) is a complete
- * alerting stack. There is deliberately no Datadog/OTel dependency here:
- * the platform aggregates logs (CHARTER.md §4), and this endpoint is the
- * one pull-based surface those logs can't provide.
+ * The internal health check (specs/mail/inbound-ingestion.md §6; runbook Part
+ * G) — one point-in-time report over everything the inbound pipeline needs to
+ * stay alive, served by the CRON_SECRET-guarded `GET
+ * /api/v1/internal/health` (`./app.ts`). It is designed so a dumb HTTP
+ * monitor becomes the alerter: **200 when `ok`, 503 when any alert is
+ * tripped**, so status-code polling (UptimeRobot, Checkly, a curl in cron —
+ * anything that can send one header) is a complete alerting stack. There is
+ * deliberately no Datadog/OTel dependency: the platform aggregates logs
+ * (CHARTER.md §4), and this endpoint is the one pull-based surface those
+ * logs cannot provide.
  *
  * ## Schema version: the one check about the deploy itself
  *
@@ -18,25 +18,23 @@
  * schema until someone runs `npm run migrate`, and with auto-deploy-on-merge
  * that window opens without anyone deciding to open it.
  *
- * Observed 2026-08-02: HT-101 shipped three migrations, the deploy landed
- * first, and an `imap-fetch` cron spent the gap erroring every two minutes
- * against tables that did not exist yet. Nothing named the cause; the only
- * symptom was a failing cron. This check turns that into a 503 on a URL, with
- * the fix in the message.
+ * Observed 2026-08-02: three migrations shipped, the deploy landed first, and
+ * an `imap-fetch` cron spent the gap erroring every two minutes against
+ * tables that did not exist yet. Nothing named the cause; the only symptom
+ * was a failing cron. This check turns that into a 503 on a URL, with the fix
+ * in the message. It deliberately does NOT migrate anything — reporting the
+ * skew keeps the operator-step rule intact while removing the part that made
+ * it dangerous, that the violation was silent.
  *
- * It deliberately does NOT migrate anything. Reporting the skew keeps the
- * "schema changes are an operator step" rule intact while removing the part
- * that made it dangerous — that the violation was silent.
-
  * ## What it reports, and the alert each section can trip
  *
  * - **Queue** (`PostgresQueue.getStats` + a 24h dead-letter window):
  *   `queue-drain-stalled` when the oldest ready job has waited longer than
  *   {@link QUEUE_OLDEST_READY_ALERT_SECONDS} (the drain cron runs every
- *   minute — a five-minute-old ready job means ~5 missed/failing ticks);
- *   `queue-dead-letter-growth` when any job was dead-lettered in the last
- *   24h (dead-letter rows are retained by design — migration 013 — so the
- *   signal is growth, never the standing count).
+ *   minute, so a five-minute-old ready job means ~5 missed or failing ticks);
+ *   `queue-dead-letter-growth` when any job was dead-lettered in the last 24h
+ *   (dead-letter rows are retained by design — migration 013 — so the signal
+ *   is growth, never the standing count).
  * - **Ingest ledger** (`inbound_deliveries`, 24h outcome counts):
  *   `ingest-dead-letter-growth`, same growth-not-backlog reasoning (a
  *   dead-lettered row's `updated_at` freezes when it parks, so a 24h
@@ -45,66 +43,60 @@
  *   `forged-token-burst` when {@link FORGED_TOKEN_ALERT_THRESHOLD} or more
  *   deliveries stored in the last 24h carried at least one forged token —
  *   threading.md §5's security signal ("a single forgery is unremarkable; a
- *   burst against one conversation or sender is a security signal"),
- *   finally consumable. The threshold is this module's own default, NOT a
- *   number threading.md §5 blesses (that spec deliberately leaves it open);
- *   it is a constant, not config, until dogfood traffic teaches us better.
+ *   burst against one conversation or sender is a security signal"). The
+ *   threshold is this module's own default, NOT a number threading.md §5
+ *   blesses (that spec deliberately leaves it open); a constant, not config,
+ *   until dogfood traffic teaches us better.
  * - **Mailboxes** (`mailboxes` LEFT JOIN `gmail_watch_state`):
- *   `mailbox-needs-attention` for `paused`/`needs_reconnect` rows (both
- *   mean inbound mail is NOT flowing until an operator acts — runbook Part
- *   G); `watch-expiring` for an `active` mailbox whose Gmail `watch()`
- *   expiration is missing or nearer than {@link WATCH_EXPIRY_ALERT_HOURS}
- *   (the daily maintenance cron re-arms it ~7 days out, so anything under
- *   72h means renewal has been failing for days — caught while there is
- *   still runway). `disconnected` mailboxes are deliberately silent: that
- *   state is an operator's own explicit action (HT-47).
+ *   `mailbox-needs-attention` for `paused`/`needs_reconnect` rows (both mean
+ *   inbound mail is NOT flowing until an operator acts); `watch-expiring` for
+ *   an `active` mailbox whose Gmail `watch()` expiration is missing or nearer
+ *   than {@link WATCH_EXPIRY_ALERT_HOURS} (the daily maintenance cron re-arms
+ *   ~7 days out, so anything under 72h means renewal has been failing for
+ *   days — caught while there is still runway). `disconnected` mailboxes are
+ *   deliberately silent: that state is an operator's own explicit action.
  * - **Schema version** (`_migrations` vs the build's own
  *   `LATEST_MIGRATION_ID`): `schema-migration-pending` when the database is
  *   BEHIND the running build, `schema-newer-than-build` when it is ahead.
- *   Unlike every other section here, this one reports on the DEPLOYMENT, not
- *   on traffic — see the dedicated section below for why it earns a place.
- * - **Webhooks** (HT-69; specs/modules/substrate-v1.md §5: "surfaced by
- *   `/api/v1/internal/health` (runbook Part G gains a section)"):
+ *   Unlike every other section, this reports on the DEPLOYMENT, not traffic.
+ * - **Webhooks** (specs/modules/substrate-v1.md §5):
  *   `webhook-endpoint-auto-disabled` for every `webhook_endpoints` row
  *   `WebhookEndpointStore.recordDeliveryFailure` flipped past the
- *   consecutive-failure threshold (spec §9 decision 2: 20) — spec's own
- *   rationale for alerting here ("conservative because a disabled endpoint
- *   silently stops a paid module"). `webhook-delivery-dead-letter-growth`
- *   for any `queue_jobs` row on `WEBHOOK_DELIVERY_TOPIC` dead-lettered in
- *   the last 24h — the SAME growth-not-backlog reasoning as `queue-dead-
- *   letter-growth`/`ingest-dead-letter-growth` above (a dead-lettered
- *   delivery's `webhook_endpoints.recordDeliveryFailure` write already
- *   happened by the time it reaches this state — `src/webhooks/
- *   delivery.ts`'s module doc — so this is a SEPARATE signal from the
- *   auto-disable alert: an endpoint can shed individual failed deliveries
- *   for a while before crossing 20 consecutive and auto-disabling).
- * - **Passkey counter regressions** (HT-75; specs/auth/passkeys.md §8):
+ *   consecutive-failure threshold (spec §9 decision 2: 20), whose own
+ *   rationale for alerting is that "a disabled endpoint silently stops a paid
+ *   module". `webhook-delivery-dead-letter-growth` for any `queue_jobs` row
+ *   on `WEBHOOK_DELIVERY_TOPIC` dead-lettered in the last 24h — the same
+ *   growth-not-backlog reasoning as above, and a SEPARATE signal from the
+ *   auto-disable alert: a dead-lettered delivery's `recordDeliveryFailure`
+ *   write already happened by the time it reaches this state
+ *   (`src/webhooks/delivery.ts`), and an endpoint can shed individual failed
+ *   deliveries for a while before crossing 20 consecutive.
+ * - **Passkey counter regressions** (specs/auth/passkeys.md §8):
  *   `webauthn-counter-regression` for any `webauthn_credentials` row whose
  *   `sign_count_regression_at` (set by `src/auth/webauthn-ceremony.ts` on a
- *   Tier-2 clone-signal rejection) falls in the last 24h — a directly
- *   analogous check to `forged-token-burst` above (a per-row marker column,
- *   not a log table; the signal is growth, never the standing count),
- *   except tripped on ANY count `> 0`, not a threshold: spec §8 is explicit
- *   this is a "high-quality clone signal for a non-synced credential," not
- *   noise to average over a burst window.
+ *   Tier-2 clone-signal rejection) falls in the last 24h — directly analogous
+ *   to `forged-token-burst` (a per-row marker column, not a log table; the
+ *   signal is growth), except tripped on ANY count `> 0` rather than a
+ *   threshold: spec §8 is explicit this is a "high-quality clone signal for a
+ *   non-synced credential," not noise to average over a burst window.
  *
  * ## What it deliberately does NOT check
  *
  * A "reconcile cursor is stale" alert was considered and dropped:
  * `gmail_watch_state.updated_at` is bumped by BOTH cursor advances and
- * watch-expiration renewals (`src/store/gmail-watch-state.ts`), so it
- * cannot distinguish "reconcile broken" from "renewal alive" — a health
- * signal that can't measure what it claims is worse than none. A stalled
- * reconcile still surfaces here indirectly (`queue-drain-stalled`, since
- * reconcile jobs retry rather than ack) and in the `gmail_reconcile` log
- * events. If dogfood shows a real blind spot, a dedicated cursor-write
- * timestamp column is the honest fix.
+ * watch-expiration renewals (`src/store/gmail-watch-state.ts`), so it cannot
+ * distinguish "reconcile broken" from "renewal alive" — a health signal that
+ * cannot measure what it claims is worse than none. A stalled reconcile still
+ * surfaces indirectly (`queue-drain-stalled`, since reconcile jobs retry
+ * rather than ack) and in the `gmail_reconcile` log events. If dogfood shows a
+ * real blind spot, a dedicated cursor-write timestamp column is the honest
+ * fix.
  *
  * ## Alert strings are contract-ish
  *
  * Each alert is `<kebab-code>: <human detail>`. The code prefix is stable
  * (runbook Part G documents each one); the detail after the colon is free
- * text for the human reading the monitor's notification, never parsed.
+ * text for the human reading the notification, never parsed.
  */
 
 import type { Db } from '../db/client.js'

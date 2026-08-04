@@ -1,57 +1,50 @@
 /**
- * Gmail OAuth2 access-token acquisition + refresh (HT-38; gmail-push.md §7:
- * "OAuth token acquisition/refresh → HT-38; the connect/consent flow →
- * HT-40"). This is what turns a stored, encrypted refresh token
- * (`src/store/mailbox-tokens.ts`, migration 010) into the live bearer access
- * token the Gmail adapters need — most directly, `getAccessToken` here is
- * built to be handed to `createGmailEmailSender`'s `getAccessToken: () =>
- * Promise<string>` option (`src/providers/adapters/gmail/sender.ts`), bound
- * to one mailbox: `() => tokenService.getAccessToken(mailboxId)`.
+ * Gmail OAuth2 access-token acquisition + refresh (gmail-push.md §7). Turns a
+ * stored, encrypted refresh token (`src/store/mailbox-tokens.ts`, migration
+ * 010) into the live bearer access token the Gmail adapters need. Most
+ * directly, `getAccessToken` is built to be handed to
+ * `createGmailEmailSender`'s `getAccessToken: () => Promise<string>` option
+ * (`src/providers/adapters/gmail/sender.ts`), bound to one mailbox:
+ * `() => tokenService.getAccessToken(mailboxId)`.
  *
  * ## What this module does NOT do
  *
- * - **Mint the first refresh token.** That is the connect/consent OAuth
- *   flow (HT-40) — this module only ever reads a refresh token that flow
+ * - **Mint the first refresh token** — that is the connect/consent flow
+ *   (`./gmail-connect.ts`). This module only reads a refresh token that flow
  *   already stored via `MailboxTokenStore.upsertTokens`.
  * - **Encrypt or decrypt anything directly.** `MailboxTokenStore` owns that
- *   boundary (`src/store/mailbox-tokens.ts`, `src/store/token-crypto.ts`) —
- *   this module only ever sees plaintext token strings, already
- *   decrypted-on-read / about to be encrypted-on-write by the store.
- * - **Renew a Gmail `watch()` subscription.** That's HT-42, which has its
- *   OWN failure→`needs_reconnect` transition (gmail-push.md §6) but reuses
+ *   boundary (`src/store/token-crypto.ts`); this module only sees plaintext
+ *   token strings, decrypted on read / about to be encrypted on write.
+ * - **Renew a Gmail `watch()` subscription** — that has its own
+ *   failure→`needs_reconnect` transition (gmail-push.md §6) but reuses
  *   {@link MailboxStore.markNeedsReconnect} rather than duplicating it.
  *
  * ## Caching and the expiry skew
  *
  * `getAccessToken` returns the cached access token from `MailboxTokenStore`
- * without a network call whenever one exists AND is not within
- * {@link GmailOAuthTokenServiceOptions.expirySkewMs} of its real expiry.
- * The skew exists so a token is never handed to a caller a moment before it
- * expires mid-use (e.g. a slow Gmail `messages.send` call straddling the
- * expiry instant): refreshing a little early is free (Google does not
- * invalidate the old access token when a new one is issued — see below),
- * whereas a request that starts with an about-to-expire token can fail
- * partway through. The default, {@link DEFAULT_EXPIRY_SKEW_MS} (5 minutes),
- * mirrors the same margin Google's own `google-auth-library` client uses for
- * this exact purpose.
+ * with no network call whenever one exists AND is not within {@link
+ * GmailOAuthTokenServiceOptions.expirySkewMs} of its real expiry. The skew
+ * stops a token being handed to a caller a moment before it expires mid-use
+ * (a slow `messages.send` straddling the expiry instant): refreshing early
+ * is free, since Google does not invalidate the old access token when a new
+ * one is issued, whereas a request starting with an about-to-expire token
+ * can fail partway through. The default {@link DEFAULT_EXPIRY_SKEW_MS} (5
+ * minutes) mirrors the margin Google's own `google-auth-library` uses.
  *
  * ## The refresh call (RFC 6749 §6; Google's token endpoint)
  *
- * One `POST https://oauth2.googleapis.com/token`, `application/
- * x-www-form-urlencoded`, `grant_type=refresh_token` +
- * `client_id`/`client_secret`/`refresh_token` — verified against Google's
- * own OAuth2 web-server-flow documentation. Deliberately a raw injected
- * `fetch` call, not the `googleapis` SDK: a token refresh is one POST with a
- * small, stable JSON response shape, and adding a whole SDK dependency for
- * it would be exactly the kind of unrequested complexity CLAUDE.md's
- * "simplicity first" rule warns against. `fetchImpl` is injected (default
- * the global `fetch`) purely so tests never hit Google — the same pattern
- * `createGmailEmailSender` already uses (`src/providers/adapters/gmail/sender.ts`).
+ * One `POST https://oauth2.googleapis.com/token`,
+ * `application/x-www-form-urlencoded`, `grant_type=refresh_token` plus
+ * `client_id`/`client_secret`/`refresh_token`. Deliberately a raw injected
+ * `fetch`, not the `googleapis` SDK: a refresh is one POST with a small,
+ * stable JSON response, and a whole SDK dependency for it is the unrequested
+ * complexity CLAUDE.md's "simplicity first" rule warns against. `fetchImpl`
+ * is injected (defaulting to global `fetch`) purely so tests never hit
+ * Google — the same pattern `createGmailEmailSender` uses.
  *
- * A refresh response MAY include a new `refresh_token` (RFC 6749 §6: "the
- * authorization server MAY issue a new refresh token"); when present it
- * replaces the stored one, otherwise the existing refresh token is kept
- * (Google's normal behavior: refresh tokens are not rotated on every
+ * A refresh response MAY include a new `refresh_token` (RFC 6749 §6); when
+ * present it replaces the stored one, otherwise the existing one is kept
+ * (Google's normal behavior — refresh tokens are not rotated on every
  * refresh). Google does not invalidate the previous access token when
  * issuing a new one, so an early/skewed refresh can never race a still-valid
  * cached token into invalidity.
@@ -59,55 +52,61 @@
  * ## `invalid_grant`: the mailbox needs reconnecting, not a crash
  *
  * A refresh token can die outside this module's control — the user revoked
- * Helpthread's access, an admin disabled the OAuth grant, or Google expired
- * it. The token endpoint reports this as an `invalid_grant` error (RFC 6749
- * §5.2). This is an EXPECTED, operator-actionable outcome, not a bug: on
- * `invalid_grant`, {@link GmailOAuthTokenService.getAccessToken} marks the
- * mailbox `needs_reconnect` (`MailboxStore.markNeedsReconnect` —
- * gmail-push.md §5/§6's same operator-visible state) and THROWS a clear,
- * specific error — it does not return a sentinel, and it does not let the
- * process crash uncaught. Every other refresh failure (network error,
- * timeout, `invalid_client`, a malformed response, an unrelated non-2xx)
- * also throws, but WITHOUT touching mailbox status: those are not proof the
- * grant itself is dead, so marking the mailbox for manual reconnection would
- * be an overreaction to what may be a transient fault.
+ * access, an admin disabled the grant, or Google expired it. The token
+ * endpoint reports this as `invalid_grant` (RFC 6749 §5.2). This is an
+ * EXPECTED, operator-actionable outcome: {@link
+ * GmailOAuthTokenService.getAccessToken} marks the mailbox `needs_reconnect`
+ * (`MailboxStore.markNeedsReconnect` — gmail-push.md §5/§6's
+ * operator-visible state) and THROWS a specific error. It does not return a
+ * sentinel and does not let the process crash uncaught.
+ *
+ * Every other refresh failure (network error, timeout, `invalid_client`, a
+ * malformed response, an unrelated non-2xx) also throws, but WITHOUT
+ * touching mailbox status: those are not proof the grant is dead, so marking
+ * the mailbox for manual reconnection would overreact to a possibly
+ * transient fault.
  *
  * ## Never log or leak a token
  *
  * `client_secret` and the refresh/access token values never appear in a
- * thrown error message or a log line anywhere in this module — matching
- * `createGmailEmailSender`'s same discipline for the access token it
- * consumes. Error messages here are built ONLY from the mailbox id, HTTP
- * status, and the OAuth `error`/`error_description` fields (which by
- * protocol design never carry credential material).
+ * thrown error message or log line anywhere in this module. Messages are
+ * built ONLY from the mailbox id, HTTP status, and the OAuth
+ * `error`/`error_description` fields, which by protocol design never carry
+ * credential material.
  *
  * ## No cross-call refresh locking
  *
  * If two `getAccessToken` calls for the SAME mailbox race while its cached
- * token is stale, both may independently POST a refresh. This is wasted
- * work, not a correctness bug: Google does not invalidate the loser's
- * freshly-issued access token, both calls still return a valid token, and
- * the store's last write simply wins for what gets cached next time. Adding
- * a lock/single-flight guard would be a reasonable follow-up if refresh
- * volume ever makes the duplicate calls matter, but is speculative
- * complexity this ticket does not add — see the HT-38 implementation report.
+ * token is stale, both may independently POST a refresh with the same stored
+ * refresh token. In Google's usual behavior — no refresh-token rotation —
+ * this is only wasted work: the previous ACCESS token is not invalidated when
+ * a new one is issued, both calls return a valid token, and the store's last
+ * write wins for what gets cached next.
  *
- * ## Never resurrect a disconnected mailbox's token row (HT-47)
+ * **It is not harmless if Google DOES rotate the refresh token on that
+ * refresh.** A rotated refresh token invalidates its predecessor, so the
+ * loser's in-flight POST can come back `invalid_grant` — which this module
+ * treats as a dead grant and marks the mailbox `needs_reconnect`, even though
+ * the winner just refreshed it successfully. A per-mailbox single-flight
+ * guard (or distinguishing "stale-because-rotated" from a genuinely dead
+ * grant before marking) is the real fix; it is not built here.
  *
- * One specific race IS worth guarding, unlike the harmless one above: a
- * refresh already in flight when `src/mail/gmail-disconnect.ts`'s
- * `disconnect()` commits (marks the mailbox `disconnected`, deletes the
- * token/watch-state rows) must not then persist its own freshly-fetched
- * token — that would re-create exactly the row disconnect just deleted, for
- * a mailbox an operator explicitly took offline. `refresh()` persists via
- * `MailboxTokenStore.upsertTokensUnlessDisconnected`, whose status
- * predicate rides ON the write statement itself (with the mailbox row
- * locked — see that method's doc for the lock ordering against disconnect's
- * transaction), so there is no check-to-write gap a disconnect can land in;
- * a write the fence rejects is silently skipped, and the fetched access
- * token is still returned to the caller. `gmail-disconnect.ts`'s module doc
- * carries the other half of this defense (disconnect re-running its deletes
- * even on an already-`disconnected` mailbox, as belt-and-braces cleanup).
+ * ## Never resurrect a disconnected mailbox's token row
+ *
+ * A second race is worth guarding outright, and unlike the one above it has
+ * no benign reading at all: a refresh
+ * already in flight when `src/mail/gmail-disconnect.ts`'s `disconnect()`
+ * commits — marking the mailbox `disconnected` and deleting the token and
+ * watch-state rows — must not then persist its own freshly-fetched token,
+ * re-creating exactly the row disconnect just deleted for a mailbox an
+ * operator explicitly took offline. `refresh()` persists via
+ * `MailboxTokenStore.upsertTokensUnlessDisconnected`, whose status predicate
+ * rides ON the write statement itself with the mailbox row locked (see that
+ * method's doc for the lock ordering against disconnect's transaction), so
+ * there is no check-to-write gap a disconnect can land in. A write the fence
+ * rejects is silently skipped, and the fetched access token is still
+ * returned to the caller. `gmail-disconnect.ts`'s module doc carries the
+ * other half of this defense.
  */
 
 import type { MailboxTokenStore, StoredMailboxTokens } from '../store/mailbox-tokens.js'

@@ -1851,230 +1851,140 @@ ALTER TABLE conversations ADD COLUMN mailbox_id uuid REFERENCES mailboxes(id) ON
  * Migration 030 — the operator-deployer persistence layer (HT-119):
  * `vercel_connections`, `module_installs`, `module_install_events`.
  *
- * This is the schema half of "the operator's own engine deploys paid
- * modules into the operator's OWN Vercel account" (CHARTER.md's
+ * The schema half of "the operator's own engine deploys paid modules into
+ * the operator's OWN Vercel account" (CHARTER.md's
  * never-hold-operator-credentials, never-host-anything invariant). Nothing
- * here talks to Vercel — that is `src/providers/adapters/vercel-deployer/`
- * (a later ticket). This migration only has to make the state that adapter
- * will read and write **impossible to corrupt**, because the thing being
- * modeled is bearer credential that is team-admin-equivalent and a
- * multi-network-call install pipeline that can crash, retry, or race with
- * itself at any step.
+ * here talks to Vercel — that is `src/providers/adapters/vercel-deployer/`.
+ * This migration's job is to make the state that adapter reads and writes
+ * impossible to corrupt: the thing modeled is a team-admin-equivalent
+ * bearer credential plus a multi-network-call pipeline that can crash,
+ * retry, or race with itself at any step.
  *
  * ## `vercel_connections` — exactly one operator credential, ever active
  *
- * A row is one connected Vercel account: which `team_id` it is scoped to,
- * its bearer token (encrypted — see below), who connected it, and a
- * `token_fingerprint` for display ("connected as team ...ab12") that is
- * NEVER the reversible token itself.
+ * One row per connected Vercel account: `team_id`, its encrypted bearer
+ * token, who connected it, and a `token_fingerprint` for display.
  *
- * ### `team_id` is immutable once set
- *
- * The non-negotiable review condition is "bind the connection to one
- * immutable team id" — the whole point of a `vercel_connections` row is
- * that every `module_installs` row hanging off it can trust it always
- * targets the SAME team, so "refuse operations on project ids the engine
- * did not create and record" (condition 1) has a fixed frame of reference.
- * A nullable-then-fillable `team_id`, or a `team_id` an UPDATE could later
- * change, would let a connection silently retarget to a different team out
- * from under every install that already trusts it. `team_id` is `NOT NULL`
- * from the first INSERT (no "connected, pending verification" row with a
- * NULL team — `last_verified_at` is the nullable field that models
- * "connected but not yet re-verified") and enforced immutable by the
- * `vercel_connections_team_id_immutable` trigger below: an `UPDATE` that
- * changes `team_id` is rejected at the database, not just by convention in
- * `src/store/vercel-connection.ts` never issuing one. A CHECK constraint
- * cannot express "compares to its OLD value", so this needs a trigger —
- * the same reason migration 027 needed a `DO` block rather than a
- * declarative constraint for something a single CREATE TABLE can't say.
- *
- * ### The token, encrypted exactly like `token-crypto.ts`'s existing envelope
- *
- * `token_ciphertext bytea NOT NULL` holds the SAME `iv || authTag ||
- * ciphertext` wire format `src/store/token-crypto.ts` already defines for
- * mailbox OAuth tokens and IMAP app passwords (migrations 010, 028) — one
- * crypto envelope, three callers, no second format to reason about. The
- * plaintext token is never a column; {@link
- * ../store/vercel-connection.ts!VercelConnectionStore.getToken}'s decrypted
- * return value must never cross an HTTP response boundary, matching
- * `ImapCredentialStore.getPassword`'s "write-only-into-outbound-fetches"
- * discipline.
- *
- * `token_fingerprint text NOT NULL` is a short, ONE-WAY display value (a
- * truncated hex digest, computed by the store — this migration only
- * reserves the column) so an operator can confirm "yes, that's the token I
- * connected" in a settings screen without the engine ever holding, logging,
- * or returning the reversible secret. Condition 1's "never return the
- * plaintext token from any API, log, or error" is what this column exists
- * to satisfy without ever touching `token_ciphertext`.
- *
- * ### Exactly one active connection — a partial unique index, not app logic
- *
- * v1 supports exactly one connected Vercel account. `revoked_at timestamptz`
- * (`NULL` while the connection is live) plus
- * `CREATE UNIQUE INDEX ... ON vercel_connections ((true)) WHERE revoked_at
- * IS NULL` makes "at most one live row" a database invariant instead of an
- * application-level check-then-insert race: indexing the constant `true`
- * means the partial index has exactly one possible key value, so Postgres's
- * own uniqueness enforcement rejects a second `revoked_at IS NULL` row even
- * under concurrent inserts — the same "let the database refuse the
- * unrepresentable state" reasoning migration 026's WebAuthn tables and
- * migration 029's `RESTRICT` both already lean on. `revoked_at` (rather
- * than a hard DELETE) keeps the connection's full history — including
- * every `module_installs` row that references it via `vercel_connection_id`
- * — intact for audit, and leaves room for a future reconnect flow (revoke
- * the old row, insert a new one) without this migration having to design
- * that flow now.
- *
- * `connected_by_agent_id uuid NOT NULL REFERENCES agents(id) ON DELETE
- * RESTRICT` — provenance for a team-admin-equivalent credential is not
- * optional (condition 2's step-up gating is meaningless if nobody can later
- * answer "which agent connected this"), so, exactly like migration 029's
- * `conversations.mailbox_id` reasoning, deleting the connecting Agent must
- * not silently sever that record. No product code path deletes an `agents`
- * row today (agents are disabled, not deleted — migration 018), so this
- * constrains nothing that currently happens.
+ * - **`team_id` is immutable once set.** Every `module_installs` row
+ *   hanging off a connection must be able to trust it always targets the
+ *   SAME team. `team_id` is `NOT NULL` from the first INSERT — there is no
+ *   "connected, pending verification" row with a NULL team;
+ *   `last_verified_at` is the nullable field modeling that — and immutable
+ *   via the `vercel_connections_team_id_immutable` trigger: an `UPDATE`
+ *   changing `team_id` is rejected at the database, not merely by
+ *   `src/store/vercel-connection.ts` never issuing one. A CHECK cannot
+ *   compare against a row's OLD value, so this needs a trigger.
+ * - **`token_ciphertext bytea NOT NULL`** holds the SAME `iv || authTag ||
+ *   ciphertext` envelope `src/store/token-crypto.ts` defines for mailbox
+ *   OAuth tokens and IMAP app passwords (migrations 010, 028) — one crypto
+ *   format, three callers. The plaintext is never a column, and
+ *   `VercelConnectionStore.getToken`'s decrypted return value must never
+ *   cross an HTTP response boundary (same discipline as
+ *   `ImapCredentialStore.getPassword`).
+ * - **`token_fingerprint text NOT NULL`** is a short ONE-WAY display value
+ *   (a truncated hex digest, computed by the store; this migration only
+ *   reserves the column) so an operator can confirm which token is
+ *   connected without the engine holding, logging, or returning the
+ *   reversible secret.
+ * - **Exactly one active connection is a database invariant, not app
+ *   logic.** `revoked_at timestamptz` (`NULL` while live) plus
+ *   `CREATE UNIQUE INDEX ... ON vercel_connections ((true)) WHERE
+ *   revoked_at IS NULL`: indexing the constant `true` gives the partial
+ *   index exactly one possible key, so Postgres rejects a second live row
+ *   even under concurrent inserts. `revoked_at` rather than a hard DELETE
+ *   keeps history — including every `module_installs` row referencing it —
+ *   and leaves room for a reconnect flow (revoke, then insert).
+ * - **`connected_by_agent_id uuid NOT NULL REFERENCES agents(id) ON DELETE
+ *   RESTRICT`** — step-up gating is meaningless if nobody can later answer
+ *   "which agent connected this." No product path deletes an `agents` row
+ *   today (agents are disabled, not deleted — migration 018).
  *
  * ## `module_installs` — the install state machine
  *
- * One row per (module, domain, environment) install attempt. `state` is
- * the CHECK-constrained lifecycle a later ticket's orchestrator walks
- * through; this migration only has to make illegal states unrepresentable
- * and illegal transitions unrepresentable — the actual state-transition
- * TABLE (which `to_state`s are reachable from which `from_state`) is
- * application logic in `src/store/module-installs.ts`, deliberately not
- * encoded here, because "which transitions are legal" changes far more
- * often than "which states exist," and a CHECK constraint per edge would
- * need a migration for every orchestration tweak.
+ * One row per (module, domain, environment) install attempt. This
+ * migration makes illegal STATES unrepresentable; which TRANSITIONS are
+ * legal is application logic in `src/store/module-installs.ts`,
+ * deliberately not encoded here — legal edges change far more often than
+ * the state set, and a CHECK per edge would need a migration per tweak.
  *
- * ### Identity: `idempotency_key` is the one true dedupe key
- *
- * `idempotency_key text NOT NULL UNIQUE` is the caller-supplied key
- * `ModuleInstallStore.create` upserts against (get-or-insert, the same
- * `INSERT ... ON CONFLICT ... DO NOTHING` / fallback-`SELECT` shape
- * `InboundDeliveryStore.claim` already uses for `inbound_deliveries`) — so
- * a retried "install this module" API call after a timeout can never
- * create two competing install rows for what the caller believes is one
- * request. `module_slug`, `entitlement_id`, `domain`, and `environment`
- * are recorded as plain columns (not part of a composite unique key)
- * because condition 7 requires reading "every install for entitlement X"
- * and "every install for domain Y" independently of idempotency — they are
- * identity/reporting fields, not the dedupe key itself. `environment` is
- * CHECK-constrained to `'production'` or `'preview'` — a Vercel Build
- * Output API deployment always targets exactly one of the two (the
- * platform's own vocabulary), and nothing in this pipeline needs a third
- * value.
- *
- * ### The fence: `lease_token` gates every transition, not just retries
- *
- * `lease_token uuid NOT NULL` (freshly re-minted by every successful
- * `create` and every successful `transition`) is the SAME "claim
- * generation" concept `inbound_deliveries.attempts` already serves
- * (migration 012/014's doc comment, "The fence" section) and
- * `postgres-queue`'s adapter already uses for lease-fenced dequeues —
- * applied here to a longer-running, many-step pipeline instead of a single
- * queue message. `src/store/module-installs.ts`'s `transition` fences its
- * `UPDATE` on `state = fromState AND lease_token = fenceToken`, so a worker
- * that stalled past its lease (condition 3's "never a DB transaction across
- * network calls" means every step commits and returns control between
- * Vercel API calls, and a crash between steps is expected, not
- * exceptional) can never resurrect an install that another worker has
- * since reclaimed and moved on from — exactly the "stale worker can never
- * resurrect an obsolete install" requirement. `lease_expires_at
- * timestamptz` is the wall-clock half a reconciler sweep reads to decide
- * "this lease is stale, reclaim it" — the token proves generation, the
- * timestamp answers "when may a NEW generation reclaim." Both are needed
- * for the identical reason `inbound_deliveries.claimed_until` and its
- * token-generation fence both are.
- *
- * ### Remote resource ids are nullable and written as they're won
- *
- * `remote_project_id`, `remote_deployment_id text` (nullable) are NOT
- * filled at row creation — condition 3, "persist remote resource ids
- * immediately after every side effect," means the orchestrator writes each
- * one the instant the corresponding Vercel API call returns success, in
- * its own commit, never batched with the network call that produced it and
- * never deferred until a later step succeeds too. A row can legitimately
- * sit at `state = 'project_created'` with `remote_project_id` set and
- * `remote_deployment_id` still `NULL` for an arbitrarily long time (a
- * crash right after project creation) — that is the intended, recoverable
- * shape, not a bug: `remote_project_id` is now on record, so a resumed
- * orchestrator (or a human running cleanup) always knows exactly which
- * remote object was created and never has to guess or double-create it.
- *
- * `previous_active_deployment_id text` (nullable) is written once, at the
- * moment a NEW deployment is about to take over from a currently-active
- * one, and read back by the rollback path (`state = 'rollback_pending'`) to
- * know what to reactivate — it is deliberately a plain column, not derived
- * from `module_install_events`, so a rollback never has to replay history
- * to find its target.
- *
- * ### Retry bookkeeping
- *
- * `attempt integer NOT NULL DEFAULT 0`, `last_error_class text`,
- * `next_retry_at timestamptz` are the same "how many times, what kind of
- * failure, when to try again" triad `queue_jobs` (migration 013) already
- * carries for its own retry loop — reused here rather than reinvented,
- * because a stalled or failing install IS a retry-queue entry in
- * everything but literal queue-table membership. `last_error_class` is
- * deliberately a CLASS/CODE, never a raw error message: condition 1's
- * "never return the plaintext token from any API, log, or error" means an
- * adapter error touching this credential must be classified before it
- * reaches storage, not stored verbatim on the (small but real) chance the
- * underlying Vercel API error string echoes request details back.
- *
- * ### `state` — the fourteen conditions
- *
- * `planned` (row exists, nothing attempted) → `credentials_issued` →
- * `project_created` → `artifact_uploaded` → `deployment_created` →
- * `build_pending` → (`build_failed` | `bootstrap_pending`) →
- * `endpoint_verified` → `active` is the happy path; condition 4 ("no build
- * step ever runs on module code") means `build_pending`/`build_failed`
- * describe VERCEL's own build-output processing of an already-prebuilt
- * artifact, never a build the engine triggers. `bootstrap_pending` →
- * `endpoint_verified` is condition 5's candidate-then-cutover gate — a
- * deployed module proves possession of its webhook endpoint via a signed
- * challenge BEFORE `active` ever activates traffic to it, so a module that
- * never proves possession simply never leaves `bootstrap_pending`.
- * `verification_failed`, `rollback_pending`, `cleanup_required`,
- * `abandoned` are the failure/recovery branches: a bootstrap or
- * verification failure lands at `verification_failed` (condition 7 — this
- * can happen only on this NEW install; nothing here touches whatever is
- * currently `active` for this domain), `rollback_pending` uses
- * `previous_active_deployment_id` to restore the prior good state,
- * `cleanup_required` marks remote resources that need manual/automated
- * teardown, and `abandoned` is the terminal give-up state a human or a
- * bounded retry budget reaches.
+ * - **`idempotency_key text NOT NULL UNIQUE`** is the one true dedupe key,
+ *   upserted against by `ModuleInstallStore.create` with the same
+ *   `INSERT ... ON CONFLICT ... DO NOTHING` / fallback-`SELECT` shape
+ *   `InboundDeliveryStore.claim` uses. A retried install call after a
+ *   timeout can never create two competing rows. `module_slug`,
+ *   `entitlement_id`, `domain`, and `environment` are plain columns, not
+ *   part of a composite key, because "every install for entitlement X" and
+ *   "every install for domain Y" must be readable independently of
+ *   idempotency. `environment` is CHECK-constrained to `'production'` or
+ *   `'preview'` — Vercel's own vocabulary, and nothing needs a third value.
+ * - **`lease_token uuid NOT NULL` fences every transition, not just
+ *   retries.** Re-minted by every successful `create` and `transition`, it
+ *   is the same claim-generation concept `inbound_deliveries.attempts`
+ *   serves and `postgres-queue` uses for lease-fenced dequeues, applied to
+ *   a longer many-step pipeline. `transition` fences its `UPDATE` on
+ *   `state = fromState AND lease_token = fenceToken`, so a worker stalled
+ *   past its lease can never resurrect an install another worker has since
+ *   reclaimed. Every step commits and returns control between Vercel API
+ *   calls — never a DB transaction across a network call — so a crash
+ *   between steps is expected, not exceptional. `lease_expires_at
+ *   timestamptz` is the wall-clock half a reconciler reads to decide a
+ *   lease is stale: the token proves generation, the timestamp answers when
+ *   a NEW generation may reclaim.
+ * - **Remote resource ids are nullable and written as they are won.**
+ *   `remote_project_id`, `remote_deployment_id text` are not filled at row
+ *   creation; the orchestrator writes each the instant its Vercel call
+ *   returns success, in its own commit, never batched with the call that
+ *   produced it. A row legitimately sits at `state = 'project_created'`
+ *   with `remote_project_id` set and `remote_deployment_id` still `NULL` —
+ *   the intended recoverable shape, since the created remote object is now
+ *   on record and never has to be guessed at or double-created.
+ * - **`previous_active_deployment_id text`** is written once, as a NEW
+ *   deployment is about to take over from a currently-active one, and read
+ *   by the rollback path (`state = 'rollback_pending'`). A plain column,
+ *   not derived from `module_install_events`, so a rollback never replays
+ *   history to find its target.
+ * - **Retry bookkeeping**: `attempt integer NOT NULL DEFAULT 0`,
+ *   `last_error_class text`, `next_retry_at timestamptz` — the same triad
+ *   `queue_jobs` (migration 013) carries. `last_error_class` is a
+ *   CLASS/CODE, never a raw message: an adapter error touching this
+ *   credential must be classified before it reaches storage, in case the
+ *   underlying Vercel error string echoes request details back.
+ * - **`state`**: `planned` → `credentials_issued` → `project_created` →
+ *   `artifact_uploaded` → `deployment_created` → `build_pending` →
+ *   (`build_failed` | `bootstrap_pending`) → `endpoint_verified` →
+ *   `active` is the happy path. No build step ever runs on module code, so
+ *   `build_pending`/`build_failed` describe VERCEL processing an
+ *   already-prebuilt artifact, never a build the engine triggers.
+ *   `bootstrap_pending` → `endpoint_verified` is the candidate-then-cutover
+ *   gate: a deployed module proves possession of its webhook endpoint via a
+ *   signed challenge BEFORE `active` routes traffic to it, so a module that
+ *   never proves possession never leaves `bootstrap_pending`. Failure and
+ *   recovery branches: `verification_failed` (reachable only on this NEW
+ *   install — nothing here touches whatever is currently `active` for the
+ *   domain), `rollback_pending` (restores via
+ *   `previous_active_deployment_id`), `cleanup_required` (remote resources
+ *   needing teardown), and `abandoned` (terminal give-up).
  *
  * ## `module_install_events` — append-only, never mutated
  *
- * One row per transition, `from_state` NULLABLE (the creation event has no
- * prior state) and `to_state` NOT NULL. This migration does not — and
- * cannot — forbid an `UPDATE`/`DELETE` at the SQL level (Postgres has no
- * "insert-only table" primitive short of revoking those privileges from
- * the app's own role, which would also break every other table's ordinary
- * UPDATE paths if the app connects as one role for everything); the
- * append-only contract is enforced by `src/store/module-installs.ts` simply
- * never exposing an update/delete method for this table, matching how
- * `_migrations` (migrate.ts, no update path either) already relies on
- * "nothing in this codebase writes it any other way" rather than a
- * database-level write-once constraint. `actor_agent_id uuid REFERENCES
- * agents(id) ON DELETE SET NULL` — unlike `vercel_connections
- * .connected_by_agent_id`, an audit-log attribution is allowed to go
- * anonymous ("actor unknown, agent since removed") without invalidating the
- * row it is attached to; the event itself (`from_state`, `to_state`, `at`,
- * `detail`) remains meaningful with no actor at all, so `SET NULL` (not
- * `RESTRICT`) is correct here. `detail jsonb NOT NULL DEFAULT '{}'::jsonb`
- * carries whatever the transition needs to record (a Vercel deployment id,
- * an error class, a challenge nonce) without a schema change per new field
- * — mirroring `queue_jobs`' own use of a JSON payload column for
- * heterogeneous per-row detail.
+ * One row per transition: `from_state` NULLABLE (the creation event has no
+ * prior state), `to_state` NOT NULL. Postgres has no insert-only-table
+ * primitive short of revoking UPDATE/DELETE from the app's role, which
+ * would break every other table, so the append-only contract is enforced by
+ * `src/store/module-installs.ts` never exposing an update or delete method
+ * — the same way `_migrations` relies on nothing writing it another way.
+ *
+ * `actor_agent_id uuid REFERENCES agents(id) ON DELETE SET NULL` — unlike
+ * `vercel_connections.connected_by_agent_id`, an audit attribution may go
+ * anonymous without invalidating its row: the event (`from_state`,
+ * `to_state`, `at`, `detail`) stays meaningful with no actor. `detail jsonb
+ * NOT NULL DEFAULT '{}'::jsonb` carries per-transition detail (a deployment
+ * id, an error class, a challenge nonce) without a schema change per field.
  *
  * ## RLS, per migration 027's standing rule
  *
- * All three tables `ENABLE ROW LEVEL SECURITY` here, for the identical
- * reason migration 028's doc comment gives: they are created AFTER 027
- * runs, so 027's blanket lockdown cannot cover them, and
+ * All three tables `ENABLE ROW LEVEL SECURITY` here: they are created AFTER
+ * 027 runs, so its blanket lockdown cannot cover them, and
  * `vercel_connections.token_ciphertext` is exactly the kind of column that
  * must never be reachable through the PostgREST Data API.
  */

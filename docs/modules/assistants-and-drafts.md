@@ -156,12 +156,11 @@ looked at anything.
 
 ## The Agent approval flow
 
-Everything past this point is an **Agent** action — the core Helpthread
-inbox UI does this for a human clicking "approve" or "discard," and it
-consumes exactly the same API, so these are also the calls a module author
-would use to build their own review tooling or to understand what the UI is
-doing. All three require `Authorization: Bearer $HELPTHREAD_API_TOKEN` +
-`X-Helpthread-Agent-Id: <acting Agent's uuid>` — missing either is `401`.
+Everything past this point is an **Agent** action. The core inbox UI does this for a
+human clicking "approve" or "discard" and consumes exactly the same API, so these are
+also the calls to build your own review tooling against. All three require
+`Authorization: Bearer $HELPTHREAD_API_TOKEN` + `X-Helpthread-Agent-Id: <acting Agent's
+uuid>` — missing either is `401`.
 
 **List the review queue** (every conversation's drafts, across the whole
 deployment, newest first):
@@ -193,19 +192,16 @@ curl -X POST "$BASE_URL/api/v1/drafts/$THREAD_ID/approve" \
   -d '{"bodyText": "Edited reply text..."}'
 ```
 
-Approval is a state transition, not a resend: it mints the reply's
-threading token and Message-ID, derives the envelope (recipient, subject,
-`In-Reply-To`/`References`) exactly the way a normal Agent reply does, and
-hands off to the same delivery worker — the mail that goes out is
-equivalent to what a human typing the same body and hitting reply would
-send. Fires `draft.resolved` immediately (`{ threadId, resolution:
-'approved', edited }`), and `conversation.reply_sent` once delivery actually
-confirms `sent` (not at accept-for-send time — modules reacting to "we
-replied" get truth, not intent).
+Approval is a state transition, not a resend: it mints the reply's threading token and
+Message-ID, derives the envelope (recipient, subject, `In-Reply-To`/`References`) exactly
+as a normal Agent reply does, and hands off to the same delivery worker. Fires
+`draft.resolved` immediately (`{ threadId, resolution: 'approved', edited }`), and
+`conversation.reply_sent` only once delivery confirms `sent` — not at accept-for-send time,
+so modules reacting to "we replied" get truth, not intent.
 
-Refused `404` (indistinguishable-from-nonexistent) if the conversation is
-missing/soft-deleted or `$THREAD_ID` doesn't name a draft currently
-`awaiting_review`; refused `409 conflict` if the conversation is `spam`.
+Refused `404` (indistinguishable-from-nonexistent) if the conversation is missing or
+soft-deleted, or `$THREAD_ID` doesn't name a draft currently `awaiting_review`; refused
+`409 conflict` if the conversation is `spam`.
 
 **Discard** (no send, row kept for audit):
 

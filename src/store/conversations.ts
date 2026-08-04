@@ -1,143 +1,119 @@
 /**
  * `ConversationStore` — persistence for conversations and their threads.
  *
- * A conversation has many threads; a thread is exactly ONE message
- * (inbound customer mail, or outbound agent/assistant mail). This is the
- * layer the inbound threading decision (`src/mail/thread.ts`,
- * `decideThreading`) lands on: a `{ kind: 'new' }` decision becomes a
- * {@link createConversation} call, a `{ kind: 'append', conversationId,
- * threadId }` decision becomes an {@link appendThread} call. The
- * `conversationId`/`threadId` pair minted here for a NEW conversation's
- * first outbound reply is exactly what later gets signed into that
- * reply's outbound `Message-ID` via `mintReplyMessageId`
+ * A conversation has many threads; a thread is exactly ONE message (inbound
+ * customer mail, or outbound agent/assistant mail). This is the layer the
+ * inbound threading decision (`src/mail/thread.ts`, `decideThreading`) lands
+ * on: `{ kind: 'new' }` becomes a {@link createConversation} call,
+ * `{ kind: 'append', conversationId, threadId }` becomes an {@link
+ * appendThread} call. The `conversationId`/`threadId` pair minted here for a
+ * new conversation's first outbound reply is exactly what later gets signed
+ * into that reply's `Message-ID` via `mintReplyMessageId`
  * (`src/mail/reply-token.ts`) — this module is the source of the ids that
  * token embeds, not the other way around.
  *
- * **Threading decisions still live in `src/mail/thread.ts`.** This module
- * does not decide *which* conversation a message belongs to — it only
- * persists the decision it's handed, and enforces what happens at the
- * storage layer when that target conversation is closed, deleted, or
- * missing. Keeping that line sharp matters: `decideThreading` is a pure
+ * **Threading decisions still live in `src/mail/thread.ts`.** This module does
+ * not decide *which* conversation a message belongs to — it persists the
+ * decision it is handed and enforces what happens at the storage layer when
+ * that target is closed, deleted, or missing. `decideThreading` is a pure
  * function with no I/O (specs/mail/threading.md §3) precisely so it stays
- * fixture-testable in isolation; this module is where the I/O — and the
- * storage-side policy below — actually happens.
+ * fixture-testable in isolation; this module is where the I/O and the
+ * storage-side policy happen.
  *
  * ## Resolving specs/mail/threading.md §5's open questions
  *
- * §5 left three related questions open pending an implementation to
- * resolve them. This module is that implementation, and the behavior
- * below is the resolution:
- *
- * - **A valid token to a CLOSED (or SPAM) conversation** → {@link appendThread}
- *   inserts the thread AND reopens the conversation (`status` to
- *   `'active'` — HT-26's four-state model; spec §4a). This is the Help
- *   Scout-like behavior the charter holds itself to (CHARTER.md §1): a
- *   customer replying to a resolved ticket should not silently fall on the
- *   floor or spawn a confusing duplicate — it reopens the same
- *   conversation, matching what an agent would expect to see. A `pending`
- *   conversation deliberately STAYS `pending` on append: `pending` is an
- *   Agent statement (spec §2's status semantics — "nothing sets it
- *   automatically in v1"), and silently flipping it on new mail would be
- *   exactly such an automatic set.
- * - **A valid token to a DELETED conversation** → {@link appendThread}
- *   inserts NOTHING and returns `{ ok: false, reason: 'deleted' }`. Unlike
- *   the closed case, a deleted conversation is not a live target to reopen
- *   — the caller (the mail-ingestion pipeline, not yet built) is expected
- *   to fall back to starting a fresh conversation for the message rather
- *   than resurrecting a deleted one, so the token's orphaned target is
- *   never silently dropped (CHARTER.md invariant #1: never lose or corrupt
- *   customer mail) but also never writes into a conversation an operator
- *   intentionally removed.
- * - **A valid token whose conversation doesn't exist at all** (never
- *   observed in practice — a token only exists if `createConversation`
- *   minted the ids it carries — but not something this layer can assume
- *   away, since inputs here are only as trustworthy as whatever called
- *   in) → {@link appendThread} returns `{ ok: false, reason: 'not-found' }`,
- *   the same "don't crash, don't silently drop, tell the caller" shape as
- *   the deleted case.
+ * - **A valid token to a CLOSED (or SPAM) conversation** → {@link
+ *   appendThread} inserts the thread AND reopens the conversation (`status`
+ *   to `'active'`; spec §4a). Per CHARTER.md §1, a customer replying to a
+ *   resolved ticket must not fall on the floor or spawn a duplicate. A
+ *   `pending` conversation deliberately STAYS `pending`: `pending` is an
+ *   Agent statement (spec §2 — "nothing sets it automatically in v1"), and
+ *   flipping it on new mail would be exactly such an automatic set.
+ * - **A valid token to a DELETED conversation** → inserts NOTHING and returns
+ *   `{ ok: false, reason: 'deleted' }`. Unlike the closed case there is no
+ *   live target to reopen; the ingest pipeline falls back to a fresh
+ *   conversation, so the mail is never dropped (CHARTER.md invariant #1) but
+ *   also never written into a conversation an operator intentionally removed.
+ * - **A valid token whose conversation doesn't exist at all** — never observed
+ *   in practice, since a token only exists if `createConversation` minted the
+ *   ids it carries, but not assumable away, since inputs here are only as
+ *   trustworthy as the caller → returns `{ ok: false, reason: 'not-found' }`,
+ *   the same "don't crash, don't silently drop, tell the caller" shape.
  *
  * All three are enforced inside a single transaction per {@link appendThread}
  * call — see its doc comment for the concurrency reasoning.
  *
- * ## Send idempotency + delivery leasing (HT-16)
+ * ## Send idempotency + delivery leasing
  *
- * Migration 003 adds three outbound-only columns this module now exposes:
- * `idempotency_key`, `send_envelope`, and `claimed_until` (see the migration's
- * doc comment, `src/db/migrate.ts`, for the full schema-level rationale).
- * {@link appendThread} implements the "atomic get-or-insert" a caller-supplied
+ * Migration 003 adds three outbound-only columns this module exposes:
+ * `idempotency_key`, `send_envelope`, and `claimed_until` (see that
+ * migration's doc comment in `src/db/migrate.ts` for the schema rationale).
+ * {@link appendThread} implements the atomic get-or-insert a caller-supplied
  * idempotency key needs: `INSERT ... ON CONFLICT (conversation_id,
- * idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING
- * *`, falling back to a `SELECT` of the pre-existing row when the insert is
- * skipped — both inside the SAME transaction that already takes the `FOR
- * UPDATE` lock on the conversation row, so a concurrent retry with the same
- * key is fully serialized against the original attempt rather than racing
- * it. {@link AppendResult}'s `created` flag tells the caller (`src/mail/
- * send.ts`) which case happened: `true` for a fresh insert (no key, or a key
- * never seen before), `false` when an existing row was found instead — at
- * which point `thread` carries that row's ALREADY-PERSISTED `messageId` and
- * `sendEnvelope`, which a retry must reuse verbatim rather than re-minting or
- * recomputing (see migration 003's doc comment on why the envelope is a
- * snapshot).
+ * idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *`,
+ * falling back to a `SELECT` when the insert is skipped — both inside the SAME
+ * transaction that already holds the conversation row's `FOR UPDATE` lock, so
+ * a concurrent retry with the same key is serialized rather than racing.
  *
- * {@link ConversationStore.claimThreadForDelivery} and
- * {@link ConversationStore.releaseThreadLease} are the lease pair a keyed
- * retry or the delivery worker (`src/mail/delivery-worker.ts`) uses to make
- * sure at most one in-flight attempt is ever sending a given outbound thread
- * at a time — see their own doc comments below.
+ * {@link AppendResult}'s `created` flag tells the caller (`src/mail/send.ts`)
+ * which case happened: `true` for a fresh insert (no key, or a key never seen
+ * before), `false` when an existing row was found — at which point `thread`
+ * carries that row's ALREADY-PERSISTED `messageId` and `sendEnvelope`, which a
+ * retry must reuse verbatim rather than re-minting or recomputing.
  *
- * ## Transaction-scoped cores (HT-37)
+ * {@link ConversationStore.claimThreadForDelivery} and {@link
+ * ConversationStore.releaseThreadLease} are the lease pair a keyed retry or
+ * the delivery worker (`src/mail/delivery-worker.ts`) uses so at most one
+ * in-flight attempt is ever sending a given outbound thread.
+ *
+ * ## Transaction-scoped cores
  *
  * {@link createConversationInTx} and {@link appendThreadInTx} are the bodies
- * of {@link ConversationStore.createConversation}/{@link
- * ConversationStore.appendThread}, factored out to accept an
+ * of the corresponding `ConversationStore` methods, factored out to accept an
  * externally-supplied `tx: Queryable` instead of opening their own
- * `db.transaction(...)`. Both `ConversationStore` methods are now thin
- * wrappers around them (`db.transaction((tx) => createConversationInTx(tx,
- * input))`), so their behavior is unchanged. They are exported so a caller
- * that must commit this write atomically alongside a DIFFERENT store's write
- * — the inbound ingest pipeline's store-write + delivery-ledger `received →
- * stored` transition, specs/mail/inbound-ingestion.md §4 — can run both
- * inside ONE transaction it opens itself (`src/mail/ingest.ts`), rather than
- * this store committing independently. See that module's doc comment for why
- * this composition is otherwise impossible: a transaction opened by one
- * `db.transaction` call cannot be joined by a second, separate call.
+ * `db.transaction(...)`. The public methods are thin wrappers, so behavior is
+ * unchanged. They are exported so a caller that must commit this write
+ * atomically alongside a DIFFERENT store's write — the ingest pipeline's
+ * store-write + delivery-ledger `received → stored` transition
+ * (inbound-ingestion.md §4) — can run both inside ONE transaction it opens
+ * itself (`src/mail/ingest.ts`). A transaction opened by one `db.transaction`
+ * call cannot be joined by a second, separate call, which is why this
+ * composition is otherwise impossible.
  *
- * ## The actor model + draft lifecycle (HT-68; specs/plugins/substrate-v1.md
- * §2, migration 021 — "module" below means an out-of-process Helpthread
- * extension, never the legal "plugin exception" phrase CHARTER.md §7 uses)
+ * ## The actor model + draft lifecycle
  *
- * Every thread now carries `author_kind` (`'customer'|'agent'|'assistant'`)
- * plus nullable author identity. {@link insertThread} DERIVES it from
- * `direction` when the caller doesn't supply one explicitly — `inbound` →
- * `'customer'`, `outbound`/`note` → `'agent'` — the same "coerce a sensible
- * default, let an explicit value override it" shape `deliveryStatus` already
- * used before this change. This is why every EXISTING caller
- * (`src/mail/ingest.ts`, `src/mail/send.ts`, `src/api/conversations.ts`'s
- * notes handler) compiles and behaves correctly with zero edits: none of
- * them author assistant rows, so the default derivation is always right for
- * them. Only the NEW draft path ({@link ConversationStore.appendDraft})
- * passes `authorKind: 'assistant'` explicitly.
+ * (specs/modules/substrate-v1.md §2, migration 021. "Module" here means an
+ * out-of-process Helpthread extension, never the legal "plugin exception"
+ * phrase CHARTER.md §7 uses.)
+ *
+ * Every thread carries `author_kind` (`'customer'|'agent'|'assistant'`) plus
+ * nullable author identity. {@link insertThread} DERIVES it from `direction`
+ * when the caller supplies none — `inbound` → `'customer'`, `outbound`/`note`
+ * → `'agent'` — the same "coerce a sensible default, let an explicit value
+ * override" shape `deliveryStatus` already used. This is why every existing
+ * caller (`src/mail/ingest.ts`, `src/mail/send.ts`, `src/api/conversations.ts`'s
+ * notes handler) works with zero edits: none author assistant rows. Only
+ * {@link ConversationStore.appendDraft} passes `authorKind: 'assistant'`
+ * explicitly.
  *
  * A draft is an outbound thread with `draft_status = 'awaiting_review'` — no
  * `send_envelope`, no `message_id`, and critically `delivery_status = NULL`
- * (spec §2's CHECK: an unapproved draft must be structurally invisible to
- * the delivery worker). {@link insertThread}'s existing `deliveryStatus ??
- * 'pending'` outbound coercion is made draft-aware: an insert carrying
- * `draftStatus: 'awaiting_review'` (the only draft-status value ever
- * INSERTed fresh — `'approved'`/`'discarded'` only ever arrive via {@link
- * ConversationStore.resolveDraft}'s UPDATE, never a fresh row) skips the
- * `'pending'` coercion and leaves `delivery_status NULL`, exactly as spec §2
- * requires ("today it would silently arm a draft for delivery").
+ * (spec §2's CHECK: an unapproved draft must be structurally invisible to the
+ * delivery worker). {@link insertThread}'s `deliveryStatus ?? 'pending'`
+ * outbound coercion is draft-aware: an insert carrying `draftStatus:
+ * 'awaiting_review'` — the only draft-status value ever INSERTed fresh, since
+ * `'approved'`/`'discarded'` arrive only via {@link
+ * ConversationStore.resolveDraft}'s UPDATE — skips the coercion and leaves
+ * `delivery_status NULL`, so a draft is never silently armed for delivery.
  *
- * {@link ConversationStore.appendDraft} reuses {@link appendThreadInTx} —
- * same not-found/deleted policy, same `FOR UPDATE` lock, same idempotency-
- * key get-or-insert — but {@link appendThreadInTx} gains an explicit
- * carve-out: a draft insert (`thread.draftStatus !== undefined`) causes NO
- * reopen and NO `updated_at` bump, stronger than even a note (spec §6: "an
- * assistant call can never directly cause outbound mail," and posting a
- * draft is not activity the way a note or a real reply is — approval is).
- * Every OTHER row's reopen/bump behavior is byte-identical to before this
- * change; only the new carve-out branch is added.
+ * {@link ConversationStore.appendDraft} reuses {@link appendThreadInTx} — same
+ * not-found/deleted policy, same `FOR UPDATE` lock, same idempotency-key
+ * get-or-insert — with one explicit carve-out: a draft insert
+ * (`thread.draftStatus !== undefined`) causes NO reopen and NO `updated_at`
+ * bump, stronger than even a note (spec §6: "an assistant call can never
+ * directly cause outbound mail"; posting a draft is not activity the way a
+ * note or a real reply is — approval is). Every other row's reopen/bump
+ * behavior is byte-identical to before.
  */
 
 import type { Db, Queryable, SqlValue } from '../db/client.js'
