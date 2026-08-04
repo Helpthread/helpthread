@@ -894,13 +894,20 @@ describe('createModuleInstallHandler', () => {
     const assistantsAfterFirstAttempt = await fixtures.assistants.list()
     expect(assistantsAfterFirstAttempt[0].status).toBe('active')
 
-    // The lease is still held under `cleanup_pending`'s own token (only a
-    // FULLY completed cleanup releases it — see `finalizeCleanup`'s doc);
-    // simulate it naturally lapsing rather than waiting out the real TTL.
-    await fixtures.db.query(
-      `UPDATE module_installs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`,
-      [install.id],
-    )
+    // The lease must ALREADY be free: a cleanup that failed released it on
+    // the way out. Rewinding `lease_expires_at` by hand here would hide the
+    // very defect this asserts — a still-held lease makes every redelivery
+    // lose `claim` and burn the queue's attempt budget waiting, and with a
+    // low `maxAttempts` the job dead-letters leaving a live Assistant token
+    // behind. So assert the row is genuinely claimable, with no help.
+    const reclaimed = await fixtures.installs.claim(install.id, 300)
+    expect(reclaimed.ok).toBe(true)
+    // Hand it straight back: claiming re-mints the token, so holding it
+    // here would starve the redelivery below of the very lease this just
+    // proved was free.
+    if (reclaimed.ok) {
+      await fixtures.installs.release(install.id, reclaimed.install.leaseToken)
+    }
 
     // A later delivery retries the SAME cleanup — this time it succeeds —
     // and only THEN reaches the real terminal state.
@@ -1235,5 +1242,11 @@ describe('createModuleInstallHandler', () => {
     // for the remainder of the TTL.
     const reclaimed = await fixtures.installs.claim(install.id, 300)
     expect(reclaimed.ok).toBe(true)
+    // Hand it straight back: claiming re-mints the token, so holding it
+    // here would starve the redelivery below of the very lease this just
+    // proved was free.
+    if (reclaimed.ok) {
+      await fixtures.installs.release(install.id, reclaimed.install.leaseToken)
+    }
   })
 })

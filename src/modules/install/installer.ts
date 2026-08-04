@@ -655,6 +655,17 @@ async function finalizeCleanup(
     await revokeIssuedCredentials(deps, install.id)
     await disableRecordedEndpoint(deps, install.id)
   } catch {
+    // Release before retrying. The handler's outer `finally` releases with
+    // the token it read at entry, which the `cleanup_pending` transition
+    // has already rotated away — so without this the lease stays held for
+    // its full TTL. Every redelivery in that window is refused by `claim`
+    // and returns retry, spending the queue's attempt budget on waiting
+    // rather than on cleanup. With a low `maxAttempts` the job dead-letters
+    // and the install strands at `cleanup_pending` holding a live Assistant
+    // token — precisely the state this retryable-cleanup path exists to
+    // prevent. `install` is the post-transition record on both call paths,
+    // so this token is the current one.
+    await deps.installs.release(install.id, install.leaseToken).catch(() => {})
     return { kind: 'retry', backoffSeconds: backoffSeconds(install.attempt) }
   }
 
