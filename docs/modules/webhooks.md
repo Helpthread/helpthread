@@ -245,22 +245,8 @@ if (!result.valid) {
 const event = JSON.parse(rawBody)
 ```
 
-Reject a stale `t` (the 5-minute default above matches the spec's
-recommendation) to close a replay window — an attacker who captures one
-valid delivery cannot resend it indefinitely.
-
-> **Verified, not just written.** This exact function was checked before
-> landing in this doc, and re-checked after the hex-validation fix above:
-> (1) signed with the engine's own `signWebhookPayload`
-> (`src/webhooks/delivery.ts`) and verified successfully by this function,
-> byte-for-byte, with a real HMAC computed both ways; (2) cross-checked
-> against the independent verifier in `module-draft-assistant/src/verify.ts`
-> (the reference module referenced throughout this guide) — both verifiers
-> agree on the same signed payload; (3) correctly rejects a wrong secret, a
-> tampered body, a stale timestamp, and a signature with trailing non-hex
-> garbage appended after a valid-length prefix (`Buffer.from(str, 'hex')`
-> otherwise silently truncates instead of rejecting it). The throwaway
-> script that ran these checks exited `0`.
+Reject a stale `t` — the 5-minute default above — to close a replay window: an
+attacker who captures one valid delivery cannot resend it indefinitely.
 
 ## Delivery guarantees
 
