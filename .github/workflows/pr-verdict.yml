@@ -95,16 +95,17 @@ jobs:
           #     "## Decision provenance" table satisfied the provenance requirement,
           #     so quoting the rule counted as following it.
           # Every check below reads BODY_CLEAN, never the raw body.
-          BODY_CLEAN=$(python3 - <<'PYEOF'
-import os, re
-b = os.environ.get("BODY") or ""
-b = re.sub(r"<!--.*?-->", "", b, flags=re.S)   # HTML comments
-b = re.sub(r"^```.*?^```", "", b, flags=re.S|re.M)  # fenced blocks
-b = re.sub(r"^~~~.*?^~~~", "", b, flags=re.S|re.M)
-print(b)
-PYEOF
-)
-          BODY="$BODY_CLEAN"
+          # Strip the two things that look like content to a regex and like nothing
+          # to a human, BEFORE any check reads the body:
+          #   - HTML comments: `<!-- 🟢 SAFE TO MERGE -->` as the first line satisfied
+          #     the verdict and bot-line checks while rendering invisible. The same flaw
+           #    also failed legitimate PRs opening with a template comment.
+          #   - Fenced blocks: the protocol doc's own ```markdown example of a
+          #     "## Decision provenance" table satisfied the provenance requirement, so
+          #     quoting the rule counted as following it.
+          BODY=$(printf '%s\n' "$BODY" \
+            | perl -0777 -pe 's/<!--.*?-->//gs' \
+            | awk '/^[[:space:]]*(```|~~~)/ { f = !f; next } !f')
 
           # 1. A verdict marker, one of exactly three, on the FIRST non-empty line.
           #    Matching anywhere would let a PR bury the verdict under arbitrary prose —
