@@ -93,7 +93,8 @@
  *
  * ## Never resurrect a disconnected mailbox's token row
  *
- * One race IS worth guarding, unlike the harmless one above: a refresh
+ * A second race is worth guarding outright, and unlike the one above it has
+ * no benign reading at all: a refresh
  * already in flight when `src/mail/gmail-disconnect.ts`'s `disconnect()`
  * commits — marking the mailbox `disconnected` and deleting the token and
  * watch-state rows — must not then persist its own freshly-fetched token,

@@ -2,9 +2,9 @@
  * Gmail OAuth connect/consent flow (specs/mail/gmail-connect.md) — the
  * write-side gmail-push.md deliberately stubbed. Runs Google's OAuth2
  * authorization-code flow to obtain a mailbox's first refresh token,
- * persists it encrypted at rest, arms the initial `users.watch()`, and seeds
- * the baseline `gmail_watch_state` cursor the reconcile consumer
- * (gmail-push.md §3) reads. Lives in `src/mail/` as Gmail-specific
+ * persists it encrypted at rest, arms the initial `users.watch()` when push
+ * is configured (step 4), and seeds the baseline `gmail_watch_state` cursor
+ * the reconcile consumer (gmail-push.md §3) reads. Lives in `src/mail/` as Gmail-specific
  * orchestration, like `./gmail-oauth.ts` and `./gmail-reconcile.ts` beside
  * it — not under `src/providers/adapters/gmail/`, which holds only thin,
  * single-purpose HTTP adapters (this module composes THREE: the OAuth token
@@ -76,8 +76,9 @@
  *    than colliding with `mailboxes`' `UNIQUE(address)`), {@link
  *    MailboxTokenStore.upsertTokens} (the refresh token encrypted at rest —
  *    this module NEVER writes a token to the database itself), and {@link
- *    GmailWatchStateStore.seedBaseline} (both `history_id` AND
- *    `watch_expiration`, from the SAME `watch()` response). All three run in
+ *    GmailWatchStateStore.seedBaseline} (`history_id`, plus
+ *    `watch_expiration` from the SAME `watch()` response when one was armed).
+ *    All three run in
  *    ONE `db.transaction`: a mid-persist failure rolls back rather than
  *    leaving a PARTIAL connect — e.g. an `active` mailbox with no cursor,
  *    which would silently no-op every push the already-armed `watch()`
@@ -88,7 +89,8 @@
  * every step-5 write is an upsert keyed by the resolved mailbox, so a
  * reconnect — an operator re-consenting a `needs_reconnect`/`paused` mailbox,
  * or simply retrying — reactivates the row, replaces the stored tokens,
- * re-arms `watch()`, and REBASELINES the cursor to the fresh `historyId`.
+ * re-arms `watch()` if push is configured, and REBASELINES the cursor to the
+ * fresh `historyId`.
  * Never a second mailbox row for the same address.
  *
  * ## Typed errors: what the API layer can safely show an operator
