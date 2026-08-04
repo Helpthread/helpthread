@@ -1,0 +1,17 @@
+{
+  "name": "helpthread-module",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "description": "Install and offline-verify Helpthread module release artifacts.",
+  "bin": {
+    "helpthread-module": "./bin/helpthread-module.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "tsx": "^4.23.1"
+  }
+}
