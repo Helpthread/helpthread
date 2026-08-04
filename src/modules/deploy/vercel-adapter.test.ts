@@ -401,6 +401,31 @@ describe('createVercelDeployProvider — full lifecycle against a mocked API', (
     expect(headers['x-vercel-digest']).toBe(expectedSha)
   })
 
+  it('prefixes https:// onto a deployment url even when the bare hostname itself starts with the literal string "http" — a prefix check would wrongly treat this hostname as already schemed', async () => {
+    const { fetchImpl } = mockFetch([
+      // A perfectly ordinary Vercel-generated hostname for a project named
+      // "httping-service" — starts with 'http' as a STRING, but carries no
+      // scheme at all.
+      jsonResponse({ id: 'dpl_2', url: 'httping-service-abcd.vercel.app' }), // createDeployment
+      jsonResponse({ readyState: 'BUILDING', url: 'httping-service-abcd.vercel.app' }), // getDeploymentState
+    ])
+    const provider = createVercelDeployProvider(baseConfig(fetchImpl))
+
+    const deployment = await provider.createDeployment({
+      teamId: TEAM_ID,
+      projectId: 'prj_2',
+      uploadId: Buffer.from('[]', 'utf8').toString('base64url'),
+      target: 'production',
+    })
+    expect(deployment.url).toBe('https://httping-service-abcd.vercel.app')
+
+    const state = await provider.getDeploymentState({
+      teamId: TEAM_ID,
+      deploymentId: deployment.deploymentId,
+    })
+    expect(state.url).toBe('https://httping-service-abcd.vercel.app')
+  })
+
   it('refuses to deploy an artifact carrying its own build settings before any network call is made', async () => {
     const { fetchImpl } = mockFetch([])
     const provider = createVercelDeployProvider(baseConfig(fetchImpl))
@@ -487,6 +512,38 @@ describe('local-manual DeployProvider — proves the interface is vendor-neutral
         teamId: TEAM_ID,
         projectId: project.projectId,
         files: [{ path: '../../etc/passwd', data: Buffer.from('pwned') }],
+      }),
+    ).rejects.toThrow()
+  })
+
+  it('refuses an env var VALUE containing a newline rather than writing a second, injected line into .env.local', async () => {
+    const provider = createLocalManualDeployProvider(TEAM_ID, { outputDir })
+    const project = await provider.createProject({ teamId: TEAM_ID, name: 'ht-module-envval' })
+
+    await expect(
+      provider.setEnvVars({
+        teamId: TEAM_ID,
+        projectId: project.projectId,
+        vars: [{ key: 'FOO', value: 'bar\nINJECTED_VAR=evil', sensitive: false }],
+      }),
+    ).rejects.toThrow()
+
+    // No .env.local was ever written — a rejected write never leaves a
+    // partial/injected file behind.
+    await expect(
+      readFile(path.join(outputDir, project.projectId, '.env.local'), 'utf8'),
+    ).rejects.toThrow()
+  })
+
+  it('refuses an env var KEY containing a newline for the same reason', async () => {
+    const provider = createLocalManualDeployProvider(TEAM_ID, { outputDir })
+    const project = await provider.createProject({ teamId: TEAM_ID, name: 'ht-module-envkey' })
+
+    await expect(
+      provider.setEnvVars({
+        teamId: TEAM_ID,
+        projectId: project.projectId,
+        vars: [{ key: 'FOO\nINJECTED_VAR', value: 'bar', sensitive: false }],
       }),
     ).rejects.toThrow()
   })

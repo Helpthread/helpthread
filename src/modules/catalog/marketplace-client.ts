@@ -179,6 +179,7 @@ export interface DownloadArtifactFailure {
   code:
     | 'network-error'
     | 'http-error'
+    | 'invalid-response'
     | 'module-not-found'
     | 'version-not-found'
     | 'served-version-mismatch'
@@ -195,6 +196,22 @@ export interface DownloadArtifactFailure {
 export type DownloadArtifactResult = DownloadArtifactOk | DownloadArtifactFailure
 
 // --- safe outbound transport (SSRF-pinned, size-capped) ---------------------
+
+/**
+ * Thrown by {@link defaultSafeFetch} ONLY when a response body actually
+ * exceeds its caller-supplied `maxBytes` cap. A dedicated class (rather
+ * than a plain `Error`, indistinguishable by message-sniffing from an SSRF
+ * refusal, a DNS failure, or any other transport error) is what lets
+ * {@link downloadVerifiedArtifact} report the REAL failure code —
+ * `size-cap-exceeded` only for this, `network-error` for everything else —
+ * instead of collapsing every `fetchImpl` throw into one hardcoded code.
+ */
+export class ResponseSizeCapExceededError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ResponseSizeCapExceededError'
+  }
+}
 
 /** One HTTP response as this module's internal transport returns it — status plus the FULL body already buffered under the cap, never a stream a caller could read past it. */
 interface SafeHttpResponse {
@@ -273,7 +290,11 @@ async function defaultSafeFetch(
           received += chunk.length
           if (received > maxBytes) {
             res.destroy()
-            reject(new Error(`marketplace response exceeds the ${maxBytes}-byte cap`))
+            reject(
+              new ResponseSizeCapExceededError(
+                `marketplace response exceeds the ${maxBytes}-byte cap`,
+              ),
+            )
             return
           }
           chunks.push(chunk)
@@ -378,7 +399,10 @@ async function requestDownloadUrl(
   licenseKey: string,
   slug: string,
   version: string,
-): Promise<{ ok: true; response: DownloadResponse } | { ok: false; message: string }> {
+): Promise<
+  | { ok: true; response: DownloadResponse }
+  | { ok: false; code: 'network-error' | 'http-error'; message: string }
+> {
   let res: SafeHttpResponse
   try {
     res = await fetchImpl(
@@ -394,8 +418,15 @@ async function requestDownloadUrl(
     // Network-layer failures (DNS, TCP, TLS, the cap in `defaultSafeFetch`)
     // never carry server-supplied text — `err.message` here is either
     // Node's own transport error or this module's own cap message, neither
-    // of which can contain the license key.
-    return { ok: false, message: err instanceof Error ? err.message : String(err) }
+    // of which can contain the license key. Tagged `network-error` — never
+    // the same code the caller uses for a real HTTP response — so the
+    // caller can propagate which of the two actually happened instead of
+    // collapsing both into one code.
+    return {
+      ok: false,
+      code: 'network-error',
+      message: err instanceof Error ? err.message : String(err),
+    }
   }
   if (res.status < 200 || res.status >= 300) {
     let detail = `HTTP ${res.status}`
@@ -409,12 +440,12 @@ async function requestDownloadUrl(
       // Non-JSON error body — fall back to the bare status, still never
       // the raw body text.
     }
-    return { ok: false, message: detail }
+    return { ok: false, code: 'http-error', message: detail }
   }
   try {
     return { ok: true, response: JSON.parse(res.body.toString('utf8')) as DownloadResponse }
   } catch {
-    return { ok: false, message: 'download response is not valid JSON' }
+    return { ok: false, code: 'http-error', message: 'download response is not valid JSON' }
   }
 }
 
@@ -450,6 +481,20 @@ export async function downloadVerifiedArtifact(
   if (!catalogModule) {
     return { ok: false, code: 'module-not-found', message: `no catalog module with slug '${slug}'` }
   }
+  // `fetchFeed` only confirms the top-level `{modules: [...]}` shape (its
+  // own doc) — a single malformed element (`versions` missing, or not an
+  // array) is still possible here. Guarded explicitly rather than trusting
+  // the `CatalogFeed` cast: an unguarded `.find` below would THROW on such
+  // an element, breaking this function's own typed-result contract for
+  // every caller that (correctly, per that contract) checks `.ok` instead
+  // of wrapping the call in `try`/`catch`.
+  if (!Array.isArray(catalogModule.versions)) {
+    return {
+      ok: false,
+      code: 'invalid-response',
+      message: `catalog module '${slug}' has a malformed 'versions' field`,
+    }
+  }
   const catalogVersion = catalogModule.versions.find((v) => v.version === version)
   if (!catalogVersion) {
     return {
@@ -468,7 +513,7 @@ export async function downloadVerifiedArtifact(
   if (!downloadResult.ok) {
     return {
       ok: false,
-      code: 'http-error',
+      code: downloadResult.code,
       message: `download request failed: ${downloadResult.message}`,
     }
   }
@@ -493,7 +538,7 @@ export async function downloadVerifiedArtifact(
   } catch (err) {
     return {
       ok: false,
-      code: 'size-cap-exceeded',
+      code: err instanceof ResponseSizeCapExceededError ? 'size-cap-exceeded' : 'network-error',
       message: `artifact download failed: ${err instanceof Error ? err.message : String(err)}`,
     }
   }

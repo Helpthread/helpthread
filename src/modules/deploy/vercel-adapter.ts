@@ -452,6 +452,23 @@ function mapReadyState(raw: string): DeploymentState {
   return mapped
 }
 
+/**
+ * Vercel's own API returns a deployment `url` as a bare hostname
+ * (`my-app-abc123.vercel.app`), never with a scheme — every call site here
+ * prepends `https://` unless one is already present. `url.startsWith('http')`
+ * tests a STRING PREFIX, not a scheme: a project whose bare hostname
+ * happens to start with `http` (e.g. `httping-service-abc123.vercel.app`,
+ * a wholly ordinary Vercel-generated name for a project called
+ * `httping-service`) would pass that check unprefixed and come back with no
+ * scheme at all — not `https://httping-service...`, just
+ * `httping-service-abc123.vercel.app`, which is not a URL any HTTP client
+ * can use. Testing the actual scheme (`https://` or `http://`, followed by
+ * `//`) is immune to what the rest of the hostname happens to spell.
+ */
+function withScheme(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`
+}
+
 // --- upload manifest (opaque uploadId encoding) ----------------------------
 
 interface UploadManifestEntry {
@@ -552,7 +569,7 @@ export function createVercelDeployProvider(config: VercelAdapterConfig): DeployP
       const body = parseJsonObject(text)
       const deploymentId = requireString(body, 'id', 'createDeployment')
       const url = requireString(body, 'url', 'createDeployment')
-      return { deploymentId, url: url.startsWith('http') ? url : `https://${url}` }
+      return { deploymentId, url: withScheme(url) }
     },
 
     async getDeploymentState(input: GetDeploymentStateInput): Promise<GetDeploymentStateResult> {
@@ -577,7 +594,7 @@ export function createVercelDeployProvider(config: VercelAdapterConfig): DeployP
       const result: GetDeploymentStateResult = { state: mapReadyState(readyState) }
       const url = body.url
       if (typeof url === 'string' && url.length > 0) {
-        result.url = url.startsWith('http') ? url : `https://${url}`
+        result.url = withScheme(url)
       }
       return result
     },

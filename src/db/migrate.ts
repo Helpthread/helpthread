@@ -2168,8 +2168,53 @@ ALTER TABLE module_install_events ENABLE ROW LEVEL SECURITY;
  * second attempt onto the row a first attempt already created instead of
  * duplicating it — this index is what makes that conflict exist to catch
  * in the first place.
+ *
+ * ## Existing duplicates, on a self-hosted operator's own database
+ *
+ * Migrations here are forward-only and applied inside one transaction (see
+ * {@link migrate}'s doc) — a `CREATE UNIQUE INDEX` that fails on pre-existing
+ * duplicate rows aborts this migration AND every migration after it,
+ * forever, until an operator hand-edits their data. This engine's own
+ * production database holds zero `webhook_endpoints` rows as of this
+ * migration, so that failure is not reachable here — but this is the public
+ * engine repo, and a self-hosting operator who registered webhooks by hand
+ * (or ran an earlier, pre-031 build long enough to accumulate a genuine
+ * duplicate) cannot be assumed to be in the same position.
+ *
+ * So this migration DE-DUPLICATES before creating the index, deterministically
+ * and without deleting anything:
+ *
+ * - Per `url`, the row with the latest `created_at` (ties broken by `id`) is
+ *   the keeper — the newest registration is the one most likely still
+ *   correct/in-use.
+ * - Every OTHER row sharing that `url` is flipped to `status = 'disabled'`
+ *   (an operator-facing state this table already has — migration 022's
+ *   doc — never auto-re-enabled) and has its `url` rewritten to
+ *   `<original>#duplicate-<id>`, a value the `https://%` CHECK still accepts
+ *   (the prefix is untouched) but that can never collide with the keeper or
+ *   any other row. The row survives, inspectable and disabled, instead of
+ *   being deleted — an operator can recover its original url from the
+ *   suffix and re-register it by hand if it turns out it wasn't really a
+ *   duplicate of the keeper.
+ *
+ * After this runs, `url` is unique across every row by construction, and
+ * `CREATE UNIQUE INDEX` always succeeds.
  */
 const MIGRATION_031_WEBHOOK_ENDPOINTS_URL_UNIQUE = `
+WITH ranked AS (
+  SELECT id, url,
+         row_number() OVER (
+           PARTITION BY url ORDER BY created_at DESC, id DESC
+         ) AS rank
+  FROM webhook_endpoints
+)
+UPDATE webhook_endpoints
+SET status = 'disabled',
+    url = webhook_endpoints.url || '#duplicate-' || webhook_endpoints.id::text
+FROM ranked
+WHERE webhook_endpoints.id = ranked.id
+  AND ranked.rank > 1;
+
 CREATE UNIQUE INDEX webhook_endpoints_url_unique ON webhook_endpoints (url);
 `
 

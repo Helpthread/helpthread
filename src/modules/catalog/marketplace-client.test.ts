@@ -16,6 +16,7 @@ import {
   downloadVerifiedArtifact,
   fetchFeed,
   MAX_ARTIFACT_BYTES,
+  ResponseSizeCapExceededError,
   type SafeFetchFn,
 } from './marketplace-client.js'
 
@@ -272,6 +273,12 @@ describe('downloadVerifiedArtifact', () => {
 
   it('refuses when the downloaded bytes do not match the manifest digest', async () => {
     const { module, trustStore } = setup()
+    // Tamper ONE byte in place — genuinely the SAME length as
+    // `ARTIFACT_BYTES` (unlike a differently-worded literal, which would
+    // also trip the size check below and no longer isolate what this test
+    // claims to test: the digest check on its own).
+    const tamperedBytes = Buffer.from(ARTIFACT_BYTES)
+    tamperedBytes[0] ^= 0xff
     const fetch = fakeFetch({
       [FEED_URL]: () => ({ status: 200, body: JSON.stringify(feedWith(module)) }),
       [DOWNLOAD_URL]: () => ({
@@ -279,7 +286,7 @@ describe('downloadVerifiedArtifact', () => {
         body: JSON.stringify({ downloadUrl: SIGNED_URL, version: '1.0.0' }),
       }),
       // Wrong bytes served at the signed URL — same length, different content.
-      [SIGNED_URL]: () => ({ status: 200, body: Buffer.from('fixture-tarball-bytes-TAMPERED!') }),
+      [SIGNED_URL]: () => ({ status: 200, body: tamperedBytes }),
     })
 
     const result = await downloadVerifiedArtifact(
@@ -311,7 +318,9 @@ describe('downloadVerifiedArtifact', () => {
         // `defaultSafeFetch`'s streamed byte-count enforcement without
         // allocating a real 64 MiB buffer in the test.
         expect(maxBytes).toBe(MAX_ARTIFACT_BYTES)
-        throw new Error(`marketplace response exceeds the ${maxBytes}-byte cap`)
+        throw new ResponseSizeCapExceededError(
+          `marketplace response exceeds the ${maxBytes}-byte cap`,
+        )
       }
       throw new Error(`unexpected fetch to ${url}`)
     }
@@ -326,6 +335,89 @@ describe('downloadVerifiedArtifact', () => {
       expect(result.code).toBe('size-cap-exceeded')
       expect(result.message).not.toContain('test-license-key')
     }
+  })
+
+  it('reports a plain transport failure fetching the artifact as network-error, not size-cap-exceeded', async () => {
+    const { module, trustStore } = setup()
+    const fetch = fakeFetch({
+      [FEED_URL]: () => ({ status: 200, body: JSON.stringify(feedWith(module)) }),
+      [DOWNLOAD_URL]: () => ({
+        status: 200,
+        body: JSON.stringify({ downloadUrl: SIGNED_URL, version: '1.0.0' }),
+      }),
+    })
+    // Override just the signed-URL fetch to throw an ORDINARY transport
+    // error (DNS/TCP/TLS-shaped) — never a `ResponseSizeCapExceededError` —
+    // proving the catch site classifies by what actually happened instead
+    // of hardcoding `size-cap-exceeded` for every throw from this call.
+    const fetchWithTransportFailure: SafeFetchFn = async (url, init, maxBytes) => {
+      if (url === SIGNED_URL) throw new Error('getaddrinfo ENOTFOUND cdn.example.test')
+      return fetch(url, init, maxBytes)
+    }
+
+    const result = await downloadVerifiedArtifact(
+      { slug: 'fixture-module', version: '1.0.0' },
+      {
+        fetch: fetchWithTransportFailure,
+        getLicenseKey: async () => 'test-license-key',
+        trustStore,
+      },
+    )
+
+    expect(result).toMatchObject({ ok: false, code: 'network-error' })
+  })
+
+  it('propagates a real transport failure requesting the download URL as network-error, not the hardcoded http-error the caller used to report for every requestDownloadUrl failure', async () => {
+    const { module, trustStore } = setup()
+    const fetch: SafeFetchFn = async (url) => {
+      if (url === FEED_URL)
+        return { status: 200, body: Buffer.from(JSON.stringify(feedWith(module))) }
+      if (url === DOWNLOAD_URL) throw new Error('getaddrinfo ENOTFOUND marketplace.helpthread.app')
+      throw new Error(`unexpected fetch to ${url}`)
+    }
+
+    const result = await downloadVerifiedArtifact(
+      { slug: 'fixture-module', version: '1.0.0' },
+      { fetch, getLicenseKey: async () => 'test-license-key', trustStore },
+    )
+
+    expect(result).toMatchObject({ ok: false, code: 'network-error' })
+  })
+
+  it('returns a typed invalid-response failure — never throws — for a catalog module whose versions field is malformed', async () => {
+    const { trustStore } = setup()
+    const malformedFeed = {
+      generatedAt: '2026-08-04T00:00:00.000Z',
+      modules: [
+        {
+          slug: 'fixture-module',
+          name: 'Fixture',
+          summary: '',
+          cluster: '',
+          latestVersion: '1.0.0',
+          changelogUrl: '',
+          priceUsd: 0,
+          billingInterval: 'month',
+          docsUrl: '',
+          // Malformed on the wire — not an array, unlike the `CatalogModule`
+          // type this feed is cast to.
+          versions: null,
+        },
+      ],
+    }
+    const fetch = fakeFetch({
+      [FEED_URL]: () => ({ status: 200, body: JSON.stringify(malformedFeed) }),
+    })
+
+    // The contract is a typed `DownloadArtifactResult`, never a rejected
+    // promise — a caller checking `result.ok` must never need a `try/catch`
+    // around this call too.
+    const result = await downloadVerifiedArtifact(
+      { slug: 'fixture-module', version: '1.0.0' },
+      { fetch, getLicenseKey: async () => 'test-license-key', trustStore },
+    )
+
+    expect(result).toMatchObject({ ok: false, code: 'invalid-response' })
   })
 
   // --- license key never reaches a log/thrown error/returned object ------

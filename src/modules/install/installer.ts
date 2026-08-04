@@ -435,11 +435,6 @@ export const ENV_ASSISTANT_TOKEN = 'HELPTHREAD_ASSISTANT_TOKEN'
 /** Env var name a module reads its webhook signing secret from — the SAME value later stored (re-encrypted) on the real `webhook_endpoints` row once `../install/challenge.ts` verifies possession of it. */
 export const ENV_WEBHOOK_SECRET = 'HELPTHREAD_WEBHOOK_SECRET'
 
-const WELL_KNOWN_ENGINE_VARS: ReadonlySet<string> = new Set([
-  ENV_ASSISTANT_TOKEN,
-  ENV_WEBHOOK_SECRET,
-])
-
 // --- default artifact extraction -------------------------------------------
 
 /**
@@ -594,19 +589,50 @@ async function disableRecordedEndpoint(
 }
 
 /**
- * Read back the reason/target-state a {@link failInstall} call recorded on
- * its `cleanup_pending` transition — the ONE place {@link finalizeCleanup}
- * (whether run inline by `failInstall` itself, or resumed by a fresh
- * delivery re-entering the `cleanup_pending` state below) gets to find out
- * what it's finishing. Throws if no such event exists — a caller bug: this
- * is only ever reached for an install already in `cleanup_pending`, which
- * cannot happen without one.
+ * Closed set of failure classifications a {@link failInstall} call may
+ * persist on the `cleanup_pending` transition's `module_install_events.
+ * detail` (migration 030: that table is append-only and permanent, so it
+ * must only ever receive values THIS file chose deliberately). Every
+ * failure branch in this file catches provider/network errors, artifact
+ * download failures, and remote deployment-state text whose provenance is
+ * NOT ours — a hostile or merely broken upstream could put arbitrary bytes
+ * in `err.message`, `download.message`, or a deployment's reported state —
+ * so none of that text is ever interpolated into a persisted event. Each
+ * call site instead picks the one code below that names what actually
+ * happened; the audit trail records the code, never the upstream's own
+ * words.
+ */
+export type InstallFailureReasonCode =
+  | 'vercel_connection_unavailable'
+  | 'project_name_conflict'
+  | 'project_creation_failed'
+  | 'artifact_download_failed'
+  | 'artifact_identity_mismatch'
+  | 'artifact_extraction_failed'
+  | 'unsupported_engine_managed_var'
+  | 'missing_required_operator_var'
+  | 'artifact_config_upload_failed'
+  | 'deployment_creation_failed'
+  | 'build_failed_remote'
+  | 'build_timeout'
+  | 'endpoint_challenge_failed'
+  | 'webhook_url_collision'
+  | 'invariant_violation'
+
+/**
+ * Read back the reason-code/target-state a {@link failInstall} call
+ * recorded on its `cleanup_pending` transition — the ONE place {@link
+ * finalizeCleanup} (whether run inline by `failInstall` itself, or resumed
+ * by a fresh delivery re-entering the `cleanup_pending` state below) gets
+ * to find out what it's finishing. Throws if no such event exists — a
+ * caller bug: this is only ever reached for an install already in
+ * `cleanup_pending`, which cannot happen without one.
  */
 async function loadCleanupTarget(
   installs: ModuleInstallStore,
   installId: string,
 ): Promise<{
-  reason: string
+  reasonCode: InstallFailureReasonCode
   targetState: 'build_failed' | 'verification_failed' | 'cleanup_required'
 }> {
   const events = await installs.listEvents(installId)
@@ -617,7 +643,7 @@ async function loadCleanupTarget(
     )
   }
   const detail = event.detail as {
-    reason: string
+    reasonCode: InstallFailureReasonCode
     targetState: 'build_failed' | 'verification_failed' | 'cleanup_required'
   }
   return detail
@@ -649,7 +675,7 @@ async function finalizeCleanup(
   deps: ModuleInstallerDeps,
   install: ModuleInstallRecord,
 ): Promise<QueueHandlerResult> {
-  const { reason, targetState } = await loadCleanupTarget(deps.installs, install.id)
+  const { reasonCode, targetState } = await loadCleanupTarget(deps.installs, install.id)
 
   try {
     await revokeIssuedCredentials(deps, install.id)
@@ -675,7 +701,7 @@ async function finalizeCleanup(
     targetState,
     install.leaseToken,
     {
-      detail: { reason },
+      detail: { reasonCode },
       // The recovery need this row exists for is over the instant the
       // install is genuinely terminal — see migration 032's doc comment.
       deleteCredentialEscrow: true,
@@ -684,12 +710,15 @@ async function finalizeCleanup(
   if (result.ok) {
     await deps.installs.release(install.id, result.install.leaseToken).catch(() => {})
   }
-  return { kind: 'deadLetter', reason }
+  return { kind: 'deadLetter', reason: reasonCode }
 }
 
 /**
- * Move `install` toward a terminal failure state, recording `reason` — the
- * shared tail of every PERMANENT failure branch below.
+ * Move `install` toward a terminal failure state, recording `reasonCode` —
+ * the shared tail of every PERMANENT failure branch below. `reasonCode`
+ * must be one of {@link InstallFailureReasonCode}'s closed set — see that
+ * type's doc for why callers never pass the underlying provider/network
+ * error text itself.
  *
  * ## Fence into `cleanup_pending` FIRST, side effects only on a win ()
  *
@@ -733,7 +762,7 @@ async function failInstall(
   deps: ModuleInstallerDeps,
   install: ModuleInstallRecord,
   toState: 'build_failed' | 'verification_failed' | 'cleanup_required',
-  reason: string,
+  reasonCode: InstallFailureReasonCode,
 ): Promise<QueueHandlerResult> {
   const result = await deps.installs.transition(
     install.id,
@@ -741,11 +770,11 @@ async function failInstall(
     'cleanup_pending',
     install.leaseToken,
     {
-      detail: { reason, targetState: toState },
+      detail: { reasonCode, targetState: toState },
     },
   )
   if (!result.ok) {
-    return { kind: 'deadLetter', reason }
+    return { kind: 'deadLetter', reason: reasonCode }
   }
   return finalizeCleanup(deps, result.install)
 }
@@ -926,23 +955,12 @@ async function stepProjectCreated(
     const message = err instanceof Error ? err.message : String(err)
     if (PROJECT_NAME_CONFLICT_RE.test(message)) {
       return {
-        retry: await failInstall(
-          deps,
-          install,
-          'cleanup_required',
-          `project '${name}' already exists on the hosting account from an earlier attempt — ` +
-            `an operator must delete it (or reconcile it by hand) before this install can retry: ${message}`,
-        ),
+        retry: await failInstall(deps, install, 'cleanup_required', 'project_name_conflict'),
       }
     }
     if (attempts >= INSTALL_MAX_ATTEMPTS) {
       return {
-        retry: await failInstall(
-          deps,
-          install,
-          'build_failed',
-          `creating hosting project '${name}' failed after ${attempts} attempts: ${message}`,
-        ),
+        retry: await failInstall(deps, install, 'build_failed', 'project_creation_failed'),
       }
     }
     return { retry: { kind: 'retry', backoffSeconds: backoffSeconds(attempts) } }
@@ -978,12 +996,7 @@ async function stepArtifactUploaded(
   const remoteProjectId = install.remoteProjectId
   if (remoteProjectId === null) {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'build_failed',
-        'installer: reached artifact_uploaded step with no remoteProjectId recorded — this is a bug, not a transient failure',
-      ),
+      retry: await failInstall(deps, install, 'build_failed', 'invariant_violation'),
     }
   }
 
@@ -1000,12 +1013,7 @@ async function stepArtifactUploaded(
   if (!download.ok) {
     if (download.permanent || attempts >= INSTALL_MAX_ATTEMPTS) {
       return {
-        retry: await failInstall(
-          deps,
-          install,
-          'build_failed',
-          `artifact download failed: ${download.message}`,
-        ),
+        retry: await failInstall(deps, install, 'build_failed', 'artifact_download_failed'),
       }
     }
     return { retry: { kind: 'retry', backoffSeconds: backoffSeconds(attempts) } }
@@ -1024,13 +1032,7 @@ async function stepArtifactUploaded(
     download.artifact.manifest.keyId !== install.manifestKeyId
   ) {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'build_failed',
-        `artifact identity mismatch: catalog served a manifest for sha256=${download.artifact.manifest.artifactSha256} keyId=${download.artifact.manifest.keyId}, ` +
-          `but this install approved sha256=${install.artifactDigest} keyId=${install.manifestKeyId} — refusing a validly-signed but SUBSTITUTED release`,
-      ),
+      retry: await failInstall(deps, install, 'build_failed', 'artifact_identity_mismatch'),
     }
   }
 
@@ -1039,15 +1041,9 @@ async function stepArtifactUploaded(
   try {
     const extract = deps.extractArtifact ?? defaultExtractArtifact
     ;({ files, moduleConfig } = await extract(download.artifact.tarballBytes))
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+  } catch {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'build_failed',
-        `artifact extraction failed: ${message}`,
-      ),
+      retry: await failInstall(deps, install, 'build_failed', 'artifact_extraction_failed'),
     }
   }
 
@@ -1066,12 +1062,7 @@ async function stepArtifactUploaded(
       const value = engineManagedValues[envVar.name]
       if (value === undefined) {
         return {
-          retry: await failInstall(
-            deps,
-            install,
-            'build_failed',
-            `module.config.json declares engine-managed var '${envVar.name}', which this engine does not know how to supply (recognized: ${[...WELL_KNOWN_ENGINE_VARS].join(', ')})`,
-          ),
+          retry: await failInstall(deps, install, 'build_failed', 'unsupported_engine_managed_var'),
         }
       }
       vars.push({ key: envVar.name, value, sensitive: envVar.sensitive })
@@ -1084,7 +1075,7 @@ async function stepArtifactUploaded(
               deps,
               install,
               'build_failed',
-              `module.config.json requires operator-managed var '${envVar.name}', which was not supplied`,
+              'missing_required_operator_var',
             ),
           }
         }
@@ -1115,16 +1106,10 @@ async function stepArtifactUploaded(
       install.leaseToken,
       { detail: { uploadId: uploadResult.uploadId, engineManagedVarNames } },
     )
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+  } catch {
     if (attempts >= INSTALL_MAX_ATTEMPTS) {
       return {
-        retry: await failInstall(
-          deps,
-          install,
-          'build_failed',
-          `configuring/uploading the artifact failed: ${message}`,
-        ),
+        retry: await failInstall(deps, install, 'build_failed', 'artifact_config_upload_failed'),
       }
     }
     return { retry: { kind: 'retry', backoffSeconds: backoffSeconds(attempts) } }
@@ -1166,12 +1151,7 @@ async function stepDeploymentCreated(
   const remoteProjectId = install.remoteProjectId
   if (remoteProjectId === null || uploadId === undefined) {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'build_failed',
-        'installer: reached deployment_created step with no remoteProjectId/uploadId recorded — this is a bug, not a transient failure',
-      ),
+      retry: await failInstall(deps, install, 'build_failed', 'invariant_violation'),
     }
   }
 
@@ -1198,16 +1178,10 @@ async function stepDeploymentCreated(
         remoteDeploymentId: result.deploymentId,
       },
     )
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+  } catch {
     if (attempts >= INSTALL_MAX_ATTEMPTS) {
       return {
-        retry: await failInstall(
-          deps,
-          install,
-          'build_failed',
-          `creating the deployment failed: ${message}`,
-        ),
+        retry: await failInstall(deps, install, 'build_failed', 'deployment_creation_failed'),
       }
     }
     return { retry: { kind: 'retry', backoffSeconds: backoffSeconds(attempts) } }
@@ -1258,12 +1232,7 @@ async function stepPollBuild(
   const remoteDeploymentId = install.remoteDeploymentId
   if (remoteDeploymentId === null) {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'build_failed',
-        'installer: reached build_pending with no remoteDeploymentId recorded — this is a bug, not a transient failure',
-      ),
+      retry: await failInstall(deps, install, 'build_failed', 'invariant_violation'),
     }
   }
 
@@ -1291,24 +1260,14 @@ async function stepPollBuild(
   }
   if (state.state === 'error' || state.state === 'canceled') {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'build_failed',
-        `deployment ${remoteDeploymentId} reached terminal build state '${state.state}'`,
-      ),
+      retry: await failInstall(deps, install, 'build_failed', 'build_failed_remote'),
     }
   }
 
   const pollAttempts = (job.buildPollAttempts ?? 0) + 1
   if (pollAttempts >= BUILD_POLL_MAX_ATTEMPTS) {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'build_failed',
-        `deployment ${remoteDeploymentId} did not become ready after ${pollAttempts} polls (still '${state.state}')`,
-      ),
+      retry: await failInstall(deps, install, 'build_failed', 'build_timeout'),
     }
   }
   // Fixed, modest 15s poll interval — genuinely fixed now (see this
@@ -1366,12 +1325,7 @@ async function stepBootstrapPending(
 
   if (!result.ok) {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'verification_failed',
-        `endpoint possession challenge failed (${result.reason}): ${result.message}`,
-      ),
+      retry: await failInstall(deps, install, 'verification_failed', 'endpoint_challenge_failed'),
     }
   }
 
@@ -1403,13 +1357,7 @@ async function stepBootstrapPending(
   // a code retry.
   if (endpoint.secret !== credentials.webhookSecret) {
     return {
-      retry: await failInstall(
-        deps,
-        install,
-        'cleanup_required',
-        `webhook endpoint url ${deploymentUrl} is already registered under a DIFFERENT secret ` +
-          `than this install's own — an operator must reconcile the url collision before this install can retry`,
-      ),
+      retry: await failInstall(deps, install, 'cleanup_required', 'webhook_url_collision'),
     }
   }
 
@@ -1514,12 +1462,7 @@ export function createModuleInstallHandler(
       const connection = await deps.connections.get(install.vercelConnectionId)
       if (connection === null || connection.revokedAt !== null) {
         return {
-          stop: await failInstall(
-            deps,
-            install,
-            'build_failed',
-            `install ${install.id} references a missing or revoked Vercel connection (${install.vercelConnectionId})`,
-          ),
+          stop: await failInstall(deps, install, 'build_failed', 'vercel_connection_unavailable'),
         }
       }
       const token = await deps.connections.getToken(connection.id)

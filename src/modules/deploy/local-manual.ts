@@ -175,6 +175,28 @@ export function createLocalManualDeployProvider(
       assertTeam(input.teamId)
       const dir = projectDir(input.projectId)
       await mkdir(dir, { recursive: true })
+      // `.env.local` is a `KEY=value`-per-line format: an unescaped `\n`
+      // (or `\r`) in either a key or a value splits into a SECOND line the
+      // file's own reader will parse as its own assignment — a value like
+      // `'x\nEVIL_VAR=y'` would inject `EVIL_VAR=y` as a wholly separate,
+      // unintended env var rather than staying part of the one value it
+      // came from. Refused outright rather than silently escaped: a
+      // caller-supplied value here is meant to be read back byte-for-byte
+      // by whatever the operator points at this directory, and there is no
+      // escaping convention this format defines that every such reader is
+      // guaranteed to honor.
+      for (const v of input.vars) {
+        if (v.key.includes('\n') || v.key.includes('\r')) {
+          throw new LocalManualDeployError(
+            `local-manual: refusing env var whose KEY contains a newline: '${JSON.stringify(v.key)}'`,
+          )
+        }
+        if (v.value.includes('\n') || v.value.includes('\r')) {
+          throw new LocalManualDeployError(
+            `local-manual: refusing env var '${v.key}' whose value contains a newline`,
+          )
+        }
+      }
       const lines = input.vars.map((v) => `${v.key}=${v.value}`)
       await writeFile(path.join(dir, '.env.local'), `${lines.join('\n')}\n`, 'utf8')
     },
