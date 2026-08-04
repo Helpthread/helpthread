@@ -52,11 +52,20 @@ function buildHeader(entry: BuilderEntry): Buffer {
   writeStringField(header, 257, 6, 'ustar\0')
   header.write('00', 263, 2, 'ascii') // ustar version
 
+  // The checksum field is NOT a plain 8-byte octal field (7 digits + NUL,
+  // what `writeOctalField` builds for every other field on this header) —
+  // POSIX/USTAR reserves its last TWO bytes for a NUL then a space, leaving
+  // only 6 digits for the value itself. Writing it through `writeOctalField`
+  // and then patching those last two bytes afterward (the previous shape
+  // here) clobbers the 7th digit `writeOctalField` already wrote at offset
+  // 154 — silently truncating the checksum's LEAST SIGNIFICANT octal digit
+  // on every header whose true checksum needs all 6 digits. Writing exactly
+  // 6 digits up front avoids ever producing a 7th digit to clobber.
   let checksum = 0
   for (let i = 0; i < BLOCK_SIZE; i++) checksum += header[i]
-  writeOctalField(header, 148, 8, checksum)
-  header[148 + 6] = 0 // octal field null terminator per spec (space then NUL, but a lone NUL is accepted)
-  header[148 + 7] = 0x20
+  header.write(checksum.toString(8).padStart(6, '0'), 148, 6, 'ascii')
+  header[154] = 0 // NUL
+  header[155] = 0x20 // space
 
   return header
 }

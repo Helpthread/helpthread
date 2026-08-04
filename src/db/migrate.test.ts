@@ -73,6 +73,10 @@ describe('migrate', () => {
       { id: 27, name: 'lock_down_data_api' },
       { id: 28, name: 'imap_transport' },
       { id: 29, name: 'conversation_mailbox_id' },
+      { id: 30, name: 'module_deployer' },
+      { id: 31, name: 'webhook_endpoints_url_unique' },
+      { id: 32, name: 'module_install_credential_escrow' },
+      { id: 33, name: 'module_installs_cleanup_pending_state' },
     ])
   })
 
@@ -112,6 +116,10 @@ describe('migrate', () => {
       { id: 27 },
       { id: 28 },
       { id: 29 },
+      { id: 30 },
+      { id: 31 },
+      { id: 32 },
+      { id: 33 },
     ])
   })
 
@@ -1423,6 +1431,73 @@ describe('migrate', () => {
         [new Uint8Array([1])],
       ),
     ).resolves.toBeDefined()
+  })
+
+  it('migration 031 de-duplicates existing webhook_endpoints rows sharing a url — keeping the newest, disabling and renaming the rest — before creating the unique index, and the index then refuses a fresh duplicate', async () => {
+    db = await createPgliteDb()
+    // Stop short of 031 so duplicate urls can be inserted without the
+    // unique index (added by 031 itself) refusing them.
+    await migrate(db, { throughId: 30 })
+
+    const sharedUrl = 'https://example.test/shared-hook'
+    // Three rows racing for the same url, at three distinct created_at
+    // times set explicitly — never relying on insertion order or on two
+    // `now()` calls landing in different milliseconds (PGlite's clock is
+    // millisecond-only and can tie).
+    const [oldest] = await db.query<{ id: string }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext, created_at)
+       VALUES ($1, $2, '2026-01-01T00:00:00Z') RETURNING id`,
+      [sharedUrl, new Uint8Array([1])],
+    )
+    const [middle] = await db.query<{ id: string }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext, created_at)
+       VALUES ($1, $2, '2026-01-02T00:00:00Z') RETURNING id`,
+      [sharedUrl, new Uint8Array([2])],
+    )
+    const [newest] = await db.query<{ id: string }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext, created_at)
+       VALUES ($1, $2, '2026-01-03T00:00:00Z') RETURNING id`,
+      [sharedUrl, new Uint8Array([3])],
+    )
+    // A control row at a DIFFERENT url — must survive untouched.
+    const [control] = await db.query<{ id: string }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext) VALUES ($1, $2) RETURNING id`,
+      ['https://example.test/other-hook', new Uint8Array([4])],
+    )
+
+    // Applying 031 must not throw — the pre-existing duplicates are
+    // resolved before the unique index is created.
+    await migrate(db)
+
+    const rows = await db.query<{ id: string; url: string; status: string }>(
+      'SELECT id, url, status FROM webhook_endpoints ORDER BY created_at NULLS LAST',
+    )
+    const byId = new Map(rows.map((r) => [r.id, r]))
+
+    // The newest row keeps the original url and stays active.
+    expect(byId.get(newest.id)).toMatchObject({ url: sharedUrl, status: 'active' })
+
+    // The older two are disabled and their url is rewritten with a
+    // `#duplicate-<id>` suffix — renamed, not deleted.
+    expect(byId.get(oldest.id)?.status).toBe('disabled')
+    expect(byId.get(oldest.id)?.url).toBe(`${sharedUrl}#duplicate-${oldest.id}`)
+    expect(byId.get(middle.id)?.status).toBe('disabled')
+    expect(byId.get(middle.id)?.url).toBe(`${sharedUrl}#duplicate-${middle.id}`)
+
+    // The control row (a different url entirely) is untouched.
+    expect(byId.get(control.id)).toMatchObject({
+      url: 'https://example.test/other-hook',
+      status: 'active',
+    })
+
+    // The index now backs a real constraint: a FRESH insert at the
+    // already-used url is refused.
+    await expect(
+      db.query(`INSERT INTO webhook_endpoints (url, secret_ciphertext) VALUES ($1, $2)`, [
+        sharedUrl,
+        new Uint8Array([5]),
+      ]),
+    ).rejects.toThrow()
   })
 
   it('migration 023 creates event_outbox keyed by event_id, ties conversation_id to a real conversation via FK cascade, and defaults dispatched_at to NULL', async () => {
