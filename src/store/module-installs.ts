@@ -1,117 +1,106 @@
 /**
  * `ModuleInstallStore` — persistence for `module_installs` and
- * `module_install_events` (migration 030, `src/db/migrate.ts`; HT-119). See
- * that migration's doc comment for the full schema reasoning; this module
- * is the state-machine DISCIPLINE layered on top of it — every write this
- * store exposes either creates a row idempotently or moves one atomically
- * between exactly the two states the caller names, never a bare `UPDATE
- * ... SET state = $1 WHERE id = $2`.
+ * `module_install_events` (migration 030, `src/db/migrate.ts`). See that
+ * migration's doc comment for the schema reasoning; this module is the
+ * state-machine DISCIPLINE on top of it — every write either creates a row
+ * idempotently or moves one atomically between exactly the two states the
+ * caller names, never a bare `UPDATE ... SET state = $1 WHERE id = $2`.
  *
  * ## Why compare-and-swap, not "read state, then update"
  *
- * The deploy orchestrator this store backs is, by design condition 3,
- * "async by construction — never a DB transaction across network calls."
- * That means the SAME install can be
- * picked up by more than one worker invocation: a serverless function that
- * timed out mid-step, then got redelivered by the queue; a reconciliation
- * sweep that finds a lapsed lease and reclaims it while the original
- * worker is still slowly finishing a Vercel API call. If a worker read
- * `state` in one query and wrote a new one in a second, a slow, stale
- * worker could commit its write AFTER a second worker has already moved
- * the row through several more states — silently resurrecting an obsolete
- * install and corrupting the state machine (the exact class of bug
- * `inbound_deliveries`'s "The fence" section, and `postgres-queue`'s own
- * lease-fenced dequeue, both exist to prevent, applied here to a
- * multi-step pipeline instead of a single message).
+ * The deploy orchestrator this store backs is async by construction — never
+ * a DB transaction across network calls — so the SAME install can be picked
+ * up by more than one worker invocation: a serverless function that timed
+ * out mid-step and got redelivered, or a reconciliation sweep reclaiming a
+ * lapsed lease while the original worker is still finishing a Vercel call.
+ * If a worker read `state` in one query and wrote a new one in a second, a
+ * slow stale worker could commit AFTER a second worker moved the row through
+ * several more states — silently resurrecting an obsolete install. This is
+ * the bug class `inbound_deliveries`'s fence and `postgres-queue`'s
+ * lease-fenced dequeue both exist to prevent, applied to a multi-step
+ * pipeline instead of a single message.
  *
- * {@link ModuleInstallStore.transition} closes this the same way both of
- * those already do: ONE `UPDATE ... WHERE id = $installId AND state =
- * $fromState AND lease_token = $fenceToken` — a single row-locked
- * statement, so two concurrent transition attempts against the same row
- * can never both match. Whichever commits first re-mints `lease_token`
- * (`gen_random_uuid()`, in the same `UPDATE`), which invalidates every
- * OTHER in-flight caller's fence token even if their `fromState` guess was
- * also still correct — a caller must always chain its next `transition`'s
- * `fenceToken` off the record `transition` just returned, never off a
- * value read separately or cached from an earlier step. A stale-fence or
- * from-state-mismatched call matches zero rows and is refused (returns
- * false; see below) rather than silently doing nothing OR silently
- * applying to the wrong generation.
+ * {@link ModuleInstallStore.transition} closes it the same way: ONE `UPDATE
+ * ... WHERE id = $installId AND state = $fromState AND lease_token =
+ * $fenceToken` — a single row-locked statement, so two concurrent attempts
+ * against the same row can never both match. Whichever commits first
+ * re-mints `lease_token` (`gen_random_uuid()`, in the same `UPDATE`),
+ * invalidating every other in-flight caller's fence token even if their
+ * `fromState` guess was still correct. **A caller must always chain its next
+ * `transition`'s `fenceToken` off the record `transition` just returned**,
+ * never off a value read separately or cached from an earlier step. A
+ * stale-fence or from-state-mismatched call matches zero rows and is
+ * refused, rather than silently doing nothing or applying to the wrong
+ * generation.
  *
  * ## `false`, not a thrown error, for a refused transition
  *
- * {@link ModuleInstallStore.transition} returns `{ ok: false, ... }`
- * rather than throwing, because a refused transition is an ORDINARY,
- * expected outcome in this pipeline (two workers racing a reclaim,
- * exactly as designed) — not a caller bug. `ModuleInstallTransitionError`
- * IS still exported as a typed value carried on the failure branch (never
- * thrown) so a caller that wants to log or branch on WHY it was refused
- * (`state_mismatch` vs `lease_stale` vs `not_found`) can, without forcing
- * a `try`/`catch` around what is, for this pipeline, routine control flow
- * — matching `QueueHandlerResult`'s "modeled as an explicit result rather
- * than throw/catch" reasoning in `src/providers/queue.ts`.
+ * {@link ModuleInstallStore.transition} returns `{ ok: false, ... }` rather
+ * than throwing, because a refused transition is an ORDINARY, expected
+ * outcome here (two workers racing a reclaim, exactly as designed) — not a
+ * caller bug. `ModuleInstallTransitionError` is still exported as a typed
+ * value carried on the failure branch (never thrown) so a caller can log or
+ * branch on WHY it was refused (`state_mismatch` vs `lease_stale` vs
+ * `not_found`) without a `try`/`catch` around routine control flow —
+ * matching `QueueHandlerResult`'s "explicit result rather than throw/catch"
+ * reasoning in `src/providers/queue.ts`.
  *
  * ## Every transition writes its own audit row, same transaction
  *
- * `module_install_events` is append-only (migration 030's doc comment).
- * {@link ModuleInstallStore.create}'s initial row and every {@link
- * ModuleInstallStore.transition} write their event INSIDE the same
- * `Db.transaction` as the state write itself, so the two can never
- * diverge — a transition that commits always has exactly one
- * corresponding event row, and a transition that gets rolled back
- * (impossible here since there's nothing else in the transaction that
- * could fail after the fenced UPDATE succeeds, but kept transactional for
- * the same "one unit" discipline `InboundDeliveryStore.markStoredInTx`
- * documents) never leaves an orphaned event.
+ * `module_install_events` is append-only. {@link ModuleInstallStore.create}'s
+ * initial row and every {@link ModuleInstallStore.transition} write their
+ * event INSIDE the same `Db.transaction` as the state write, so the two can
+ * never diverge: a committed transition always has exactly one corresponding
+ * event row, and a rolled-back one never leaves an orphaned event. (Nothing
+ * else in the transaction can fail after the fenced UPDATE succeeds, but it
+ * stays transactional for the same one-unit discipline
+ * `InboundDeliveryStore.markStoredInTx` documents.)
  *
  * ## Idempotent `create`
  *
- * {@link ModuleInstallStore.create} is the same get-or-insert shape
- * `InboundDeliveryStore.claim` already uses: `INSERT ... ON CONFLICT
- * (idempotency_key) DO NOTHING RETURNING *`, falling back to a `SELECT` of
- * the pre-existing row on conflict. A caller that retries an "install this
- * module" request (e.g. after a client-side timeout with the server-side
- * write having actually landed) gets the SAME row back both times, never a
- * second competing `planned` install for what it believes is one request.
+ * {@link ModuleInstallStore.create} is the get-or-insert shape
+ * `InboundDeliveryStore.claim` uses: `INSERT ... ON CONFLICT
+ * (idempotency_key) DO NOTHING RETURNING *`, falling back to a `SELECT` on
+ * conflict. A caller retrying an "install this module" request — e.g. after
+ * a client-side timeout where the write actually landed — gets the SAME row
+ * back both times, never a second competing `planned` install.
  *
  * ## `claim` — the lease that actually excludes concurrent workers
  *
- * {@link ModuleInstallStore.transition} fences WRITES against each other
- * (two concurrent transition attempts can never both commit), but by
- * itself it does nothing to stop N concurrent workers from all reading the
- * SAME fence token, all passing their CAS precondition check in sequence
- * one-by-one, and all performing a real side effect (minting a token,
- * calling a hosting API) before any of them attempts to write — the fence
- * token sat READABLE on the row the whole time, so "holding a valid fence"
- * and "being the only worker allowed to act" were never the same thing.
- * {@link ModuleInstallStore.claim} closes that gap the same way
- * `inbound_deliveries`' `claimed_until` lease does (see that module's "The
- * fence" section): a conditional `UPDATE ... WHERE (lease_expires_at IS
- * NULL OR lease_expires_at < now())` that only ONE caller can ever win for
- * a given lease generation. `../../modules/install/installer.ts`'s handler
- * calls this BEFORE doing anything else — a refused claim means a network
- * call, a mint, or a provider call is never even attempted, not merely
- * that its result loses a race afterward. `attempt` is bumped in the same
- * statement — it is this row's own count of claim attempts, independent of
- * (and a superset of) `QueueMessage.attempts`, since a reconciliation
- * sweep reclaiming a lapsed lease is a claim with no corresponding queue
- * redelivery. `next_retry_at`, when set by a future reconciliation-sweep
- * ticket (out of this store's boundary — nothing in this codebase writes
- * it yet), additionally holds a claim back until its own scheduled time;
- * left `NULL` today this condition is always satisfied, so claiming
- * behaves exactly as if the column did not exist.
+ * `transition` fences WRITES against each other, but by itself does nothing
+ * to stop N concurrent workers from all reading the SAME fence token, all
+ * passing their CAS precondition in sequence, and all performing a real side
+ * effect — minting a token, calling a hosting API — before any attempts to
+ * write. The fence token sat READABLE on the row the whole time, so "holding
+ * a valid fence" and "being the only worker allowed to act" were never the
+ * same thing.
  *
- * {@link ModuleInstallStore.release} is claim's counterpart: called once
- * an invocation is done with the row, whatever the outcome, so the NEXT
- * legitimate delivery (which may arrive well before `lease_expires_at` —
- * `build_pending`'s poll interval is 15 seconds, far shorter than any
- * sane crash-safety TTL) does not have to wait out the full lease to make
- * progress. `lease_expires_at` alone is the crash-recovery backstop (a
- * worker that is SIGKILLed mid-invocation never calls `release`, and the
- * lease simply lapses); a clean exit always releases promptly. `release`
- * is fenced on `fenceToken` for the same reason every other write here
- * is — a caller whose OWN claim already lost a race (a stale fence) must
- * never clear a newer claim's lease out from under it.
+ * {@link ModuleInstallStore.claim} closes that gap the way
+ * `inbound_deliveries`' `claimed_until` lease does: a conditional `UPDATE
+ * ... WHERE (lease_expires_at IS NULL OR lease_expires_at < now())` only ONE
+ * caller can win for a given lease generation.
+ * `../../modules/install/installer.ts` calls it BEFORE anything else, so a
+ * refused claim means a network call, a mint, or a provider call is never
+ * even attempted.
+ *
+ * `attempt` is bumped in the same statement — this row's own count of claim
+ * attempts, independent of (and a superset of) `QueueMessage.attempts`,
+ * since a reconciliation sweep reclaiming a lapsed lease is a claim with no
+ * corresponding queue redelivery. `next_retry_at`, when set by a future
+ * reconciliation sweep (nothing in this codebase writes it yet),
+ * additionally holds a claim back until its scheduled time; left `NULL` the
+ * condition is always satisfied, so claiming behaves as if the column did
+ * not exist.
+ *
+ * {@link ModuleInstallStore.release} is claim's counterpart: called once an
+ * invocation is done with the row, whatever the outcome, so the next
+ * legitimate delivery — which may arrive well before `lease_expires_at`,
+ * since `build_pending`'s poll interval is 15 seconds against any sane
+ * crash-safety TTL — need not wait out the full lease. `lease_expires_at`
+ * alone is the crash-recovery backstop: a worker SIGKILLed mid-invocation
+ * never calls `release` and the lease simply lapses. `release` is fenced on
+ * `fenceToken` for the same reason every other write is — a caller whose own
+ * claim already lost a race must never clear a newer claim's lease.
  */
 
 import type { Db, SqlValue } from '../db/client.js'
