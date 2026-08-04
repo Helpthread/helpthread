@@ -3,125 +3,104 @@
  * (specs/mail/inbound-ingestion.md §4; migration 012, `src/db/migrate.ts`).
  *
  * One row per `(mailboxId, providerMessageId)` — simultaneously the
- * **idempotency record**, the **claim/lease**, and the **retry queue** (spec
- * §4's own three-way framing). This is the storage layer the ingest pipeline
- * (`src/mail/ingest.ts`) is built on, mirroring `src/store/conversations.ts`'s
- * style and doc-comment density, and mirroring the outbound get-or-insert
- * pattern (specs/mail/sending.md §3a) on the inbound side.
+ * **idempotency record**, the **claim/lease**, and the **retry queue**. This
+ * is the storage layer `src/mail/ingest.ts` is built on, mirroring the
+ * outbound get-or-insert pattern (sending.md §3a) on the inbound side.
  *
  * ## The claim (spec §3 step 1)
  *
  * {@link InboundDeliveryStore.claim} is the atomic get-or-insert: `INSERT ...
  * ON CONFLICT (mailbox_id, provider_message_id) DO NOTHING RETURNING *`,
- * falling back to a `SELECT` of the pre-existing row on conflict — the exact
- * shape `src/store/conversations.ts`'s `insertThread` uses for outbound
- * idempotency keys. `claimed: true` means the caller owns processing this
- * delivery (a fresh row, OR a `failed` row just reclaimed for a retry — see
- * below); `claimed: false` means a concurrent or prior delivery already owns
- * it, or it has reached a terminal state, and the caller must return THAT
- * row's outcome rather than double-process (spec §3 step 1, §8's "two
- * concurrent deliveries... exactly one conversation" acceptance case).
+ * falling back to a `SELECT` on conflict — the exact shape
+ * `src/store/conversations.ts`'s `insertThread` uses for outbound
+ * idempotency keys. `claimed: true` means the caller owns processing (a
+ * fresh row, or a `failed`/`received` row just reclaimed); `claimed: false`
+ * means a concurrent or prior delivery owns it, or it is terminal, and the
+ * caller must return THAT row's outcome rather than double-process.
  *
- * ## `failed` rows are retryable — reclaimed, not just replayed
+ * ## `failed` rows are reclaimed, not just replayed
  *
  * Unlike a terminal `stored`/`suppressed`/`dead-letter` row (returned as-is,
- * `claimed: false`), a `failed` row IS meant to be retried: spec §4 says "the
- * per-message ingest is retryable as a unit." `claim` implements this by
- * atomically flipping a conflicting `failed` row back to `received` (`UPDATE
- * ... WHERE status = 'failed' ... RETURNING *`) — an ordinary Postgres
- * row-locked `UPDATE`, so two concurrent retries of the SAME failed row can
- * never both win, the same atomicity reasoning as
- * `ConversationStore.claimThreadForDelivery`'s single `UPDATE`. This is what
- * makes a second `ingestInboundMessage` call for a key that previously
- * failed actually reprocess it, rather than silently replaying the stale
- * `failed` outcome forever.
+ * `claimed: false`), a `failed` row IS retried: spec §4's "the per-message
+ * ingest is retryable as a unit." `claim` atomically flips a conflicting
+ * `failed` row back to `received` (`UPDATE ... WHERE status = 'failed' ...
+ * RETURNING *`) — a row-locked `UPDATE`, so two concurrent retries of the
+ * same row can never both win, the same atomicity as
+ * `ConversationStore.claimThreadForDelivery`. Without it, a second
+ * `ingestInboundMessage` call for a previously-failed key would replay the
+ * stale `failed` outcome forever.
  *
- * `dead-letter` is deliberately NOT reclaimed by this path: it is a
- * terminal, manual-review state (spec §4, "a message that exhausts its retry
- * budget lands in dead-letter for manual review"), so ordinary re-delivery
- * must not auto-retry it — that would defeat dead-lettering's purpose of
- * bounding how many times a poison message is retried automatically.
+ * `dead-letter` is deliberately NOT reclaimed here: it is terminal and
+ * manual-review, so ordinary re-delivery must not auto-retry it — that would
+ * defeat dead-lettering's purpose of bounding automatic retries of a poison
+ * message.
  *
- * ## `received` rows are ALSO reclaimed, once their lease lapses (HT-45)
+ * ## `received` rows are ALSO reclaimed, once their lease lapses
  *
- * A `received` row is normally another worker's claim genuinely still in
- * flight — spec §3 step 1's "do not double-process" — so `claim` must not
- * reclaim it unconditionally. But a hard crash (SIGKILL / OOM / redeploy)
- * between this method committing `'received'` and the ingest pipeline's
- * step-5 store transaction (or its catch-block `markFailed`) strands the row
- * at `'received'` forever: nothing ever marks it `failed`, so the `failed`-
- * row reclaim above never fires, and — with HT-41's cursor coupling
- * (`src/mail/gmail-reconcile.ts` step 6) — a stuck `received` row can block
- * the mailbox's reconcile cursor from ever advancing past it.
+ * A `received` row is normally another worker's claim still in flight, so
+ * `claim` must not reclaim it unconditionally. But a hard crash (SIGKILL /
+ * OOM / redeploy) between this method committing `'received'` and the
+ * pipeline's step-5 transaction (or its catch-block `markFailed`) strands the
+ * row at `'received'` forever: nothing marks it `failed`, so the `failed`
+ * reclaim never fires — and with the cursor coupling in
+ * `src/mail/gmail-reconcile.ts` step 6, a stuck row blocks the mailbox's
+ * reconcile cursor from ever advancing past it.
  *
- * `claimed_until` (migration 014) closes this the same way migration 003's
+ * `claimed_until` (migration 014) closes this the way migration 003's
  * `threads.claimed_until` closes the outbound equivalent: every successful
- * claim (fresh insert, or a `failed`/`received` reclaim) stamps a lease
- * `leaseMs` into the future. A `received` row is reclaimable exactly when
- * `claimed_until IS NULL OR claimed_until < now()` — `NULL` covers both a
- * pre-migration stuck row (no lease was ever recorded for it) and, in
- * principle, any row somehow written without one; either way, "no known
- * lease" means "nothing is verifiably still working on this," so it is
- * immediately reclaimable rather than requiring a second wait. The reclaim
- * itself is a single row-locked `UPDATE ... WHERE status = 'received' AND
- * (claimed_until IS NULL OR claimed_until < now())`, so two concurrent
- * reclaim attempts on the same lapsed row can never both win — identical
- * atomicity to the `failed`-row reclaim and to
- * `ConversationStore.claimThreadForDelivery`.
+ * claim stamps a lease `leaseMs` into the future. A `received` row is
+ * reclaimable exactly when `claimed_until IS NULL OR claimed_until < now()`
+ * — `NULL` covers a pre-migration stuck row and any row somehow written
+ * without a lease; either way "no known lease" means nothing is verifiably
+ * still working on it. The reclaim is a single row-locked `UPDATE ... WHERE
+ * status = 'received' AND (claimed_until IS NULL OR claimed_until < now())`,
+ * so two concurrent reclaims can never both win.
  *
- * No separate periodic sweep function is added for this: unlike outbound's
- * `runDeliveryWorker` (which exists because nothing else re-visits a stuck
- * outbound thread), an inbound delivery is already re-visited by the
- * transport's own retry paths — a re-delivered push notification, or (given
- * the cursor-coupling above) `src/mail/gmail-reconcile.ts`'s history replay,
- * which keeps re-listing and re-`ingest`-ing the SAME stuck message on every
- * subsequent reconcile run for as long as the cursor cannot advance past it,
- * and which is guaranteed to run at least once a day regardless of new mail
- * (`src/mail/gmail-watch-maintenance.ts`'s unconditional daily sweep). Once
- * the lease has lapsed, the very next such call into `claim()` reclaims and
- * reprocesses the row — this ticket's "on re-delivery" trigger, not a new
- * "on a sweep" one. See this ticket's report for the full reasoning.
+ * No separate periodic sweep is added. Unlike outbound's `runDeliveryWorker`
+ * (which exists because nothing else re-visits a stuck outbound thread), an
+ * inbound delivery is already re-visited by the transport's own retry paths:
+ * a re-delivered push notification, or `src/mail/gmail-reconcile.ts`'s
+ * history replay, which re-lists and re-`ingest`s the same stuck message on
+ * every reconcile run for as long as the cursor cannot pass it — guaranteed
+ * to run at least daily regardless of new mail
+ * (`src/mail/gmail-watch-maintenance.ts`). Once the lease lapses, the next
+ * such `claim()` reclaims and reprocesses the row.
  *
- * The `received`-row reclaim also bumps `attempts` (unlike the `failed`-row
- * reclaim, which leaves it alone — that generation was already counted when
- * the prior `markFailed` ran). A lease lapsing IS evidence of a failed
- * attempt: the owner crashed, OOM'd, or otherwise never reached a recorded
- * outcome, which is exactly what a hard-crashing "poison" message does on
- * every retry. Without this, `attempts` stays frozen at whatever it was
- * before the crash and `src/mail/ingest.ts`'s `MAX_INGEST_ATTEMPTS` dead-letter
- * budget never engages for a message that always crashes rather than always
- * throws — the mailbox's reconcile cursor would stay wedged behind it
- * forever, the exact permanent-stuck symptom this ticket exists to fix, now
- * recurring instead of stranded. `ingestInboundMessage` reads the post-reclaim
+ * The `received` reclaim also bumps `attempts` — unlike the `failed` reclaim,
+ * which leaves it alone, that generation having been counted by the prior
+ * `markFailed`. A lapsed lease IS evidence of a failed attempt: the owner
+ * crashed or never reached a recorded outcome, exactly what a hard-crashing
+ * poison message does every time. Without the bump, `attempts` stays frozen
+ * and `src/mail/ingest.ts`'s `MAX_INGEST_ATTEMPTS` budget never engages for a
+ * message that always crashes rather than always throws — leaving the cursor
+ * wedged behind it forever. `ingestInboundMessage` reads the post-reclaim
  * `attempts` off the claim result and dead-letters immediately, before
- * spending another parse/store cycle on a message proven to keep crashing.
+ * spending another parse/store cycle.
  *
- * ## The fence: `attempts` doubles as a claim generation (HT-45)
+ * ## The fence: `attempts` doubles as a claim generation
  *
- * A lease is advisory, not exclusive: nothing stops a slow-but-still-alive
- * owner from finishing its work and committing *after* another worker has
- * already reclaimed the lapsed lease out from under it. Committing that late
- * write unconditionally is exactly the corruption this reclaim otherwise
- * risks reintroducing — two live owners, two commits, two conversations for
- * one email (spec §8's "exactly one conversation," invariant #5). Every
- * successful claim (fresh insert, `failed`-reclaim, or `received`-reclaim)
- * returns the row's current `attempts` value; the caller carries that number
- * as its claim generation for as long as it processes the delivery. Every
- * outcome write below (`markStoredInTx`, `markSuppressed`, `markFailed`,
- * `markDeadLetter`) requires the caller to pass that SAME `attempts` value
- * back in, and fences its `UPDATE` on `status = 'received' AND attempts =
- * $claimedAttempts`. A reclaim always changes the row out from under a stale
- * generation — the `received`-reclaim bumps `attempts` (previous paragraph);
- * ANY subsequent `markFailed`/`markDeadLetter` bumps it too — so a stale
- * owner's fenced write always matches zero rows and is rejected, exactly the
- * same optimistic-concurrency shape `src/providers/adapters/postgres-queue/
- * index.ts` already uses (`attempts` as the claim generation, fencing every
- * outcome write). {@link LeaseLostError} is thrown when a fenced write
- * matches zero rows against a row that DOES still exist (as opposed to an
- * unknown `id`, still a caller bug) — `src/mail/ingest.ts` catches it and
- * reports the delivery as `in-progress` rather than forcing a `failed`/
- * `dead-letter` write that would itself just be fenced out (or, worse, land
- * on whatever generation now legitimately owns the row).
+ * A lease is advisory, not exclusive: nothing stops a slow-but-alive owner
+ * from committing *after* another worker reclaimed the lapsed lease.
+ * Committing that late write unconditionally is the corruption the reclaim
+ * would otherwise reintroduce — two live owners, two commits, two
+ * conversations for one email (invariant #5). Every successful claim returns
+ * the row's current `attempts`; the caller carries it as its claim generation
+ * for as long as it processes the delivery. Every outcome write
+ * (`markStoredInTx`, `markSuppressed`, `markFailed`, `markDeadLetter`)
+ * requires that same value back and fences its `UPDATE` on `status =
+ * 'received' AND attempts = $claimedAttempts`. A reclaim always changes the
+ * row out from under a stale generation — the `received` reclaim bumps
+ * `attempts`, and any `markFailed`/`markDeadLetter` bumps it too — so a stale
+ * owner's fenced write matches zero rows and is rejected, the same
+ * optimistic-concurrency shape
+ * `src/providers/adapters/postgres-queue/index.ts` uses.
+ *
+ * {@link LeaseLostError} is thrown when a fenced write matches zero rows
+ * against a row that DOES still exist (an unknown `id` remains a caller bug).
+ * `src/mail/ingest.ts` catches it and reports the delivery as `in-progress`
+ * rather than forcing a `failed`/`dead-letter` write that would itself be
+ * fenced out — or worse, land on whatever generation now legitimately owns
+ * the row.
  *
  * ## The joint store-write + ledger transaction (spec §4)
  *
@@ -129,45 +108,37 @@
  * takes an externally-supplied `Queryable` (an already-open transaction)
  * rather than opening its own, so `src/mail/ingest.ts` can run it in the SAME
  * transaction as the `createConversationInTx`/`appendThreadInTx` call it
- * follows (`src/store/conversations.ts`) — this is what makes the store write
- * and the ledger's `received → stored` transition one atomic unit (spec §4;
- * see `src/mail/ingest.ts`'s `storeAndMarkDelivered` for the composition).
- * Every OTHER status transition below (`markSuppressed`/`markFailed`/
- * `markDeadLetter`) has no store write to coordinate with — suppression and
- * failure both create nothing — so each opens its own transaction, matching
- * `ConversationStore`'s standalone methods.
+ * follows — this is what makes the store write and the ledger's `received →
+ * stored` transition one atomic unit (see `ingest.ts`'s
+ * `storeAndMarkDelivered`). Every other transition
+ * (`markSuppressed`/`markFailed`/`markDeadLetter`) has no store write to
+ * coordinate with — suppression and failure both create nothing — so each
+ * opens its own transaction.
  *
  * ## `last_error` doubles as the suppression reason
  *
- * Migration 012 has no dedicated "suppression reason" column — only
- * `last_error` (nullable `text`). Rather than add a migration for one field
- * this ticket doesn't strictly need (CLAUDE.md: surgical changes, minimum
- * code), {@link InboundDeliveryStore.markSuppressed} reuses `last_error` to
- * carry the (non-error) suppression reason string. It is still exactly what
- * spec §5 asks for — "recorded in the ledger (suppressed, with the reason)"
- * — just sharing a column with the failure-path's error text rather than
- * owning a dedicated one.
+ * Migration 012 has no dedicated suppression-reason column, only `last_error`
+ * (nullable `text`). Rather than add a migration for one field, {@link
+ * InboundDeliveryStore.markSuppressed} reuses it to carry the (non-error)
+ * suppression reason. Still exactly what spec §5 asks for — "recorded in the
+ * ledger (suppressed, with the reason)" — just sharing a column.
  *
- * ## Pre-seeded suppression (HT-49): suppressing before a claim exists
+ * ## Pre-seeded suppression: suppressing before a claim exists
  *
- * Every mark* method above requires a row already `claim()`-ed to `received`
- * — the ordinary "ingest ran, then decided to suppress" order. {@link
- * InboundDeliveryStore.preSuppressOwnSend} is the one exception: it creates
- * an ALREADY-`suppressed` row from scratch, before any `claim()` for that key
- * has ever happened. This exists for exactly one caller, `src/mail/send.ts`'s
- * self-echo guard (see that module's doc comment): some transports (Gmail
- * confirmed — HT-49 live evidence) deliver the sent copy of an outbound
- * reply back into the SAME mailbox it was sent from, where the reconcile
- * pipeline (`src/mail/gmail-reconcile.ts`) would otherwise ingest it as a
- * genuine new inbound message — and by the time that happens, the token this
- * fix added to `References` (threading.md §2a) makes that self-echo `append`
- * to the very conversation it belongs to, duplicating the agent's own reply
- * as a phantom customer message. Pre-seeding `(mailboxId,
- * providerMessageId)` — using the SAME provider id (`EmailSendResult.
- * providerMessageId`) the transport will later report for that exact message
- * during reconcile — means `claim()`'s ordinary "terminal row, do not
- * double-process" branch absorbs the echo with zero heuristics and zero
- * changes to `decideThreading`.
+ * Every mark* method requires a row already `claim()`-ed to `received`. {@link
+ * InboundDeliveryStore.preSuppressOwnSend} is the one exception: it creates an
+ * ALREADY-`suppressed` row from scratch, before any `claim()` for that key.
+ * It exists for exactly one caller, `src/mail/send.ts`'s self-echo guard: some
+ * transports (Gmail, confirmed live) deliver the sent copy of an outbound
+ * reply back into the SAME mailbox, where `src/mail/gmail-reconcile.ts` would
+ * otherwise ingest it as genuine inbound mail — and the token now carried in
+ * `References` (threading.md §2a) would make that echo `append` to the very
+ * conversation it belongs to, duplicating the Agent's reply as a phantom
+ * customer message. Pre-seeding `(mailboxId, providerMessageId)` — using the
+ * SAME `EmailSendResult.providerMessageId` the transport will later report
+ * for that message during reconcile — means `claim()`'s ordinary "terminal
+ * row, do not double-process" branch absorbs the echo with zero heuristics
+ * and no change to `decideThreading`.
  */
 
 import type { Db, Queryable } from '../db/client.js'
