@@ -468,84 +468,76 @@ CREATE TABLE gmail_watch_state (
 `
 
 /**
- * Migration 012 — `inbound_deliveries`, the delivery ledger (HT-36;
- * specs/mail/inbound-ingestion.md §4).
+ * Migration 012 — `inbound_deliveries`, the delivery ledger
+ * (specs/mail/inbound-ingestion.md §4).
  *
  * One row per `(mailbox_id, provider_message_id)` — simultaneously the
- * **idempotency record**, the **claim/lease**, and the **retry queue** (spec
- * §4's own three-way framing). `provider_message_id`, not the RFC
- * `Message-ID`, is the dedup authority: the inbound `Message-ID` is optional
- * and entirely sender-controlled (`NewThread.messageId` permits `null`,
- * `src/store/conversations.ts`), while the transport's own message id is
- * stable and provider-issued (spec §4).
+ * **idempotency record**, the **claim/lease**, and the **retry queue**.
+ * `provider_message_id`, not the RFC `Message-ID`, is the dedup authority:
+ * the inbound `Message-ID` is optional and entirely sender-controlled
+ * (`NewThread.messageId` permits `null`), while the transport's own id is
+ * stable and provider-issued.
  *
- * `id` is a conventional surrogate `uuid` PRIMARY KEY (matching every other
- * table in this schema), separate from the UNIQUE claim key below — the
- * same "surrogate PK + a separate business-key unique index" shape
- * migration 003 already uses for `threads`' own idempotency key
- * (`threads_conversation_idempotency_key_idx`).
+ * `id` is a conventional surrogate `uuid` PRIMARY KEY, separate from the
+ * UNIQUE claim key below — the same "surrogate PK plus a separate
+ * business-key unique index" shape migration 003 uses for `threads`'
+ * idempotency key.
  *
  * ## The claim key
  *
- * `inbound_deliveries_mailbox_id_provider_message_id_key` is what the
- * ingest pipeline's step 1 targets (spec §3 step 1): `INSERT ... ON
- * CONFLICT (mailbox_id, provider_message_id) DO NOTHING RETURNING *`. A
- * fresh insert means the caller owns processing this delivery; a conflict
- * means a concurrent or prior delivery already claimed or completed it, and
- * the caller must return THAT row's outcome rather than double-process
- * (spec §3 step 1, §8's "two concurrent deliveries... exactly one
- * conversation" acceptance case). Ordinary `UNIQUE`, not partial: unlike
- * `threads.idempotency_key` (optional, migration 003),
- * `provider_message_id` is always present (spec §2: the transport rejects a
- * delivery it cannot resolve to a `providerMessageId`), so every row
+ * `inbound_deliveries_mailbox_id_provider_message_id_key` is what the ingest
+ * pipeline's step 1 targets: `INSERT ... ON CONFLICT (mailbox_id,
+ * provider_message_id) DO NOTHING RETURNING *`. A fresh insert means the
+ * caller owns processing; a conflict means a concurrent or prior delivery
+ * already claimed or completed it, and the caller must return THAT row's
+ * outcome rather than double-process (spec §3 step 1, and §8's "two
+ * concurrent deliveries... exactly one conversation" acceptance case).
+ *
+ * Ordinary `UNIQUE`, not partial: unlike `threads.idempotency_key`
+ * (optional, migration 003), `provider_message_id` is always present — the
+ * transport rejects a delivery it cannot resolve to one — so every row
  * participates in the constraint.
  *
- * `status` defaults to `'received'` — the state a row is inserted in at the
- * step-1 claim, before parse/thread/store (steps 2-5) even run. The CHECK
- * list is spelled `'dead-letter'` (hyphen) to match
- * specs/mail/inbound-ingestion.md §4's own spelling, used consistently
- * throughout that spec (and matching the industry-standard "dead-letter
- * queue" term); HT-36's ticket text listed the same value with an
- * underscore (`dead_letter`) in one place, which reads as a transcription
- * slip against the spec's consistent hyphenated usage — flagged for
- * explicit confirmation in the implementation report rather than resolved
- * silently.
+ * `status` defaults to `'received'`, the state a row is inserted in at the
+ * step-1 claim, before parse/thread/store run. The CHECK list is spelled
+ * `'dead-letter'` (hyphen) to match the spec's own consistent spelling and
+ * the industry-standard "dead-letter queue" term.
  *
- * `attempts`/`last_error` are the retry-queue bookkeeping the spec's "retry
- * queue" framing implies (§4) — no schema-level opinion on the attempts
- * ceiling or backoff; that policy belongs to the worker that consumes this
- * table (a later ticket).
+ * `attempts`/`last_error` are the retry-queue bookkeeping. No schema-level
+ * opinion on the attempts ceiling or backoff: that policy belongs to
+ * `src/mail/ingest.ts` and `src/store/inbound-deliveries.ts`.
  *
- * `thread_id` is the ledger's recorded OUTCOME (spec §3 step 5, §4),
- * nullable because most statuses (`received`, `suppressed`, `failed`,
- * `dead-letter`) never resolve to one. The resulting CONVERSATION is
+ * ## `thread_id` is the recorded outcome
+ *
+ * Nullable, because most statuses (`received`, `suppressed`, `failed`,
+ * `dead-letter`) never resolve to a thread. The resulting CONVERSATION is
  * deliberately NOT a second column: a thread belongs to exactly one
- * conversation (`threads.conversation_id`, NOT NULL, migration 001), so
- * `thread_id` already determines it — a separate `conversation_id` would be
+ * conversation (`threads.conversation_id`, `NOT NULL`, migration 001), so
+ * `thread_id` already determines it. A separate column would be
  * derivable-but-denormalized, and two independent FKs would let a row pair a
- * `conversation_id` with a `thread_id` from a DIFFERENT conversation, a
- * corrupt outcome the schema simply should not be able to represent. Derive
- * the conversation with a join to `threads` when an audit query needs it.
+ * conversation with a thread from a DIFFERENT conversation — a corrupt
+ * outcome the schema should not be able to represent. Join to `threads` when
+ * an audit query needs it.
+ *
  * Declared a real FK (this schema's convention for id-shaped columns) but
- * `ON DELETE SET NULL` rather than `CASCADE` (unlike migration 001's
- * `threads`): a ledger row's audit/idempotency value ("we received message X
- * for mailbox Y, and here is what happened") does not depend on the thread it
- * produced still existing — invariant #1's never-silently-lost applies to the
- * fact of ingestion, so the ledger row survives and only the now-unresolvable
- * pointer clears.
+ * `ON DELETE SET NULL` rather than `CASCADE`, unlike migration 001's
+ * `threads`: a ledger row's audit and idempotency value — "we received
+ * message X for mailbox Y, and here is what happened" — does not depend on
+ * the thread it produced still existing. Invariant #1's never-silently-lost
+ * applies to the fact of ingestion, so the row survives and only the
+ * now-unresolvable pointer clears.
  *
- * No cross-column CHECK tying `status` to `conversation_id`/`thread_id`
- * nullability (e.g. "non-null iff `stored`") — deliberately deferred: the
- * exact invariant depends on retry/dead-letter edge cases the consuming
- * store methods (a later ticket) haven't been written yet to pin down, and
- * this ticket is schema-only. Worth adding once that implementation settles
- * the question for real.
+ * ## Two deliberate omissions
  *
- * No index beyond the UNIQUE claim key: the ticket's own framing ("the
- * unique index IS the claim key") reads as the one index this migration
- * needs; a `status`-scoped index for a future retry-sweep/dead-letter-review
- * query is deferred to whichever ticket implements that query, so as not to
- * carry write-time index cost for a read pattern that doesn't exist yet.
+ * No cross-column CHECK tying `status` to `thread_id` nullability (e.g.
+ * "non-null iff `stored`"): the exact invariant depends on
+ * retry/dead-letter edge cases, and this migration is schema-only. Worth
+ * adding now that the consuming store methods have settled the question.
+ *
+ * No index beyond the UNIQUE claim key — the unique index IS the claim key.
+ * A `status`-scoped index for a retry-sweep or dead-letter-review query
+ * belongs to whichever change implements that query, rather than carrying
+ * write-time index cost for a read pattern that does not exist.
  */
 const MIGRATION_012_INBOUND_DELIVERIES = `
 CREATE TABLE inbound_deliveries (
