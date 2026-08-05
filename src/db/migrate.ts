@@ -1700,8 +1700,11 @@ $migration027$;
  * All three tables `ENABLE ROW LEVEL SECURITY` here. Migration 027 enabled
  * RLS on every table existing at that point and states the rule: a migration
  * that adds a table MUST also enable RLS on it. These are created AFTER 027
- * runs, so it cannot cover them — without this they would ship reachable
- * through the PostgREST Data API, and `imap_mailbox_credentials` holds
+ * runs, so its per-table `ALTER`s cannot cover them. 027's `ALTER DEFAULT
+ * PRIVILEGES` means they should arrive without anon grants, but that layer is
+ * narrow — it binds only to the migrating role and does not survive Supabase
+ * re-running its stock bootstrap (027's own doc) — so RLS here is the durable
+ * layer rather than a redundant one. `imap_mailbox_credentials` holds
  * encrypted app passwords.
  *
  * No index beyond each PRIMARY KEY: every lookup across all three tables is

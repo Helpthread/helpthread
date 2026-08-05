@@ -8,8 +8,11 @@
  * Wraps `pg` (node-postgres, MIT) over a `pg.Pool`. Every parameterized
  * query goes through the extended query protocol as an UNNAMED prepared
  * statement, which is compatible with transaction-mode connection poolers
- * (Supabase's Supavisor on port 6543, PgBouncer). Named prepared statements
- * are not, and this adapter never creates one.
+ * (Supabase's Supavisor on port 6543, PgBouncer) regardless of how they are
+ * configured. NAMED prepared statements are riskier: PgBouncer supports them
+ * in transaction mode only from 1.21 with a non-zero `max_prepared_statements`,
+ * and older or unconfigured poolers break on them. This adapter never creates
+ * one, so it needs no such tuning.
  *
  * ## Deploying against Supabase
  *

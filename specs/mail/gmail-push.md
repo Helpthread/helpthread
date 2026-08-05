@@ -200,15 +200,23 @@ here the cursor itself is unrecoverable.)
   — no adapter implements it, and `registerCron` is not called in production. Daily rather
   than every-6-days buys margin against a missed run; `watch` is idempotent, so re-arming
   early is free.
-- **The same daily cron also runs a bounded reconciliation `history.list` from each active
-  mailbox's stored cursor.** Because push is best-effort (§1), a dropped or delayed
-  notification — most damagingly the *last* one before a quiet spell — would otherwise leave
-  a mailbox stale indefinitely, since nothing else triggers a fetch. The sweep is the
-  charter's "bounded reconciliation fetch, never a long-running poller": it reuses the §3–§4
-  fetch/cursor path, is bounded per run, and fires on the same once-daily tick. It feeds the
-  identical idempotent ingest pipeline, so any message already delivered by push is deduped,
-  never doubled (inbound-ingestion.md §4). Cadence is a tuning knob: daily bounds worst-case
-  staleness to ~24h for a dropped tail notification.
+- **A SEPARATE, every-minute cron runs the bounded reconciliation `history.list` from each
+  active mailbox's stored cursor** (`/api/v1/internal/cron/reconcile-sweep`, `vercel.json`;
+  `src/mail/gmail-reconcile-sweep.ts`). This is not a backstop on the renewal cron — since
+  the 2026-07-20 charter amendment it is the engine's **primary inbound transport**, and a
+  deployment with no Pub/Sub topic ingests mail through it alone. Push, where configured,
+  becomes the low-latency accelerator rather than the mechanism of record.
+
+  It is the charter's "bounded scheduled fetch, never a long-running poller": it reuses the
+  §3–§4 fetch/cursor path, is bounded per run, and feeds the identical idempotent ingest
+  pipeline, so any message already delivered by push is deduped, never doubled
+  (inbound-ingestion.md §4).
+
+  **Renewal and the sweep are deliberately separate crons**, not two steps of one pass. Their
+  cadences differ by three orders of magnitude, and renewal must acquire a per-mailbox access
+  token (it calls `watch()`) while the sweep needs none — welding them together would mean a
+  token refresh per mailbox per minute for a Gmail call the sweep never makes.
+
 - **Reconciliation is serialized per mailbox by a reconciliation lease.** Push-triggered
   reconciliation (§2–§3) and the daily sweep both advance the same mailbox's cursor, so a
   mailbox's runs are serialized by a **reconciliation lease** — the inbound analogue of the
