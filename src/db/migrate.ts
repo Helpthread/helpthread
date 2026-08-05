@@ -564,100 +564,85 @@ CREATE UNIQUE INDEX inbound_deliveries_mailbox_id_provider_message_id_key ON inb
 
 /**
  * Migration 013 — `queue_jobs`, the durable Postgres-backed queue behind
- * `createPostgresQueue` (HT-43; `src/providers/adapters/postgres-queue/`).
- * This is the production `QueueProvider` for the RIQ dogfood: the Gmail
- * push webhook (`src/api/gmail-webhook.ts`) enqueues a "reconcile" job here,
- * and a Vercel Cron tick drains and processes a bounded batch
- * (`PostgresQueue.drainOnce`) — chosen over Vercel Queues (still beta)
- * because it reuses the Supabase Postgres every deployment already
- * provisions, rather than adding a second durable-work dependency.
+ * `createPostgresQueue` (`src/providers/adapters/postgres-queue/`). The
+ * production `QueueProvider`: the Gmail push webhook
+ * (`src/api/gmail-webhook.ts`) enqueues a reconcile job, and a Vercel Cron
+ * tick drains a bounded batch (`PostgresQueue.drainOnce`). Chosen over
+ * Vercel Queues (still beta) because it reuses the Supabase Postgres every
+ * deployment already provisions.
  *
  * One row per enqueued job, simultaneously the **dedupe record**, the
  * **claim/lease**, and the **retry/dead-letter bookkeeping** — the same
- * three-way framing migration 012's doc comment uses for
- * `inbound_deliveries`, applied here to outbound queue work instead of
- * inbound delivery ledgering.
+ * three-way framing migration 012 uses for `inbound_deliveries`, applied to
+ * outbound queue work.
  *
- * ## Dedupe: a partial unique index, mirroring migration 003's precedent
+ * ## Dedupe: a partial unique index
  *
  * `queue_jobs_topic_dedupe_key` constrains `(topic, dedupe_key)` only when
- * `dedupe_key IS NOT NULL` — the same partial-index shape migration 003's
- * `threads_conversation_idempotency_key_idx` established for `threads`:
- * only rows that opted into dedup (a caller-supplied key) constrain each
- * other, and every `NULL`-key row is invisible to the index, so ordinary
- * (non-deduped) enqueues never collide with one another. The adapter's
- * `enqueue` targets this exact index with `INSERT ... ON CONFLICT (topic,
- * dedupe_key) WHERE dedupe_key IS NOT NULL AND dead_lettered_at IS NULL DO
- * NOTHING` — a retried enqueue call sharing the same `(topic, dedupeKey)`
- * as a still-live job is silently suppressed, matching
- * `EnqueueOptions.dedupeKey`'s "SHOULD suppress duplicate enqueues"
- * contract (`src/providers/queue.ts`).
+ * `dedupe_key IS NOT NULL` — the shape migration 003's
+ * `threads_conversation_idempotency_key_idx` established: only rows that
+ * opted into dedup constrain each other, and every `NULL`-key row is
+ * invisible to the index, so ordinary enqueues never collide. `enqueue`
+ * targets this index with `INSERT ... ON CONFLICT (topic, dedupe_key) WHERE
+ * dedupe_key IS NOT NULL AND dead_lettered_at IS NULL DO NOTHING`, so a
+ * retried enqueue sharing a `(topic, dedupeKey)` with a still-live job is
+ * silently suppressed, matching `EnqueueOptions.dedupeKey`'s contract.
  *
  * The `AND dead_lettered_at IS NULL` arm is a deliberate WIDENING beyond
- * migration 003's precedent, not a copy-paste: a `threads` row is never
- * reprocessed after it reaches a terminal send state, so 003's index needed
- * no such arm. A queue job's dedupe key, by contrast, must become reusable
- * once the job it protected reaches ITS OWN terminal failure
- * (dead-lettered) — otherwise a poison job's dedupe key would permanently
- * block every future enqueue attempt for that same key, even after an
- * operator fixes the root cause and wants to try again. Excluding
- * dead-lettered rows from the constraint is what makes that re-enqueue
- * possible while still retaining the dead-lettered row itself (see below).
+ * migration 003, not a copy-paste. A `threads` row is never reprocessed
+ * after a terminal send state, so 003 needed no such arm. A queue job's
+ * dedupe key must become reusable once the job it protected reaches its own
+ * terminal failure — otherwise a poison job's key would permanently block
+ * every future enqueue for that key, even after an operator fixes the root
+ * cause. Excluding dead-lettered rows is what makes re-enqueue possible
+ * while still retaining the dead-lettered row.
  *
- * ## `run_after` + `locked_until`: "eligible" and "leased" are separate axes
+ * ## `run_after` + `locked_until`: eligible and leased are separate axes
  *
  * `run_after` is the earliest time a job may be claimed — `now()` for an
  * immediate enqueue, later for `delaySeconds` or a backed-off retry.
- * `locked_until` is a lease: `drainOnce`'s claim sets it to a near-future
- * expiry so a crashed or timed-out worker's claim eventually lapses and the
- * job becomes reclaimable, rather than stuck forever behind a lock nobody
- * will release — the same lease shape migration 003's `threads.claimed_until`
- * uses for outbound-send delivery claims, applied here to queue jobs
- * instead. A job is claimable exactly when BOTH are satisfied: `run_after
- * <= now()` (eligible) AND `locked_until IS NULL OR locked_until < now()`
- * (unleased) — two independent conditions kept as two columns rather than
- * folded into one, because "eligible but currently leased" (another worker
- * has it) is a real, common state that a single combined timestamp could
- * not distinguish from "not yet eligible."
+ * `locked_until` is a lease: `drainOnce`'s claim sets a near-future expiry
+ * so a crashed or timed-out worker's claim lapses and the job becomes
+ * reclaimable rather than stuck behind a lock nobody will release — the
+ * lease shape migration 003's `threads.claimed_until` uses, applied to queue
+ * jobs.
  *
- * ## `dead_lettered_at` rows are retained forever — never silently dropped
+ * A job is claimable exactly when BOTH hold: `run_after <= now()` (eligible)
+ * AND `locked_until IS NULL OR locked_until < now()` (unleased). Two columns
+ * rather than one combined timestamp, because "eligible but currently
+ * leased" is a real, common state a single value could not distinguish from
+ * "not yet eligible."
  *
- * A job that exhausts its retry ceiling is dead-lettered, not deleted:
- * `dead_lettered_at` is stamped and the row stays in the table permanently,
- * queryable via `PostgresQueue.getStats()`'s `deadLettered` count or a
- * direct `SELECT ... WHERE dead_lettered_at IS NOT NULL`. This is
- * CHARTER.md invariant #1 ("never silently drop") applied to queue work —
- * the same retention discipline migration 012 uses for
- * `inbound_deliveries.status = 'dead-letter'`: a poison job is parked and
- * visible for manual review, never erased. Deleting it on terminal failure
- * would make "did this job ever run, and why did it fail?" an unanswerable
- * question during an incident.
+ * ## `dead_lettered_at` rows are retained forever
+ *
+ * A job exhausting its retry ceiling is dead-lettered, not deleted: the
+ * column is stamped and the row stays permanently, queryable via
+ * `PostgresQueue.getStats()`'s `deadLettered` count or a direct `SELECT ...
+ * WHERE dead_lettered_at IS NOT NULL`. CHARTER.md invariant #1 ("never
+ * silently drop") applied to queue work, matching migration 012's retention
+ * of `inbound_deliveries.status = 'dead-letter'`. Deleting on terminal
+ * failure would make "did this job ever run, and why did it fail?"
+ * unanswerable during an incident.
  *
  * ## The two indexes
  *
- * - `queue_jobs_topic_dedupe_key` — the dedupe constraint above; also
- *   doubles as the lookup a future admin tool would use to find "the live
- *   job for key X."
+ * - `queue_jobs_topic_dedupe_key` — the dedupe constraint above; also the
+ *   lookup a future admin tool would use to find the live job for a key.
  * - `queue_jobs_ready_idx` — `(topic, run_after) WHERE dead_lettered_at IS
- *   NULL`, sized for the drain hot path: `drainOnce`'s claim filters to a
- *   specific topic set and orders by `run_after`, and excluding
- *   dead-lettered rows keeps the index from accumulating entries for jobs
- *   that can never be claimed again. `locked_until` is deliberately NOT
- *   part of this index — it churns on every claim/release, and the "find
- *   the oldest eligible, unleased jobs" read pattern is already served by
- *   ordering on `(topic, run_after)` and re-checking `locked_until` in the
- *   claim query's `WHERE` clause, rather than indexing a column that
- *   changes this fast.
+ *   NULL`, sized for the drain hot path, which filters to a topic set and
+ *   orders by `run_after`. Excluding dead-lettered rows keeps the index from
+ *   accumulating entries for jobs that can never be claimed again.
+ *   `locked_until` is deliberately NOT indexed: it churns on every
+ *   claim/release, and "find the oldest eligible, unleased jobs" is already
+ *   served by ordering on `(topic, run_after)` and re-checking
+ *   `locked_until` in the claim query's `WHERE`.
  *
- * No CHECK constraint ties `dead_lettered_at` to `attempts`/`max_attempts`
- * (unlike, say, migration 002's direction-tied CHECKs): the
+ * No CHECK ties `dead_lettered_at` to `attempts`/`max_attempts`: the
  * attempts-vs-ceiling decision is adapter-level policy
- * (`PostgresQueue.drainOnce`'s own `maxAttempts` option — see that
- * module's doc comment for why it reads as a call-level knob rather than
- * this row's `max_attempts` column), not a database-level invariant the
- * schema should enforce. `max_attempts` is retained as per-row schema
- * head-room for a future per-job ceiling override, matching migration
- * 010's "the column is reserved, the logic lands in a later ticket"
+ * (`PostgresQueue.drainOnce`'s own `maxAttempts` option — see that module's
+ * doc for why it is a call-level knob rather than this row's column), not a
+ * database-level invariant. `max_attempts` is retained as head-room for a
+ * future per-job override, matching migration 010's reserve-the-column
  * precedent.
  */
 const MIGRATION_013_QUEUE_JOBS = `
@@ -1439,86 +1424,79 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
  * ## What was wrong
  *
  * Supabase exposes the `public` schema through PostgREST, and its stock
- * setup grants `anon` and `authenticated` full `SELECT/INSERT/UPDATE/
- * DELETE/TRUNCATE` on tables in that schema. Row-Level Security is what is
- * normally supposed to make those grants safe — but no migration up to 026
- * ever enabled RLS, so every table stood fully open to anyone holding the
- * project's anon key. The anon key is public by design (it ships to
- * browsers), so that is effectively unauthenticated read AND write:
- * dumping `conversations`/`threads`, but also INSERTing into `agents`,
+ * setup grants `anon` and `authenticated` full
+ * `SELECT/INSERT/UPDATE/DELETE/TRUNCATE` there. RLS is what normally makes
+ * those grants safe, but no migration up to 026 enabled it, so every table
+ * stood open to anyone holding the project's anon key — which is public by
+ * design, since it ships to browsers. That is unauthenticated read AND
+ * write: dumping `conversations`/`threads`, INSERTing into `agents`,
  * `agent_auth_identities`, `agent_mailbox_access` and
  * `webauthn_credentials` to self-provision an authenticated Agent, or
  * TRUNCATEing the lot. `mailbox_oauth_tokens` is the one partial mercy —
- * its token columns are AES-256-GCM ciphertext (`src/store/token-crypto.
- * ts`) keyed outside the database, so a dump yields ciphertext.
+ * its token columns are AES-256-GCM ciphertext
+ * (`src/store/token-crypto.ts`) keyed outside the database, so a dump
+ * yields ciphertext.
  *
  * Nothing in this codebase uses that surface: the app reaches Postgres
  * directly over the pooler (`DATABASE_URL`, `src/db/postgres.ts`) and
- * Supabase Storage with the `service_role` key
- * (`src/providers/adapters/supabase-storage/`). There is no anon-key
- * client anywhere in the repo. The Data API was pure attack surface with
- * zero application value, which is what makes closing it entirely safe.
+ * Supabase Storage with the `service_role` key. There is no anon-key client
+ * anywhere in the repo, which is what makes closing it entirely safe.
  *
  * ## Defence in depth, not either/or
  *
- * Both halves below are applied because they fail independently: RLS alone
- * would be undone by a future `GRANT` plus a permissive policy, and
- * revoked grants alone would be undone by anything that re-grants. Neither
- * layer is load-bearing on its own.
+ * Both halves are applied because they fail independently: RLS alone would
+ * be undone by a future `GRANT` plus a permissive policy, and revoked grants
+ * alone by anything that re-grants.
  *
- * Be precise about what the `ALTER DEFAULT PRIVILEGES` calls do and do
- * NOT buy, because it is easy to overrate them. `ALTER DEFAULT PRIVILEGES
- * ... REVOKE` *deletes a default-ACL entry*; it does not install a
- * standing deny. And without `FOR ROLE` it applies only to the role that
- * executes it — the one running this migration. So it stops tables
- * created by THIS role from arriving pre-granted, and nothing more. It
- * does not survive Supabase re-running its stock bootstrap (which simply
- * re-creates the entry), and it does not touch default privileges defined
- * for other roles such as `supabase_admin`. The durable protection is the
- * standing rule below, not this statement.
+ * **The `ALTER DEFAULT PRIVILEGES` calls are easy to overrate.** `ALTER
+ * DEFAULT PRIVILEGES ... REVOKE` *deletes a default-ACL entry*; it does not
+ * install a standing deny. Without `FOR ROLE` it applies only to the role
+ * executing it — the one running this migration. So it stops tables created
+ * by THIS role from arriving pre-granted, and nothing more. It does not
+ * survive Supabase re-running its stock bootstrap, and it does not touch
+ * defaults defined for other roles such as `supabase_admin`. The durable
+ * protection is the standing rule below.
  *
  * 1. **RLS on every table**, spelled out one `ALTER TABLE` per table rather
  *    than looped, so the set is reviewable in the diff and a table added
- *    later fails loudly by omission instead of being silently swept in.
- *    With no policies attached this is deny-by-default. It does not affect
- *    the application: these tables are owned by `postgres`, and a table
- *    owner bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set (which we
- *    deliberately do not set).
- * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` (subject
- *    to the limits spelled out above) so tables created by future
- *    migrations do not silently arrive pre-granted. Note that `REVOKE
- *    ... FROM anon` removes only that role's own ACL entry — privileges
- *    held via the `PUBLIC` pseudo-role are unaffected, which is why
- *    `anon` still reports schema `USAGE` afterwards. The table-level
- *    grants are the gate that matters; schema `USAGE` alone conveys no
- *    access to any table.
+ *    later fails loudly by omission instead of being silently swept in. With
+ *    no policies attached this is deny-by-default. It does not affect the
+ *    application: these tables are owned by `postgres`, and an owner
+ *    bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set, which we
+ *    deliberately do not set.
+ * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` subject to
+ *    the limits above. `REVOKE ... FROM anon` removes only that role's own
+ *    ACL entry — privileges held via the `PUBLIC` pseudo-role are
+ *    unaffected, which is why `anon` still reports schema `USAGE`
+ *    afterwards. The table-level grants are the gate that matters; schema
+ *    `USAGE` alone conveys no access to any table.
  *
  * Neither half hardcodes `public`, because `PostgresDb` supports a `schema`
- * option (`src/db/postgres.ts`) that puts every table in a named schema
- * instead. The `ALTER TABLE`s are unqualified, so they resolve wherever
- * search_path finds the table; the revokes then derive that SAME schema
- * from `'conversations'::regclass` rather than from `current_schema()`.
- * That distinction is load-bearing and the reason for the comment in the
- * `DO` block below — the two rules disagree whenever the first entry on
- * search_path is not the schema holding the tables, and picking the wrong
- * one fails silently, leaving the grants in place while reporting success.
+ * option that puts every table in a named schema. The `ALTER TABLE`s are
+ * unqualified, so they resolve wherever search_path finds the table; the
+ * revokes then derive that SAME schema from `'conversations'::regclass`
+ * rather than `current_schema()`. That distinction is load-bearing and is
+ * why the `DO` block below carries its own comment: the two disagree
+ * whenever the first entry on search_path is not the schema holding the
+ * tables, and picking the wrong one fails silently, leaving the grants in
+ * place while reporting success.
  *
  * ## Why the `DO` block
  *
  * `anon`/`authenticated` are Supabase-created roles. They do not exist in
- * PGlite, which is what the test suite runs `migrate()` against
- * (`createPgliteDb`, `src/db/client.ts`), and an unguarded `REVOKE ... FROM
- * anon` is a hard error when the role is missing — it would fail every
- * test that migrates. The `pg_roles` guard makes the revokes a no-op off
- * Supabase while still applying in production. This block is also why
- * {@link splitStatements} had to learn about dollar quoting.
+ * PGlite, which the test suite runs `migrate()` against (`createPgliteDb`,
+ * `src/db/client.ts`), and an unguarded `REVOKE ... FROM anon` is a hard
+ * error when the role is missing — it would fail every test that migrates.
+ * The `pg_roles` guard makes the revokes a no-op off Supabase while still
+ * applying in production. This block is also why {@link splitStatements} had
+ * to learn about dollar quoting.
  *
  * ## Standing rule for future migrations
  *
- * A migration that adds a table MUST also `ENABLE ROW LEVEL SECURITY` on
- * it. The `ALTER DEFAULT PRIVILEGES` above means such a table
- * arrives without anon grants, so RLS is the second layer rather than the
- * only one — but the rule stands so the two layers stay in step.
+ * A migration that adds a table MUST also `ENABLE ROW LEVEL SECURITY` on it.
+ * The `ALTER DEFAULT PRIVILEGES` above means such a table arrives without
+ * anon grants, so RLS is the second layer rather than the only one — but the
+ * rule stands so the two stay in step.
  */
 export const MIGRATION_027_LOCK_DOWN_DATA_API = `
 ALTER TABLE _migrations ENABLE ROW LEVEL SECURITY;
