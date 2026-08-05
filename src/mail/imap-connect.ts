@@ -1,94 +1,87 @@
 /**
- * IMAP/SMTP connect and connectivity-check service (HT-101 Stage 2a-ii;
- * specs/mail/mailbox-connection.md §5's connect flow). The per-inbox
- * counterpart of `./gmail-connect.ts`, but for an operator-supplied IMAP/SMTP
- * mail server rather than a Google OAuth grant.
+ * IMAP/SMTP connect and connectivity-check service
+ * (specs/mail/mailbox-connection.md §5). The counterpart of
+ * `./gmail-connect.ts`, but for an operator-supplied mail server rather than
+ * a Google OAuth grant.
  *
  * ## Two operations, backing two routes (`src/api/imap-connect.ts`)
  *
  * - {@link ImapConnectService.checkConnection} — `POST
  *   /api/v1/inbound/imap/check`: attempt BOTH the IMAP and SMTP legs and
- *   report each leg's outcome INDEPENDENTLY, persisting nothing. Lets an
- *   operator validate host/port/credentials before committing them.
+ *   report each outcome INDEPENDENTLY, persisting nothing. Lets an operator
+ *   validate host/port/credentials before committing them.
  * - {@link ImapConnectService.connect} — `POST /api/v1/inbound/imap/connect`:
- *   the same two checks, but ABORTS on the first failure (never both-report,
- *   unlike `checkConnection`) and, only once both legs are proven usable,
- *   persists the mailbox/config/credential/cursor rows atomically.
+ *   the same two checks, but ABORTS on the first failure, and only once both
+ *   legs are proven usable persists the mailbox/config/credential/cursor rows
+ *   atomically.
  *
  * ## No OAuth, no pre-auth callback — unlike `./gmail-connect.ts`
  *
- * Gmail's connect flow is a two-request OAuth dance: a Bearer-gated `POST
- * .../connect` that mints a consent URL, then a PRE-AUTH `GET .../callback`
- * Google's redirect lands on (`./gmail-connect.ts`'s module doc). IMAP/SMTP
- * has no third party to redirect through — an operator supplies host/port/
- * username/password directly in one Bearer-gated request. So `connect` here
- * is a single ordinary authenticated action, not a `beginConnect`/
- * `completeConnect` pair, and there is no signed `state` CSRF token to mint
- * or verify (`src/api/router.ts` never carves out a pre-auth path for either
- * IMAP route).
+ * Gmail's flow is a two-request OAuth dance: a Bearer-gated `POST
+ * .../connect` minting a consent URL, then a PRE-AUTH `GET .../callback`
+ * Google's redirect lands on. IMAP/SMTP has no third party to redirect
+ * through — an operator supplies host, port, username and password directly
+ * in one Bearer-gated request. So `connect` is a single ordinary
+ * authenticated action, not a `beginConnect`/`completeConnect` pair, and
+ * there is no signed `state` CSRF token to mint or verify (`src/api/router.ts`
+ * carves out no pre-auth path for either IMAP route).
  *
  * ## The mailbox address is operator-supplied, not authoritatively resolved
  *
- * Gmail's connect flow resolves the connected address from the OAuth grant
- * itself (`getProfile()`, never operator input) — there is no equivalent
- * discovery call for a generic IMAP/SMTP server, so `ImapConnectInput.address`
- * is taken as given. A caller with the service Bearer token could in
- * principle claim any address; that is the SAME trust level every other
- * ordinary Bearer-gated admin action in this API already carries (creating
- * Agents, connecting/disconnecting mailboxes, registering webhooks) — not a
- * new privilege boundary this ticket introduces. Flagged for the reviewer,
- * not resolved here.
+ * Gmail resolves the connected address from the grant itself (`getProfile()`,
+ * never operator input). There is no equivalent discovery call for a generic
+ * IMAP/SMTP server, so `ImapConnectInput.address` is taken as given. A caller
+ * with the service Bearer token could in principle claim any address — the
+ * SAME trust level every other Bearer-gated admin action already carries
+ * (creating Agents, connecting mailboxes, registering webhooks), not a new
+ * privilege boundary. Flagged, not resolved here.
  *
  * ## Both legs run to completion, independently (`checkConnection`)
  *
- * A failing IMAP leg must never suppress the SMTP leg's result, and vice
- * versa — {@link attemptImapConnection}/{@link attemptSmtpVerification} are
- * both always awaited (never short-circuited with `&&`/early-return), so an
- * operator fixing a typo'd IMAP host still learns the SMTP credentials are
- * ALSO wrong in the same response, rather than in a second round-trip.
+ * A failing IMAP leg must never suppress the SMTP leg's result, or vice
+ * versa: {@link attemptImapConnection} and {@link attemptSmtpVerification}
+ * are both always awaited, never short-circuited with `&&` or an early
+ * return, so an operator fixing a typo'd IMAP host learns in the SAME
+ * response that the SMTP credentials are also wrong.
  *
- * ## `connect` aborts on the first failure — nothing persisted until both pass
+ * ## `connect` aborts on the first failure
  *
- * Unlike `checkConnection`, `connect` runs the IMAP leg first and THROWS
- * {@link ImapConnectError} immediately on failure, before the SMTP leg is
- * ever attempted — mirroring `./gmail-connect.ts`'s "nothing persisted unless
- * the grant is proven usable" discipline (module doc there, step 4-5). Only
- * once BOTH legs have proven usable does the persist step below run.
+ * It runs the IMAP leg first and THROWS {@link ImapConnectError} immediately
+ * on failure, before the SMTP leg is attempted — mirroring
+ * `./gmail-connect.ts`'s "nothing persisted unless the grant is proven
+ * usable" discipline. Only once BOTH legs pass does the persist step run.
  *
  * ## The baseline cursor: `lastUid = uidNext - 1`
  *
- * The IMAP leg's `selectInbox()` call (`../providers/adapters/imap/client.ts`)
+ * The IMAP leg's `selectInbox()` (`../providers/adapters/imap/client.ts`)
  * returns `uidValidity`/`uidNext` in the SAME round trip that proves the
- * credentials work — no second connection is opened to read them. `uidNext`
- * is the UID the server predicts for the NEXT message to arrive, so seeding
- * the baseline at `lastUid = uidNext - 1` means the first scheduled fetch
- * (`./imap-fetch.ts`) starts strictly AFTER whatever is already in the
- * mailbox — mail that arrived before this connect is never fetched, exactly
- * like `./gmail-connect.ts`'s `watch()`-response `historyId` baseline seeds
- * "start fetching new mail from here forward, never a resync of the
- * mailbox's entire history" (`../store/imap-watch-state.ts`'s module doc).
+ * credentials work — no second connection is opened. `uidNext` is the UID the
+ * server predicts for the next message to arrive, so seeding `lastUid =
+ * uidNext - 1` means the first scheduled fetch (`./imap-fetch.ts`) starts
+ * strictly AFTER whatever is already in the mailbox: mail that arrived before
+ * this connect is never fetched. Same intent as `./gmail-connect.ts`'s
+ * `watch()`-response `historyId` baseline — start from here forward, never a
+ * resync of the mailbox's entire history.
  *
- * ## Persist is ONE transaction — atomicity mirrors `./gmail-connect.ts` step 5
+ * ## Persist is ONE transaction
  *
  * `MailboxStore.upsertConnectedMailbox` → `ImapConfigStore.upsertConfig` →
  * `ImapCredentialStore.upsertPassword` → `ImapWatchStateStore.seedBaseline`,
- * all against the SAME `tx` — a mid-persist failure (a constraint violation,
- * a dropped connection) rolls back the WHOLE unit, never a partial connect
- * (e.g. a mailbox row with no baseline cursor, which `./imap-fetch.ts`'s
- * `runImapFetch` would then skip forever as "missing cursor," silently
- * un-ingesting — worse than no mailbox row at all).
+ * all against the SAME `tx`. A mid-persist failure rolls back the WHOLE unit,
+ * never a partial connect — e.g. a mailbox row with no baseline cursor, which
+ * `./imap-fetch.ts`'s `runImapFetch` would then skip forever as "missing
+ * cursor," silently un-ingesting: worse than no mailbox row at all.
  *
  * ## Error messages: bounded, never the password, never a stack trace
  *
- * {@link sanitizeConnectionError} builds every `LegResult.error`/
- * `ImapConnectError.message` from ONLY the caught error's own `.message`
- * (never `.stack`), redacts any LITERAL occurrence of the submitted password
- * (defense in depth against a pathological failure that echoes back raw
- * protocol traffic — imapflow's/nodemailer's own logging is already off by
- * default, per `../providers/adapters/imap/client.ts`'s and `./verify.ts`'s
- * module docs, so this is a second, independent layer, not the only one),
- * and truncates to a bounded length. Every message this module produces is
- * safe to return over the API (`src/api/imap-connect.ts`) or to log.
+ * {@link sanitizeConnectionError} builds every
+ * `LegResult.error`/`ImapConnectError.message` from ONLY the caught error's
+ * own `.message` (never `.stack`), redacts any LITERAL occurrence of the
+ * submitted password, and truncates to a bounded length. The redaction is
+ * defense in depth against a pathological failure echoing back raw protocol
+ * traffic — imapflow's and nodemailer's own logging is already off by
+ * default — so it is a second independent layer, not the only one. Every
+ * message this module produces is safe to return over the API or to log.
  */
 
 import type { Db } from '../db/client.js'
