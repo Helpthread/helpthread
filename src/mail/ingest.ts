@@ -674,82 +674,78 @@ async function storeAndMarkDelivered(
 }
 
 /**
- * The `new`/`append`(+deleted/not-found fallback) store write itself — see
- * {@link storeAndMarkDelivered}'s doc comment for the transaction it runs
- * inside. When an `append` decision's target is gone, the returned
- * `appendFallback` names why (spec §6's append-fallback reason, HT-44) —
- * the decision itself is left untouched, so the caller can log both what
- * `decideThreading` decided AND what the store made of it.
+ * The `new`/`append` (plus deleted/not-found fallback) store write itself —
+ * see {@link storeAndMarkDelivered} for the transaction it runs inside. When
+ * an `append` target is gone, the returned `appendFallback` names why (spec
+ * §6's append-fallback reason); the decision itself is left untouched, so a
+ * caller can log both what `decideThreading` decided AND what the store made
+ * of it.
  *
- * ## Event emission (HT-69; specs/modules/substrate-v1.md §4)
+ * ## Event emission (specs/modules/substrate-v1.md §4)
  *
  * This is "the ingestion append path" spec §4's vocabulary table means by
- * `conversation.created`/`conversation.message_received`: both are fired
- * HERE, inside the SAME `tx` this function already writes the conversation/
- * thread rows in (spec §4's transactional-outbox rule) — never inside
- * `appendThreadInTx`/`createConversationInTx` themselves, which are shared
- * by callers that must NOT fire these events (`src/mail/send.ts`'s outbound
- * `sendReply`, and the notes handler in `src/api/conversations.ts`, both go
- * through `appendThread` too, but neither is "an inbound thread stored").
+ * `conversation.created`/`conversation.message_received`. Both fire HERE,
+ * inside the SAME `tx` that writes the conversation and thread rows (spec
+ * §4's transactional-outbox rule) — never inside
+ * `appendThreadInTx`/`createConversationInTx`, which are shared by callers
+ * that must NOT fire them (`src/mail/send.ts`'s outbound `sendReply` and the
+ * notes handler in `src/api/conversations.ts` both go through `appendThread`,
+ * but neither is "an inbound thread stored").
  *
- * A brand-new conversation's first message fires BOTH events
- * (`conversation.created` with no data, then `conversation.message_
- * received` with `reopened: false` — a fresh conversation is never a
- * reopen) — this covers a genuinely fresh `decision.kind === 'new'` AND the
- * deleted/not-found fallback below, which also creates a fresh
- * conversation. A successful `append` fires only `conversation.message_
- * received`, with `reopened` taken verbatim from `AppendResult.reopened`
- * (`src/store/conversations.ts`) rather than re-derived here.
+ * A brand-new conversation's first message fires BOTH — `conversation.created`
+ * with no data, then `conversation.message_received` with `reopened: false`,
+ * since a fresh conversation is never a reopen. That covers a genuine
+ * `decision.kind === 'new'` AND the deleted/not-found fallback, which also
+ * creates a fresh conversation. A successful `append` fires only
+ * `conversation.message_received`, with `reopened` taken verbatim from
+ * `AppendResult.reopened` rather than re-derived here.
  *
- * **The `append` branch's event is gated on `appended.created` (review
- * fix)** — `AppendResult.ok: true` alone does not mean a row was actually
- * INSERTED; `created: false` is a replay (the get-or-insert found a
- * pre-existing row instead, `appendThreadInTx`'s own doc comment). Nothing
- * about `firstMessage` here sets `idempotencyKey` today (inbound threads
- * never carry one — migration 003's CHECK forbids it, and a genuine
- * redelivery of the SAME raw message is already intercepted one layer up by
- * `InboundDeliveryStore`'s own ledger dedup, which never calls this
- * function twice for one delivery — see `ingestInboundMessage`'s "idempotent
- * by step 1" doc), so `created` is always `true` at this call site as
- * things stand. The gate is defensive, not a fix for an exploitable path
- * today: `AppendResult`'s type does not promise `created` is always `true`
- * here, and firing `conversation.message_received` with a FRESH `eventId`
- * on a replay would defeat every consumer's `eventId` dedupe (spec §4) —
- * this is exactly the same "a genuinely NEW row is the only thing that
- * counts" discipline `appendThreadInTx` already applies to its own reopen/
- * `updated_at`-bump decision, applied here to event emission too.
+ * **The `append` branch's event is gated on `appended.created`.**
+ * `AppendResult.ok: true` alone does not mean a row was INSERTED — `created:
+ * false` is a replay, where the get-or-insert found a pre-existing row. As
+ * things stand `created` is always `true` at this call site: nothing sets
+ * `idempotencyKey` on an inbound thread (migration 003's CHECK forbids it),
+ * and a genuine redelivery of the same raw message is intercepted a layer up
+ * by `InboundDeliveryStore`'s ledger dedup, which never calls this function
+ * twice for one delivery.
  *
- * `mailboxId` (HT-101 Stage 2b-i) is stamped onto {@link NewConversation.mailboxId}
- * at BOTH `createConversationInTx` call sites below (a genuine `new`
- * decision, and the deleted/not-found fallback) — both mint a brand-new
- * conversation, so both record which mailbox took its first message. The
- * `append` branch deliberately never touches it: an existing conversation
- * already has whatever mailbox its own creation recorded, and a reply
- * threaded onto it must not overwrite that, even if this particular reply
- * happened to arrive at a different connected mailbox.
+ * The gate is therefore defensive rather than a fix for an exploitable path:
+ * `AppendResult`'s type does not promise `created` is always `true`, and
+ * firing `conversation.message_received` with a FRESH `eventId` on a replay
+ * would defeat every consumer's `eventId` dedupe (spec §4). Same "only a
+ * genuinely NEW row counts" discipline `appendThreadInTx` already applies to
+ * its own reopen and `updated_at` decisions.
+ *
+ * `mailboxId` is stamped onto {@link NewConversation.mailboxId} at BOTH
+ * `createConversationInTx` call sites — a genuine `new` decision and the
+ * fallback — since both mint a brand-new conversation and both should record
+ * which mailbox took its first message. The `append` branch deliberately
+ * never touches it: an existing conversation already has whatever mailbox its
+ * creation recorded, and a reply threaded onto it must not overwrite that,
+ * even if this reply arrived at a different connected mailbox.
  *
  * ## The spam verdict (specs/mail/spam-classification.md §4)
  *
- * `spamVerdict` follows exactly the same shape, and for the same reason: it
- * decides the STATUS of a brand-new conversation at both
- * `createConversationInTx` call sites, and the `append` branch never reads
- * it at all. Three properties are load-bearing:
+ * `spamVerdict` follows the same shape for the same reason: it decides the
+ * STATUS of a brand-new conversation at both `createConversationInTx` call
+ * sites, and the `append` branch never reads it. Three load-bearing
+ * properties:
  *
  * - **It never drops anything.** A `'spam'` verdict changes one column. The
  *   message is parsed, stored, threaded, and attachment-linked exactly as a
  *   clean one is (inbound-ingestion.md §1's third invariant), so an Agent
- *   who opens the Spam folder sees the real message and a reply reopens it
- *   to `active` (agent-inbox-v1.md §4a) — a false positive is always
- *   recoverable.
- * - **It never re-files an existing conversation.** A reply that carried a
- *   valid reply token threads onto its target and leaves that target's
- *   status alone, however the provider classified this particular message.
- *   Our own token is the stronger signal, and an Agent who put a
- *   conversation somewhere must not be silently overruled by Google.
+ *   opening the Spam folder sees the real message and a reply reopens it to
+ *   `active` — a false positive is always recoverable.
+ * - **It never re-files an existing conversation.** A reply carrying a valid
+ *   reply token threads onto its target and leaves that target's status
+ *   alone, however the provider classified this particular message. Our own
+ *   token is the stronger signal, and an Agent who filed a conversation
+ *   somewhere must not be silently overruled by Google.
  * - **Only `'spam'` is evidence.** `'clean'`, `'unknown'`, and an omitted
- *   field all mean `active` — see {@link RawInboundMessage.providerSpamVerdict}
- *   for why "we asked and it said no" and "we have no idea" are still kept
- *   distinct on the wire even though they agree here.
+ *   field all mean `active` — see {@link
+ *   RawInboundMessage.providerSpamVerdict} for why "we asked and it said no"
+ *   and "we have no idea" stay distinct on the wire even though they agree
+ *   here.
  */
 async function writeParsedEmail(
   tx: Queryable,
