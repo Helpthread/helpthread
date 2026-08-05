@@ -1,66 +1,63 @@
 /**
- * Per-Agent session model (HT-54; specs/auth/agents-and-auth.md §8) —
- * supersedes HT-51's single-operator posture. Real Agents now exist (the
- * engine's `agents` table), so the session must carry WHICH Agent this is,
- * not just "someone is logged in." This module is the whole of that shape:
- * mint a signed cookie value, verify one back, nothing else. It holds no I/O
- * beyond reading one env var, so it is safe to import from both a Node
- * server action (the login/logout actions) and `middleware.ts`.
+ * Per-Agent session model (specs/auth/agents-and-auth.md §8). Real Agents
+ * exist (the engine's `agents` table), so the session carries WHICH Agent
+ * this is, not just "someone is logged in." This module is the whole of that
+ * shape: mint a signed cookie value, verify one back, nothing else. It holds
+ * no I/O beyond reading one env var, so it is safe to import from both a Node
+ * server action (login/logout) and `middleware.ts`.
  *
  * ## Why Web Crypto, not `node:crypto`
  *
  * `middleware.ts` runs on Next's Edge runtime, where `node:crypto` does not
- * exist. `crypto.subtle` (Web Crypto) is available as a global in BOTH the
- * Edge runtime and Node 20+ (this repo's `engines.node`), so writing the
- * sign/verify pair against Web Crypto lets the exact same code run in the
- * middleware (Edge) and the login/logout server actions (Node) with no
- * runtime branch. It also gives constant-time MAC comparison for free:
- * `crypto.subtle.verify` never decodes a MAC to a string and `===`s it —
- * that comparison happens inside the WebCrypto implementation itself, which
- * is the actual constant-time primitive, not a hand-rolled one. (Password
- * verification is a SEPARATE concern now owned entirely by the engine —
- * spec §4/§9 — the web never compares a password to anything; this module
- * only ever signs/verifies the cookie's identity claim.)
+ * exist. `crypto.subtle` is a global in BOTH Edge and Node 20+ (this repo's
+ * `engines.node`), so writing the sign/verify pair against Web Crypto lets
+ * the exact same code run in middleware and in the server actions with no
+ * runtime branch.
+ *
+ * It also gives constant-time MAC comparison for free: `crypto.subtle.verify`
+ * never decodes a MAC to a string and `===`s it — the comparison happens
+ * inside the WebCrypto implementation, which is the actual constant-time
+ * primitive rather than a hand-rolled one. Password verification is a
+ * separate concern owned entirely by the engine (spec §4/§9); the web never
+ * compares a password to anything.
  *
  * ## Cookie format
  *
  * `<payload>.<mac>`, both base64url. `payload` is the JSON string
- * `{"v":2,"iat":<unix-ms>,"sub":<agentId>}` and
- * `mac = HMAC-SHA256(secret, payload)` — signed over the base64url TEXT of
- * the payload (not the raw JSON bytes), so verification never has to
- * re-derive the exact encoding that was signed. `v` exists so a session
- * shape change never verifies as something it isn't: this is the SECOND
- * shape (`v:1` carried no identity at all, HT-51's single-operator
- * placeholder) — a `v` this module doesn't recognize fails closed (verifies
- * to `null`), so an old v1 cookie simply forces one re-login, same as any
- * other invalid cookie.
+ * `{"v":2,"iat":<unix-ms>,"sub":<agentId>}` and `mac = HMAC-SHA256(secret,
+ * payload)`, signed over the base64url TEXT of the payload rather than the
+ * raw JSON bytes, so verification never has to re-derive the exact encoding
+ * that was signed.
  *
- * ## Cookie carries identity — `sub` is required, not optional
+ * `v` exists so a session-shape change never verifies as something it is not.
+ * This is the SECOND shape; `v:1` carried no identity at all. A `v` this
+ * module does not recognize fails closed, so an old v1 cookie forces one
+ * re-login, same as any other invalid cookie.
  *
- * `sub` is the Agent id this cookie asserts. `mintSessionCookie` takes it as
- * a REQUIRED first parameter (spec §8: "make `sub` required ... so the
+ * ## `sub` is required, not optional
+ *
+ * `sub` is the Agent id this cookie asserts, and `mintSessionCookie` takes it
+ * as a REQUIRED first parameter (spec §8: "make `sub` required ... so the
  * compiler rejects any call that would silently re-mint an identity-less
- * cookie mid-session") — the sliding-refresh re-stamp in `middleware.ts` is
- * exactly the call site that trap guards against; see that file's comment.
- * `verifySessionCookie` mirrors this on the read side: a payload whose `sub`
- * isn't a non-empty string fails closed, same as a bad MAC or an
- * unrecognized `v`.
+ * cookie mid-session"). The sliding-refresh re-stamp in `middleware.ts` is
+ * exactly the call site that trap guards. `verifySessionCookie` mirrors it on
+ * the read side: a payload whose `sub` is not a non-empty string fails
+ * closed, same as a bad MAC or an unrecognized `v`.
  *
- * ## Expiry model — sliding, simplest-correct option
+ * ## Expiry model — sliding
  *
  * A minted cookie is valid for `SESSION_MAX_AGE_MS` (7 days) from its `iat`.
- * Two ways to make that "slide" with activity: re-sign on literally every
- * request (correct, but a wasted HMAC on every single navigation), or never
- * slide at all (simple, but forces a re-login every 7 days regardless of how
- * active the Agent is — a worse experience for zero extra safety). This
- * module picks the middle option: `verifySessionCookie` reports
- * `shouldRefresh: true` once the cookie is more than a day old, and the
- * caller (middleware, on any authenticated request) re-stamps a fresh cookie
- * at that point, threading the SAME `sub` through. An active Agent's session
- * then rolls forward roughly a day at a time; an idle one still lapses
- * within a week of their last request. This is the one sliding-window shape
- * simple enough to hold in your head during review — no configurable
- * policy, no separate "absolute max" cap to reason about.
+ * Two obvious ways to make that slide with activity: re-sign on every request
+ * (correct, but a wasted HMAC on every navigation), or never slide (simple,
+ * but forces a re-login every 7 days however active the Agent is — worse
+ * experience for zero extra safety).
+ *
+ * This picks the middle: `verifySessionCookie` reports `shouldRefresh: true`
+ * once the cookie is more than a day old, and middleware re-stamps a fresh
+ * cookie at that point, threading the SAME `sub` through. An active Agent's
+ * session rolls forward roughly a day at a time; an idle one still lapses
+ * within a week of their last request. One sliding window, no configurable
+ * policy and no separate absolute-max cap to reason about.
  */
 
 export const SESSION_COOKIE_NAME = 'ht_session'
