@@ -76,7 +76,17 @@ export function MailboxListScreen({ mailboxes }: { mailboxes: MailboxSummary[] }
     if (connected === null && connectError === null) return
 
     if (connected !== null) {
-      showToast({ title: 'Mailbox connected', detail: connected })
+      // Only claim success if that address is ACTUALLY in the freshly-fetched
+      // roster. `?connected=` is just a query param — anyone can link to
+      // /manage/mailboxes?connected=anything and would otherwise be shown a
+      // "Mailbox connected" toast for a mailbox that was never connected (a
+      // UI-integrity/phishing gap, not XSS — React escapes the text). The
+      // roster is server-fetched on this same request, so a genuine callback
+      // redirect always finds its mailbox here.
+      const isConnected = mailboxes.some((mailbox) => mailbox.address === connected)
+      if (isConnected) {
+        showToast({ title: 'Mailbox connected', detail: connected })
+      }
     } else if (connectError !== null) {
       showToast({
         title: 'Could not connect mailbox',

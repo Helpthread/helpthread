@@ -148,7 +148,13 @@ export async function handleGmailConnect(
     const { consentUrl } = deps.service.beginConnect()
     return json(200, { consentUrl })
   } catch (err) {
-    console.error('[gmail-connect] unhandled error beginning connect', err)
+    // Log the error's CLASS only, never the caught object or its message: an
+    // unexpected failure on the OAuth path can originate upstream (a token
+    // exchange, a provider HTTP error) and carry a token or `code` in its
+    // text. The "never log a secret" guarantee outranks log fidelity here.
+    console.error('[gmail-connect] unhandled error beginning connect', {
+      error: err instanceof Error ? err.name : typeof err,
+    })
     return apiError(500, 'server_error', 'Internal server error.')
   }
 }
@@ -226,7 +232,12 @@ export async function handleGmailConnectCallback(
       throw err
     }
   } catch (err) {
-    console.error('[gmail-connect] unhandled error completing connect', err)
+    // Class only, never the caught object/message — see handleGmailConnect's
+    // identical guard. This path is reached AFTER a token exchange, so an
+    // upstream error's text is exactly where a leaked token would surface.
+    console.error('[gmail-connect] unhandled error completing connect', {
+      error: err instanceof Error ? err.name : typeof err,
+    })
     if (uiBaseUrl !== undefined) {
       return redirectToMailboxes(uiBaseUrl, { connect_error: 'server_error' })
     }
