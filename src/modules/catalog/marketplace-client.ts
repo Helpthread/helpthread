@@ -1,80 +1,73 @@
 /**
- * The engine's own marketplace catalog client (HT-119) — fetches the
- * published module feed and downloads a verified module release artifact
- * from `marketplace.helpthread.app`, for the operator's own engine to
- * install into the operator's own Vercel account.
+ * The engine's own marketplace catalog client — fetches the published module
+ * feed and downloads a verified module release artifact from
+ * `marketplace.helpthread.app`, for the operator's own engine to install
+ * into the operator's own Vercel account.
  *
- * This is the server-side twin of `cli/src/catalog.ts` / `cli/src/
- * verify-core.ts` (HT-116). The two are NOT the same file — `cli/` is a
- * separate workspace this module must not import from — but they exist to
- * enforce exactly the same policy, and that policy is not duplicated: this
- * module verifies artifacts using ONLY `src/modules/artifact`'s exported
- * functions (`parseManifest`, `canonicalizeManifest`,
- * `verifyManifestSignature`, `sha256Hex`), the same shared library the CLI
- * itself is built on. There is exactly one implementation of "is this
- * artifact real" in this codebase; this module and the CLI are two callers
- * of it, not two reimplementations.
+ * The server-side twin of `cli/src/catalog.ts` / `cli/src/verify-core.ts`.
+ * Not the same file — `cli/` is a separate workspace this module must not
+ * import from — but the policy is not duplicated: this module verifies
+ * artifacts using ONLY `src/modules/artifact`'s exported functions
+ * (`parseManifest`, `canonicalizeManifest`, `verifyManifestSignature`,
+ * `sha256Hex`), the same shared library the CLI is built on. There is
+ * exactly one implementation of "is this artifact real"; this module and the
+ * CLI are two callers of it, not two reimplementations.
  *
  * ## The origin is compiled in, not configurable
  *
- * {@link CATALOG_ORIGIN} is a literal, not read from an env var, a config
- * file, or a database row. A configurable catalog origin would let
- * WHATEVER controls that configuration point this engine's outbound,
- * license-key-bearing requests at an arbitrary host — turning a "which
- * marketplace do I use" setting into a privileged SSRF primitive with the
- * engine's own credentials attached. Pinning it in source, reviewed and
- * released the same way the rest of the engine is, closes that off
- * structurally. (This mirrors `cli/src/trust-store.ts`'s reasoning for why
+ * {@link CATALOG_ORIGIN} is a literal — not an env var, config file, or
+ * database row. A configurable catalog origin would let whatever controls
+ * that configuration point this engine's outbound, license-key-bearing
+ * requests at an arbitrary host, turning a "which marketplace do I use"
+ * setting into a privileged SSRF primitive with the engine's own credentials
+ * attached. Pinning it in source closes that off structurally. (Same shape
+ * of problem, same answer, as `cli/src/trust-store.ts`'s reasoning for why
  * the signing trust store must never be fetched from the network it then
- * verifies against — same shape of problem, same answer.)
+ * verifies against.)
  *
  * ## Every outbound call is SSRF-pinned, even to a compiled-in host
  *
- * A literal origin string still requires a DNS lookup to connect to, and
- * DNS is not trustworthy at connect time (`../../webhooks/ssrf.ts`'s module
- * doc: a hostname that resolves to a public IP when checked can resolve to
- * `127.0.0.1` moments later when connected to — DNS rebinding). Worse, the
- * signed download URL {@link requestDownloadUrl} returns is chosen by the
- * marketplace at request time, not compiled in at all — a compromised
- * marketplace could hand back a URL pointing anywhere. Every request this
- * module makes — to the compiled-in origin AND to whatever `downloadUrl`
+ * A literal origin still requires a DNS lookup, and DNS is not trustworthy
+ * at connect time: a hostname resolving to a public IP when checked can
+ * resolve to `127.0.0.1` moments later when connected to
+ * (`../../webhooks/ssrf.ts`). Worse, the signed download URL {@link
+ * requestDownloadUrl} returns is chosen by the marketplace at request time,
+ * not compiled in at all — a compromised marketplace could hand back a URL
+ * pointing anywhere.
+ *
+ * So every request — to the compiled-in origin AND to whatever `downloadUrl`
  * the marketplace returns — goes through {@link resolveSafeAddress}'s
- * resolve-then-connect pinning, the exact posture `../../webhooks/
- * delivery.ts` already uses for webhook egress. This is the same defense
- * applied to a different privileged egress path, not a new one invented
- * for this module.
+ * resolve-then-connect pinning, the exact posture
+ * `../../webhooks/delivery.ts` uses for webhook egress. The same defense
+ * applied to a different privileged egress path, not a new one.
  *
  * ## Identity binding: a valid signature proves authenticity, not identity
  *
  * Every first-party module release shares the SAME publisher signing key
- * (`cli/src/trust-store.ts`'s `riq-2026` entry) — the key identifies
- * "signed by Resonant IQ," not "is the module and version you asked for."
- * A signature check alone therefore cannot catch a compromised or hostile
- * marketplace that serves a genuinely-signed manifest for a DIFFERENT
- * module (or a different, possibly vulnerable, older version) than the one
- * {@link downloadVerifiedArtifact} was asked to install — every check in
- * `verify-core.ts`'s style would pass, because the artifact really is
- * validly signed, just not the artifact that was requested. {@link
- * downloadVerifiedArtifact} closes this with an EXPLICIT extra check
- * (`identity-mismatch` below) comparing the verified manifest's own
- * `module` and `semver` fields against the slug/version the caller asked
- * for and the version the marketplace's download response says it served
- * — on top of, never instead of, the signature/digest/size checks.
+ * (`cli/src/trust-store.ts`'s `riq-2026` entry) — it identifies "signed by
+ * Resonant IQ," not "is the module and version you asked for." A signature
+ * check alone therefore cannot catch a compromised or hostile marketplace
+ * serving a genuinely-signed manifest for a DIFFERENT module, or a
+ * different and possibly vulnerable older version, than the one requested:
+ * every signature check would pass, because the artifact really is validly
+ * signed — just not the one asked for.
  *
- * ## The license key never reaches a log, a thrown error, or a returned
- * object
+ * {@link downloadVerifiedArtifact} closes this with an explicit
+ * `identity-mismatch` check comparing the verified manifest's own `module`
+ * and `semver` fields against the slug and version the caller asked for and
+ * the version the download response says it served — on top of, never
+ * instead of, the signature, digest, and size checks.
  *
- * `requestDownloadUrl` is the one call that carries the license key (as a
- * Bearer token). On a non-2xx response this module takes ONLY a
- * pattern-checked machine error CODE from the response body — never the
- * server's own message text — for exactly the reason `cli/src/catalog.ts`'s
- * `requestDownloadUrl` documents: the marketplace fully controls its own
- * error body, and a compromised or hostile marketplace could echo the
- * license key back inside `error.message`, which would otherwise land in a
- * thrown `Error`'s message and from there in a log line or an operator-
- * facing error screen. The human-readable text this module produces on
- * failure is always generated locally from the status/code, never copied
- * from the server.
+ * ## The license key never reaches a log, a thrown error, or a returned object
+ *
+ * `requestDownloadUrl` is the one call carrying the license key, as a Bearer
+ * token. On a non-2xx response this module takes ONLY a pattern-checked
+ * machine error CODE from the response body, never the server's own message
+ * text: the marketplace fully controls its error body, and a compromised or
+ * hostile one could echo the license key back inside `error.message`, which
+ * would land in a thrown `Error` and from there in a log line or an
+ * operator-facing error screen. The human-readable text this module produces
+ * on failure is always generated locally from the status and code.
  */
 
 import { request as httpsRequest } from 'node:https'
