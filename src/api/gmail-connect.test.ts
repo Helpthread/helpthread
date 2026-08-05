@@ -334,6 +334,13 @@ describe('handleGmailConnectCallback with uiBaseUrl configured (HT-123)', () => 
     const location = res.headers.get('Location') ?? ''
     expect(location).not.toContain('super-secret-auth-code')
     expect(location).not.toContain('super-secret-state-value')
+    // The thrown message itself must not leak either — the test's own title
+    // promises this, and asserting only the code/state left it unchecked.
+    expect(location).not.toContain('invalid or has expired')
+    // Pin the WHOLE redirect: anything beyond the fixed error code would have
+    // to show up here, so this closes the gap by construction rather than by
+    // enumerating individual secrets.
+    expect(location).toBe(`${UI_BASE_URL}/manage/mailboxes?connect_error=invalid_state`)
   })
 
   it('falls back to the plain HTML page when uiBaseUrl is not configured (regression guard)', async () => {

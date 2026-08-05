@@ -83,7 +83,14 @@ export function MailboxListScreen({ mailboxes }: { mailboxes: MailboxSummary[] }
       // UI-integrity/phishing gap, not XSS — React escapes the text). The
       // roster is server-fetched on this same request, so a genuine callback
       // redirect always finds its mailbox here.
-      const isConnected = mailboxes.some((mailbox) => mailbox.address === connected)
+      // Case-INSENSITIVE: the address in the redirect comes from Google's
+      // `getProfile()`, whose casing need not match the stored row. An exact
+      // comparison would silently swallow the confirmation after a genuinely
+      // successful connect — the param is stripped either way, so the operator
+      // would be left with no feedback at all.
+      const isConnected = mailboxes.some(
+        (mailbox) => mailbox.address.toLowerCase() === connected.toLowerCase(),
+      )
       if (isConnected) {
         showToast({ title: 'Mailbox connected', detail: connected })
       }

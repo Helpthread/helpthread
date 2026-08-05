@@ -342,7 +342,13 @@ export function ConnectInboxForm({
   // Google — offering it there would just be confusing, not helpful
   // (module doc). An unrecognized domain might be a Workspace org's own
   // domain, so it does.
-  const offerGoogleAlternative = !lockAddress && !microsoftOnly && preset === undefined
+  // Offered whenever Google is a real possibility for this address: a Google
+  // domain (so someone who opened the app-password option can get BACK to
+  // OAuth — without this they are stuck in password mode until they retype the
+  // address), or an unrecognized domain that may belong to a Workspace org. A
+  // known non-Google preset (Fastmail, Zoho, iCloud, Yahoo) never offers it.
+  const offerGoogleAlternative =
+    !lockAddress && !microsoftOnly && (isGoogleDomain || preset === undefined)
   const defaultConnectMode: 'oauth' | 'password' = isGoogleDomain ? 'oauth' : 'password'
   const connectRenderMode: 'oauth' | 'password' | 'unsupported' = lockAddress
     ? 'password'
@@ -631,7 +637,9 @@ export function ConnectInboxForm({
                 cursor: 'pointer',
               }}
             >
-              Connect with Google Workspace instead
+              {isGoogleDomain
+                ? 'Connect with Google instead'
+                : 'Connect with Google Workspace instead'}
             </button>
           )}
 
