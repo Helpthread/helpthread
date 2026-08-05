@@ -195,9 +195,11 @@ here the cursor itself is unrecoverable.)
   (the cursor's starting point) and an expiration (~7 days out).
 - **`watch` expires and MUST be re-armed at least every 7 days, or notifications silently
   stop** — no error on either side, mail just keeps arriving with nothing telling us. A daily
-  `SchedulerProvider` cron (`registerCron`, `src/providers/scheduler.ts`) re-arms `watch` for
-  every active mailbox. Daily rather than every-6-days buys margin against a missed run;
-  `watch` is idempotent, so re-arming early is free.
+  Vercel Cron (`/api/v1/internal/cron/watch-maintenance`, `vercel.json`) re-arms `watch` for
+  every active mailbox. `SchedulerProvider` (`src/providers/scheduler.ts`) is an interface only
+  — no adapter implements it, and `registerCron` is not called in production. Daily rather
+  than every-6-days buys margin against a missed run; `watch` is idempotent, so re-arming
+  early is free.
 - **The same daily cron also runs a bounded reconciliation `history.list` from each active
   mailbox's stored cursor.** Because push is best-effort (§1), a dropped or delayed
   notification — most damagingly the *last* one before a quiet spell — would otherwise leave
