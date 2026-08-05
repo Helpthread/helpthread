@@ -1,106 +1,94 @@
 /**
- * Gmail `history.list` + raw-message-fetch HTTP client (specs/mail/gmail-
- * push.md §3) — the transport HT-41's reconcile handler (`src/mail/gmail-
- * reconcile.ts`) uses to turn a mailbox's stored cursor into the raw RFC822
- * bytes of every message added since. Mirrors `./sender.ts`'s shape:
- * injectable `fetchImpl`, `userId` (default `'me'`), `AbortSignal.timeout`,
- * Bearer auth, throwing on any unexpected non-2xx with a bounded response-body
- * snippet, and the access token never touched by a log line or a thrown
- * error — see that module's doc for the shared rationale, not repeated
- * here.
+ * Gmail `history.list` + raw-message-fetch HTTP client
+ * (specs/mail/gmail-push.md §3) — the transport the reconcile handler
+ * (`src/mail/gmail-reconcile.ts`) uses to turn a mailbox's stored cursor
+ * into the raw RFC822 bytes of every message added since. Mirrors
+ * `./sender.ts`'s shape: injectable `fetchImpl`, `userId` (default `'me'`),
+ * `AbortSignal.timeout`, Bearer auth, throwing on any unexpected non-2xx
+ * with a bounded response-body snippet, and the access token never touched
+ * by a log line or a thrown error. See that module's doc for the shared
+ * rationale.
  *
- * ## Two outcomes this client reports as typed results, not thrown errors
+ * ## Two outcomes reported as typed results, not thrown errors
  *
  * - `history.list` 404s when `startHistoryId` is older than Gmail's
  *   retention window (gmail-push.md §5) — an expected, caller-actionable
  *   outcome (pause the mailbox), not a transport failure. {@link
- *   GmailHistoryClient.listAddedMessageIds} reports this as `{ kind:
- *   'expired' }` rather than throwing.
+ *   GmailHistoryClient.listAddedMessageIds} reports `{ kind: 'expired' }`.
  * - `messages.get` 404s when a message existed at `history.list` time but
- *   was deleted (or otherwise removed) before the raw fetch ran.
- *   gmail-push.md doesn't speak to this directly, but it is the same "the
- *   resource is legitimately gone, not a transport error" shape, so {@link
- *   GmailHistoryClient.getRawMessage} reports it as `null` (the caller
- *   skips this message) rather than throwing.
+ *   was deleted before the raw fetch ran. Same "legitimately gone, not a
+ *   transport error" shape, so {@link GmailHistoryClient.getRawMessage}
+ *   reports `null` and the caller skips it.
  *
  * Every OTHER non-2xx from either call still throws, exactly like
  * `sender.ts`.
  *
  * ## Pagination and id de-duplication
  *
- * `history.list` paginates via `nextPageToken`; {@link
- * GmailHistoryClient.listAddedMessageIds} follows every page to the end
- * before returning. Gmail's history records can repeat a message id across
- * records (e.g. a message that is both added and labeled within the same
- * batch appears in more than one `history[]` entry), so ids are collected
- * into a `Map` keyed on id and returned de-duplicated — a caller handling
- * each id exactly once matters both for correctness (no redundant ingest
- * attempt per id) and for cost (no redundant `messages.get` call). Where an
- * id repeats across records, the LAST record's `labelIds` wins (mirrors
- * `newHistoryId`'s own "last page wins" rule below — favor the freshest
- * label snapshot Gmail gave us). `newHistoryId` is taken from whichever
- * page's top-level `historyId` field is read last (Gmail includes it on
- * every page as the mailbox's then-current watermark; taking the LAST
- * page's value is what "follow pagination to the end" requires — see
- * gmail-push.md §4, "the cursor").
+ * `history.list` paginates via `nextPageToken`; `listAddedMessageIds`
+ * follows every page to the end. Gmail's history records can repeat a
+ * message id across records — a message both added and labeled within one
+ * batch appears in more than one `history[]` entry — so ids are collected
+ * into a `Map` keyed on id and returned de-duplicated. Handling each id once
+ * matters for correctness (no redundant ingest attempt) and cost (no
+ * redundant `messages.get`). Where an id repeats, the LAST record's
+ * `labelIds` wins — the freshest snapshot Gmail gave us. `newHistoryId` is
+ * taken from whichever page's top-level `historyId` is read last: Gmail
+ * includes it on every page as the then-current watermark, and taking the
+ * last page's value is what following pagination to the end requires
+ * (gmail-push.md §4).
  *
- * ## `labelIds` (HT-50)
+ * ## `labelIds`
  *
- * Each `messagesAdded` record's `message` object carries the same
- * `labelIds` field `messages.get` returns — Gmail's History resource embeds
- * the message's labels at record time, not just its id. {@link
- * GmailHistoryClient.listAddedMessageIds} surfaces this per message (see
- * {@link AddedGmailMessage}) purely so the reconcile handler
- * (`src/mail/gmail-reconcile.ts`) can filter the mailbox's own outbound
- * sends (and in-progress drafts) out of the batch BEFORE ever calling
- * `messages.get`/`ingest` for them (gmail-push.md's reconcile section,
- * HT-50) — this client itself does not interpret `labelIds`, it only
- * carries the field through. Missing or absent `labelIds` on a record
- * defaults to `[]` (never inferred as "definitely not sent") so a caller's
- * filter fails open toward ingesting rather than toward silently dropping a
- * message it can't confirm.
+ * Each `messagesAdded` record's `message` carries the same `labelIds` field
+ * `messages.get` returns — Gmail's History resource embeds the message's
+ * labels at record time, not just its id. `listAddedMessageIds` surfaces
+ * this per message (see {@link AddedGmailMessage}) purely so the reconcile
+ * handler can filter the mailbox's own outbound sends and in-progress drafts
+ * out of the batch BEFORE calling `messages.get`/`ingest`. This client never
+ * interprets `labelIds`, only carries it through. Missing or absent
+ * `labelIds` defaults to `[]` — never inferred as "definitely not sent" — so
+ * a caller's filter fails open toward ingesting rather than toward silently
+ * dropping a message it cannot confirm.
  *
- * ## Folding in `labelsAdded` — hardening against a split SENT/INBOX
- * snapshot (HT-50)
+ * ## Folding in `labelsAdded` — hardening against a split SENT/INBOX snapshot
  *
  * The reconcile handler's self-echo filter assumes a self-addressed send's
  * `messagesAdded` record already carries BOTH `SENT` and `INBOX` in one
- * `labelIds` snapshot (`gmail-reconcile.ts`'s module doc). This has not been
- * confirmed against a live self-addressed send — Gmail's docs do not rule
- * out recording the message as `SENT`-only at insert time and applying
- * `INBOX` via a LATER, separate history event once delivery completes. If
- * that happens and this client only ever read `messagesAdded` records, the
- * `INBOX` label would never reach the caller: the message would misread as
- * a pure self-echo and be silently, permanently dropped — invariant #1
- * forbids exactly that.
+ * snapshot. **That has not been confirmed against a live self-addressed
+ * send** — Gmail's docs do not rule out recording the message `SENT`-only at
+ * insert time and applying `INBOX` via a LATER history event. If that
+ * happens and this client only read `messagesAdded`, the `INBOX` label would
+ * never reach the caller: the message would misread as a pure self-echo and
+ * be silently, permanently dropped, which invariant #1 forbids.
  *
- * To close that gap without depending on the unconfirmed one-record
- * assumption, `listAddedMessageIds` also requests the `labelAdded` history
- * type and reads each page's `labelsAdded` records. A `labelsAdded` record
- * carries the labels applied by that event in its TOP-LEVEL `labelIds`
- * field, beside `message` (the discovery schema's `HistoryLabelAdded`:
- * "Label IDs added to the message.") — the embedded `message` object's own
- * `labelIds` is NOT guaranteed to be populated in history records, so this
- * client never reads it there. For any message id that already has a
- * `messagesAdded` entry in this same listed window, each `labelsAdded`
- * record's top-level `labelIds` is MERGED (set union) into the tracked
- * entry's labels — never overwritten: an overwrite keyed off the embedded
- * snapshot would, when Gmail omits it, clobber a real `['SENT']` down to
- * `[]` and lose the one label the caller's self-echo filter keys on,
- * whereas merging the schema-guaranteed delta can only ever ADD labels — it
- * reveals the later `INBOX` without ever losing the earlier `SENT`. Label
- * REMOVALS (`labelsRemoved`) are deliberately not folded in: the only
- * removal that could change the caller's decision is `INBOX` (e.g. the
- * message archived mid-window), and keeping a stale `INBOX` biases the
- * filter toward ingesting — the safe direction. `labelsAdded` records for
- * ids that never had a `messagesAdded` entry in this window are ignored:
- * they describe a label change on a message that was NOT newly added since
- * the cursor (e.g. an existing message re-labeled), which is out of scope
- * for "messages added since the cursor" and must not manufacture a new
- * tracked id. This closes the split-record ordering gap whichever way
- * Gmail's history actually orders the two labels; it does not by itself
- * confirm the assumption is even real — see gmail-reconcile.ts's module doc
- * for the still-open live-verification item this ticket's report flagged.
+ * So `listAddedMessageIds` also requests the `labelAdded` history type and
+ * reads each page's `labelsAdded` records. Such a record carries the labels
+ * applied by that event in its TOP-LEVEL `labelIds` field, beside `message`
+ * (the discovery schema's `HistoryLabelAdded`: "Label IDs added to the
+ * message."). The embedded `message` object's own `labelIds` is NOT
+ * guaranteed populated in history records, so this client never reads it
+ * there.
+ *
+ * For any id that already has a `messagesAdded` entry in the same listed
+ * window, each `labelsAdded` record's top-level `labelIds` is MERGED (set
+ * union) into the tracked entry — never overwritten. An overwrite keyed off
+ * the embedded snapshot would, when Gmail omits it, clobber a real
+ * `['SENT']` down to `[]` and lose the one label the self-echo filter keys
+ * on; merging the schema-guaranteed delta can only ADD labels, revealing a
+ * later `INBOX` without losing the earlier `SENT`.
+ *
+ * Label REMOVALS (`labelsRemoved`) are deliberately not folded in: the only
+ * removal that could change the caller's decision is `INBOX` (a message
+ * archived mid-window), and keeping a stale `INBOX` biases the filter toward
+ * ingesting — the safe direction. `labelsAdded` records for ids with no
+ * `messagesAdded` entry in this window are ignored: they describe a label
+ * change on a message not newly added since the cursor, which is out of
+ * scope and must not manufacture a tracked id.
+ *
+ * This closes the split-record ordering gap whichever way Gmail actually
+ * orders the two labels; it does not confirm the assumption is real — see
+ * `gmail-reconcile.ts` for the still-open live-verification item.
  */
 
 /** Options for {@link createGmailHistoryClient}. Mirrors `GmailEmailSenderOptions` (`./sender.ts`). */
