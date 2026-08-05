@@ -140,6 +140,13 @@ export interface ImapMailboxConfigView {
   secure: boolean
 }
 
+// --- Gmail OAuth connect (HT-40/HT-123; specs/mail/gmail-connect.md §2a) ---
+
+/** `POST /api/v1/inbound/gmail/connect`'s success response — the Google consent URL to navigate the browser to. Never a token, `code`, or `state`. */
+export interface GmailBeginConnectResult {
+  consentUrl: string
+}
+
 /** v1.1 (HT-46) — one inbound attachment's metadata plus a time-limited
  *  signed `BlobStore` URL (never a stable/public path; it expires). */
 export interface AttachmentView {

@@ -18,7 +18,7 @@
  */
 
 import { revalidatePath } from 'next/cache'
-import { ApiError, imapCheckConnection, imapConnect } from './api'
+import { ApiError, gmailBeginConnect, imapCheckConnection, imapConnect } from './api'
 import type { ConnectedMailbox, ImapCheckResult, ImapConnectionInput } from './api-types'
 
 export interface MailboxActionResult {
@@ -63,6 +63,26 @@ export async function connectMailbox(
     revalidatePath('/manage/mailboxes')
     revalidatePath(`/mailbox/${mailbox.id}/settings/connection`)
     return { ok: true, mailbox }
+  } catch (error) {
+    return toActionResult(error)
+  }
+}
+
+export interface BeginGoogleConnectResult extends MailboxActionResult {
+  consentUrl?: string
+}
+
+/**
+ * `ConnectInboxForm`'s "Connect with Google" button (HT-123) — mints the
+ * consent URL server-side (the Bearer token never reaches the browser) and
+ * hands it back for the client to navigate to. The engine's response only
+ * ever carries `consentUrl`, so there is nothing else to accidentally
+ * forward.
+ */
+export async function beginGoogleConnect(): Promise<BeginGoogleConnectResult> {
+  try {
+    const { consentUrl } = await gmailBeginConnect()
+    return { ok: true, consentUrl }
   } catch (error) {
     return toActionResult(error)
   }

@@ -17,14 +17,37 @@
  * silently widen that wire contract, this list shows address + status only
  * and flags the gap here; adding `provider` to `GET /mailboxes` is a
  * one-line follow-up if the maintainer wants the card to show it.
+ *
+ * ## `?connected=` / `?connect_error=` (HT-123)
+ *
+ * The engine's Gmail OAuth callback (`src/api/gmail-connect.ts`) redirects
+ * back here on both success and failure, carrying only the connected
+ * address or a short error code — never a token, `code`, `state`, or
+ * secret (that contract lives entirely on the engine side; this screen just
+ * renders what already arrived). On mount, a matching param shows a toast
+ * and the params are stripped from the URL via `router.replace` so a page
+ * refresh doesn't re-show the toast.
  */
 
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { useEffect } from 'react'
 import type { MailboxStatus, MailboxSummary } from '../lib/api-types'
 import { Button } from './ds/core/Button'
 import { EmptyState } from './ds/core/EmptyState'
 import { StatusPill } from './ds/core/StatusPill'
+import { useToast } from './Toaster'
+
+/** `?connect_error=` codes the engine's callback can send (`src/api/gmail-connect.ts`'s `ConnectRedirectErrorCode`) — kept in sync by hand, same convention `ACTING_AGENT_HEADER` in `lib/api.ts` already uses for a cross-package constant. */
+const CONNECT_ERROR_MESSAGES: Record<string, string> = {
+  missing_params: 'The connect link was missing required parameters. Please try again.',
+  invalid_state: 'That connect link is invalid or has expired. Please try again.',
+  exchange_failed: 'Google could not complete the connection. Please try again.',
+  no_refresh_token:
+    'Google did not grant lasting access. Please try again — the consent screen will show again.',
+  watch_failed: 'The mailbox could not be fully connected. Please try again.',
+  server_error: 'Something went wrong connecting the mailbox. Please try again.',
+}
 
 /**
  * `MailboxStatus` → `StatusPill` — `active` matches the pill's own META key
@@ -43,6 +66,25 @@ function mailboxStatusPill(status: MailboxStatus) {
 
 export function MailboxListScreen({ mailboxes }: { mailboxes: MailboxSummary[] }) {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const showToast = useToast()
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only re-run when the params actually change — router.replace/showToast are stable across renders (next/navigation, ToasterProvider's useCallback).
+  useEffect(() => {
+    const connected = searchParams.get('connected')
+    const connectError = searchParams.get('connect_error')
+    if (connected === null && connectError === null) return
+
+    if (connected !== null) {
+      showToast({ title: 'Mailbox connected', detail: connected })
+    } else if (connectError !== null) {
+      showToast({
+        title: 'Could not connect mailbox',
+        detail: CONNECT_ERROR_MESSAGES[connectError] ?? 'Please try again.',
+      })
+    }
+    router.replace('/manage/mailboxes')
+  }, [searchParams])
 
   return (
     <main style={{ flex: 1, minWidth: 0, padding: 24 }}>

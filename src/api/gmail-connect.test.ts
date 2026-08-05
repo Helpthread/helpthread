@@ -230,3 +230,122 @@ describe('handleGmailConnectCallback', () => {
     expect(html).not.toContain('<script>evil()</script>')
   })
 })
+
+describe('handleGmailConnectCallback with uiBaseUrl configured (HT-123)', () => {
+  function callbackRequest(query: string): Request {
+    return new Request(`${CALLBACK_URL}${query}`)
+  }
+
+  const UI_BASE_URL = 'https://desk.example.test'
+
+  it('302-redirects to /manage/mailboxes?connected=<address> on success', async () => {
+    const service = fakeService({
+      completeConnect: async () => ({ mailboxId: 'mb-1', address: 'connected@example.test' }),
+    })
+    const res = await handleGmailConnectCallback(callbackRequest('?code=abc&state=xyz'), {
+      service,
+      uiBaseUrl: UI_BASE_URL,
+    })
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('Location')).toBe(
+      `${UI_BASE_URL}/manage/mailboxes?connected=connected%40example.test`,
+    )
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+  })
+
+  it('302-redirects to /manage/mailboxes?connect_error=missing_params when code/state are missing, without calling the service', async () => {
+    const completeConnect = vi.fn()
+    const service = fakeService({ completeConnect: completeConnect as never })
+
+    const res = await handleGmailConnectCallback(callbackRequest(''), {
+      service,
+      uiBaseUrl: UI_BASE_URL,
+    })
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('Location')).toBe(
+      `${UI_BASE_URL}/manage/mailboxes?connect_error=missing_params`,
+    )
+    expect(completeConnect).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['invalid_state' as const],
+    ['exchange_failed' as const],
+    ['no_refresh_token' as const],
+    ['watch_failed' as const],
+  ])(
+    '302-redirects to /manage/mailboxes?connect_error=%s for a caught GmailConnectError, never including its message',
+    async (code) => {
+      const service = fakeService({
+        completeConnect: async () => {
+          throw new GmailConnectError(
+            code,
+            `safe message for ${code} — must never appear in the URL`,
+          )
+        },
+      })
+
+      const res = await handleGmailConnectCallback(callbackRequest('?code=abc&state=xyz'), {
+        service,
+        uiBaseUrl: UI_BASE_URL,
+      })
+
+      expect(res.status).toBe(302)
+      const location = res.headers.get('Location') ?? ''
+      expect(location).toBe(`${UI_BASE_URL}/manage/mailboxes?connect_error=${code}`)
+      expect(location).not.toContain('safe message')
+    },
+  )
+
+  it('302-redirects to /manage/mailboxes?connect_error=server_error for an unexpected throw, without leaking the thrown message', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const service = fakeService({
+      completeConnect: async () => {
+        throw new Error('db connection refused — must never reach the browser or the URL')
+      },
+    })
+
+    const res = await handleGmailConnectCallback(callbackRequest('?code=abc&state=xyz'), {
+      service,
+      uiBaseUrl: UI_BASE_URL,
+    })
+
+    expect(res.status).toBe(302)
+    expect(res.headers.get('Location')).toBe(
+      `${UI_BASE_URL}/manage/mailboxes?connect_error=server_error`,
+    )
+    errorSpy.mockRestore()
+  })
+
+  it('never carries the code, state, or a GmailConnectError message anywhere in the redirect Location', async () => {
+    const service = fakeService({
+      completeConnect: async () => {
+        throw new GmailConnectError('invalid_state', 'This connect link is invalid or has expired.')
+      },
+    })
+
+    const res = await handleGmailConnectCallback(
+      callbackRequest('?code=super-secret-auth-code&state=super-secret-state-value'),
+      { service, uiBaseUrl: UI_BASE_URL },
+    )
+
+    const location = res.headers.get('Location') ?? ''
+    expect(location).not.toContain('super-secret-auth-code')
+    expect(location).not.toContain('super-secret-state-value')
+  })
+
+  it('falls back to the plain HTML page when uiBaseUrl is not configured (regression guard)', async () => {
+    const service = fakeService({
+      completeConnect: async () => ({ mailboxId: 'mb-1', address: 'connected@example.test' }),
+    })
+    const res = await handleGmailConnectCallback(callbackRequest('?code=abc&state=xyz'), {
+      service,
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Content-Type')).toBe('text/html; charset=utf-8')
+    expect(res.headers.get('Location')).toBeNull()
+  })
+})
