@@ -997,116 +997,103 @@ CREATE TABLE assistants (
 `
 
 /**
- * Migration 021 — the `threads` actor model + draft lifecycle (HT-68;
- * specs/plugins/substrate-v1.md §2). Closes the gap that spec names
- * explicitly: CHARTER.md §4 promises an authoring-actor-kind + draft-before-
- * send schema shape "day one," but the shipped schema (migrations 001/007)
- * only ever had `direction IN ('inbound','outbound','note')`. This migration
- * is that promise, kept late but in full — the contradiction and its
- * resolution are recorded here deliberately (CLAUDE.md's coding-discipline
- * commandment: name the contradiction, don't code through it).
+ * Migration 021 — the `threads` actor model + draft lifecycle
+ * (specs/modules/substrate-v1.md §2). Closes a gap that spec names:
+ * CHARTER.md §4 promises an authoring-actor-kind and draft-before-send shape
+ * "day one," but the shipped schema (migrations 001/007) only ever had
+ * `direction IN ('inbound','outbound','note')`. Recorded here rather than
+ * coded through.
  *
- * ## `author_kind` + identity (spec §2, backfill-before-constraint order)
+ * ## `author_kind` + identity (backfill before constraint)
  *
- * Same discipline as migration 004/005's own backfill-before-constraint
- * ordering: `author_kind` is added nullable, backfilled (`inbound` →
- * `customer`; `outbound`/`note` → `agent` — every pre-substrate row was
- * authored by a human, since Assistants didn't exist before this
- * migration), THEN set `NOT NULL` and CHECK-constrained. NO column
- * `DEFAULT` is added: every application insert
- * (`src/store/conversations.ts`'s `insertThread`) ALWAYS computes and
- * supplies `author_kind` explicitly (spec §2: "every insert path supplies
- * it in the same change"), so a default would only ever mask a hand-written
- * INSERT that forgot the column — exactly the kind of silent wrong-value
- * risk this schema's CHECK-heavy convention exists to avoid, not paper
- * over. **No `DEFAULT 'agent'`**, however convenient it would be for test
- * fixtures: a masking default is strictly worse than giving the handful of
- * raw-SQL fixtures an explicit value (see `src/db/migrate.test.ts`'s
- * `threads` inserts).
+ * Same ordering as migrations 004/005: added nullable, backfilled (`inbound`
+ * → `customer`; `outbound`/`note` → `agent`, since every pre-substrate row
+ * was human-authored — Assistants did not exist yet), THEN `NOT NULL` and
+ * CHECK-constrained.
  *
- * `threads_author_kind_direction_check` is the real invariant a default
- * would have masked: `(direction = 'inbound') = (author_kind = 'customer')`
- * — a biconditional, both sides always boolean (never NULL: `direction` is
- * `NOT NULL` since migration 001, `author_kind` is `NOT NULL` as of the
- * statement just above). Inbound mail is ALWAYS customer-authored, and only
- * inbound mail is — outbound/note rows are free to be `'agent'` or
- * `'assistant'`, but never `'customer'`. This is stronger than the backfill
- * CASE alone: the backfill sets the right value once; this CHECK keeps it
- * right forever, rejecting e.g. an inbound row mislabeled `'agent'` or an
- * outbound row mislabeled `'customer'` at insert/update time, not just at
- * migration time.
+ * **No column `DEFAULT`.** Every application insert
+ * (`src/store/conversations.ts`'s `insertThread`) always computes and
+ * supplies `author_kind` explicitly, so a default could only ever mask a
+ * hand-written INSERT that forgot the column. That silent-wrong-value risk
+ * is exactly what this schema's CHECK-heavy convention exists to avoid. Not
+ * even `DEFAULT 'agent'` for fixture convenience: a masking default is worse
+ * than giving the handful of raw-SQL fixtures an explicit value (see
+ * `src/db/migrate.test.ts`).
  *
- * `author_agent_id`/`author_assistant_id` need no backfill: `NULL` is the
- * correct, honest value for every backfilled row and every future
- * service-token caller with no acting-agent header (spec §3: "a
- * service-token caller without the header still writes author_kind='agent'
- * with NULL identity — the pre-HT-54 posture, preserved rather than
- * broken"). `threads_author_identity_check` makes the spec's three-way
- * consistency rule unrepresentable-otherwise: a `customer` row carries
- * neither id; an `assistant` row carries `author_assistant_id` and never
- * `author_agent_id`; an `agent` row may carry `author_agent_id` (or not)
- * and never `author_assistant_id`.
+ * `threads_author_kind_direction_check` is the invariant a default would
+ * have masked: `(direction = 'inbound') = (author_kind = 'customer')` — a
+ * biconditional, both sides always boolean, never NULL (`direction` is `NOT
+ * NULL` since migration 001, `author_kind` as of the statement above).
+ * Inbound mail is ALWAYS customer-authored and only inbound mail is;
+ * outbound and note rows may be `'agent'` or `'assistant'` but never
+ * `'customer'`. Stronger than the backfill alone: the backfill sets the
+ * right value once, this keeps it right forever, rejecting a mislabeled row
+ * at insert/update time.
  *
- * ## Draft lifecycle (spec §2)
+ * `author_agent_id`/`author_assistant_id` need no backfill — `NULL` is the
+ * honest value for every backfilled row and every future service-token
+ * caller with no acting-agent header (spec §3: "a service-token caller
+ * without the header still writes author_kind='agent' with NULL identity").
+ * `threads_author_identity_check` makes the three-way rule
+ * unrepresentable-otherwise: a `customer` row carries neither id; an
+ * `assistant` row carries `author_assistant_id` and never
+ * `author_agent_id`; an `agent` row may carry `author_agent_id` and never
+ * `author_assistant_id`.
  *
- * `draft_status` is nullable — legal only on `direction = 'outbound'`
- * (`threads_draft_status_outbound_only`, matching the shape of every other
- * outbound-only column in this schema, e.g. migration 003's `idempotency_
- * key`) and only from the closed set `awaiting_review`/`approved`/
- * `discarded` (`threads_draft_status_check`). The audit columns
- * (`approved_by_agent_id`, `draft_resolved_at`, `draft_edited`) need no
- * CHECK of their own — they are meaningful only alongside a non-null
- * `draft_status`, which the store layer (not the schema) is responsible for
- * only ever setting together; no illegal state results from setting them on
- * a non-draft row, so no constraint is needed to forbid it.
+ * ## Draft lifecycle
  *
- * ## The delivery/draft CHECK replacement — spec §2's exact predicate
+ * `draft_status` is nullable, legal only on `direction = 'outbound'`
+ * (`threads_draft_status_outbound_only`, matching every other outbound-only
+ * column, e.g. migration 003's `idempotency_key`) and only from the closed
+ * set `awaiting_review`/`approved`/`discarded`
+ * (`threads_draft_status_check`). The audit columns (`approved_by_agent_id`,
+ * `draft_resolved_at`, `draft_edited`) need no CHECK: they are meaningful
+ * only alongside a non-null `draft_status`, which the store layer is
+ * responsible for setting together, and no illegal state results from them
+ * on a non-draft row.
  *
- * This DROPS migration 007's `threads_delivery_status_by_direction` (which
- * still carries the `note` arm — reproduced verbatim below, not narrowed)
- * and replaces it with the spec's two-CHECK predicate, copied here exactly
- * as spec §2 shows it, not paraphrased:
+ * ## The delivery/draft CHECK replacement
  *
- * 1. `threads_draft_status_outbound_only` — already listed above, but doing
- *    real work here too: without it, the second CHECK's outbound branches
- *    say nothing about a `note` row carrying a stray `draft_status`, since
- *    the first arm of the second CHECK (`direction IN ('inbound','note')
- *    AND delivery_status IS NULL`) never inspects `draft_status` at all.
- * 2. `threads_delivery_draft_status_check` — the illegal-state-proof rule
- *    spec §2 requires: an unapproved draft (`awaiting_review`/`discarded`)
- *    MUST have `delivery_status IS NULL` (invisible to the delivery worker,
- *    which scopes every query to `delivery_status IN (...)`), and only
- *    `draft_status IS NULL` (an ordinary send/note — the pre-substrate
- *    shape) or `'approved'` may carry a real delivery status.
+ * DROPS migration 007's `threads_delivery_status_by_direction` (whose `note`
+ * arm is reproduced verbatim below, not narrowed) and replaces it with two
+ * CHECKs:
  *
- *    **Deviation from spec §2's literal SQL, found by this migration's own
- *    tests**: the spec's predicate text omits explicit `IS NOT NULL` guards
- *    on both `IN (...)` membership tests over nullable columns — the
- *    second arm's `draft_status IN ('awaiting_review','discarded')` and the
- *    third arm's `delivery_status IN ('pending','sent','failed')`. Copied
- *    verbatim, an ORDINARY outbound row (`draft_status IS NULL`,
- *    `delivery_status IS NULL` — never a legal state; a plain send always
- *    carries a delivery status) slipped through: `NULL IN (...)` evaluates
- *    to SQL NULL, not FALSE, so both the second and third arm evaluated to
- *    NULL rather than FALSE, and a CHECK treats NULL as a PASS. This is the
- *    EXACT trap migration 002's own doc comment names ("a CHECK constraint
- *    passes on TRUE *or* NULL... the guard forces that case to FALSE so it
- *    is rejected") — applied here, with both guards restored, rather than
- *    reproducing the bug spec §2's prose missed.
+ * 1. `threads_draft_status_outbound_only` — listed above, but load-bearing
+ *    here too: without it the second CHECK says nothing about a `note` row
+ *    carrying a stray `draft_status`, since its first arm (`direction IN
+ *    ('inbound','note') AND delivery_status IS NULL`) never inspects
+ *    `draft_status`.
+ * 2. `threads_delivery_draft_status_check` — an unapproved draft
+ *    (`awaiting_review`/`discarded`) MUST have `delivery_status IS NULL`, so
+ *    it is invisible to the delivery worker, which scopes every query to
+ *    `delivery_status IN (...)`. Only `draft_status IS NULL` (an ordinary
+ *    send or note) or `'approved'` may carry a real delivery status.
  *
- * `listDeliverableThreads`/`claimThreadForDelivery` (`src/store/
- * conversations.ts`) additionally gain an explicit `draft_status IS
- * DISTINCT FROM 'awaiting_review'` guard in the same change — belt on top
- * of this CHECK's braces, per spec §2's closing paragraph.
+ * **Deviation from spec §2's literal SQL, caught by this migration's own
+ * tests.** The spec's predicate omits explicit `IS NOT NULL` guards on both
+ * `IN (...)` tests over nullable columns — the second arm's `draft_status IN
+ * ('awaiting_review','discarded')` and the third's `delivery_status IN
+ * ('pending','sent','failed')`. Copied verbatim, an ordinary outbound row
+ * with both columns NULL — never a legal state, since a plain send always
+ * carries a delivery status — slipped through: `NULL IN (...)` evaluates to
+ * SQL NULL rather than FALSE, both arms evaluated to NULL, and a CHECK
+ * treats NULL as a PASS. This is the trap migration 002's doc comment names
+ * ("a CHECK constraint passes on TRUE *or* NULL... the guard forces that
+ * case to FALSE so it is rejected"). Both guards are restored here rather
+ * than reproducing the bug the spec's prose missed.
+ *
+ * `listDeliverableThreads`/`claimThreadForDelivery` additionally gain an
+ * explicit `draft_status IS DISTINCT FROM 'awaiting_review'` guard — belt on
+ * top of this CHECK's braces.
  *
  * ## The partial index
  *
- * `threads_awaiting_review_idx` serves `ConversationStore.listAwaitingDrafts`
- * (`GET /api/v1/drafts?status=awaiting_review`, spec §6) — a real,
- * shipped-in-this-change query, not speculative head-room, so it is added
- * alongside the column it scans rather than deferred (matching migration
- * 013's `queue_jobs_ready_idx` precedent: an index ships with the query
- * that needs it, not before).
+ * `threads_awaiting_review_idx` serves
+ * `ConversationStore.listAwaitingDrafts` (`GET
+ * /api/v1/drafts?status=awaiting_review`, spec §6) — a query shipped in this
+ * same change, not speculative head-room, so it lands alongside the column
+ * it scans (matching migration 013's `queue_jobs_ready_idx`: an index ships
+ * with the query that needs it).
  */
 const MIGRATION_021_THREADS_ACTOR_MODEL = `
 ALTER TABLE threads ADD COLUMN author_kind text;
@@ -1650,116 +1637,105 @@ $migration027$;
 
 /**
  * Migration 028 — `imap_mailbox_config`, `imap_mailbox_credentials`,
- * `imap_watch_state` (HT-101 Stage 2a-i; specs/mail/mailbox-connection.md).
+ * `imap_watch_state` (specs/mail/mailbox-connection.md).
+ *
  * Stage 1 (`src/providers/adapters/imap/*`, `smtp/*`) built the pure
- * fetch/send adapters behind the existing `InboundEmailProvider`-adjacent
- * and `EmailSender` seams with NO persistence of their own — every
- * dependency (an `ImapClient`, an `SmtpTransporter`) is injected by the
- * caller. This migration is where that persistence lands: three per-mailbox
- * sidecar tables, kept OUT of the generic `mailboxes` schema exactly like
- * `mailbox_oauth_tokens`/`gmail_watch_state` (migrations 010/011) are —
- * `mailboxes` stays provider-agnostic, and an IMAP-specific column set adds
- * nothing to a schema a future non-IMAP, non-Gmail transport would also have
- * to carry. Same 1:1-sidecar shape throughout: `mailbox_id` is the PRIMARY
- * KEY on all three tables (one row per mailbox), not a separate surrogate
- * `id`.
+ * fetch/send adapters with NO persistence of their own — every dependency
+ * (an `ImapClient`, an `SmtpTransporter`) is injected. This migration is
+ * where that persistence lands: three per-mailbox sidecar tables, kept OUT
+ * of the generic `mailboxes` schema exactly as
+ * `mailbox_oauth_tokens`/`gmail_watch_state` (migrations 010/011) are, so
+ * `mailboxes` stays provider-agnostic and an IMAP-specific column set adds
+ * nothing a future non-IMAP, non-Gmail transport would have to carry. Same
+ * 1:1-sidecar shape throughout: `mailbox_id` is the PRIMARY KEY on all
+ * three, not a separate surrogate `id`.
  *
  * ## `imap_mailbox_config` — the non-secret connection parameters
  *
- * Host/port for BOTH transports (`imap_host`/`imap_port` for fetch,
- * `smtp_host`/`smtp_port` for send) live in one row, not two, because a
- * single IMAP/SMTP mailbox connection is configured as one unit in the
- * connect flow this table backs — an operator supplies one server pair (or
- * one provider's well-known pair) and one account, never a fetch-only or
- * send-only half-connection. `username` is a single column shared by both
- * transports: the overwhelmingly common case for an app-password-based
- * mailbox (the credential this ticket's sibling table stores) is one
- * account authenticating both IMAP and SMTP identically; a future
- * split-credential mailbox is a schema change for whoever needs it; not a
- * checkbox this migration is guessing at today. `secure` defaults `true`
- * (TLS-first posture for both connections) — `imapflow`/`nodemailer` both
- * take an explicit boolean, so this is a plain pass-through, not a schema
- * opinion about how either library behaves.
+ * Host/port for BOTH transports (`imap_host`/`imap_port`,
+ * `smtp_host`/`smtp_port`) live in one row, because a single IMAP/SMTP
+ * mailbox is configured as one unit in the connect flow this table backs —
+ * an operator supplies one server pair and one account, never a fetch-only
+ * or send-only half-connection. `username` is one column shared by both
+ * transports: for an app-password mailbox the overwhelmingly common case is
+ * one account authenticating IMAP and SMTP identically, and a
+ * split-credential mailbox is a schema change for whoever needs it rather
+ * than a checkbox guessed at now. `secure` defaults `true` (TLS-first);
+ * `imapflow`/`nodemailer` both take an explicit boolean, so this is a
+ * pass-through, not a schema opinion about either library.
  *
- * ## `imap_mailbox_credentials` — the secret, kept in its OWN table
+ * ## `imap_mailbox_credentials` — the secret, in its OWN table
  *
- * Deliberately a separate table from `imap_mailbox_config`, not one more
- * nullable column on it — narrows which code path ever needs to `SELECT` an
- * encrypted column at all: the connect-flow / settings-display code that
- * reads back host/port/username for an operator to review never has a
- * reason to touch ciphertext, and keeping the secret physically apart from
- * the config makes "this query cannot possibly leak the password" true by
- * construction for every config-only reader, not just true by discipline.
- * `password_ciphertext` is `bytea NOT NULL` — this migration only reserves
- * the column shape, exactly like migration 010's own framing for
- * `mailbox_oauth_tokens`; `src/store/imap-credentials.ts` (this same
- * ticket) is what actually encrypts/decrypts, reusing `token-crypto.ts`'s
- * existing AES-256-GCM envelope rather than inventing a second one — one
- * crypto module, two callers.
+ * Deliberately separate from `imap_mailbox_config` rather than one more
+ * nullable column on it, which narrows which code path ever `SELECT`s an
+ * encrypted column: the connect-flow and settings-display code that reads
+ * back host/port/username never has a reason to touch ciphertext. Keeping
+ * the secret physically apart makes "this query cannot leak the password"
+ * true by construction for every config-only reader, not merely by
+ * discipline.
+ *
+ * `password_ciphertext bytea NOT NULL` — this migration only reserves the
+ * column shape, as migration 010 does for `mailbox_oauth_tokens`;
+ * `src/store/imap-credentials.ts` does the encrypting, reusing
+ * `token-crypto.ts`'s AES-256-GCM envelope rather than inventing a second
+ * one.
  *
  * ## `imap_watch_state` — the fetch cursor, reusing `ImapCursor` verbatim
  *
  * `uid_validity`/`last_uid` are the exact two fields of
- * `src/providers/adapters/imap/fetch.ts`'s `ImapCursor` — `bigint`, not
- * `integer`: IMAP UIDs and UIDVALIDITY values are unsigned 32-bit per RFC
- * 3501 §2.3.1, so `bigint` gives full headroom with no risk of the
- * range-overflow question migration 011's doc comment raised (and
- * sidestepped with `text`) for Gmail's `historyId` — an IMAP UID is a true
- * integer counter this store needs to compare and increment, so `bigint`
- * (not `text`) is the right column type here, `pg`/PGlite's usual
- * string-or-number wire representation for it handled the same way
- * `webauthn_credentials.sign_count` already is (`src/store/webauthn.ts`'s
- * `toSignCount`). Both columns are `NOT NULL`, unlike `gmail_watch_state
- * .history_id` (nullable until Gmail's first async `watch()` call
- * completes): an IMAP `SELECT INBOX` returns `UIDVALIDITY` synchronously in
- * the very same connect-time round trip that establishes the mailbox
- * (`fetch.ts`'s `selectInbox`), so there is no "connected but not yet
- * baselined" gap for this transport — a row is only ever inserted once both
- * values are already known, by `ImapWatchStateStore.seedBaseline`.
+ * `src/providers/adapters/imap/fetch.ts`'s `ImapCursor`. `bigint`, not
+ * `integer`: IMAP UIDs and UIDVALIDITY are unsigned 32-bit (RFC 3501
+ * §2.3.1), so `bigint` gives full headroom without the range-overflow
+ * question migration 011 sidestepped with `text` for Gmail's `historyId`.
+ * An IMAP UID is a true integer counter this store compares and increments,
+ * so `bigint` is right here; `pg`/PGlite's string-or-number wire
+ * representation is handled the same way `webauthn_credentials.sign_count`
+ * already is (`src/store/webauthn.ts`'s `toSignCount`).
  *
- * `claimed_until` is the fetch lease (the never-double-fetch guard) —
- * folded into this table from the start, unlike Gmail's own lease, which
- * shipped two migrations after its cursor (011, then 016) once HT-48
- * identified the need. IMAP's overlapping-invocation hazard (a cron tick
- * still running when the next tick fires) exists from Stage 2a-i's first
- * cursor-advancing caller, so the lease column ships in the same migration
- * as the cursor rather than as a later patch. Nullable, `NULL` meaning
- * "unclaimed" — same convention as `gmail_watch_state.claimed_until`
- * (migration 016) and `threads.claimed_until` (migration 003).
- * `lease_token` is a per-claim `uuid`, and it — not `claimed_until` — is the
- * value a holder proves ownership with. Gmail's lease
+ * Both columns are `NOT NULL`, unlike `gmail_watch_state.history_id`
+ * (nullable until Gmail's first async `watch()` completes): an IMAP `SELECT
+ * INBOX` returns `UIDVALIDITY` synchronously in the same connect-time round
+ * trip that establishes the mailbox (`fetch.ts`'s `selectInbox`), so there
+ * is no "connected but not yet baselined" gap for this transport — a row is
+ * inserted only once both values are known, by
+ * `ImapWatchStateStore.seedBaseline`.
+ *
+ * `claimed_until` is the fetch lease (the never-double-fetch guard), folded
+ * in from the start — unlike Gmail's, which shipped two migrations after its
+ * cursor (011, then 016). IMAP's overlapping-invocation hazard (a cron tick
+ * still running when the next fires) exists from the first cursor-advancing
+ * caller, so the lease ships with the cursor rather than as a later patch.
+ * Nullable, `NULL` meaning unclaimed — same convention as
+ * `gmail_watch_state.claimed_until` and `threads.claimed_until`.
+ *
+ * `lease_token` is a per-claim `uuid`, and it — not `claimed_until` — is
+ * what a holder proves ownership with. Gmail's lease
  * (`GmailWatchStateStore.claimReconcileLease`) uses the rendered
- * `claimed_until::text` as its token; HT-101
- * (2026-07-31) showed why that is too weak to fence a *write*: two successive
- * claims that land within one clock tick mint the SAME token, so a stale
- * holder's token compares equal to the live holder's and passes the check.
- * A test forced exactly that collision. A fresh `gen_random_uuid()` per claim
- * cannot collide regardless of clock resolution.
+ * `claimed_until::text` as its token, which is too weak to fence a *write*:
+ * two successive claims landing within one clock tick mint the SAME token,
+ * so a stale holder's compares equal to the live holder's and passes the
+ * check. A test forced exactly that collision (2026-07-31). A fresh
+ * `gen_random_uuid()` per claim cannot collide regardless of clock
+ * resolution. `claimed_until` is retained for expiry (`WHERE claimed_until
+ * IS NULL OR claimed_until < now()`), the token for ownership — two
+ * questions, both needed.
  *
- * `claimed_until` is retained for expiry (`WHERE claimed_until IS NULL OR
- * claimed_until < now()`); the token is retained for ownership. The two
- * answer different questions and both are needed.
- *
- * NOTE — the same weakness remains in `gmail_watch_state`'s timestamp-derived
- * token. It is NOT fixed here (out of HT-101's scope) and is filed as a
- * follow-up; Gmail's token guards only `releaseReconcileLease`, never a
- * cursor advance, so the blast radius there is a prematurely-cleared lease
- * rather than a corrupted cursor.
+ * **The same weakness remains in `gmail_watch_state`'s timestamp-derived
+ * token.** Not fixed here and filed as a follow-up; Gmail's token guards
+ * only `releaseReconcileLease`, never a cursor advance, so the blast radius
+ * there is a prematurely-cleared lease rather than a corrupted cursor.
  *
  * ## RLS, per migration 027's standing rule
  *
- * All three tables `ENABLE ROW LEVEL SECURITY` here. Migration 027 closed the
- * PostgREST Data API surface by enabling RLS on every table that existed at
- * that point and states the rule plainly: "a migration that adds a table MUST
- * also ENABLE ROW LEVEL SECURITY on it." These tables are created AFTER 027
- * runs, so 027 cannot cover them — without this they would ship reachable
- * through the Data API, and `imap_mailbox_credentials` holds encrypted app
- * passwords. Caught by 027's own test when this branch merged main.
+ * All three tables `ENABLE ROW LEVEL SECURITY` here. Migration 027 enabled
+ * RLS on every table existing at that point and states the rule: a migration
+ * that adds a table MUST also enable RLS on it. These are created AFTER 027
+ * runs, so it cannot cover them — without this they would ship reachable
+ * through the PostgREST Data API, and `imap_mailbox_credentials` holds
+ * encrypted app passwords.
  *
- * No index beyond each table's PRIMARY KEY: every lookup across all three
- * tables is a single-row fetch by `mailbox_id`, which the PK already serves
- * — matching migration 016's own "no index: this column is only ever read
- * via an equality match on the `mailbox_id` PRIMARY KEY" precedent.
+ * No index beyond each PRIMARY KEY: every lookup across all three tables is
+ * a single-row fetch by `mailbox_id`, which the PK already serves.
  */
 const MIGRATION_028_IMAP_TRANSPORT = `
 CREATE TABLE imap_mailbox_config (
