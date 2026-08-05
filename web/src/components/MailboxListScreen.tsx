@@ -83,14 +83,21 @@ export function MailboxListScreen({ mailboxes }: { mailboxes: MailboxSummary[] }
       // UI-integrity/phishing gap, not XSS — React escapes the text). The
       // roster is server-fetched on this same request, so a genuine callback
       // redirect always finds its mailbox here.
-      // Case-INSENSITIVE: the address in the redirect comes from Google's
-      // `getProfile()`, whose casing need not match the stored row. An exact
-      // comparison would silently swallow the confirmation after a genuinely
-      // successful connect — the param is stripped either way, so the operator
-      // would be left with no feedback at all.
-      const isConnected = mailboxes.some(
-        (mailbox) => mailbox.address.toLowerCase() === connected.toLowerCase(),
-      )
+      // EXACT match, deliberately. Both sides are the same string: the
+      // callback redirects with the address `completeConnect` resolved from
+      // Google's `getProfile()`, and that same value is what
+      // `upsertConnectedMailbox` stored — verbatim, with no case
+      // normalization in the store or the schema. So an exact comparison
+      // always succeeds for a real connect.
+      //
+      // Do NOT relax this to a case-insensitive compare: lowercasing is not
+      // injective (distinct Unicode strings can fold together), which would
+      // let a crafted `?connected=` value match a DIFFERENT roster address and
+      // render a "connected" confirmation for a mailbox that was never
+      // connected — the exact spoofing hole this check exists to close. If
+      // address canonicalization is ever wanted, it belongs once at the
+      // persistence layer, not in this security check.
+      const isConnected = mailboxes.some((mailbox) => mailbox.address === connected)
       if (isConnected) {
         showToast({ title: 'Mailbox connected', detail: connected })
       }
