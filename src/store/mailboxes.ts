@@ -1,71 +1,59 @@
 /**
- * `MailboxStore` — the `mailboxes` (migration 009, `src/db/migrate.ts`) seam:
- * the lookups and lifecycle-status mutations the inbound path needs so far.
+ * `MailboxStore` — the `mailboxes` (migration 009) seam: the lookups and
+ * lifecycle-status mutations the inbound path needs so far.
  *
- * Deliberately narrow. Operations exist today, each added by the ticket
+ * Deliberately narrow. Eight operations exist today, each added by the change
  * that first needed it:
  *
- * - {@link MailboxStore.getMailboxByAddress} (HT-39): resolve a Gmail push
+ * - {@link MailboxStore.getMailboxByAddress} — resolve a Gmail push
  *   notification's `emailAddress` to a connected mailbox (gmail-push.md §3).
- *   It returns the row regardless of `status` — the same "store returns the
- *   row, caller applies the policy" split `ConversationStore.getConversation`'s
- *   `includeDeleted` option uses — so the webhook handler
- *   (`src/api/gmail-webhook.ts`) is what decides `status !== 'active'` means
- *   "reject," not this store.
- * - {@link MailboxStore.getMailboxById} (HT-41): the same lookup, keyed by
- *   id rather than address — the reconcile handler
- *   (`src/mail/gmail-reconcile.ts`) already has a `mailboxId` (from the
- *   queue job) and must re-check the mailbox's CURRENT status before/while
- *   reconciling (gmail-push.md §3, §5), never trusting the enqueue-time
- *   snapshot. Same "returns the row regardless of status" split as
- *   `getMailboxByAddress`.
- * - {@link MailboxStore.markNeedsReconnect} (HT-38): mark a mailbox
- *   `needs_reconnect` when its OAuth grant turns out revoked/expired
- *   (`src/mail/gmail-oauth.ts`'s `getAccessToken`, on an `invalid_grant`
- *   response). `watch()` renewal (HT-42) needs the SAME transition on a failed
- *   renewal (gmail-push.md §6) and should call this rather than duplicate the
- *   SQL — that shared reuse is why this is a store module, not a raw query
- *   inline.
- * - {@link MailboxStore.markPaused} (HT-41): mark a mailbox `paused` — the
- *   deliberate dogfood response to an expired (404) Gmail history cursor
- *   (gmail-push.md §5): "pause the mailbox and flag it for manual
- *   rebaseline," rather than an automatic full-mailbox resync.
- * - {@link MailboxStore.upsertConnectedMailbox} (HT-40; gmail-connect.md
- *   §4-§5): the connect/consent flow's own write — creates the `mailboxes`
- *   row on a first-ever connect, or reactivates an existing `paused`/
- *   `needs_reconnect` row to `active` on a reconnect. Upsert BY `address`
- *   (migration 009's `UNIQUE` constraint) is what makes a reconnect
- *   idempotent: re-running connect for the same account never collides with
- *   its own prior row.
- * - {@link MailboxStore.listActiveMailboxes} (HT-42): list every `active`
- *   mailbox, ordered by `created_at` — the per-mailbox source the daily
- *   watch-renewal + reconciliation-sweep cron (`../mail/gmail-watch-
- *   maintenance.ts`, gmail-push.md §6) iterates. `paused`/`needs_reconnect`
- *   mailboxes are excluded by the query itself, not filtered by the caller
- *   (unlike `getMailboxByAddress`/`getMailboxById` above): neither needs
- *   `watch()` re-armed (a `paused` mailbox isn't being ingested; a
- *   `needs_reconnect` one has a dead grant `watch()` can't fix) nor a
- *   reconcile job enqueued, for the same reason.
- * - {@link MailboxStore.listMailboxes} (HT-54; specs/auth/agents-and-auth.md
- *   §3.4/§6): list EVERY mailbox regardless of status — the roster
- *   `GET /api/v1/mailboxes` renders as the Permissions screen's checkbox
- *   list. Deliberately unfiltered, unlike {@link listActiveMailboxes}: the
- *   Permissions UI shows disconnected/paused mailboxes too, so an admin can
- *   see a grant that exists on a mailbox no longer ingesting.
- * - {@link MailboxStore.markDisconnected} (HT-47; specs/mail/gmail-connect.md's
- *   disconnect section): mark a mailbox `disconnected` — the terminal,
- *   operator-initiated state the disconnect admin action puts a mailbox into
- *   (migration 017 widens the `status` CHECK to allow it). Distinct from
- *   `paused`/`needs_reconnect` (both are states the PIPELINE puts a mailbox
- *   into automatically); `disconnected` only ever follows an explicit
+ *   Returns the row regardless of `status`: the same "store returns the row,
+ *   caller applies the policy" split `ConversationStore.getConversation`'s
+ *   `includeDeleted` uses, so `src/api/gmail-webhook.ts` decides that
+ *   `status !== 'active'` means reject, not this store.
+ * - {@link MailboxStore.getMailboxById} — the same lookup keyed by id. The
+ *   reconcile handler already has a `mailboxId` from the queue job and must
+ *   re-check the mailbox's CURRENT status while reconciling (gmail-push.md
+ *   §3, §5), never trusting the enqueue-time snapshot. Same
+ *   returns-regardless-of-status split.
+ * - {@link MailboxStore.markNeedsReconnect} — mark a mailbox
+ *   `needs_reconnect` when its OAuth grant turns out revoked or expired
+ *   (`../mail/gmail-oauth.ts`'s `getAccessToken`, on `invalid_grant`).
+ *   `watch()` renewal needs the SAME transition on a failed renewal
+ *   (gmail-push.md §6) and calls this rather than duplicating the SQL — that
+ *   shared reuse is why this is a store module, not an inline query.
+ * - {@link MailboxStore.markPaused} — mark a mailbox `paused`, the deliberate
+ *   response to an expired (404) Gmail history cursor (gmail-push.md §5):
+ *   pause and flag for manual rebaseline, rather than an automatic
+ *   full-mailbox resync.
+ * - {@link MailboxStore.upsertConnectedMailbox} — the connect flow's own
+ *   write (gmail-connect.md §4-§5): creates the row on a first-ever connect,
+ *   or reactivates an existing `paused`/`needs_reconnect` row to `active` on
+ *   a reconnect. Upserting BY `address` (migration 009's `UNIQUE`) is what
+ *   makes a reconnect idempotent — re-running connect for the same account
+ *   never collides with its own prior row.
+ * - {@link MailboxStore.listActiveMailboxes} — every `active` mailbox,
+ *   ordered by `created_at`; the per-mailbox source the watch-renewal cron
+ *   iterates. `paused`/`needs_reconnect` are excluded by the query itself
+ *   rather than filtered by the caller, unlike the two getters above: neither
+ *   needs `watch()` re-armed (a paused mailbox is not being ingested; a
+ *   `needs_reconnect` one has a dead grant `watch()` cannot fix).
+ * - {@link MailboxStore.listMailboxes} — EVERY mailbox regardless of status,
+ *   the roster `GET /api/v1/mailboxes` renders as the Permissions screen's
+ *   checkbox list (agents-and-auth.md §3.4/§6). Deliberately unfiltered: the
+ *   Permissions UI shows disconnected and paused mailboxes too, so an admin
+ *   can see a grant on a mailbox no longer ingesting.
+ * - {@link MailboxStore.markDisconnected} — mark a mailbox `disconnected`,
+ *   the terminal operator-initiated state (migration 017 widens the `status`
+ *   CHECK to allow it). Distinct from `paused`/`needs_reconnect`, which the
+ *   PIPELINE sets automatically; `disconnected` only ever follows an explicit
  *   operator disconnect (`../mail/gmail-disconnect.ts`), which runs this
- *   alongside deleting the mailbox's `mailbox_oauth_tokens`/
+ *   alongside deleting the mailbox's `mailbox_oauth_tokens` and
  *   `gmail_watch_state` rows in ONE transaction — same `tx?` pattern as
- *   {@link upsertConnectedMailbox}.
+ *   `upsertConnectedMailbox`.
  *
- * A fuller `mailboxes` CRUD surface (beyond the operations above) is still
- * narrower than a general CRUD module — add operations as the ticket that
- * needs them requires.
+ * Add operations as the change that needs them requires, rather than growing
+ * this into a general CRUD module.
  */
 
 import type { Db, Queryable } from '../db/client.js'
