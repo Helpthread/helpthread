@@ -1,91 +1,83 @@
 /**
- * `runGmailWatchMaintenance` — the daily Gmail `watch()` renewal (HT-42;
- * specs/mail/gmail-push.md §6). One job, run per active mailbox:
+ * `runGmailWatchMaintenance` — the daily Gmail `watch()` renewal
+ * (specs/mail/gmail-push.md §6), run per active mailbox.
  *
- * **Re-arm `watch()`.** Gmail push notifications stop — silently, with no
- * error on either side — once a mailbox's `watch()` registration expires (~7
- * days out). This re-arms it and stores the fresh expiration. Daily (not
- * every-6-days) buys a safety margin against a missed run; `watch()` is
- * idempotent, so re-arming early is free.
+ * Gmail push notifications stop — silently, with no error on either side —
+ * once a mailbox's `watch()` registration expires (~7 days out). This
+ * re-arms it and stores the fresh expiration. Daily rather than
+ * every-6-days buys margin against a missed run; `watch()` is idempotent,
+ * so re-arming early is free.
  *
- * ## Renewal only, as of HT-94
+ * ## Renewal only
  *
- * This module also used to run a bounded reconciliation sweep, as a daily
- * *backstop* for push being best-effort. That sweep is now the engine's
- * PRIMARY inbound transport and lives in `./gmail-reconcile-sweep.ts`, running
- * every minute (CHARTER.md §2, amended 2026-07-20). Two reasons it could not
- * stay here, both in that module's doc: the cadences differ by three orders of
- * magnitude, and renewal needs a per-mailbox access token while the sweep needs
- * none — welding them would have meant refreshing a token every minute for a
- * Gmail call the sweep never makes.
+ * This module also used to run a bounded reconciliation sweep as a daily
+ * backstop for push being best-effort. That sweep is now the engine's
+ * PRIMARY inbound transport and lives in `./gmail-reconcile-sweep.ts`,
+ * running every minute (CHARTER.md §2, amended 2026-07-20). Two reasons it
+ * could not stay here, both in that module's doc: the cadences differ by
+ * three orders of magnitude, and renewal needs a per-mailbox access token
+ * while the sweep needs none — welding them would mean refreshing a token
+ * every minute for a Gmail call the sweep never makes.
  *
- * Consequently this whole module is meaningful ONLY when push is configured.
- * With no Pub/Sub topic there is no `watch()` to re-arm, and the composition
- * root does not construct its deps at all; the cron endpoint stays routed and
+ * So this module is meaningful ONLY when push is configured. With no
+ * Pub/Sub topic there is no `watch()` to re-arm, the composition root does
+ * not construct its deps at all, and the cron endpoint stays routed and
  * reports a skip (`../composition/root.ts`).
  *
  * ## A plain function, not a queue/cron adapter
  *
- * Exactly like `./delivery-worker.ts` (HT-16): `runGmailWatchMaintenance`
- * is a plain `async function` of injected dependencies, NOT built on a
- * `SchedulerProvider` adapter — no such adapter is wired up yet, and
- * CHARTER.md §4's provider-seam discipline is exactly why this stays a pure
- * function rather than reaching for a platform primitive that doesn't
- * exist yet. Wiring a real daily schedule (Vercel Cron calling this, or a
- * future `SchedulerProvider.registerCron`, `src/providers/scheduler.ts`) is
- * deferred to the composition root (HT-43) — at that point it is a one-line
- * call to this function, not a rewrite of it.
+ * Like `./delivery-worker.ts`, this is a plain `async function` of injected
+ * dependencies, NOT built on a `SchedulerProvider` adapter — no such adapter
+ * is wired up yet, and CHARTER.md §4's provider-seam discipline is why this
+ * stays a pure function rather than reaching for a platform primitive that
+ * does not exist. Wiring a real schedule (Vercel Cron, or a future
+ * `SchedulerProvider.registerCron`) is the composition root's job, and is a
+ * one-line call to this function.
  *
  * ## Failure-isolated per mailbox
  *
- * One mailbox's token failure or `watch()` failure never stops the others
- * (gmail-push.md §6). The whole per-mailbox unit of work
- * ({@link maintainOneMailbox}) is wrapped in its own try/catch inside
- * {@link runGmailWatchMaintenance}'s loop, so even a genuinely unexpected
- * throw (a store failure outside the two expected-failure
- * branches below) only counts that one mailbox `failed` and moves on to
- * the next — never aborting the batch.
+ * One mailbox's token or `watch()` failure never stops the others
+ * (gmail-push.md §6). The whole per-mailbox unit ({@link maintainOneMailbox})
+ * is wrapped in its own try/catch inside the loop, so even an unexpected
+ * throw — a store failure outside the two expected branches below — counts
+ * that one mailbox `failed` and moves on, never aborting the batch.
  *
  * ## Failure handling — the token layer owns `needs_reconnect`
  *
  * The access token is acquired ONCE per mailbox and reused for the single
- * `watch()` call (see {@link maintainOneMailbox} step 1) — not fetched a
- * second time through the watch client. Beyond saving a redundant token-service
- * call, this keeps token-acquisition failures classified in one place: a
- * token-acquisition failure is resolved by re-reading the mailbox's CURRENT
- * status (never trusting the caught error's content) — `needs_reconnect`
- * means the OAuth
- * token layer (`./gmail-oauth.ts`'s `getAccessToken`, on `invalid_grant`)
- * already found the grant dead and marked it, so this cron counts it and
- * moves on; any other status means the failure is transient (network,
- * timeout), also counted and moved on, retried automatically on tomorrow's
- * run.
+ * `watch()` call, not fetched again through the watch client. Beyond saving
+ * a redundant call, this keeps token-acquisition failures classified in one
+ * place: such a failure is resolved by re-reading the mailbox's CURRENT
+ * status, never by trusting the caught error's content. `needs_reconnect`
+ * means the OAuth layer (`./gmail-oauth.ts`'s `getAccessToken`, on
+ * `invalid_grant`) already found the grant dead and marked it, so this cron
+ * counts it and moves on; any other status means a transient failure
+ * (network, timeout), also counted and retried on tomorrow's run.
  *
- * A `watch()` renewal failure PAST a valid token is different: gmail-
- * push.md §6 is explicit that this cron does NOT itself mark
- * `needs_reconnect` on a generic `watch()` error — only the token layer
- * owns that transition. A valid-token `watch()` failure is treated as
- * TRANSIENT (logged, counted `failed`, retried on the next daily tick —
- * the ~7-day expiry leaves ample margin for a few missed runs) rather than
- * halting a healthy mailbox on a transient Gmail blip.
+ * A `watch()` failure PAST a valid token is different: gmail-push.md §6 is
+ * explicit that this cron does NOT itself mark `needs_reconnect` on a
+ * generic `watch()` error — only the token layer owns that transition. Such
+ * a failure is treated as TRANSIENT (logged, counted `failed`, retried on
+ * the next daily tick, with the ~7-day expiry leaving ample margin for a few
+ * missed runs) rather than halting a healthy mailbox on a Gmail blip.
  *
  * ## Never overwrite the cursor on renewal
  *
  * `watchStateStore.setWatchExpiration` (`../store/gmail-watch-state.ts`)
- * touches `watch_expiration` ONLY — see that method's own doc comment for
- * the full mail-semantics rationale (charter invariant #1: a renewal's
- * fresh `historyId` is AHEAD of the stored cursor, and overwriting the
- * cursor with it would silently skip un-reconciled mail).
+ * touches `watch_expiration` ONLY — see that method's own doc for the
+ * mail-semantics rationale (charter invariant #1: a renewal's fresh
+ * `historyId` is AHEAD of the stored cursor, and overwriting the cursor with
+ * it would silently skip un-reconciled mail).
  *
- * ## The reconciliation lease (HT-48) — now entirely the sweep's concern
+ * ## The reconciliation lease is entirely the sweep's concern
  *
- * The lease that serializes overlapping reconciliation lives in the reconcile
+ * The lease serializing overlapping reconciliation lives in the reconcile
  * job's CONSUMER (`./gmail-reconcile.ts`'s
  * `claimReconcileLease`/`releaseReconcileLease` around `history.list`), never
  * in a producer. Since this module no longer produces reconcile jobs, that
- * discussion moved with the sweep — see `./gmail-reconcile-sweep.ts`'s doc,
- * where it matters considerably more: at every-minute cadence the lease stops
- * being an efficiency guard and becomes structural.
+ * discussion moved with the sweep — see `./gmail-reconcile-sweep.ts`, where
+ * at every-minute cadence the lease stops being an efficiency guard and
+ * becomes structural.
  */
 
 // Type-only: engine modules never take a RUNTIME dependency on a concrete

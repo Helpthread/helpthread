@@ -1,68 +1,64 @@
 /**
  * `ModuleLicenseStore` — persistence for the operator's ONE marketplace
- * license key (HT-119), encrypted at rest in a dedicated `module_license`
- * table this ticket expects but does not itself migrate — see "Migration
- * dependency" below.
+ * license key, encrypted at rest in a dedicated `module_license` table this
+ * module expects but does not itself migrate (see "Migration dependency").
  *
- * ## Why this key gets its OWN encryption key, not `token-crypto.ts`'s
- * mailbox key
+ * ## Why this key gets its OWN encryption key
  *
- * `imap-credentials.ts` and `mailbox-tokens.ts` both encrypt under the same
- * `HELPTHREAD_TOKEN_ENC_KEY` because they protect the same class of secret
- * (credentials to the operator's OWN mail infrastructure) and a compromise
- * of one already implies the other is exposed to the same blast radius. The
- * marketplace license key is a different class entirely: it is the
- * credential that lets THIS engine pull paid module artifacts from
- * marketplace.helpthread.app (`../modules/catalog/marketplace-client.ts`).
- * A caller (composition root) MUST decode a distinct key — e.g. from
+ * `imap-credentials.ts` and `mailbox-tokens.ts` both encrypt under
+ * `HELPTHREAD_TOKEN_ENC_KEY` because they protect the same class of secret —
+ * credentials to the operator's own mail infrastructure — where a compromise
+ * of one already implies the other is in the same blast radius. The
+ * marketplace license key is a different class: it is what lets THIS engine
+ * pull paid module artifacts from marketplace.helpthread.app
+ * (`../modules/catalog/marketplace-client.ts`).
+ *
+ * So the composition root MUST decode a distinct key — e.g. from
  * `HELPTHREAD_MODULE_LICENSE_ENC_KEY`, via `token-crypto.ts`'s
- * `decodeEncryptionKey`, exactly as `createImapCredentialStore` already
- * does for its own key — and pass it to {@link createModuleLicenseStore}. A
- * stolen mailbox-token key must not also decrypt the license key, and vice
- * versa: two independent keys is what makes that true. This module reuses
- * `token-crypto.ts`'s AES-256-GCM envelope (the crypto is not
- * class-specific, only the key material is) — one crypto implementation,
- * multiple independent keys, never a second envelope format.
+ * `decodeEncryptionKey`, exactly as `createImapCredentialStore` does for its
+ * own — and pass it to {@link createModuleLicenseStore}. A stolen
+ * mailbox-token key must not also decrypt the license key, and vice versa;
+ * two independent keys is what makes that true. The AES-256-GCM envelope
+ * itself is reused from `token-crypto.ts`: the crypto is not class-specific,
+ * only the key material is. One implementation, multiple independent keys,
+ * never a second envelope format.
  *
- * ## What "encrypted at rest" actually buys — stated honestly
+ * ## What "encrypted at rest" actually buys
  *
- * Encryption at rest protects exactly one thing: a stolen COPY of the
- * database (a leaked backup, a misconfigured replica, a dump handed to the
- * wrong party) does not hand over a usable license key along with it — the
- * attacker gets ciphertext and needs the separate `HELPTHREAD_MODULE_
- * LICENSE_ENC_KEY` (held only by the running engine's environment, never
- * the database) to do anything with it. It does NOT protect against a
- * compromised RUNNING engine process: that process already holds the
- * decryption key in memory and can call {@link
- * ModuleLicenseDecryptor.decryptForCatalogClient} itself, so an attacker
- * with code execution inside the engine reads the plaintext the same way
- * the catalog client does. This module's threat model is the data-at-rest
- * one — a database dump — not a compromised running process; nothing here
- * should be read as a claim to the contrary.
+ * It protects exactly one thing: a stolen COPY of the database — a leaked
+ * backup, a misconfigured replica, a dump handed to the wrong party — does
+ * not hand over a usable license key. The attacker gets ciphertext and needs
+ * the separate `HELPTHREAD_MODULE_LICENSE_ENC_KEY`, held only in the running
+ * engine's environment and never in the database.
+ *
+ * **It does NOT protect against a compromised running engine process.** That
+ * process already holds the decryption key in memory and can call {@link
+ * ModuleLicenseDecryptor.decryptForCatalogClient} itself, so an attacker with
+ * code execution inside the engine reads the plaintext the same way the
+ * catalog client does. The threat model here is a database dump, not a
+ * compromised process; nothing should be read as a claim to the contrary.
  *
  * ## No read-back API returns plaintext
  *
- * {@link ModuleLicenseStore} — the interface any HTTP handler (a settings
+ * {@link ModuleLicenseStore} — the interface an HTTP handler (a settings
  * screen, a "connect marketplace" endpoint) is meant to hold — exposes
- * `store`, `delete`, and `getDisplayInfo` (a one-way fingerprint plus the
+ * `store`, `delete`, and `getDisplayInfo`: a one-way fingerprint plus the
  * key's last four characters, the same "enough to recognize, not enough to
- * reuse" display convention as a stored payment card). None of those can
- * ever produce the plaintext key. The plaintext-producing operation lives
- * on a SEPARATE type, {@link ModuleLicenseDecryptor}, returned by a
- * SEPARATELY named factory ({@link createModuleLicenseDecryptor}) — an HTTP
- * handler wired only to `ModuleLicenseStore` has no path to the plaintext
- * at all, by construction, not by convention. Only
- * `../modules/catalog/marketplace-client.ts` is meant to hold a
- * `ModuleLicenseDecryptor`.
+ * reuse" convention as a stored payment card. None can produce the
+ * plaintext.
  *
- * ## Migration dependency (NOT included in this change)
+ * The plaintext-producing operation lives on a SEPARATE type, {@link
+ * ModuleLicenseDecryptor}, returned by a separately named factory ({@link
+ * createModuleLicenseDecryptor}). A handler wired only to
+ * `ModuleLicenseStore` has no path to the plaintext by construction, not by
+ * convention. Only `../modules/catalog/marketplace-client.ts` is meant to
+ * hold a decryptor.
  *
- * This module is scoped to store/decrypt logic only, per this ticket's
- * owned-files boundary — it does not add a migration to `src/db/migrate.ts`
- * (last id at the time of writing: 29; a parallel HT-119 change has since
- * claimed 30 for `vercel_connections`/`module_installs`, so this table
- * belongs at the next free id after whatever lands). It expects a table
- * shaped exactly like this:
+ * ## Migration dependency (NOT included here)
+ *
+ * This module is scoped to store/decrypt logic only and adds no migration to
+ * `src/db/migrate.ts`; `module_license` belongs at the next free id. It
+ * expects a table shaped exactly like this:
  *
  * ```sql
  * CREATE TABLE module_license (
@@ -80,9 +76,9 @@
  * );
  * ```
  *
- * This module's own tests create that exact table directly (not via
- * `migrate()`) so they exercise real PGlite SQL without reaching into a
- * migration file outside this ticket's scope; when migration 30 lands, its
+ * This module's own tests create that table directly rather than via
+ * `migrate()`, so they exercise real PGlite SQL without reaching into a
+ * migration file outside this module's scope. When the migration lands, its
  * SQL should match the block above so no drift accumulates between the
  * documented and the shipped schema.
  */
