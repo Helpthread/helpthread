@@ -1,86 +1,84 @@
 /**
- * `Db` implementation backed by a real Postgres server over the wire —
- * the production counterpart to `PgliteDb` (`src/db/client.ts`). Same seam,
- * same SQL: anything the stores run against PGlite locally runs unmodified
- * here, which is the whole point of keeping the abstraction at "run this
- * SQL, get these rows".
+ * `Db` implementation backed by a real Postgres server over the wire — the
+ * production counterpart to `PgliteDb` (`src/db/client.ts`). Same seam, same
+ * SQL: anything the stores run against PGlite locally runs unmodified here,
+ * which is the point of keeping the abstraction at "run this SQL, get these
+ * rows".
  *
- * Wraps `pg` (node-postgres, MIT) — the boring, battle-tested driver. A
- * `pg.Pool` underneath; every parameterized query goes through the extended
- * query protocol as an UNNAMED prepared statement, which is compatible with
- * transaction-mode connection poolers (Supabase's Supavisor on port 6543,
- * PgBouncer) — named prepared statements are not, and this adapter never
- * creates one.
+ * Wraps `pg` (node-postgres, MIT) over a `pg.Pool`. Every parameterized
+ * query goes through the extended query protocol as an UNNAMED prepared
+ * statement, which is compatible with transaction-mode connection poolers
+ * (Supabase's Supavisor on port 6543, PgBouncer). Named prepared statements
+ * are not, and this adapter never creates one.
  *
  * ## Deploying against Supabase
  *
  * Use the **transaction-mode pooler connection string (port 6543)** — the
- * serverless-correct choice: many short-lived function instances share a
- * small set of real backend connections. Direct 5432 connections would
- * exhaust Postgres's connection slots under serverless fan-out.
+ * serverless-correct choice, letting many short-lived function instances
+ * share a small set of real backend connections. Direct 5432 connections
+ * would exhaust Postgres's connection slots under serverless fan-out.
  *
- * ## The `schema` option — and why it is enforced per-transaction
+ * ## The `schema` option, and why it is enforced per-transaction
  *
  * With `schema: 'helpthread'`, every table this adapter touches lives in
- * that Postgres schema instead of `public`, without qualifying a single
- * store SQL string. That containment is a deployment concern (e.g. renting
- * a corner of an existing database), so it lives here in deployment config,
- * not in the product's SQL.
+ * that schema instead of `public`, without qualifying a single store SQL
+ * string. That containment is a deployment concern — renting a corner of an
+ * existing database — so it lives in deployment config, not in the product's
+ * SQL.
  *
  * The mechanism has to survive transaction pooling, which rules out the
- * obvious approaches: a session-level `SET search_path` on connect does NOT
+ * obvious approach: a session-level `SET search_path` on connect does NOT
  * stick, because a transaction-mode pooler hands each *transaction* —
- * including each autocommit statement — to whatever backend connection is
- * free, and session state set on one backend is invisible on the next. Even
- * two sequential statements on the same client ("SET, then INSERT") can land
- * on different backends. The only placement the pooler contractually keeps
- * together is a single transaction. So:
+ * including each autocommit statement — to whatever backend is free, and
+ * session state set on one is invisible on the next. Even two sequential
+ * statements on the same client ("SET, then INSERT") can land on different
+ * backends. The only placement the pooler contractually keeps together is a
+ * single transaction. So:
  *
  * - `transaction()` pins one pooled client, opens the transaction, and sets
  *   a transaction-local search_path (`set_config(..., is_local => true)`)
  *   before running the callback.
  * - `query()` in schema mode routes through `transaction()` — a
  *   single-statement transaction. A few extra round trips per query, priced
- *   in deliberately: correctness under pooling beats saving milliseconds on
+ *   in deliberately: correctness under pooling beats saving milliseconds at
  *   a helpdesk's write volume. Without `schema`, `query()` is a plain
  *   single-round-trip `pool.query`.
  *
- * (The RIQ deployment ALSO sets a role-level default search_path via
- * `ALTER ROLE ... SET search_path` — belt and braces, and it makes ad-hoc
- * psql sessions land in the right schema — but this adapter does not rely
- * on it.)
+ * The deployment also sets a role-level default search_path via `ALTER ROLE
+ * ... SET search_path` — belt and braces, and it makes ad-hoc psql sessions
+ * land in the right schema — but this adapter does not rely on it.
  *
- * Note: the transaction-local search_path is exactly the configured schema
- * (plus the implicit `pg_catalog`) — `public` is deliberately NOT on it, so
- * a deployment sharing a database cannot accidentally read or create tables
- * outside its schema. Everything the engine's SQL needs from core Postgres
+ * The transaction-local search_path is exactly the configured schema plus
+ * the implicit `pg_catalog`. `public` is deliberately NOT on it, so a
+ * deployment sharing a database cannot accidentally read or create tables
+ * outside its schema. Everything the engine needs from core Postgres
  * (`gen_random_uuid()`, `now()`, ...) lives in `pg_catalog`, which Postgres
  * always searches.
  *
- * `migrate()` (`src/db/migrate.ts`) needs no special handling: its advisory
- * lock is `pg_advisory_xact_lock` — transaction-scoped, released on
- * commit/rollback — which is the one advisory-lock flavor that is safe
- * behind a transaction pooler (a session-scoped lock could be "released"
- * onto a backend the caller no longer holds).
+ * `migrate()` needs no special handling: its advisory lock is
+ * `pg_advisory_xact_lock` — transaction-scoped, released on commit or
+ * rollback — the one advisory-lock flavor safe behind a transaction pooler.
+ * A session-scoped lock could be "released" onto a backend the caller no
+ * longer holds.
  *
  * ## Caveat: a rejected `transaction()` can be commit-uncertain
  *
  * The `Db.transaction` contract ("if fn throws, nothing committed") holds
  * for every failure the DATABASE reports. One failure mode is inherently
  * weaker over a network: if the connection dies after `COMMIT` was sent but
- * before its confirmation arrived, this method rejects even though the
+ * before its confirmation arrives, this method rejects even though the
  * commit may have landed. No wire-protocol client can do better — callers
- * for whom a phantom-success matters must make the work idempotent (which
- * is HT-16's territory for outbound sends, the one place the engine cares).
- * The in-process PGlite adapter has no network, so it never exhibits this.
+ * for whom a phantom success matters must make the work idempotent, which
+ * outbound sends already do. The in-process PGlite adapter has no network,
+ * so it never exhibits this.
  *
  * ## Caveat: no non-transactional statements in schema mode
  *
  * Because schema mode wraps every `query()` in a transaction, statements
- * Postgres refuses to run inside one (`CREATE INDEX CONCURRENTLY`,
- * `VACUUM`, ...) cannot go through this adapter with `schema` set. Nothing
- * in the engine issues any today; if one ever becomes necessary it will
- * need an explicit, documented side door.
+ * Postgres refuses to run inside one (`CREATE INDEX CONCURRENTLY`, `VACUUM`,
+ * ...) cannot go through this adapter with `schema` set. Nothing in the
+ * engine issues any today; if one becomes necessary it needs an explicit,
+ * documented side door.
  */
 
 import pg from 'pg'
