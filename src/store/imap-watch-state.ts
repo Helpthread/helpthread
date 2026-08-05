@@ -1,63 +1,59 @@
 /**
  * `ImapWatchStateStore` — persistence for a mailbox's IMAP fetch cursor
- * (`imap_watch_state`, migration 028, `src/db/migrate.ts`) and its
- * never-double-fetch lease (HT-101 Stage 2a-i). One row per mailbox
- * (`mailbox_id` is the PRIMARY KEY — migration 028's doc comment), holding
- * the {@link ImapCursor} (`uid_validity`/`last_uid`, reused verbatim from
+ * (`imap_watch_state`, migration 028) and its never-double-fetch lease. One
+ * row per mailbox (`mailbox_id` is the PRIMARY KEY), holding the {@link
+ * ImapCursor} (`uid_validity`/`last_uid`, reused verbatim from
  * `../providers/adapters/imap/fetch.ts` — no second cursor type is defined
- * here) plus `claimed_until` (the fetch lease).
+ * here) plus `claimed_until`.
  *
  * ## `setCursor` vs `seedBaseline` — different SQL, different intent
  *
- * - {@link ImapWatchStateStore.seedBaseline} is called ONCE, at connect
- *   time, with the `uidValidity`/`lastUid` an initial `selectInbox` call
- *   reports — establishing "start fetching new mail from here forward,"
- *   never a resync of the mailbox's entire history. It is an `INSERT ... ON
- *   CONFLICT (mailbox_id) DO UPDATE` upsert: at connect time there may be no
- *   row yet, and creating one is exactly the point.
+ * - {@link ImapWatchStateStore.seedBaseline} is called ONCE at connect time,
+ *   with the `uidValidity`/`lastUid` an initial `selectInbox` reports,
+ *   establishing "start fetching new mail from here forward" rather than a
+ *   resync of the mailbox's entire history. An `INSERT ... ON CONFLICT
+ *   (mailbox_id) DO UPDATE` upsert: at connect time there may be no row yet,
+ *   and creating one is the point.
  * - {@link ImapWatchStateStore.setCursor} is called after every subsequent
  *   fetch invocation commits, advancing the same row to the `newCursor`
- *   {@link fetchImapInboundMessages} (`../providers/adapters/imap/fetch.ts`)
- *   returned. It is a lease-fenced plain `UPDATE`, and it returns whether the
- *   write landed.
+ *   {@link fetchImapInboundMessages} returned. A lease-fenced plain `UPDATE`,
+ *   returning whether the write landed.
  *
- * That asymmetry is deliberate and is the opposite of what an earlier
- * revision did. `setCursor` matching zero rows is not a bug to be papered
- * over by an upsert — it is the FENCE WORKING: either the caller's lease was
- * superseded while it was ingesting, or there is no cursor row to advance.
- * Both cases must leave the stored cursor exactly where the live holder put
- * it. See {@link ImapWatchStateStore.setCursor}'s own SACRED section for the
- * quarantine escape this closes.
+ * The asymmetry is deliberate. `setCursor` matching zero rows is not a bug to
+ * be papered over with an upsert — it is the FENCE WORKING: either the
+ * caller's lease was superseded while it was ingesting, or there is no cursor
+ * row to advance. Both must leave the stored cursor exactly where the live
+ * holder put it. See {@link ImapWatchStateStore.setCursor}'s own SACRED
+ * section for the quarantine escape this closes.
  *
  * ## `uid_validity`/`last_uid` are `bigint` — read back via `Number()`
  *
- * `pg`/PGlite may hand a `bigint` column back as a string to avoid an
- * appearance of precision loss (the same convention `webauthn_credentials
- * .sign_count` uses, `src/store/webauthn.ts`'s `toSignCount`). Every value
- * this codebase ever writes is an IMAP UID or UIDVALIDITY — unsigned 32-bit
- * per RFC 3501 §2.3.1 — always well within `Number.MAX_SAFE_INTEGER`, so a
- * plain `Number()` conversion is exact.
+ * `pg`/PGlite may return a `bigint` column as a string to avoid an appearance
+ * of precision loss (the convention `webauthn_credentials.sign_count` uses,
+ * `src/store/webauthn.ts`'s `toSignCount`). Every value written here is an
+ * IMAP UID or UIDVALIDITY — unsigned 32-bit per RFC 3501 §2.3.1, always well
+ * within `Number.MAX_SAFE_INTEGER` — so a plain `Number()` is exact.
  *
  * ## The fetch lease — a uuid token, NOT Gmail's timestamp token
  *
- * {@link ImapWatchStateStore.claimFetchLease}/{@link
+ * {@link ImapWatchStateStore.claimFetchLease} and {@link
  * ImapWatchStateStore.releaseFetchLease} are the never-double-fetch guard: an
  * atomic `UPDATE ... WHERE claimed_until IS NULL OR claimed_until < now()`
  * claim, and a token-conditioned release.
  *
  * The claim mints a fresh `gen_random_uuid()` into `lease_token` and returns
- * THAT as the token. `claimed_until` answers "has this lease expired?";
- * `lease_token` answers "is this lease still mine?" — two different questions
- * that a single column cannot answer.
+ * that as the token. `claimed_until` answers "has this lease expired?";
+ * `lease_token` answers "is this lease still mine?" — two questions one
+ * column cannot answer.
  *
- * This deliberately DIVERGES from `GmailWatchStateStore
- * .claimReconcileLease`, which returns the rendered `claimed_until::text`.
- * Mirroring it statement-for-statement is too weak: two claims landing in
- * the same clock tick mint the SAME timestamp, so a stale holder's token
- * compares equal to the live holder's and passes the check — a test written
- * to prove the fence reproduces the collision instead. Gmail's lease has the
- * same weakness (filed separately) but a smaller blast radius — its token
- * guards only release, never a cursor advance.
+ * This deliberately DIVERGES from `GmailWatchStateStore.claimReconcileLease`,
+ * which returns the rendered `claimed_until::text`. Mirroring that is too
+ * weak to fence a write: two claims landing in the same clock tick mint the
+ * SAME timestamp, so a stale holder's token compares equal to the live
+ * holder's and passes — a test written to prove the fence reproduced the
+ * collision instead. Gmail's lease has the same weakness, filed separately,
+ * but a smaller blast radius: its token guards only release, never a cursor
+ * advance.
  *
  * Callers must treat the token as opaque.
  */
