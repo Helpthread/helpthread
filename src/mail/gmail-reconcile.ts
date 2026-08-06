@@ -56,9 +56,9 @@
  * lease (`GmailWatchStateStore.claimReconcileLease`, `claimed_until` on
  * `gmail_watch_state`, migration 016) — the inbound analogue of the
  * outbound delivery lease (`ConversationStore.claimThreadForDelivery`,
- * sending.md §3a). It exists ONLY to stop a push-triggered reconcile and
- * the daily sweep from doing the same `history.list`/`messages.get` work
- * concurrently on one mailbox. It is an efficiency guard, not a correctness
+ * sending.md §3a). It exists ONLY to stop a push-triggered reconcile and the
+ * every-minute reconciliation sweep (`./gmail-reconcile-sweep.ts`) from doing
+ * the same `history.list`/`messages.get` work concurrently on one mailbox. It is an efficiency guard, not a correctness
  * one: step 6's cursor rule and the ingest dedup already make either
  * ordering safe with no lease at all. Different mailboxes never contend —
  * the lease is keyed by `mailboxId`.
