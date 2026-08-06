@@ -75,9 +75,11 @@
  * job's CONSUMER (`./gmail-reconcile.ts`'s
  * `claimReconcileLease`/`releaseReconcileLease` around `history.list`), never
  * in a producer. Since this module no longer produces reconcile jobs, that
- * discussion moved with the sweep — see `./gmail-reconcile-sweep.ts`, where
- * at every-minute cadence the lease stops being an efficiency guard and
- * becomes structural.
+ * discussion moved with the sweep — see `./gmail-reconcile-sweep.ts`. The
+ * lease remains an efficiency guard, never a correctness one, at any cadence:
+ * `./gmail-reconcile.ts`'s cursor-advance rule and the ingest pipeline's
+ * dedup are what make either ordering safe. Every-minute cadence only makes
+ * the redundant work it avoids more frequent, not more load-bearing.
  */
 
 // Type-only: engine modules never take a RUNTIME dependency on a concrete
