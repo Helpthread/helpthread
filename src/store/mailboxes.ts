@@ -239,9 +239,10 @@ export interface MailboxStore {
 
   /**
    * List every mailbox currently `active`, ordered by `created_at` — the
-   * per-mailbox source the daily watch-renewal + reconciliation-sweep cron
-   * (HT-42, `../mail/gmail-watch-maintenance.ts`, gmail-push.md §6)
-   * iterates. `paused`/`needs_reconnect` mailboxes are excluded by the
+   * per-mailbox source both the daily `watch`-renewal cron
+   * (`../mail/gmail-watch-maintenance.ts`) and the separate every-minute
+   * reconciliation sweep (`../mail/gmail-reconcile-sweep.ts`) iterate
+   * (gmail-push.md §6). `paused`/`needs_reconnect` mailboxes are excluded by the
    * query itself, not filtered by the caller (see the module doc). Returns
    * `[]` when no mailbox is currently active.
    */

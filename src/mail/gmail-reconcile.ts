@@ -76,7 +76,8 @@
  * consumed by a second run while the first still holds the lease, so its
  * claim fails. Acking there discards the notification outright — the
  * holder's `setCursor` only reaches `H1`, so `H2` waits for the next
- * trigger, up to ~24h of silent latency on a quiet mailbox. The ingest
+ * trigger — bounded by the every-minute sweep's cadence, but still
+ * avoidable latency on a message this run already knew about. The ingest
  * dedup does not cover this: it guards against DOUBLING work, not against a
  * snapshot predating a message. Retrying means the same job is redelivered
  * after the holder has very likely released (see {@link

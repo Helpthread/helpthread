@@ -142,7 +142,8 @@ function assertNonEmpty(field: string, value: string): void {
 }
 
 /**
- * Run one daily watch-renewal + reconciliation-sweep pass. See the module
+ * Run one daily `watch`-renewal pass. Reconciliation is a SEPARATE
+ * every-minute cron (`./gmail-reconcile-sweep.ts`). See the module
  * doc for the full behavior. Never throws for an individual mailbox's
  * failure (failure-isolated — see {@link GmailWatchMaintenanceReport}); a
  * genuinely unexpected fault outside the per-mailbox loop (e.g.
