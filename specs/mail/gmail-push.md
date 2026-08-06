@@ -70,9 +70,15 @@ reconciliation step (§3) do the fetching.
 
 **Recording the notification is a durable enqueue, not an in-process continuation.** The
 endpoint **enqueues a "reconcile mailbox X" job onto the `QueueProvider`**
-(`src/providers/queue.ts`; Vercel Queues per architecture guide), then acks. A `QueueProvider`
-consumer runs §3. This is deliberate, and it is the near-real-time path — the §6 daily sweep
-is the 24h-bounded *fallback*, not the primary trigger — so the hand-off must not rely on a
+(`src/providers/queue.ts`), then acks. A `QueueProvider` consumer runs §3. The shipped
+implementation is `createPostgresQueue` (`src/providers/adapters/postgres-queue/`), wired at
+the composition root — deliberately Postgres-backed rather than Vercel Queues, reusing the
+database every deployment already provisions instead of adding a second durable-work
+dependency.
+
+Push is the low-latency path, not the mechanism of record: §6's every-minute sweep is the
+primary inbound transport, and a deployment with no Pub/Sub topic ingests through it alone.
+The hand-off must still not rely on a
 `waitUntil`/after-response continuation, which a serverless runtime does not guarantee to
 execute: a dropped continuation would silently degrade push to "eventually caught by the
 sweep" with no signal, whereas a durable queue job cannot vanish that way. It also keeps the
@@ -151,9 +157,12 @@ which client sent the mail.
 
 ## 4. The cursor: monotonic, transactional with persistence
 
-Each mailbox stores a `historyId` cursor. Its one rule: **it advances only after
-the ingest pipeline confirms every message HANDED TO IT is `stored` or `suppressed`**
-(inbound-ingestion.md §4) — "the batch" here is scoped to messages the pipeline actually
+Each mailbox stores a `historyId` cursor. Its one rule: **it advances only after the ingest
+pipeline confirms every message HANDED TO IT reached a TERMINAL, durably-recorded ledger
+outcome — `stored`, `suppressed`, or `dead-letter`** (inbound-ingestion.md §4). A
+dead-lettered message is visible and recoverable for manual review, so it satisfies the
+never-drop invariant; treating it as non-terminal instead would wedge the cursor on that one
+poison message forever and block every healthy message behind it in history order — "the batch" here is scoped to messages the pipeline actually
 received, not every `messagesAdded` entry `history.list` returned. Two kinds of entry are
 filtered out before ever reaching the pipeline and so contribute no outcome for this rule
 to inspect: a message deleted between `history.list` and the raw fetch (§3, "deleted
@@ -218,7 +227,7 @@ here the cursor itself is unrecoverable.)
   token refresh per mailbox per minute for a Gmail call the sweep never makes.
 
 - **Reconciliation is serialized per mailbox by a reconciliation lease.** Push-triggered
-  reconciliation (§2–§3) and the daily sweep both advance the same mailbox's cursor, so a
+  reconciliation (§2–§3) and the every-minute sweep both advance the same mailbox's cursor, so a
   mailbox's runs are serialized by a **reconciliation lease** — the inbound analogue of the
   outbound delivery lease (sending.md §3a) — held on `gmail_watch_state.claimed_until`
   (migration 016, `src/store/gmail-watch-state.ts`'s
@@ -276,9 +285,9 @@ here the cursor itself is unrecoverable.)
 - **Parsing, threading, storage, idempotency, attachment extraction, loop-suppression,
   observability** → inbound-ingestion.md. This transport hands over raw bytes and provider
   metadata and stops.
-- **OAuth token acquisition/refresh** →; the **connect/consent flow**
-  (authorization-code grant, initial `watch` arm, baseline cursor seed) →
-, [gmail-connect.md](./gmail-connect.md).
+- **OAuth token acquisition/refresh** → `src/mail/gmail-oauth.ts`; the **connect/consent
+  flow** (authorization-code grant, initial `watch` arm, baseline cursor seed) →
+  [gmail-connect.md](./gmail-connect.md).
 - **One-time GCP/Pub-Sub provisioning** (Internal OAuth app; enable the Gmail + Pub/Sub APIs;
   create the topic; grant `gmail-api-push@system.gserviceaccount.com` the Pub/Sub Publisher
   role; create the push subscription → our endpoint) is an **operator runbook**, not
@@ -304,8 +313,9 @@ Against a **faked** Gmail API + Pub/Sub push (no cloud):
   `inbound_deliveries` row created, cursor still advances past it ("the self-echo
   filter" above). A self-addressed entry labeled both `SENT` and `INBOX` → still ingested
   normally.
-- The daily reconciliation sweep re-lists from the stored cursor and ingests a message a
-  *dropped* push never delivered — with no duplication of messages push already delivered.
+- The every-minute reconciliation sweep (§6) re-lists from the stored cursor and ingests a
+  message a *dropped* push never delivered — with no duplication of messages push already
+  delivered.
 
 The **live** end-to-end proof against real Gmail — send via the Gmail API, assert the
 delivered message carries our verbatim token-bearing `Message-ID`, reply from a real Gmail
