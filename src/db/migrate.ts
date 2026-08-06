@@ -743,9 +743,9 @@ CREATE INDEX thread_attachments_thread_id_idx ON thread_attachments (thread_id);
  *
  * Unlike the outbound lease, there is no accompanying "status" to record on
  * release — this lease guards nothing but redundant Gmail API work
- * (`history.list`/`messages.get`) between a push-triggered reconcile
- * (HT-41) and the daily sweep (HT-42) landing on the SAME mailbox at
- * overlapping times. It is a pure efficiency guard, not a correctness one:
+ * (`history.list`/`messages.get`) between a push-triggered reconcile and
+ * the every-minute reconciliation sweep (`src/mail/gmail-reconcile-sweep.ts`)
+ * landing on the SAME mailbox at overlapping times. It is a pure efficiency guard, not a correctness one:
  * `src/mail/gmail-reconcile.ts`'s own cursor-advance rule (step 6) and the
  * ingest pipeline's dedup on `(mailboxId, providerMessageId)`
  * (inbound-ingestion.md §4) already make either ordering safe with no lease

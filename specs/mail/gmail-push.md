@@ -245,7 +245,9 @@ here the cursor itself is unrecoverable.)
   **Acking on a failed claim would be unsafe**: the holder's `history.list` snapshot is fixed
   the moment it runs, so a message arriving in Gmail's history *after* that snapshot is
   invisible to the holder's cursor advance — acking its notification would drop it until the
-  next trigger, up to ~24h of added latency on a quiet mailbox. Retrying instead means the job
+  next trigger — at the sweep's every-minute cadence that is bounded latency rather than the
+  ~24h a daily sweep would have implied, but it is still avoidable latency on a message this
+  run already knew about. Retrying instead means the job
   is redelivered shortly after the holder has very likely released, at which point its own
   `history.list` picks up anything the holder missed. The backoff is sized so that, combined
   with the queue's exponential backoff and `maxAttempts` dead-letter ceiling
