@@ -36,7 +36,12 @@ const KEYRING: Keyring = { current: { keyId: 'k1', secret: 'a'.repeat(32) } }
 const CUSTOMER_HEADER = 'X-Helpthread-Customer-Email'
 const PATH = '/api/v1/customer/conversations'
 
-const NOOP_SENDER: EmailSender = { maxSendMs: 30_000, async send() {} }
+const NOOP_SENDER: EmailSender = {
+  maxSendMs: 30_000,
+  async send() {
+    return {}
+  },
+}
 
 /** A `BlobStore` that records writes and can be told to fail on the Nth put. */
 function createFakeBlobStore(failOnPut = -1): {
@@ -47,7 +52,7 @@ function createFakeBlobStore(failOnPut = -1): {
   return {
     written,
     blobStore: {
-      async put(key) {
+      async put(key: string) {
         if (written.length === failOnPut) throw new Error('blob write failed')
         written.push(key)
       },
@@ -102,7 +107,14 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
       },
       assistants: { store: createAssistantStore(db) },
       savedReplies: { store: createSavedReplyStore(db), mailboxStore },
-      attachments: { store: { async listByConversationId() { return [] } }, blobStore },
+      attachments: {
+        store: {
+          async listByConversationId() {
+            return []
+          },
+        },
+        blobStore,
+      },
     })
 
     return { db, api, conversations, outbox, mailbox, written }
@@ -120,7 +132,12 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
   }
 
   function validBody(mailboxId: string, extra: Record<string, unknown> = {}) {
-    return { subject: 'Cannot export my report', bodyText: 'It times out every time.', mailboxId, ...extra }
+    return {
+      subject: 'Cannot export my report',
+      bodyText: 'It times out every time.',
+      mailboxId,
+      ...extra,
+    }
   }
 
   it('creates a conversation owned by the header address, with an inbound first thread', async () => {
@@ -148,7 +165,10 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
       req({
         email: 'real@example.test',
         // A body that tries to name someone else must be ignored outright.
-        body: validBody(mailbox.id, { customerEmail: 'victim@example.test', fromAddress: 'victim@example.test' }),
+        body: validBody(mailbox.id, {
+          customerEmail: 'victim@example.test',
+          fromAddress: 'victim@example.test',
+        }),
       }),
     )
     expect(res.status).toBe(201)
@@ -192,7 +212,13 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
   it('rejects a missing, multi-valued, or unsupported customer header', async () => {
     const { api, mailbox } = await harness()
 
-    for (const email of [null, 'a@example.test,b@example.test', 'not-an-email', '"quoted"@example.test', 'a@@b.test']) {
+    for (const email of [
+      null,
+      'a@example.test,b@example.test',
+      'not-an-email',
+      '"quoted"@example.test',
+      'a@@b.test',
+    ]) {
       const res = await api(req({ email, body: validBody(mailbox.id) }))
       expect(res.status, `email=${String(email)}`).toBe(400)
       expect((await res.json()).error.code).toBe('validation_failed')
@@ -203,7 +229,10 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
     const { api, db, mailbox } = await harness()
 
     const unknown = await api(
-      req({ email: 'customer@example.test', body: validBody('00000000-0000-4000-8000-000000000000') }),
+      req({
+        email: 'customer@example.test',
+        body: validBody('00000000-0000-4000-8000-000000000000'),
+      }),
     )
     expect(unknown.status).toBe(400)
 
@@ -235,7 +264,13 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
       req({
         email: 'customer@example.test',
         body: validBody(mailbox.id, {
-          attachments: [{ filename: 'log.txt', contentType: 'text/plain', data: Buffer.from('hello').toString('base64') }],
+          attachments: [
+            {
+              filename: 'log.txt',
+              contentType: 'text/plain',
+              data: Buffer.from('hello').toString('base64'),
+            },
+          ],
         }),
       }),
     )
@@ -254,7 +289,7 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
     expect(bad.status).toBe(400)
 
     // The rejected request created nothing.
-    const all = await conversations.listConversations({ status: 'open', limit: 50 })
+    const all = await conversations.listConversations({ folder: 'open', limit: 50 })
     expect(all).toHaveLength(1)
   })
 
@@ -268,15 +303,23 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
         email: 'customer@example.test',
         body: validBody(mailbox.id, {
           attachments: [
-            { filename: 'a.txt', contentType: 'text/plain', data: Buffer.from('a').toString('base64') },
-            { filename: 'b.txt', contentType: 'text/plain', data: Buffer.from('b').toString('base64') },
+            {
+              filename: 'a.txt',
+              contentType: 'text/plain',
+              data: Buffer.from('a').toString('base64'),
+            },
+            {
+              filename: 'b.txt',
+              contentType: 'text/plain',
+              data: Buffer.from('b').toString('base64'),
+            },
           ],
         }),
       }),
     )
     expect(res.status).toBe(502)
 
-    const all = await conversations.listConversations({ status: 'open', limit: 50 })
+    const all = await conversations.listConversations({ folder: 'open', limit: 50 })
     expect(all).toHaveLength(0)
   })
 
