@@ -79,6 +79,11 @@ jobs:
           FILES: ${{ steps.tier.outputs.files }}
         run: |
           set -euo pipefail
+          # Pin the locale: several patterns below contain non-ASCII characters
+          # (the verdict emoji, curly quotes). Under a byte-oriented locale grep
+          # matches those byte-by-byte, so a bracket or case-fold over them
+          # silently stops working — the check would pass everything and look green.
+          export LC_ALL=C.UTF-8
           fail() { echo "::error::$1"; FAILED=1; }
           FAILED=0
 
@@ -123,20 +128,22 @@ jobs:
           fi
 
           # 2. A decision-provenance section.
-          if ! grep -qiE '^#+[[:space:]]*Decision provenance' <<<"$BODY"; then
+          # Anchored: "## Decision provenance deliberately omitted" is a heading that
+          # says the opposite of what it would otherwise satisfy.
+          if ! grep -qiE '^#+[[:space:]]*Decision provenance[[:space:]]*$' <<<"$BODY"; then
             fail "No '## Decision provenance' section. Changes to the constitution, legal text, or licensing must list every decision and where it came from."
           fi
 
           # 3. Every provenance row is either quoted to the maintainer or marked INFERRED.
           #    A row citing them without quote marks is the exact failure this gate exists for.
           #    sed form is BRE-portable (BSD and GNU) — `\+` is a GNU extension.
-          if grep -qiE '^#{1,}[[:space:]]*Decision provenance' <<<"$BODY"; then
+          if grep -qiE '^#{1,}[[:space:]]*Decision provenance[[:space:]]*$' <<<"$BODY"; then
             # Stop at the next heading — reading to end-of-body swallows any later
             # table (a test-results table, for instance) and parses it as provenance rows.
             # Terminate on an ATX heading (# Foo) OR a setext underline (--- / ===),
             # which the earlier awk missed — a "Test results" setext heading let the
             # table under it be parsed as provenance rows.
-            ROWS=$(awk '/^#+[[:space:]]*[Dd]ecision provenance/{f=1;next} \
+            ROWS=$(awk '/^#+[[:space:]]*[Dd]ecision provenance[[:space:]]*$/{f=1;next} \
                         f&&/^#+[[:space:]]/{exit} \
                         f&&/^(-{3,}|={3,})[[:space:]]*$/{exit} f' <<<"$BODY" \
                    | grep -E '^\|' | grep -vE '^\|[[:space:]]*[-:[:space:]]+\|' | tail -n +2 || true)
@@ -148,7 +155,18 @@ jobs:
                 # Only an explicit INFERRED label, or an explicit no-decision row, excuses a
                 # missing quote. 'no authorization' alone does NOT — the protocol requires
                 # the INFERRED label itself so the disclosure is unmissable.
-                if grep -qiE 'INFERRED|none —|no new decision' <<<"$row"; then continue; fi
+                #
+                # An INFERRED row also forces the verdict to yellow. The protocol is
+                # explicit that one inferred item means 🟡 and never 🟢, and without this
+                # a PR could disclose an unauthorized decision and still call itself
+                # safe to merge — disclosure without the consequence.
+                if grep -qiE 'INFERRED' <<<"$row"; then
+                  if [ "$VERDICT" = safe ]; then
+                    fail "Verdict is SAFE TO MERGE but a provenance row is marked INFERRED. One inferred decision means the verdict is NEEDS YOUR DECISION: ${row}"
+                  fi
+                  continue
+                fi
+                if grep -qiE 'none —|no new decision' <<<"$row"; then continue; fi
                 # A sourced row must contain an actual quotation.
                 if ! grep -qE '["“”]' <<<"$row"; then
                   fail "Provenance row has no quote and is not marked INFERRED: ${row}"
@@ -173,7 +191,7 @@ jobs:
             grep -qE '["“”]' <<<"$line" && continue
             grep -qiE 'INFERRED' <<<"$line" && continue
             fail "Attributes a decision to the maintainer without quoting them: ${line}"
-          done < <(grep -iE "(maintainer's (decision|call|choice)|per the maintainer's|maintainer decided|you decided|you chose|as you decided|decided by the maintainer|CONFIRMED by the maintainer|SIGNED OFF by the maintainer|\(maintainer,? [0-9]{4}-|maintainer decision, [0-9]{4}-)" <<<"$BODY_NO_CODE" || true)
+          done < <(grep -iE "(maintainer('|’)s (decision|call|choice)|per the maintainer('|’)s|maintainer decided|per your decision|you decided|you chose|as you decided|decided by the maintainer|CONFIRMED by the maintainer|SIGNED OFF by the maintainer|\(maintainer,? [0-9]{4}-|maintainer decision, [0-9]{4}-)" <<<"$BODY_NO_CODE" || true)
 
           # 5. A green verdict must show the review bots were adjudicated.
           #    Bots review AFTER a PR opens, so nothing can honestly be green at open
@@ -191,8 +209,8 @@ jobs:
           #    one is unavailable, so hardcoding names would fail an honest substitution;
           #    it also keeps third-party product names out of a public repo.
           if [ "$VERDICT" = safe ]; then
-            if ! grep -qiE ':[^:]*\bfindings?\b' <<<"$BODY_NO_CODE"; then
-              fail "Verdict is SAFE TO MERGE but no review adjudication line is present. Add one line naming the reviewer and stating what it found and how each finding was resolved — e.g. '<reviewer>: 7 findings, 5 real and fixed, 2 wrong (misread the token scope).' If no review has run on the current head yet, the verdict cannot be green."
+            if ! grep -qiE ':[^:]*[^[:alnum:]]*\b([0-9]+|no|none|zero)[[:space:]]+findings?\b' <<<"$BODY_NO_CODE"; then
+              fail "Verdict is SAFE TO MERGE but no review adjudication line is present. Add one line naming the reviewer and giving a COUNT — e.g. '<reviewer>: 7 findings, 5 real and fixed, 2 wrong (misread the token scope)' or '<reviewer>: no findings'. The bare word 'findings' does not adjudicate anything. If no review has run on the current head yet, the verdict cannot be green."
             fi
           fi
 
