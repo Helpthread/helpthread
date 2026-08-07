@@ -50,8 +50,41 @@ import type { HealthReport } from './health.js'
 /** `GET` (Vercel Cron) → drain one bounded batch of the durable job queue (runbook Part C: every minute). */
 export const QUEUE_DRAIN_PATH = '/api/v1/internal/queue/drain'
 
-/** `GET` (Vercel Cron) → daily Gmail `watch()` re-arm + reconciliation sweep (runbook Part C: daily at 06:00 UTC). */
+/** `GET` (Vercel Cron) → daily Gmail `watch()` re-arm (runbook Part C: daily at 06:00 UTC). Only meaningful when push is configured; reports a skip otherwise (HT-94). The reconciliation sweep this endpoint used to also perform now lives at {@link RECONCILE_SWEEP_PATH}. */
 export const WATCH_MAINTENANCE_PATH = '/api/v1/internal/cron/watch-maintenance'
+
+/**
+ * `GET` (Vercel Cron) → one bounded reconciliation sweep (HT-94;
+ * `src/mail/gmail-reconcile-sweep.ts`): enqueue a reconcile job per active
+ * mailbox with a baseline cursor.
+ *
+ * **This is the primary inbound transport for GMAIL mailboxes** (CHARTER.md
+ * §2 as amended 2026-07-20), not a backstop — a deployment with no Pub/Sub
+ * ingests mail entirely through this endpoint, so it runs at the same
+ * every-minute cadence as {@link QUEUE_DRAIN_PATH} rather than the daily
+ * cadence {@link WATCH_MAINTENANCE_PATH} uses for infrastructure upkeep.
+ * Split out of that endpoint precisely so the two cadences could diverge, and
+ * so the sweep would stop paying for a per-mailbox token refresh it never
+ * needs. The IMAP transport's equivalent is {@link IMAP_FETCH_PATH} — a
+ * separate endpoint because it fetches mail directly rather than enqueueing
+ * reconcile jobs, and because the two transports' cadences are independently
+ * tunable.
+ */
+export const RECONCILE_SWEEP_PATH = '/api/v1/internal/cron/reconcile-sweep'
+
+/**
+ * `GET` (Vercel Cron) → the IMAP scheduled-fetch sweep (HT-101 Stage 2a-ii;
+ * specs/mail/mailbox-connection.md §5; `src/mail/imap-fetch.ts`'s
+ * `runImapFetch`): fetch bounded new mail for every active `provider ===
+ * 'imap'` mailbox. `vercel.json`'s schedule for this path (every 2 minutes)
+ * is a conservative DEFAULT, not a spec'd number — flagged as deploy-time
+ * tunable: an operator running many IMAP mailboxes, or one wanting tighter
+ * latency, can shorten it without any code change (the fetch's own lease —
+ * `ImapWatchStateStore.claimFetchLease`, `DEFAULT_IMAP_FETCH_LEASE_MS` —
+ * already makes an overlapping invocation safe, so shortening the interval
+ * only trades IMAP API load for latency, never correctness).
+ */
+export const IMAP_FETCH_PATH = '/api/v1/internal/cron/imap-fetch'
 
 /** `GET` (Vercel Cron) → drain one bounded batch of `event_outbox` into `queue_jobs` webhook-delivery fan-out (HT-69; `src/webhooks/outbox-drain.ts`; runbook Part C: every minute, same cadence as {@link QUEUE_DRAIN_PATH}). A SEPARATE endpoint from the queue drain — this one turns outbox rows into queue jobs; the queue drain is what then delivers them. */
 export const OUTBOX_DRAIN_PATH = '/api/v1/internal/outbox/drain'
@@ -80,8 +113,12 @@ export interface AppHandlerDeps {
   drainOutbox: () => Promise<unknown>
   /** Run one snooze wake pass (HT-77, {@link SNOOZE_WAKE_PATH}); returns a JSON-serializable report for the response body + logs. */
   runSnoozeWake: () => Promise<unknown>
-  /** Run one daily watch-renewal + reconciliation-sweep pass; returns a JSON-serializable report. */
+  /** Run one daily watch-renewal pass; returns a JSON-serializable report. */
   runWatchMaintenance: () => Promise<unknown>
+  /** Run one bounded reconciliation sweep (HT-94, {@link RECONCILE_SWEEP_PATH}) — the primary inbound transport for Gmail mailboxes; returns a JSON-serializable report. */
+  runReconcileSweep: () => Promise<unknown>
+  /** Run one IMAP scheduled-fetch sweep ({@link IMAP_FETCH_PATH}); returns a JSON-serializable report for the response body + logs. */
+  runImapFetch: () => Promise<unknown>
   /** Assemble the health report (`./health.ts`) — the {@link HEALTH_PATH} endpoint's work. */
   runHealthCheck: () => Promise<HealthReport>
   /**
@@ -114,6 +151,9 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
     if (pathname === SNOOZE_WAKE_PATH) {
       return handleCronEndpoint(request, deps.cronSecret, 'snooze-wake', deps.runSnoozeWake)
     }
+    if (pathname === RECONCILE_SWEEP_PATH) {
+      return handleCronEndpoint(request, deps.cronSecret, 'reconcile-sweep', deps.runReconcileSweep)
+    }
     if (pathname === WATCH_MAINTENANCE_PATH) {
       return handleCronEndpoint(
         request,
@@ -121,6 +161,9 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
         'watch-maintenance',
         deps.runWatchMaintenance,
       )
+    }
+    if (pathname === IMAP_FETCH_PATH) {
+      return handleCronEndpoint(request, deps.cronSecret, 'imap-fetch', deps.runImapFetch)
     }
     if (pathname === HEALTH_PATH) {
       // The report is the body verbatim (it carries its own `ok`/`alerts`),

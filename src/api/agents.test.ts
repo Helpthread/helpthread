@@ -85,6 +85,9 @@ describe('Agents & Authentication API', () => {
       store: createConversationStore(db),
       apiToken: TOKEN,
       sender: overrides.sender ?? defaultSender,
+      senderResolver: {
+        resolve: async () => ({ sender: overrides.sender ?? defaultSender, from: SUPPORT_ADDRESS }),
+      },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,

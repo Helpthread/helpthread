@@ -56,7 +56,12 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Db, Queryable } from '../db/client.js'
-import type { BlobStore, RawInboundMessage, RawMessageContent } from '../providers/index.js'
+import type {
+  BlobStore,
+  ProviderSpamVerdict,
+  RawInboundMessage,
+  RawMessageContent,
+} from '../providers/index.js'
 import { insertThreadAttachmentsInTx, type NewThreadAttachment } from '../store/attachments.js'
 import { appendThreadInTx, createConversationInTx, type NewThread } from '../store/conversations.js'
 import { appendOutboxEventInTx } from '../store/event-outbox.js'
@@ -73,7 +78,7 @@ import { decideThreading, type ThreadingDecision } from './thread.js'
 /**
  * How many failed-or-abandoned processing attempts (`InboundDeliveryStore`'s
  * `attempts` — every `markFailed`/`markDeadLetter`, AND every `received`-row
- * lease reclaim, HT-45 review fix) a delivery may accumulate before this
+ * lease reclaim, HT-45) a delivery may accumulate before this
  * pipeline gives up and marks it `dead-letter` for manual review (spec §4:
  * "a message that exhausts its retry budget"). Migration 012's doc comment
  * (`src/db/migrate.ts`) deliberately leaves this policy to "the worker that
@@ -355,7 +360,7 @@ async function processClaimedDelivery(
     providerMessageId: delivery.providerMessageId,
   }
 
-  // --- Lease-reclaim retry budget (HT-45 review fix). A `received`-row
+  // --- Lease-reclaim retry budget (HT-45). A `received`-row
   // lease reclaim bumps `attempts` (src/store/inbound-deliveries.ts's "The
   // fence" section) precisely so a message that hard-crashes the process on
   // every attempt — never reaching a recorded `failed`/`dead-letter` outcome
@@ -434,10 +439,12 @@ async function processClaimedDelivery(
     const written = await storeAndMarkDelivered(
       deps.db,
       delivery.id,
+      delivery.mailboxId,
       decision,
       parsed,
       attachmentRefs,
       delivery.attempts,
+      raw.providerSpamVerdict ?? 'unknown',
     )
     logIngestEvent({
       ...base,
@@ -633,17 +640,24 @@ async function recordFailure(
  * ledger mark, or a `thread_attachments` row pointing at a thread that was
  * never committed; the only trace it leaves is the orphaned blob bytes the
  * paragraph above already accounts for.
+ *
+ * `mailboxId` (HT-101 Stage 2b-i) is threaded straight through to {@link
+ * writeParsedEmail}, which stamps it on a genuinely NEW conversation only —
+ * purely additive, no other step in this function reads or is affected by
+ * it.
  */
 async function storeAndMarkDelivered(
   db: Db,
   deliveryId: string,
+  mailboxId: string,
   decision: ThreadingDecision,
   parsed: ParsedEmail,
   attachmentRefs: Omit<NewThreadAttachment, 'threadId'>[],
   claimedAttempts: number,
+  spamVerdict: ProviderSpamVerdict,
 ): Promise<{ conversationId: string; threadId: string; appendFallback?: AppendFallbackReason }> {
   return db.transaction(async (tx) => {
-    const written = await writeParsedEmail(tx, decision, parsed)
+    const written = await writeParsedEmail(tx, mailboxId, decision, parsed, spamVerdict)
     await insertThreadAttachmentsInTx(
       tx,
       attachmentRefs.map((ref) => ({ ...ref, threadId: written.threadId })),
@@ -704,11 +718,45 @@ async function storeAndMarkDelivered(
  * this is exactly the same "a genuinely NEW row is the only thing that
  * counts" discipline `appendThreadInTx` already applies to its own reopen/
  * `updated_at`-bump decision, applied here to event emission too.
+ *
+ * `mailboxId` (HT-101 Stage 2b-i) is stamped onto {@link NewConversation.mailboxId}
+ * at BOTH `createConversationInTx` call sites below (a genuine `new`
+ * decision, and the deleted/not-found fallback) — both mint a brand-new
+ * conversation, so both record which mailbox took its first message. The
+ * `append` branch deliberately never touches it: an existing conversation
+ * already has whatever mailbox its own creation recorded, and a reply
+ * threaded onto it must not overwrite that, even if this particular reply
+ * happened to arrive at a different connected mailbox.
+ *
+ * ## The spam verdict (specs/mail/spam-classification.md §4)
+ *
+ * `spamVerdict` follows exactly the same shape, and for the same reason: it
+ * decides the STATUS of a brand-new conversation at both
+ * `createConversationInTx` call sites, and the `append` branch never reads
+ * it at all. Three properties are load-bearing:
+ *
+ * - **It never drops anything.** A `'spam'` verdict changes one column. The
+ *   message is parsed, stored, threaded, and attachment-linked exactly as a
+ *   clean one is (inbound-ingestion.md §1's third invariant), so an Agent
+ *   who opens the Spam folder sees the real message and a reply reopens it
+ *   to `active` (agent-inbox-v1.md §4a) — a false positive is always
+ *   recoverable.
+ * - **It never re-files an existing conversation.** A reply that carried a
+ *   valid reply token threads onto its target and leaves that target's
+ *   status alone, however the provider classified this particular message.
+ *   Our own token is the stronger signal, and an Agent who put a
+ *   conversation somewhere must not be silently overruled by Google.
+ * - **Only `'spam'` is evidence.** `'clean'`, `'unknown'`, and an omitted
+ *   field all mean `active` — see {@link RawInboundMessage.providerSpamVerdict}
+ *   for why "we asked and it said no" and "we have no idea" are still kept
+ *   distinct on the wire even though they agree here.
  */
 async function writeParsedEmail(
   tx: Queryable,
+  mailboxId: string,
   decision: ThreadingDecision,
   parsed: ParsedEmail,
+  spamVerdict: ProviderSpamVerdict,
 ): Promise<{ conversationId: string; threadId: string; appendFallback?: AppendFallbackReason }> {
   const firstMessage: NewThread = {
     direction: 'inbound',
@@ -718,12 +766,15 @@ async function writeParsedEmail(
     bodyText: parsed.text,
     bodyHtml: parsed.html,
   }
+  const status = spamVerdict === 'spam' ? 'spam' : 'active'
 
   if (decision.kind === 'new') {
     const created = await createConversationInTx(tx, {
       subject: parsed.subject,
       customerEmail: fromAddressOf(parsed),
       firstMessage,
+      mailboxId,
+      status,
     })
     await emitNewConversationEvents(tx, created.conversationId, created.threadId)
     return created
@@ -731,7 +782,7 @@ async function writeParsedEmail(
 
   const appended = await appendThreadInTx(tx, decision.conversationId, firstMessage)
   if (appended.ok) {
-    // Gated on `created` (review fix, module doc above): a replay
+    // Gated on `created` (module doc above): a replay
     // (`created: false`) must never re-fire the event with a fresh eventId.
     if (appended.created) {
       await appendOutboxEventInTx(tx, {
@@ -750,6 +801,8 @@ async function writeParsedEmail(
     subject: parsed.subject,
     customerEmail: fromAddressOf(parsed),
     firstMessage,
+    mailboxId,
+    status,
   })
   await emitNewConversationEvents(tx, created.conversationId, created.threadId)
   return { ...created, appendFallback: appended.reason }

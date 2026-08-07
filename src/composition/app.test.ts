@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createAppHandler,
   HEALTH_PATH,
+  IMAP_FETCH_PATH,
   OUTBOX_DRAIN_PATH,
   QUEUE_DRAIN_PATH,
+  RECONCILE_SWEEP_PATH,
   SNOOZE_WAKE_PATH,
   WATCH_MAINTENANCE_PATH,
 } from './app.js'
@@ -26,6 +28,7 @@ const HEALTHY_REPORT: HealthReport = {
   mailboxes: [],
   webhooks: { autoDisabled: [], deliveryFailuresLast24h: 0 },
   webauthn: { counterRegressionsLast24h: 0 },
+  schema: { expectedMigrationId: 1, appliedMigrationId: 1, missing: [] },
 }
 
 /** Build a handler over spy deps; the inbox API spy returns a recognizable 299 so delegation is observable. */
@@ -35,6 +38,8 @@ function makeHandler(opts: { cronSecret?: string; uiBaseUrl?: string } = {}) {
   const drainOutbox = vi.fn(async () => ({ claimed: 2, enqueued: 2, dispatched: 2 }))
   const runSnoozeWake = vi.fn(async () => ({ due: 1, woken: 1 }))
   const runWatchMaintenance = vi.fn(async () => ({ total: 1, renewed: 1 }))
+  const runReconcileSweep = vi.fn(async () => ({ total: 1, swept: 1, skipped: 0, failed: 0 }))
+  const runImapFetch = vi.fn(async () => ({ total: 0, fetched: 0 }))
   const runHealthCheck = vi.fn(async (): Promise<HealthReport> => HEALTHY_REPORT)
   const handler = createAppHandler({
     inboxApi,
@@ -44,6 +49,8 @@ function makeHandler(opts: { cronSecret?: string; uiBaseUrl?: string } = {}) {
     drainOutbox,
     runSnoozeWake,
     runWatchMaintenance,
+    runReconcileSweep,
+    runImapFetch,
     runHealthCheck,
   })
   return {
@@ -53,6 +60,8 @@ function makeHandler(opts: { cronSecret?: string; uiBaseUrl?: string } = {}) {
     drainOutbox,
     runSnoozeWake,
     runWatchMaintenance,
+    runReconcileSweep,
+    runImapFetch,
     runHealthCheck,
   }
 }
@@ -146,6 +155,8 @@ describe('createAppHandler — queue drain endpoint', () => {
       drainOutbox: vi.fn(async () => ({})),
       runSnoozeWake: vi.fn(async () => ({})),
       runWatchMaintenance,
+      runReconcileSweep: vi.fn(async () => ({})),
+      runImapFetch: vi.fn(async () => ({})),
       runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
     })
 
@@ -202,6 +213,8 @@ describe('createAppHandler — outbox drain endpoint (HT-69)', () => {
       }),
       runSnoozeWake: vi.fn(async () => ({})),
       runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
+      runImapFetch: vi.fn(async () => ({})),
       runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
     })
 
@@ -256,6 +269,8 @@ describe('createAppHandler — snooze wake endpoint (HT-77)', () => {
         throw new Error('secret-internal-detail-should-not-leak')
       }),
       runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
+      runImapFetch: vi.fn(async () => ({})),
       runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
     })
 
@@ -286,6 +301,151 @@ describe('createAppHandler — watch-maintenance endpoint', () => {
     const res = await handler(req(WATCH_MAINTENANCE_PATH, { secret: 'nope-9999999999999' }))
     expect(res.status).toBe(401)
     expect(runWatchMaintenance).not.toHaveBeenCalled()
+  })
+})
+
+describe('createAppHandler — reconcile-sweep endpoint (HT-94, the primary inbound transport for Gmail)', () => {
+  it('runs the sweep and returns its report on a GET with the correct cron secret', async () => {
+    const { handler, runReconcileSweep, inboxApi } = makeHandler()
+
+    const res = await handler(req(RECONCILE_SWEEP_PATH))
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      ok: true,
+      report: { total: 1, swept: 1, skipped: 0, failed: 0 },
+    })
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(runReconcileSweep).toHaveBeenCalledOnce()
+    expect(inboxApi).not.toHaveBeenCalled()
+  })
+
+  it('rejects a wrong cron secret with 401 and never runs the work', async () => {
+    const { handler, runReconcileSweep } = makeHandler()
+    const res = await handler(req(RECONCILE_SWEEP_PATH, { secret: 'wrong-secret-9999999999' }))
+    expect(res.status).toBe(401)
+    expect(runReconcileSweep).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing Authorization header with 401', async () => {
+    const { handler, runReconcileSweep } = makeHandler()
+    const res = await handler(req(RECONCILE_SWEEP_PATH, { secret: null }))
+    expect(res.status).toBe(401)
+    expect(runReconcileSweep).not.toHaveBeenCalled()
+  })
+
+  it('checks auth BEFORE method — a wrong-secret POST is 401, not 405 (no method oracle for an unauthenticated caller)', async () => {
+    const { handler, runReconcileSweep } = makeHandler()
+    const res = await handler(
+      req(RECONCILE_SWEEP_PATH, { method: 'POST', secret: 'wrong-9999999999' }),
+    )
+    expect(res.status).toBe(401)
+    expect(runReconcileSweep).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-GET method (authenticated) with 405', async () => {
+    const { handler, runReconcileSweep } = makeHandler()
+    const res = await handler(req(RECONCILE_SWEEP_PATH, { method: 'POST' }))
+    expect(res.status).toBe(405)
+    expect(runReconcileSweep).not.toHaveBeenCalled()
+  })
+
+  it('answers a generic 500 (never the error text) when the work throws', async () => {
+    const inboxApi = vi.fn(async () => new Response(null, { status: 299 }))
+    const handler = createAppHandler({
+      inboxApi,
+      cronSecret: CRON_SECRET,
+      drainQueue: vi.fn(async () => ({})),
+      drainOutbox: vi.fn(async () => ({})),
+      runSnoozeWake: vi.fn(async () => ({})),
+      runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => {
+        throw new Error('secret-internal-detail-should-not-leak')
+      }),
+      runImapFetch: vi.fn(async () => ({})),
+      runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
+    })
+
+    const res = await handler(req(RECONCILE_SWEEP_PATH))
+    const bodyText = await res.text()
+
+    expect(res.status).toBe(500)
+    expect(bodyText).not.toContain('secret-internal-detail-should-not-leak')
+    expect(JSON.parse(bodyText)).toEqual({
+      error: { code: 'server_error', message: 'Internal server error.' },
+    })
+  })
+})
+
+describe('createAppHandler — imap-fetch endpoint (HT-101 Stage 2a-ii)', () => {
+  it('runs the fetch sweep and returns its report on a GET with the correct cron secret — a SEPARATE endpoint from every other cron', async () => {
+    const { handler, runImapFetch, drainQueue, runWatchMaintenance, inboxApi } = makeHandler()
+
+    const res = await handler(req(IMAP_FETCH_PATH))
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true, report: { total: 0, fetched: 0 } })
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(runImapFetch).toHaveBeenCalledOnce()
+    expect(drainQueue).not.toHaveBeenCalled()
+    expect(runWatchMaintenance).not.toHaveBeenCalled()
+    expect(inboxApi).not.toHaveBeenCalled()
+  })
+
+  it('does NOT run the Gmail reconcile sweep — the two transports are independent ticks', async () => {
+    const { handler, runImapFetch, runReconcileSweep } = makeHandler()
+
+    await handler(req(IMAP_FETCH_PATH))
+
+    expect(runImapFetch).toHaveBeenCalledOnce()
+    expect(runReconcileSweep).not.toHaveBeenCalled()
+  })
+
+  it('rejects a wrong cron secret with 401 and never runs the work', async () => {
+    const { handler, runImapFetch } = makeHandler()
+    const res = await handler(req(IMAP_FETCH_PATH, { secret: 'wrong-secret-9999999999' }))
+    expect(res.status).toBe(401)
+    expect(runImapFetch).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing Authorization header with 401', async () => {
+    const { handler, runImapFetch } = makeHandler()
+    const res = await handler(req(IMAP_FETCH_PATH, { secret: null }))
+    expect(res.status).toBe(401)
+    expect(runImapFetch).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-GET method (authenticated) with 405', async () => {
+    const { handler, runImapFetch } = makeHandler()
+    const res = await handler(req(IMAP_FETCH_PATH, { method: 'POST' }))
+    expect(res.status).toBe(405)
+    expect(runImapFetch).not.toHaveBeenCalled()
+  })
+
+  it('answers a generic 500 (never the error text) when the fetch throws', async () => {
+    const inboxApi = vi.fn(async () => new Response(null, { status: 299 }))
+    const handler = createAppHandler({
+      inboxApi,
+      cronSecret: CRON_SECRET,
+      drainQueue: vi.fn(async () => ({})),
+      drainOutbox: vi.fn(async () => ({})),
+      runSnoozeWake: vi.fn(async () => ({})),
+      runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
+      runImapFetch: vi.fn(async () => {
+        throw new Error('secret-imap-detail-should-not-leak')
+      }),
+      runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
+    })
+
+    const res = await handler(req(IMAP_FETCH_PATH))
+    const bodyText = await res.text()
+
+    expect(res.status).toBe(500)
+    expect(bodyText).not.toContain('secret-imap-detail-should-not-leak')
+    expect(JSON.parse(bodyText)).toEqual({
+      error: { code: 'server_error', message: 'Internal server error.' },
+    })
   })
 })
 

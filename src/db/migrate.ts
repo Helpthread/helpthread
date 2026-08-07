@@ -852,7 +852,7 @@ ALTER TABLE mailboxes ADD CONSTRAINT mailboxes_status_check CHECK (status IN ('a
  * ## `agent_mailbox_access` — schema now, behavior deferred (spec §3.4)
  *
  * Modeled so a future per-Agent mailbox-scoping increment is a store/API
- * change, not a migration against live rows (TJ, 2026-07-18, spec §12.4).
+ * change, not a migration against live rows (maintainer, 2026-07-18, spec §12.4).
  * Nothing in this build reads or writes this table — an EMPTY table means
  * "every Agent may access every mailbox" by definition, not by a runtime
  * check anywhere. `PRIMARY KEY (agent_id, mailbox_id)` needs no separate
@@ -1019,10 +1019,10 @@ CREATE TABLE assistants (
  * it in the same change"), so a default would only ever mask a hand-written
  * INSERT that forgot the column — exactly the kind of silent wrong-value
  * risk this schema's CHECK-heavy convention exists to avoid, not paper
- * over. (An earlier revision of this migration added `DEFAULT 'agent'` for
- * test-fixture convenience; reviewed and reverted — a masking default is
- * strictly worse than fixing the ~handful of raw-SQL fixtures that needed
- * an explicit value, see `src/db/migrate.test.ts`'s `threads` inserts.)
+ * over. **No `DEFAULT 'agent'`**, however convenient it would be for test
+ * fixtures: a masking default is strictly worse than giving the handful of
+ * raw-SQL fixtures an explicit value (see `src/db/migrate.test.ts`'s
+ * `threads` inserts).
  *
  * `threads_author_kind_direction_check` is the real invariant a default
  * would have masked: `(direction = 'inbound') = (author_kind = 'customer')`
@@ -1447,6 +1447,774 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
 `
 
 /**
+ * Migration 027 — close the PostgREST Data API surface.
+ *
+ * ## What was wrong
+ *
+ * Supabase exposes the `public` schema through PostgREST, and its stock
+ * setup grants `anon` and `authenticated` full `SELECT/INSERT/UPDATE/
+ * DELETE/TRUNCATE` on tables in that schema. Row-Level Security is what is
+ * normally supposed to make those grants safe — but no migration up to 026
+ * ever enabled RLS, so every table stood fully open to anyone holding the
+ * project's anon key. The anon key is public by design (it ships to
+ * browsers), so that is effectively unauthenticated read AND write:
+ * dumping `conversations`/`threads`, but also INSERTing into `agents`,
+ * `agent_auth_identities`, `agent_mailbox_access` and
+ * `webauthn_credentials` to self-provision an authenticated Agent, or
+ * TRUNCATEing the lot. `mailbox_oauth_tokens` is the one partial mercy —
+ * its token columns are AES-256-GCM ciphertext (`src/store/token-crypto.
+ * ts`) keyed outside the database, so a dump yields ciphertext.
+ *
+ * Nothing in this codebase uses that surface: the app reaches Postgres
+ * directly over the pooler (`DATABASE_URL`, `src/db/postgres.ts`) and
+ * Supabase Storage with the `service_role` key
+ * (`src/providers/adapters/supabase-storage/`). There is no anon-key
+ * client anywhere in the repo. The Data API was pure attack surface with
+ * zero application value, which is what makes closing it entirely safe.
+ *
+ * ## Defence in depth, not either/or
+ *
+ * Both halves below are applied because they fail independently: RLS alone
+ * would be undone by a future `GRANT` plus a permissive policy, and
+ * revoked grants alone would be undone by anything that re-grants. Neither
+ * layer is load-bearing on its own.
+ *
+ * Be precise about what the `ALTER DEFAULT PRIVILEGES` calls do and do
+ * NOT buy, because it is easy to overrate them. `ALTER DEFAULT PRIVILEGES
+ * ... REVOKE` *deletes a default-ACL entry*; it does not install a
+ * standing deny. And without `FOR ROLE` it applies only to the role that
+ * executes it — the one running this migration. So it stops tables
+ * created by THIS role from arriving pre-granted, and nothing more. It
+ * does not survive Supabase re-running its stock bootstrap (which simply
+ * re-creates the entry), and it does not touch default privileges defined
+ * for other roles such as `supabase_admin`. The durable protection is the
+ * standing rule below, not this statement.
+ *
+ * 1. **RLS on every table**, spelled out one `ALTER TABLE` per table rather
+ *    than looped, so the set is reviewable in the diff and a table added
+ *    later fails loudly by omission instead of being silently swept in.
+ *    With no policies attached this is deny-by-default. It does not affect
+ *    the application: these tables are owned by `postgres`, and a table
+ *    owner bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set (which we
+ *    deliberately do not set).
+ * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` (subject
+ *    to the limits spelled out above) so tables created by future
+ *    migrations do not silently arrive pre-granted. Note that `REVOKE
+ *    ... FROM anon` removes only that role's own ACL entry — privileges
+ *    held via the `PUBLIC` pseudo-role are unaffected, which is why
+ *    `anon` still reports schema `USAGE` afterwards. The table-level
+ *    grants are the gate that matters; schema `USAGE` alone conveys no
+ *    access to any table.
+ *
+ * Neither half hardcodes `public`, because `PostgresDb` supports a `schema`
+ * option (`src/db/postgres.ts`) that puts every table in a named schema
+ * instead. The `ALTER TABLE`s are unqualified, so they resolve wherever
+ * search_path finds the table; the revokes then derive that SAME schema
+ * from `'conversations'::regclass` rather than from `current_schema()`.
+ * That distinction is load-bearing and the reason for the comment in the
+ * `DO` block below — the two rules disagree whenever the first entry on
+ * search_path is not the schema holding the tables, and picking the wrong
+ * one fails silently, leaving the grants in place while reporting success.
+ *
+ * ## Why the `DO` block
+ *
+ * `anon`/`authenticated` are Supabase-created roles. They do not exist in
+ * PGlite, which is what the test suite runs `migrate()` against
+ * (`createPgliteDb`, `src/db/client.ts`), and an unguarded `REVOKE ... FROM
+ * anon` is a hard error when the role is missing — it would fail every
+ * test that migrates. The `pg_roles` guard makes the revokes a no-op off
+ * Supabase while still applying in production. This block is also why
+ * {@link splitStatements} had to learn about dollar quoting.
+ *
+ * ## Standing rule for future migrations
+ *
+ * A migration that adds a table MUST also `ENABLE ROW LEVEL SECURITY` on
+ * it. The `ALTER DEFAULT PRIVILEGES` above means such a table
+ * arrives without anon grants, so RLS is the second layer rather than the
+ * only one — but the rule stands so the two layers stay in step.
+ */
+export const MIGRATION_027_LOCK_DOWN_DATA_API = `
+ALTER TABLE _migrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE threads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mailboxes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mailbox_oauth_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gmail_watch_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inbound_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE queue_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE thread_attachments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_auth_identities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_mailbox_access ENABLE ROW LEVEL SECURITY;
+ALTER TABLE assistants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_endpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE saved_replies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_challenges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webauthn_stepup_tokens ENABLE ROW LEVEL SECURITY;
+DO $migration027$
+DECLARE
+  target_schema name;
+  role_name text;
+  leftover integer;
+BEGIN
+  -- Resolve the target schema the SAME way the unqualified ALTER TABLEs
+  -- above did: by asking where an actual application table landed, not via
+  -- current_schema(). Those two rules can DIVERGE — an unqualified name scans
+  -- search_path for a schema that CONTAINS the table, while current_schema()
+  -- is just the first existing entry on the path — and the failure is silent:
+  -- RLS would be enabled in one schema while the revokes hit another, with
+  -- the migration reporting success and the grants still in place. Anchoring
+  -- to 'conversations'::regclass (migration 001, so always present here)
+  -- makes both halves land in the same schema by construction.
+  --
+  -- Scope this honestly: it is defence, not a fix for a reachable bug. Via
+  -- migrate() the divergent state cannot arise today, because migrate()'s own
+  -- CREATE TABLE IF NOT EXISTS _migrations uses creation semantics
+  -- (current_schema()) — a shadowed search_path makes it land in the leading
+  -- schema, find no applied rows, and re-bootstrap every table there, after
+  -- which both rules agree. Divergence needs _migrations in one schema and
+  -- the app tables in another, which no path here produces. Resolving via
+  -- current_schema() would rely on the caller's search_path; this keeps the
+  -- migration correct on its own terms instead.
+  SELECT n.nspname INTO STRICT target_schema
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.oid = 'conversations'::regclass;
+
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      CONTINUE;
+    END IF;
+    EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM %I', target_schema, role_name);
+    -- ROUTINES, not FUNCTIONS: ALL FUNCTIONS IN SCHEMA covers functions and
+    -- aggregates but NOT procedures, which would leave those grants standing.
+    EXECUTE format('REVOKE ALL ON ALL ROUTINES IN SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM %I', target_schema, role_name);
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TABLES FROM %I',
+      target_schema, role_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM %I',
+      target_schema, role_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON FUNCTIONS FROM %I',
+      target_schema, role_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TYPES FROM %I',
+      target_schema, role_name
+    );
+  END LOOP;
+
+  -- Revoking from anon/authenticated by name is not sufficient: a privilege
+  -- granted to the PUBLIC pseudo-role is held by EVERY role, so a lone
+  -- 'GRANT SELECT ... TO PUBLIC' leaves both of them able to read the table
+  -- with no ACL entry of their own to revoke. Relations only — deliberately
+  -- NOT routines, where Postgres grants EXECUTE to PUBLIC by default and
+  -- stripping it could break an extension living in this schema. Table data
+  -- is what the PostgREST surface exposes and what this migration is about.
+  EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM PUBLIC', target_schema);
+  EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM PUBLIC', target_schema);
+
+  -- Verify rather than assume. REVOKE only strips ACL entries whose GRANTOR is
+  -- the executing role (or a role it can act as); against entries granted by
+  -- someone else — Supabase's bootstrap runs as supabase_admin — it emits a
+  -- warning and completes successfully, leaving the privileges in place. That
+  -- is the same silent-success shape the schema resolution above guards
+  -- against, and this migration exists precisely to close a hole that nobody
+  -- noticed, so it fails loudly rather than reporting a lockdown it did not
+  -- achieve. grantee = 0 is PUBLIC, which has no pg_roles row — hence the
+  -- LEFT JOIN, so an effective privilege held that way is counted too.
+  SELECT count(*) INTO leftover
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   CROSS JOIN LATERAL aclexplode(c.relacl) acl
+    LEFT JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE n.nspname = target_schema
+     AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+     AND (acl.grantee = 0 OR r.rolname IN ('anon', 'authenticated'));
+
+  IF leftover > 0 THEN
+    RAISE EXCEPTION
+      'migration 027: % privilege(s) reachable by anon/authenticated (directly or via PUBLIC) remain on relations in schema % after REVOKE. The migrating role is probably not the grantor of those grants, so REVOKE only warned. Re-run as the grantor, or as a role that is a member of it.',
+      leftover, target_schema;
+  END IF;
+END
+$migration027$;
+`
+
+/**
+ * Migration 028 — `imap_mailbox_config`, `imap_mailbox_credentials`,
+ * `imap_watch_state` (HT-101 Stage 2a-i; specs/mail/mailbox-connection.md).
+ * Stage 1 (`src/providers/adapters/imap/*`, `smtp/*`) built the pure
+ * fetch/send adapters behind the existing `InboundEmailProvider`-adjacent
+ * and `EmailSender` seams with NO persistence of their own — every
+ * dependency (an `ImapClient`, an `SmtpTransporter`) is injected by the
+ * caller. This migration is where that persistence lands: three per-mailbox
+ * sidecar tables, kept OUT of the generic `mailboxes` schema exactly like
+ * `mailbox_oauth_tokens`/`gmail_watch_state` (migrations 010/011) are —
+ * `mailboxes` stays provider-agnostic, and an IMAP-specific column set adds
+ * nothing to a schema a future non-IMAP, non-Gmail transport would also have
+ * to carry. Same 1:1-sidecar shape throughout: `mailbox_id` is the PRIMARY
+ * KEY on all three tables (one row per mailbox), not a separate surrogate
+ * `id`.
+ *
+ * ## `imap_mailbox_config` — the non-secret connection parameters
+ *
+ * Host/port for BOTH transports (`imap_host`/`imap_port` for fetch,
+ * `smtp_host`/`smtp_port` for send) live in one row, not two, because a
+ * single IMAP/SMTP mailbox connection is configured as one unit in the
+ * connect flow this table backs — an operator supplies one server pair (or
+ * one provider's well-known pair) and one account, never a fetch-only or
+ * send-only half-connection. `username` is a single column shared by both
+ * transports: the overwhelmingly common case for an app-password-based
+ * mailbox (the credential this ticket's sibling table stores) is one
+ * account authenticating both IMAP and SMTP identically; a future
+ * split-credential mailbox is a schema change for whoever needs it; not a
+ * checkbox this migration is guessing at today. `secure` defaults `true`
+ * (TLS-first posture for both connections) — `imapflow`/`nodemailer` both
+ * take an explicit boolean, so this is a plain pass-through, not a schema
+ * opinion about how either library behaves.
+ *
+ * ## `imap_mailbox_credentials` — the secret, kept in its OWN table
+ *
+ * Deliberately a separate table from `imap_mailbox_config`, not one more
+ * nullable column on it — narrows which code path ever needs to `SELECT` an
+ * encrypted column at all: the connect-flow / settings-display code that
+ * reads back host/port/username for an operator to review never has a
+ * reason to touch ciphertext, and keeping the secret physically apart from
+ * the config makes "this query cannot possibly leak the password" true by
+ * construction for every config-only reader, not just true by discipline.
+ * `password_ciphertext` is `bytea NOT NULL` — this migration only reserves
+ * the column shape, exactly like migration 010's own framing for
+ * `mailbox_oauth_tokens`; `src/store/imap-credentials.ts` (this same
+ * ticket) is what actually encrypts/decrypts, reusing `token-crypto.ts`'s
+ * existing AES-256-GCM envelope rather than inventing a second one — one
+ * crypto module, two callers.
+ *
+ * ## `imap_watch_state` — the fetch cursor, reusing `ImapCursor` verbatim
+ *
+ * `uid_validity`/`last_uid` are the exact two fields of
+ * `src/providers/adapters/imap/fetch.ts`'s `ImapCursor` — `bigint`, not
+ * `integer`: IMAP UIDs and UIDVALIDITY values are unsigned 32-bit per RFC
+ * 3501 §2.3.1, so `bigint` gives full headroom with no risk of the
+ * range-overflow question migration 011's doc comment raised (and
+ * sidestepped with `text`) for Gmail's `historyId` — an IMAP UID is a true
+ * integer counter this store needs to compare and increment, so `bigint`
+ * (not `text`) is the right column type here, `pg`/PGlite's usual
+ * string-or-number wire representation for it handled the same way
+ * `webauthn_credentials.sign_count` already is (`src/store/webauthn.ts`'s
+ * `toSignCount`). Both columns are `NOT NULL`, unlike `gmail_watch_state
+ * .history_id` (nullable until Gmail's first async `watch()` call
+ * completes): an IMAP `SELECT INBOX` returns `UIDVALIDITY` synchronously in
+ * the very same connect-time round trip that establishes the mailbox
+ * (`fetch.ts`'s `selectInbox`), so there is no "connected but not yet
+ * baselined" gap for this transport — a row is only ever inserted once both
+ * values are already known, by `ImapWatchStateStore.seedBaseline`.
+ *
+ * `claimed_until` is the fetch lease (the never-double-fetch guard) —
+ * folded into this table from the start, unlike Gmail's own lease, which
+ * shipped two migrations after its cursor (011, then 016) once HT-48
+ * identified the need. IMAP's overlapping-invocation hazard (a cron tick
+ * still running when the next tick fires) exists from Stage 2a-i's first
+ * cursor-advancing caller, so the lease column ships in the same migration
+ * as the cursor rather than as a later patch. Nullable, `NULL` meaning
+ * "unclaimed" — same convention as `gmail_watch_state.claimed_until`
+ * (migration 016) and `threads.claimed_until` (migration 003).
+ * `lease_token` is a per-claim `uuid`, and it — not `claimed_until` — is the
+ * value a holder proves ownership with. Gmail's lease
+ * (`GmailWatchStateStore.claimReconcileLease`) uses the rendered
+ * `claimed_until::text` as its token; HT-101
+ * (2026-07-31) showed why that is too weak to fence a *write*: two successive
+ * claims that land within one clock tick mint the SAME token, so a stale
+ * holder's token compares equal to the live holder's and passes the check.
+ * A test forced exactly that collision. A fresh `gen_random_uuid()` per claim
+ * cannot collide regardless of clock resolution.
+ *
+ * `claimed_until` is retained for expiry (`WHERE claimed_until IS NULL OR
+ * claimed_until < now()`); the token is retained for ownership. The two
+ * answer different questions and both are needed.
+ *
+ * NOTE — the same weakness remains in `gmail_watch_state`'s timestamp-derived
+ * token. It is NOT fixed here (out of HT-101's scope) and is filed as a
+ * follow-up; Gmail's token guards only `releaseReconcileLease`, never a
+ * cursor advance, so the blast radius there is a prematurely-cleared lease
+ * rather than a corrupted cursor.
+ *
+ * ## RLS, per migration 027's standing rule
+ *
+ * All three tables `ENABLE ROW LEVEL SECURITY` here. Migration 027 closed the
+ * PostgREST Data API surface by enabling RLS on every table that existed at
+ * that point and states the rule plainly: "a migration that adds a table MUST
+ * also ENABLE ROW LEVEL SECURITY on it." These tables are created AFTER 027
+ * runs, so 027 cannot cover them — without this they would ship reachable
+ * through the Data API, and `imap_mailbox_credentials` holds encrypted app
+ * passwords. Caught by 027's own test when this branch merged main.
+ *
+ * No index beyond each table's PRIMARY KEY: every lookup across all three
+ * tables is a single-row fetch by `mailbox_id`, which the PK already serves
+ * — matching migration 016's own "no index: this column is only ever read
+ * via an equality match on the `mailbox_id` PRIMARY KEY" precedent.
+ */
+const MIGRATION_028_IMAP_TRANSPORT = `
+CREATE TABLE imap_mailbox_config (
+  mailbox_id uuid PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,
+  imap_host text NOT NULL,
+  imap_port integer NOT NULL CHECK (imap_port BETWEEN 1 AND 65535),
+  smtp_host text NOT NULL,
+  smtp_port integer NOT NULL CHECK (smtp_port BETWEEN 1 AND 65535),
+  username text NOT NULL,
+  secure boolean NOT NULL DEFAULT true,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE imap_mailbox_credentials (
+  mailbox_id uuid PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,
+  password_ciphertext bytea NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE imap_watch_state (
+  mailbox_id uuid PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,
+  uid_validity bigint NOT NULL CHECK (uid_validity BETWEEN 0 AND 4294967295),
+  last_uid bigint NOT NULL CHECK (last_uid BETWEEN 0 AND 4294967295),
+  claimed_until timestamptz,
+  lease_token uuid,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE imap_mailbox_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE imap_mailbox_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE imap_watch_state ENABLE ROW LEVEL SECURITY;
+`
+
+/**
+ * Migration 029 — `conversations.mailbox_id`, recording which connected
+ * mailbox took inbound delivery of a conversation's first message (HT-101
+ * Stage 2b-i; the per-inbox outbound-routing foundation Stage 2b-ii builds
+ * on).
+ *
+ * Nullable, with NO backfill: every conversation that exists before this
+ * migration runs legitimately has no known mailbox (the column didn't exist
+ * when they were created, and this migration does not guess one), and
+ * `NULL` is exactly the value Stage 2b-ii's send path will read as "no
+ * mailbox on record — fall back to the deployment's default sender."
+ * `src/mail/ingest.ts` stamps this column ONLY on the `'new'`-conversation
+ * branch, from the inbound `RawInboundMessage`'s own `mailboxId` (already in
+ * scope there — see `src/providers/inbound-email.ts`) — a reply threaded
+ * onto an EXISTING conversation never touches this column, so the value
+ * recorded here is always the mailbox that took the conversation's very
+ * first inbound message, never overwritten by a later reply that happens to
+ * arrive at a different connected mailbox.
+ *
+ * Not `CASCADE`: the same "the record outlives the pointer" policy migration
+ * 018 already applies to this table's `assignee_agent_id` — deleting a mailbox
+ * must never delete customer conversations. The exact action is `RESTRICT`,
+ * for the reasons in the section below. **Not `SET NULL`.**
+ *
+ * No index: nothing yet queries "every conversation for mailbox X" — the
+ * one planned reader (Stage 2b-ii's send path) looks up ONE conversation's
+ * own `mailbox_id` alongside its already-indexed primary key, the same
+ * "no index needed, this is only ever read via a single-row fetch"
+ * reasoning migration 028's doc comment applies to its own `mailbox_id`
+ * columns.
+ *
+ * ## `ON DELETE RESTRICT`, not `SET NULL`
+ *
+ * `ON DELETE SET NULL` silently violates provenance. `NULL` already has a
+ * meaning here — "this conversation predates the column, so send from the
+ * deployment default" (`../mail/sender-resolver.ts`'s `resolve(null)`).
+ * `SET NULL` overloads that same value with a second, incompatible meaning:
+ * "this conversation HAD an inbox and it was deleted." The two are
+ * indistinguishable afterwards, so deleting a mailbox would silently reroute
+ * every one of its in-flight replies through the default inbox — changing the
+ * `From:` address a customer sees mid-thread, with no error anywhere.
+ * CHARTER.md §2 makes authorship explicit; a transport that quietly re-signs
+ * a reply as somebody else is exactly what that forbids.
+ *
+ * `RESTRICT` makes the ambiguous state unrepresentable rather than handling
+ * it: a mailbox that still owns conversations cannot be deleted, so `NULL`
+ * keeps its single original meaning forever. No product code path deletes a
+ * `mailboxes` row today (disconnect sets `status`, it does not delete), so
+ * this constrains nothing that currently happens — it closes the door before
+ * something walks through it. A future "delete a mailbox" feature must decide
+ * deliberately what happens to its conversations; that is a product decision,
+ * not something a foreign-key action should answer by default.
+ */
+const MIGRATION_029_CONVERSATION_MAILBOX_ID = `
+ALTER TABLE conversations ADD COLUMN mailbox_id uuid REFERENCES mailboxes(id) ON DELETE RESTRICT;
+`
+
+/**
+ * Migration 030 — the operator-deployer persistence layer (HT-119):
+ * `vercel_connections`, `module_installs`, `module_install_events`.
+ *
+ * The schema half of "the operator's own engine deploys paid modules into
+ * the operator's OWN Vercel account" (CHARTER.md's
+ * never-hold-operator-credentials, never-host-anything invariant). Nothing
+ * here talks to Vercel — that is `src/providers/adapters/vercel-deployer/`.
+ * This migration's job is to make the state that adapter reads and writes
+ * impossible to corrupt: the thing modeled is a team-admin-equivalent
+ * bearer credential plus a multi-network-call pipeline that can crash,
+ * retry, or race with itself at any step.
+ *
+ * ## `vercel_connections` — exactly one operator credential, ever active
+ *
+ * One row per connected Vercel account: `team_id`, its encrypted bearer
+ * token, who connected it, and a `token_fingerprint` for display.
+ *
+ * - **`team_id` is immutable once set.** Every `module_installs` row
+ *   hanging off a connection must be able to trust it always targets the
+ *   SAME team. `team_id` is `NOT NULL` from the first INSERT — there is no
+ *   "connected, pending verification" row with a NULL team;
+ *   `last_verified_at` is the nullable field modeling that — and immutable
+ *   via the `vercel_connections_team_id_immutable` trigger: an `UPDATE`
+ *   changing `team_id` is rejected at the database, not merely by
+ *   `src/store/vercel-connection.ts` never issuing one. A CHECK cannot
+ *   compare against a row's OLD value, so this needs a trigger.
+ * - **`token_ciphertext bytea NOT NULL`** holds the SAME `iv || authTag ||
+ *   ciphertext` envelope `src/store/token-crypto.ts` defines for mailbox
+ *   OAuth tokens and IMAP app passwords (migrations 010, 028) — one crypto
+ *   format, three callers. The plaintext is never a column, and
+ *   `VercelConnectionStore.getToken`'s decrypted return value must never
+ *   cross an HTTP response boundary (same discipline as
+ *   `ImapCredentialStore.getPassword`).
+ * - **`token_fingerprint text NOT NULL`** is a short ONE-WAY display value
+ *   (a truncated hex digest, computed by the store; this migration only
+ *   reserves the column) so an operator can confirm which token is
+ *   connected without the engine holding, logging, or returning the
+ *   reversible secret.
+ * - **Exactly one active connection is a database invariant, not app
+ *   logic.** `revoked_at timestamptz` (`NULL` while live) plus
+ *   `CREATE UNIQUE INDEX ... ON vercel_connections ((true)) WHERE
+ *   revoked_at IS NULL`: indexing the constant `true` gives the partial
+ *   index exactly one possible key, so Postgres rejects a second live row
+ *   even under concurrent inserts. `revoked_at` rather than a hard DELETE
+ *   keeps history — including every `module_installs` row referencing it —
+ *   and leaves room for a reconnect flow (revoke, then insert).
+ * - **`connected_by_agent_id uuid NOT NULL REFERENCES agents(id) ON DELETE
+ *   RESTRICT`** — step-up gating is meaningless if nobody can later answer
+ *   "which agent connected this." No product path deletes an `agents` row
+ *   today (agents are disabled, not deleted — migration 018).
+ *
+ * ## `module_installs` — the install state machine
+ *
+ * One row per (module, domain, environment) install attempt. This
+ * migration makes illegal STATES unrepresentable; which TRANSITIONS are
+ * legal is application logic in `src/store/module-installs.ts`,
+ * deliberately not encoded here — legal edges change far more often than
+ * the state set, and a CHECK per edge would need a migration per tweak.
+ *
+ * - **`idempotency_key text NOT NULL UNIQUE`** is the one true dedupe key,
+ *   upserted against by `ModuleInstallStore.create` with the same
+ *   `INSERT ... ON CONFLICT ... DO NOTHING` / fallback-`SELECT` shape
+ *   `InboundDeliveryStore.claim` uses. A retried install call after a
+ *   timeout can never create two competing rows. `module_slug`,
+ *   `entitlement_id`, `domain`, and `environment` are plain columns, not
+ *   part of a composite key, because "every install for entitlement X" and
+ *   "every install for domain Y" must be readable independently of
+ *   idempotency. `environment` is CHECK-constrained to `'production'` or
+ *   `'preview'` — Vercel's own vocabulary, and nothing needs a third value.
+ * - **`lease_token uuid NOT NULL` fences every transition, not just
+ *   retries.** Re-minted by every successful `create` and `transition`, it
+ *   is the same claim-generation concept `inbound_deliveries.attempts`
+ *   serves and `postgres-queue` uses for lease-fenced dequeues, applied to
+ *   a longer many-step pipeline. `transition` fences its `UPDATE` on
+ *   `state = fromState AND lease_token = fenceToken`, so a worker stalled
+ *   past its lease can never resurrect an install another worker has since
+ *   reclaimed. Every step commits and returns control between Vercel API
+ *   calls — never a DB transaction across a network call — so a crash
+ *   between steps is expected, not exceptional. `lease_expires_at
+ *   timestamptz` is the wall-clock half a reconciler reads to decide a
+ *   lease is stale: the token proves generation, the timestamp answers when
+ *   a NEW generation may reclaim.
+ * - **Remote resource ids are nullable and written as they are won.**
+ *   `remote_project_id`, `remote_deployment_id text` are not filled at row
+ *   creation; the orchestrator writes each the instant its Vercel call
+ *   returns success, in its own commit, never batched with the call that
+ *   produced it. A row legitimately sits at `state = 'project_created'`
+ *   with `remote_project_id` set and `remote_deployment_id` still `NULL` —
+ *   the intended recoverable shape, since the created remote object is now
+ *   on record and never has to be guessed at or double-created.
+ * - **`previous_active_deployment_id text`** is written once, as a NEW
+ *   deployment is about to take over from a currently-active one, and read
+ *   by the rollback path (`state = 'rollback_pending'`). A plain column,
+ *   not derived from `module_install_events`, so a rollback never replays
+ *   history to find its target.
+ * - **Retry bookkeeping**: `attempt integer NOT NULL DEFAULT 0`,
+ *   `last_error_class text`, `next_retry_at timestamptz` — the same triad
+ *   `queue_jobs` (migration 013) carries. `last_error_class` is a
+ *   CLASS/CODE, never a raw message: an adapter error touching this
+ *   credential must be classified before it reaches storage, in case the
+ *   underlying Vercel error string echoes request details back.
+ * - **`state`**: `planned` → `credentials_issued` → `project_created` →
+ *   `artifact_uploaded` → `deployment_created` → `build_pending` →
+ *   (`build_failed` | `bootstrap_pending`) → `endpoint_verified` →
+ *   `active` is the happy path. No build step ever runs on module code, so
+ *   `build_pending`/`build_failed` describe VERCEL processing an
+ *   already-prebuilt artifact, never a build the engine triggers.
+ *   `bootstrap_pending` → `endpoint_verified` is the candidate-then-cutover
+ *   gate: a deployed module proves possession of its webhook endpoint via a
+ *   signed challenge BEFORE `active` routes traffic to it, so a module that
+ *   never proves possession never leaves `bootstrap_pending`. Failure and
+ *   recovery branches: `verification_failed` (reachable only on this NEW
+ *   install — nothing here touches whatever is currently `active` for the
+ *   domain), `rollback_pending` (restores via
+ *   `previous_active_deployment_id`), `cleanup_required` (remote resources
+ *   needing teardown), and `abandoned` (terminal give-up).
+ *
+ * ## `module_install_events` — append-only, never mutated
+ *
+ * One row per transition: `from_state` NULLABLE (the creation event has no
+ * prior state), `to_state` NOT NULL. Postgres has no insert-only-table
+ * primitive short of revoking UPDATE/DELETE from the app's role, which
+ * would break every other table, so the append-only contract is enforced by
+ * `src/store/module-installs.ts` never exposing an update or delete method
+ * — the same way `_migrations` relies on nothing writing it another way.
+ *
+ * `actor_agent_id uuid REFERENCES agents(id) ON DELETE SET NULL` — unlike
+ * `vercel_connections.connected_by_agent_id`, an audit attribution may go
+ * anonymous without invalidating its row: the event (`from_state`,
+ * `to_state`, `at`, `detail`) stays meaningful with no actor. `detail jsonb
+ * NOT NULL DEFAULT '{}'::jsonb` carries per-transition detail (a deployment
+ * id, an error class, a challenge nonce) without a schema change per field.
+ *
+ * ## RLS, per migration 027's standing rule
+ *
+ * All three tables `ENABLE ROW LEVEL SECURITY` here: they are created AFTER
+ * 027 runs, so its blanket lockdown cannot cover them, and
+ * `vercel_connections.token_ciphertext` is exactly the kind of column that
+ * must never be reachable through the PostgREST Data API.
+ */
+const MIGRATION_030_MODULE_DEPLOYER = `
+CREATE TABLE vercel_connections (
+  id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  team_id                 text NOT NULL,
+  token_ciphertext        bytea NOT NULL,
+  token_fingerprint       text NOT NULL,
+  connected_by_agent_id   uuid NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  connected_at            timestamptz NOT NULL DEFAULT now(),
+  last_verified_at        timestamptz,
+  revoked_at              timestamptz
+);
+CREATE UNIQUE INDEX vercel_connections_one_active ON vercel_connections ((true)) WHERE revoked_at IS NULL;
+CREATE FUNCTION vercel_connections_team_id_immutable() RETURNS trigger AS $team_id_guard$
+BEGIN
+  IF NEW.team_id IS DISTINCT FROM OLD.team_id THEN
+    RAISE EXCEPTION 'vercel_connections.team_id is immutable once set (row %, old %, new %)',
+      OLD.id, OLD.team_id, NEW.team_id;
+  END IF;
+  RETURN NEW;
+END;
+$team_id_guard$ LANGUAGE plpgsql;
+CREATE TRIGGER vercel_connections_team_id_immutable
+  BEFORE UPDATE ON vercel_connections
+  FOR EACH ROW EXECUTE FUNCTION vercel_connections_team_id_immutable();
+
+CREATE TABLE module_installs (
+  id                             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  idempotency_key                text NOT NULL UNIQUE,
+  module_slug                    text NOT NULL,
+  entitlement_id                 text NOT NULL,
+  domain                         text NOT NULL,
+  environment                    text NOT NULL DEFAULT 'production' CHECK (environment IN ('production', 'preview')),
+  vercel_connection_id           uuid NOT NULL REFERENCES vercel_connections(id) ON DELETE RESTRICT,
+  remote_project_id              text,
+  remote_deployment_id           text,
+  desired_release_version        text NOT NULL,
+  artifact_digest                text NOT NULL,
+  manifest_key_id                text NOT NULL,
+  config_generation               integer NOT NULL DEFAULT 1,
+  previous_active_deployment_id  text,
+  state                          text NOT NULL DEFAULT 'planned' CHECK (state IN (
+                                    'planned', 'credentials_issued', 'project_created',
+                                    'artifact_uploaded', 'deployment_created', 'build_pending',
+                                    'build_failed', 'bootstrap_pending', 'endpoint_verified',
+                                    'active', 'verification_failed', 'rollback_pending',
+                                    'cleanup_required', 'abandoned'
+                                  )),
+  attempt                        integer NOT NULL DEFAULT 0,
+  lease_token                    uuid NOT NULL DEFAULT gen_random_uuid(),
+  lease_expires_at               timestamptz,
+  last_error_class               text,
+  next_retry_at                  timestamptz,
+  created_at                     timestamptz NOT NULL DEFAULT now(),
+  updated_at                     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX module_installs_vercel_connection ON module_installs (vercel_connection_id);
+CREATE INDEX module_installs_entitlement ON module_installs (entitlement_id);
+CREATE INDEX module_installs_domain ON module_installs (domain);
+
+CREATE TABLE module_install_events (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  install_id       uuid NOT NULL REFERENCES module_installs(id) ON DELETE CASCADE,
+  from_state       text,
+  to_state         text NOT NULL,
+  actor_agent_id   uuid REFERENCES agents(id) ON DELETE SET NULL,
+  at               timestamptz NOT NULL DEFAULT now(),
+  detail           jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX module_install_events_install ON module_install_events (install_id, at);
+
+ALTER TABLE vercel_connections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE module_installs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE module_install_events ENABLE ROW LEVEL SECURITY;
+`
+
+/**
+ * Migration 031 — `webhook_endpoints(url)` uniqueness (HT-119).
+ *
+ * Before this, `WebhookEndpointStore.create` had no way to refuse two
+ * endpoints pointed at the SAME url: two workers racing to bootstrap the
+ * same module install (or a crash-retry re-running `stepBootstrapPending`
+ * against the same deployment url) could each insert their own row,
+ * leaving every future conversation event delivered twice, forever, with
+ * only one of the two duplicates ever referenced by an install. The store
+ * layer now inserts with `ON CONFLICT (url) DO NOTHING`, coalescing a
+ * second attempt onto the row a first attempt already created instead of
+ * duplicating it — this index is what makes that conflict exist to catch
+ * in the first place.
+ *
+ * ## Existing duplicates, on a self-hosted operator's own database
+ *
+ * Migrations here are forward-only and applied inside one transaction (see
+ * {@link migrate}'s doc) — a `CREATE UNIQUE INDEX` that fails on pre-existing
+ * duplicate rows aborts this migration AND every migration after it,
+ * forever, until an operator hand-edits their data. This engine's own
+ * production database holds zero `webhook_endpoints` rows as of this
+ * migration, so that failure is not reachable here — but this is the public
+ * engine repo, and a self-hosting operator who registered webhooks by hand
+ * (or ran an earlier, pre-031 build long enough to accumulate a genuine
+ * duplicate) cannot be assumed to be in the same position.
+ *
+ * So this migration DE-DUPLICATES before creating the index, deterministically
+ * and without deleting anything:
+ *
+ * - Per `url`, the row with the latest `created_at` (ties broken by `id`) is
+ *   the keeper — the newest registration is the one most likely still
+ *   correct/in-use.
+ * - Every OTHER row sharing that `url` is flipped to `status = 'disabled'`
+ *   (an operator-facing state this table already has — migration 022's
+ *   doc — never auto-re-enabled) and has its `url` rewritten to
+ *   `<original>#duplicate-<id>`, a value the `https://%` CHECK still accepts
+ *   (the prefix is untouched) but that can never collide with the keeper or
+ *   any other row. The row survives, inspectable and disabled, instead of
+ *   being deleted — an operator can recover its original url from the
+ *   suffix and re-register it by hand if it turns out it wasn't really a
+ *   duplicate of the keeper.
+ *
+ * After this runs, `url` is unique across every row by construction, and
+ * `CREATE UNIQUE INDEX` always succeeds.
+ */
+const MIGRATION_031_WEBHOOK_ENDPOINTS_URL_UNIQUE = `
+WITH ranked AS (
+  SELECT id, url,
+         row_number() OVER (
+           PARTITION BY url ORDER BY created_at DESC, id DESC
+         ) AS rank
+  FROM webhook_endpoints
+)
+UPDATE webhook_endpoints
+SET status = 'disabled',
+    url = webhook_endpoints.url || '#duplicate-' || webhook_endpoints.id::text
+FROM ranked
+WHERE webhook_endpoints.id = ranked.id
+  AND ranked.rank > 1;
+
+CREATE UNIQUE INDEX webhook_endpoints_url_unique ON webhook_endpoints (url);
+`
+
+/**
+ * Migration 032 — `module_install_credential_escrow` (HT-119).
+ *
+ * `module_install_events` (migration 030) is append-only and permanent by
+ * design — exactly the wrong home for the ONE thing an install pipeline
+ * needs to carry across a crash before its Assistant token and webhook
+ * signing secret are baked into the deployed module's env vars: a
+ * recoverable, plaintext-decryptable copy of those credentials. Recording
+ * that ciphertext on an audit event means it never leaves, ever, even
+ * though the recovery need it exists for ends the moment the install
+ * reaches `active` (the secret is now live in the deployment) or any
+ * terminal state (there is nothing left to recover into).
+ *
+ * This table holds exactly that recoverable copy, and nothing else:
+ *
+ * - `install_id uuid NOT NULL UNIQUE REFERENCES module_installs(id) ON
+ *   DELETE CASCADE` — one row per install, ever. `UNIQUE` is what makes
+ *   `src/store/module-installs.ts`'s escrow upsert (`ON CONFLICT
+ *   (install_id) DO UPDATE`) coalesce onto the SAME row rather than
+ *   accumulating one per mint attempt; `ON DELETE CASCADE` (unlike
+ *   `vercel_connections.connected_by_agent_id`'s `RESTRICT`) is correct
+ *   here because this row's only reason to exist is the install it
+ *   belongs to — nothing else in this schema ever references it back.
+ * - `ciphertext bytea NOT NULL` — the SAME `iv || authTag || ciphertext`
+ *   envelope `src/store/token-crypto.ts` already defines for every other
+ *   encrypted-at-rest secret in this codebase (migrations 010, 028, 030's
+ *   `vercel_connections.token_ciphertext`), reused rather than reinvented.
+ * - `created_at timestamptz NOT NULL DEFAULT now()` — informational only;
+ *   nothing reads it to decide when to expire a row. Deletion is driven by
+ *   the install's own lifecycle (see below), never by age.
+ *
+ * The row is written (via `ModuleInstallStore.transition`'s
+ * `credentialCiphertext` option, in the SAME transaction as the
+ * `credentials_issued` state write) and deleted (via that same method's
+ * `deleteCredentialEscrow` option, in the SAME transaction as the
+ * transition into `active` or into any terminal failure state) — never by
+ * a standalone statement outside a fenced transition, so this row's
+ * lifetime is always exactly as long as, and no longer than, the recovery
+ * need it exists for.
+ *
+ * RLS, per migration 030's own standing rule for every table this pipeline
+ * introduces: created after migration 027's blanket lockdown, so it is
+ * enabled explicitly here, and a `bytea` column holding decryptable
+ * credential material is exactly the kind of thing that must never be
+ * reachable through the PostgREST Data API.
+ */
+const MIGRATION_032_MODULE_INSTALL_CREDENTIAL_ESCROW = `
+CREATE TABLE module_install_credential_escrow (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  install_id   uuid NOT NULL UNIQUE REFERENCES module_installs(id) ON DELETE CASCADE,
+  ciphertext   bytea NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE module_install_credential_escrow ENABLE ROW LEVEL SECURITY;
+`
+
+/**
+ * Migration 033 — `module_installs.state` gains `cleanup_pending` (HT-119).
+ *
+ * A terminal-failure transition (\`build_failed\` / \`verification_failed\` /
+ * \`cleanup_required\`) always needs two things to be true first: any
+ * Assistant this install minted is disabled, and any webhook endpoint it
+ * bootstrapped is disabled. Landing directly on the terminal state and
+ * treating that cleanup as best-effort meant a transient failure in either
+ * step (most plausibly a DB hiccup, since neither is a remote Vercel call)
+ * was silently swallowed — the row read as fully, terminally handled while
+ * a credential that should have been revoked was still live.
+ *
+ * \`cleanup_pending\` is the fenced, RETRYABLE stop between "this install
+ * has failed" and "cleanup has actually finished": \`src/modules/install/
+ * installer.ts\`'s \`failInstall\` transitions into it first, and only
+ * transitions onward to the real terminal state once revoking the
+ * Assistant and disabling the endpoint have BOTH actually succeeded. A
+ * failure at that point leaves the row here — inspectable, and picked up
+ * again by the next delivery — rather than reporting a clean terminal
+ * state that isn't true yet.
+ */
+const MIGRATION_033_MODULE_INSTALLS_CLEANUP_PENDING_STATE = `
+ALTER TABLE module_installs DROP CONSTRAINT module_installs_state_check;
+ALTER TABLE module_installs ADD CONSTRAINT module_installs_state_check CHECK (state IN (
+  'planned', 'credentials_issued', 'project_created',
+  'artifact_uploaded', 'deployment_created', 'build_pending',
+  'build_failed', 'bootstrap_pending', 'endpoint_verified',
+  'active', 'verification_failed', 'rollback_pending',
+  'cleanup_required', 'abandoned', 'cleanup_pending'
+));
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -1578,7 +2346,75 @@ const MIGRATIONS: Migration[] = [
     name: 'webauthn',
     sql: MIGRATION_026_WEBAUTHN,
   },
+  {
+    id: 27,
+    name: 'lock_down_data_api',
+    sql: MIGRATION_027_LOCK_DOWN_DATA_API,
+  },
+  // HT-101's two migrations were authored as 027/028 and renumbered to 028/029
+  // when `lock_down_data_api` took 027 on main first. `id` is the applied-once
+  // key, so shipping a second 027 would have been recorded as already-applied
+  // and SKIPPED — the IMAP tables would simply never have been created.
+  {
+    id: 28,
+    name: 'imap_transport',
+    sql: MIGRATION_028_IMAP_TRANSPORT,
+  },
+  {
+    id: 29,
+    name: 'conversation_mailbox_id',
+    sql: MIGRATION_029_CONVERSATION_MAILBOX_ID,
+  },
+  {
+    id: 30,
+    name: 'module_deployer',
+    sql: MIGRATION_030_MODULE_DEPLOYER,
+  },
+  {
+    id: 31,
+    name: 'webhook_endpoints_url_unique',
+    sql: MIGRATION_031_WEBHOOK_ENDPOINTS_URL_UNIQUE,
+  },
+  {
+    id: 32,
+    name: 'module_install_credential_escrow',
+    sql: MIGRATION_032_MODULE_INSTALL_CREDENTIAL_ESCROW,
+  },
+  {
+    id: 33,
+    name: 'module_installs_cleanup_pending_state',
+    sql: MIGRATION_033_MODULE_INSTALLS_CLEANUP_PENDING_STATE,
+  },
 ]
+
+/**
+ * The highest migration id this BUILD knows about — the schema version the
+ * running code expects.
+ *
+ * Exists so `src/composition/health.ts` can compare it against the database's
+ * own `max(_migrations.id)` and report a version skew. That skew is reachable
+ * by construction: `src/composition/root.ts` deliberately does not migrate on
+ * cold start (see `scripts/migrate.ts` — schema changes are an operator step),
+ * so every deploy opens a window where new code runs against an older schema
+ * until someone runs `npm run migrate`.
+ *
+ * Before this existed the window announced itself only as whatever happened to
+ * break first — a cron erroring every two minutes against a table that did not
+ * exist yet, one failing request at a time, with nothing naming the cause.
+ * Derived from {@link MIGRATIONS} rather than written down, so it cannot drift
+ * from the list it describes.
+ */
+export const LATEST_MIGRATION_ID = MIGRATIONS.reduce((max, m) => (m.id > max ? m.id : max), 0)
+
+/**
+ * Every migration id this build carries, ascending. `src/composition/health.ts`
+ * compares the whole set against `_migrations` rather than only the highest:
+ * `max(id)` alone calls a database healthy when it holds 1..26 plus 29 and is
+ * missing 27 and 28. `migrate()`'s single transaction makes that unreachable
+ * through the normal path — manual repair and hand-edited bookkeeping are
+ * precisely the cases a health check exists for.
+ */
+export const MIGRATION_IDS: readonly number[] = MIGRATIONS.map((m) => m.id).sort((a, b) => a - b)
 
 /**
  * Split a migration's SQL body into individual statements on `;`.
@@ -1594,18 +2430,156 @@ const MIGRATIONS: Migration[] = [
  * multi-statement-capable method just for this one caller, `migrate` stays
  * inside the same thin `query`-only seam every other module uses, and
  * splits the (fully first-party, never user-controlled) migration SQL into
- * individual statements itself. This is safe specifically because
- * migration bodies are our own embedded string constants — never data —
- * and none of them contain a semicolon inside a string literal or a
- * dollar-quoted body; that invariant is worth re-checking if a future
- * migration ever needs one (e.g. a function body), at which point a
- * smarter splitter would be warranted.
+ * individual statements itself.
+ *
+ * ## Why this is no longer a plain `split(';')`
+ *
+ * The original splitter split on every semicolon, resting on the invariant
+ * that no migration body contained one inside a string literal or a
+ * dollar-quoted block — with a note that a smarter splitter would be
+ * warranted the first time one did. Migration 027 is that first time: its
+ * role-guarded `REVOKE`s live in a `DO $$ ... $$` block whose body is full
+ * of semicolons, and a naive split would tear it into fragments that are
+ * not valid SQL on their own.
+ *
+ * So this scanner tracks the lexical contexts in which a `;` is NOT a
+ * statement terminator:
+ *
+ * - `'...'` single-quoted literals (with `''` escaping),
+ * - `E'...'` escape strings, where a backslash escapes the next character
+ *   (so `E'a\';b'` is ONE literal, not a literal followed by `;b`),
+ * - `"..."` quoted identifiers,
+ * - `$tag$ ... $tag$` dollar-quoted bodies (tag matched exactly, so a
+ *   nested `$$` inside a `$body$` does not close it),
+ * - `-- ...` line comments and `/* ... *\/` block comments (which nest in
+ *   Postgres, so the scanner counts depth).
+ *
+ * Everything outside those contexts splits on `;` exactly as before, so
+ * migrations 001–026 tokenize identically to the old implementation —
+ * verified by `splitStatements` tests in `./migrate.test.ts`, which is
+ * also why this is exported despite having no non-test caller.
+ *
+ * Deliberately NOT handled, both latent and unreachable from any migration
+ * in this file:
+ *
+ * - `standard_conforming_strings = off`, under which a plain `'...'` would
+ *   also honour backslash escapes. Postgres has defaulted it to `on` since
+ *   9.1 and nothing here depends on it.
+ * - An `E'...'` immediately following a dollar-quote terminator
+ *   (`$e$x$e$E'a\';b'`). The token-boundary guard includes `$` in its
+ *   look-behind because Postgres identifiers may contain `$` and
+ *   `foo$e'x'` must NOT be read as an escape string — which makes the two
+ *   cases genuinely ambiguous to a scanner this size. Postgres resolves it
+ *   by longest-match; we accept the false negative, since the alternative
+ *   breaks the commoner case.
  */
-function splitStatements(sql: string): string[] {
-  return sql
-    .split(';')
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0)
+export function splitStatements(sql: string): string[] {
+  const statements: string[] = []
+  let current = ''
+  let index = 0
+
+  while (index < sql.length) {
+    const rest = sql.slice(index)
+
+    // Line comment — consume through end of line (or end of input).
+    if (rest.startsWith('--')) {
+      const newline = sql.indexOf('\n', index)
+      const stop = newline === -1 ? sql.length : newline
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    // Block comment — Postgres nests these, so track depth.
+    if (rest.startsWith('/*')) {
+      let depth = 0
+      let scan = index
+      while (scan < sql.length) {
+        if (sql.startsWith('/*', scan)) {
+          depth += 1
+          scan += 2
+        } else if (sql.startsWith('*/', scan)) {
+          depth -= 1
+          scan += 2
+          if (depth === 0) break
+        } else {
+          scan += 1
+        }
+      }
+      current += sql.slice(index, scan)
+      index = scan
+      continue
+    }
+
+    // Dollar-quoted body — the tag must match exactly to close it.
+    // Tag grammar per Postgres: `$$`, or `$tag$` where tag starts with a
+    // letter/underscore and may then contain digits (`$migration027$`).
+    const dollarTag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(rest)
+    if (dollarTag !== null) {
+      const tag = dollarTag[0]
+      const close = sql.indexOf(tag, index + tag.length)
+      const stop = close === -1 ? sql.length : close + tag.length
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    // Escape string (`E'...'` / `e'...'`) — a backslash escapes the next
+    // character, so the closing quote must be found by scanning rather than
+    // by indexOf. Handled before the plain-quote branch below, which would
+    // otherwise stop at the backslash-escaped quote in `E'a\';b'`.
+    // The `[A-Za-z0-9_$]` look-behind keeps this from firing on the tail of
+    // an identifier that happens to end in `e` (Postgres only lexes `E'` as
+    // an escape string at a token boundary).
+    const escapeString = /^[Ee]'/.exec(rest)
+    if (escapeString !== null && !/[A-Za-z0-9_$]/.test(sql[index - 1] ?? '')) {
+      let scan = index + 2
+      while (scan < sql.length) {
+        if (sql[scan] === '\\') {
+          scan += 2
+        } else if (sql[scan] === "'") {
+          // A doubled '' is an escaped quote here too, not a close.
+          if (sql[scan + 1] === "'") scan += 2
+          else {
+            scan += 1
+            break
+          }
+        } else {
+          scan += 1
+        }
+      }
+      current += sql.slice(index, Math.min(scan, sql.length))
+      index = scan
+      continue
+    }
+
+    const char = sql[index]
+
+    // Single-quoted literal or double-quoted identifier. A doubled quote
+    // ('' / "") is an escaped quote, not a close, and falls out naturally:
+    // the close is consumed, then the next iteration re-opens on the second.
+    if (char === "'" || char === '"') {
+      const close = sql.indexOf(char, index + 1)
+      const stop = close === -1 ? sql.length : close + 1
+      current += sql.slice(index, stop)
+      index = stop
+      continue
+    }
+
+    if (char === ';') {
+      statements.push(current)
+      current = ''
+      index += 1
+      continue
+    }
+
+    current += char
+    index += 1
+  }
+
+  statements.push(current)
+
+  return statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0)
 }
 
 /**

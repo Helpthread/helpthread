@@ -9,8 +9,10 @@ export interface ConversationRowProps {
   count?: string;
   /** human conversation number (#N) */
   number?: string;
-  /** relative waiting time */
+  /** relative waiting time; empty hides the pill but keeps its column slot */
   time?: string;
+  /** status badge rendered in its own slot ahead of the count pill */
+  badge?: React.ReactNode;
   starred?: boolean;
   onStar?: () => void;
   checked?: boolean;
@@ -20,4 +22,4 @@ export interface ConversationRowProps {
   selected?: boolean;
   onClick?: () => void;
 }
-export declare function ConversationRow(props: ConversationRowProps): JSX.Element;
+export declare function ConversationRow(props: ConversationRowProps): React.JSX.Element;

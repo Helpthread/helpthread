@@ -29,8 +29,16 @@
       "schedule": "*/1 * * * *"
     },
     {
+      "path": "/api/v1/internal/cron/reconcile-sweep",
+      "schedule": "*/1 * * * *"
+    },
+    {
       "path": "/api/v1/internal/cron/watch-maintenance",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/v1/internal/cron/imap-fetch",
+      "schedule": "*/2 * * * *"
     }
   ]
 }

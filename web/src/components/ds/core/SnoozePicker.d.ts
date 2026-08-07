@@ -9,4 +9,4 @@ export interface SnoozePickerProps {
   /** seed date for the custom calendar */
   initialSel?: Date;
 }
-export declare function SnoozePicker(props: SnoozePickerProps): JSX.Element;
+export declare function SnoozePicker(props: SnoozePickerProps): React.JSX.Element;

@@ -8,6 +8,7 @@ export type { BlobStore } from './blob.js'
 export type { EmailSender, EmailSendResult, OutboundEmail } from './email-sender.js'
 export type {
   InboundEmailProvider,
+  ProviderSpamVerdict,
   RawInboundMessage,
   RawMessageContent,
 } from './inbound-email.js'

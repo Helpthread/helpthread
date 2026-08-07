@@ -5,7 +5,7 @@ import { ApiError, getAgent, getAgentMailboxes, getMe, listMailboxes } from '../
 
 /**
  * `/manage/agents/{id}/permissions` — admin-only (HT-54 fidelity
- * correction, TJ's 2026-07-18 admin-IA review; specs/auth/agents-and-
+ * correction, the maintainer's 2026-07-18 admin-IA review; specs/auth/agents-and-
  * auth.md §6 "Mailbox access"). A non-admin viewer — even viewing their own
  * profile — is sent to the Profile section instead, same "never render an
  * engine 403 as a crash" posture the other admin-only Team pages use.

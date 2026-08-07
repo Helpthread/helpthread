@@ -18,6 +18,7 @@
 import { deriveReplyHeaders } from '../mail/reply-headers.js'
 import type { Keyring } from '../mail/reply-token.js'
 import { type SelfEchoGuardDeps, sendReply } from '../mail/send.js'
+import { SenderResolutionError, type SenderResolver } from '../mail/sender-resolver.js'
 import type { BlobStore, EmailSender } from '../providers/index.js'
 import type { AgentRecord, AgentStore } from '../store/agents.js'
 import type { StoredThreadAttachment, ThreadAttachmentStore } from '../store/attachments.js'
@@ -414,10 +415,17 @@ export async function handleReply(
   request: Request,
   deps: {
     store: ConversationStore
-    sender: EmailSender
+    /**
+     * Resolves the sender + `from` address to use, from the conversation's
+     * OWN mailbox (HT-101 Stage 2b-ii; `src/mail/sender-resolver.ts`) —
+     * replaces the single fixed `sender`/`supportAddress` pair this endpoint
+     * used before this feature: every reply now routes through the SAME
+     * inbox its conversation arrived at, not always the deployment's one
+     * default mailbox.
+     */
+    senderResolver: SenderResolver
     keyring: Keyring
     mailDomain: string
-    supportAddress: string
     openTracking?: { publicBaseUrl: string }
     selfEchoGuard?: SelfEchoGuardDeps
     /** HT-70 (spec §3's author-identity forward-carry): the acting Agent's id from `X-Helpthread-Agent-Id`, or `null` when absent/unknown — `src/api/index.ts` resolves this before dispatch. Never an error when absent (spec §9 decision 4). */
@@ -440,7 +448,7 @@ export async function handleReply(
       `Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters.`,
     )
   }
-  // HT-70 review fix (Opus): a reply's idempotency key is stored RAW — unlike
+  // HT-70: a reply's idempotency key is stored RAW — unlike
   // a draft's, which the engine itself prefixes (`ConversationStore.appendDraft`
   // stores it as `` `draft:${key}` ``, src/store/conversations.ts). Without
   // this check, a caller-supplied reply key literally spelled e.g. `draft:abc`
@@ -487,6 +495,31 @@ export async function handleReply(
 
   const { subject, inReplyTo, references } = deriveReplyHeaders(conversation)
 
+  // HT-101 Stage 2b-ii: resolve the sender + from-address from THIS
+  // conversation's own mailbox (`null` falls back to the deployment's
+  // default mailbox — see `SenderResolver`'s doc comment) — replaces the
+  // single fixed `deps.sender`/`deps.supportAddress` pair every reply used
+  // to route through regardless of which inbox the conversation belongs to.
+  let sender: EmailSender
+  let from: string
+  try {
+    const resolved = await deps.senderResolver.resolve(conversation.mailboxId)
+    sender = resolved.sender
+    from = resolved.from
+  } catch (err) {
+    if (err instanceof SenderResolutionError) {
+      // The conversation's inbox can't send as configured (missing IMAP
+      // config/credential, or its mailbox was deleted) — a clean send-domain
+      // error, not an opaque 500.
+      return apiError(
+        502,
+        'send_failed',
+        'The reply could not be sent — this inbox is not configured for sending.',
+      )
+    }
+    throw err
+  }
+
   const result = await sendReply(
     {
       // Use the CANONICAL id from the fetched row, not the raw path segment:
@@ -494,7 +527,7 @@ export async function handleReply(
       // non-canonical (e.g. upper-cased) path id would put a non-canonical
       // conversationId in the token even though the stored row is lowercase.
       conversationId: conversation.id,
-      from: deps.supportAddress,
+      from,
       to: [conversation.customerEmail],
       subject,
       text: replyBody.text,
@@ -507,7 +540,7 @@ export async function handleReply(
     },
     {
       store: deps.store,
-      sender: deps.sender,
+      sender,
       keyring: deps.keyring,
       mailDomain: deps.mailDomain,
       ...(deps.openTracking !== undefined ? { openTracking: deps.openTracking } : {}),

@@ -1,15 +1,14 @@
 /**
- * Gmail OAuth connect/consent flow (HT-40; specs/mail/gmail-connect.md) —
- * the write-side gmail-push.md deliberately stubbed. Runs Google's OAuth2
+ * Gmail OAuth connect/consent flow (specs/mail/gmail-connect.md) — the
+ * write-side gmail-push.md deliberately stubbed. Runs Google's OAuth2
  * authorization-code flow to obtain a mailbox's first refresh token,
- * persists it encrypted-at-rest, arms the initial `users.watch()`, and
- * seeds the baseline `gmail_watch_state` cursor the reconcile consumer
- * (gmail-push.md §3, HT-41) reads. Lives in `src/mail/` as Gmail-specific
- * orchestration, exactly like `./gmail-oauth.ts` and `./gmail-reconcile.ts`
- * beside it — not under `src/providers/adapters/gmail/`, which holds only
- * thin, single-purpose HTTP adapters (`./gmail-connect.ts` composes THREE
- * of them: the OAuth token endpoint, `GmailWatchClient`, and the store
- * layer).
+ * persists it encrypted at rest, arms the initial `users.watch()` when push
+ * is configured (step 4), and seeds the baseline `gmail_watch_state` cursor
+ * the reconcile consumer (gmail-push.md §3) reads. Lives in `src/mail/` as Gmail-specific
+ * orchestration, like `./gmail-oauth.ts` and `./gmail-reconcile.ts` beside
+ * it — not under `src/providers/adapters/gmail/`, which holds only thin,
+ * single-purpose HTTP adapters (this module composes THREE: the OAuth token
+ * endpoint, `GmailWatchClient`, and the store layer).
  *
  * ## The two routes this module backs (gmail-connect.md §2)
  *
@@ -19,8 +18,7 @@
  *   (`src/api/gmail-connect.ts`) never redirects itself.
  * - `GET /api/v1/inbound/gmail/callback?code&state` — pre-auth (Google
  *   redirects the operator's browser here with no service Bearer token):
- *   {@link GmailConnectService.completeConnect} runs the callback sequence
- *   below.
+ *   {@link GmailConnectService.completeConnect} runs the sequence below.
  *
  * ## The `state` token: a stateless CSRF defence (RFC 6749 §10.12)
  *
@@ -28,102 +26,106 @@
  * gmc.{keyId}.{issuedAtMs}.{nonce}.{sig}
  * ```
  *
- * Mirrors `src/mail/reply-token.ts`/`./open-tracking.ts`'s signed-token
- * shape off the same {@link Keyring} (full HMAC-SHA256, base64url,
- * constant-time verification, current+retired key rotation) — the same
- * stateless, server-session-free pattern those surfaces already use, a
- * natural fit for a serverless deployment with no session store. `gmc` is
- * the domain separator (distinct from reply tokens' `ht` and view tokens'
- * `v`): a signature minted for one purpose can never verify for another.
- * Unlike those two, a connect `state` carries no domain payload (no
- * conversation/thread id) — its only job is proving "we minted this
- * recently" — so instead it carries a random `nonce` (replay-resistance)
- * and an `issuedAtMs` timestamp ({@link mintConnectState}/{@link
- * verifyConnectState} check freshness against a TTL, default 10 minutes,
- * gmail-connect.md §2b) rather than an id `{@link verifyConnectState}`
- * hands back. Minting is STRICT (a malformed keyring is our bug — throw
- * loudly); verification is TOTAL over the token string (a hostile/expired
- * `state` on the public callback must never throw).
+ * Mirrors `src/mail/reply-token.ts`/`./open-tracking.ts`'s signed-token shape
+ * off the same {@link Keyring} (HMAC-SHA256, base64url, constant-time
+ * verification, current+retired key rotation) — stateless and
+ * server-session-free, a natural fit for a serverless deployment with no
+ * session store. `gmc` is the domain separator (distinct from reply tokens'
+ * `ht` and view tokens' `v`), so a signature minted for one purpose can never
+ * verify for another. Unlike those two, a connect `state` carries no domain
+ * payload — its only job is proving "we minted this recently" — so it carries
+ * a random `nonce` (replay resistance) and an `issuedAtMs` timestamp
+ * ({@link mintConnectState}/{@link verifyConnectState} check freshness
+ * against a TTL, default 10 minutes, gmail-connect.md §2b). Minting is STRICT
+ * (a malformed keyring is our bug — throw loudly); verification is TOTAL over
+ * the token string (a hostile or expired `state` on the public callback must
+ * never throw).
  *
- * ## The callback sequence (gmail-connect.md §4) — nothing persisted until the grant is proven
+ * ## The callback sequence (gmail-connect.md §4)
  *
- * {@link GmailConnectService.completeConnect}, in order:
+ * Nothing is persisted until the grant is proven. {@link
+ * GmailConnectService.completeConnect}, in order:
  *
  * 1. **Verify `state`.** Bad signature / expired / malformed → throw {@link
- *    GmailConnectError} `invalid_state`, nothing else runs.
+ *    GmailConnectError} `invalid_state`; nothing else runs.
  * 2. **Exchange the code** ({@link exchangeAuthCode} — the
  *    authorization-code sibling of `./gmail-oauth.ts`'s refresh-token POST,
- *    same injected `fetch`, same "never log `client_secret` or any token"
- *    discipline). A response with no `refresh_token` is a hard error
- *    (`no_refresh_token`) — Google only issues one on a fresh consent
- *    grant (`prompt=consent` forces that).
+ *    same injected `fetch`, same never-log-a-credential discipline). A
+ *    response with no `refresh_token` is a hard error (`no_refresh_token`):
+ *    Google only issues one on a fresh consent grant, which
+ *    `prompt=consent` forces.
  * 3. **Resolve the mailbox address authoritatively from the grant** —
  *    `getProfile()` with the fresh access token, never operator input, so a
  *    connected `mailboxes.address` can never disagree with the account that
  *    actually granted access.
- * 4. **Arm `watch()`** with the same fresh access token — BEFORE any
- *    persistence, so a failure here (`watch_failed`) aborts cleanly with
- *    nothing written. `watch()`'s `historyId` — NOT `getProfile`'s — is the
- *    baseline cursor: the exact watermark `history.list` resumes from: using
+ * 4. **Arm `watch()`** with the same fresh access token, BEFORE any
+ *    persistence, so a failure here (`watch_failed`) aborts with nothing
+ *    written. `watch()`'s `historyId` — NOT `getProfile`'s — is the baseline
+ *    cursor: the exact watermark `history.list` resumes from. Using
  *    `getProfile`'s separately-read `historyId` could straddle the arm and
  *    miss or replay a sliver of history.
- * 5. **Persist**, now that the grant is proven usable — three writes keyed
- *    by the resolved mailbox: {@link MailboxStore.upsertConnectedMailbox}
- *    (upsert BY ADDRESS — a reconnect reactivates the existing row rather
+ *
+ *    **Skipped entirely when push is not configured** (`topicName ===
+ *    undefined`): there is no topic to arm against and the bounded scheduled
+ *    fetch is the transport, so the baseline comes from step 3's existing
+ *    `getProfile()` response instead — no extra API call, and nothing to
+ *    straddle, since there is no arm. `watch_expiration` is then unset.
+ * 5. **Persist**, now that the grant is proven usable — three writes keyed by
+ *    the resolved mailbox: {@link MailboxStore.upsertConnectedMailbox}
+ *    (upsert BY ADDRESS, so a reconnect reactivates the existing row rather
  *    than colliding with `mailboxes`' `UNIQUE(address)`), {@link
  *    MailboxTokenStore.upsertTokens} (the refresh token encrypted at rest —
  *    this module NEVER writes a token to the database itself), and {@link
- *    GmailWatchStateStore.seedBaseline} (both `history_id` AND
- *    `watch_expiration`, from the SAME `watch()` response). All three run in
- *    ONE `db.transaction` — a mid-persist failure rolls the whole thing back
- *    rather than leaving a PARTIAL connect (e.g. an `active` mailbox with no
- *    cursor, which would silently no-op every push the already-armed
- *    `watch()` delivers — worse than no mailbox at all, since the webhook
- *    would enqueue reconcile jobs that find nothing to resume from).
- * 6. Return `{ mailboxId, address }` — the API layer renders the success
- *    page.
+ *    GmailWatchStateStore.seedBaseline} (`history_id`, plus
+ *    `watch_expiration` from the SAME `watch()` response when one was armed).
+ *    All three run in
+ *    ONE `db.transaction`: a mid-persist failure rolls back rather than
+ *    leaving a PARTIAL connect — e.g. an `active` mailbox with no cursor,
+ *    which would silently no-op every push the already-armed `watch()`
+ *    delivers, worse than no mailbox at all.
+ * 6. Return `{ mailboxId, address }`; the API layer renders the success page.
  *
- * The whole sequence is **idempotent by mailbox address** (gmail-connect.md
- * §5): every step-5 write is an upsert keyed by the resolved mailbox, so a
- * reconnect (an operator re-consenting a `needs_reconnect`/`paused`
- * mailbox, or simply retrying) reactivates the row, replaces the stored
- * tokens, re-arms `watch()`, and REBASELINES the cursor to the fresh
- * `historyId` — never a second mailbox row for the same address.
+ * The sequence is **idempotent by mailbox address** (gmail-connect.md §5):
+ * every step-5 write is an upsert keyed by the resolved mailbox, so a
+ * reconnect — an operator re-consenting a `needs_reconnect`/`paused` mailbox,
+ * or simply retrying — reactivates the row, replaces the stored tokens,
+ * re-arms `watch()` if push is configured, and REBASELINES the cursor to the
+ * fresh `historyId`.
+ * Never a second mailbox row for the same address.
  *
  * ## Typed errors: what the API layer can safely show an operator
  *
  * {@link GmailConnectError} distinguishes the four operator-fixable 4xx
  * outcomes (`invalid_state`, `exchange_failed`, `no_refresh_token`,
- * `watch_failed`) from an unexpected failure (a DB blip, a network error
- * from `getProfile`) that the API layer maps to a 500 instead
- * (`src/api/gmail-connect.ts`). Every {@link GmailConnectError} message is
- * built to be safe to render on the public callback page: no `code`,
- * `state`, `client_secret`, or token ever appears in one.
+ * `watch_failed`) from an unexpected failure (a DB blip, a network error from
+ * `getProfile`) that the API layer maps to a 500. Every message is built to
+ * be safe to render on the public callback page: no `code`, `state`,
+ * `client_secret`, or token ever appears in one.
  *
- * ## Never log or leak a token (same discipline as `./gmail-oauth.ts`)
+ * ## Never log or leak a token
  *
- * `client_secret`, the authorization `code`, and every token value
- * (access, refresh) never appear in a thrown error message anywhere in
- * this module. Error messages are built ONLY from HTTP status codes, the
- * OAuth `error`/`error_description` fields (which by protocol design never
- * carry credential material), and this module's own fixed prose.
+ * `client_secret`, the authorization `code`, and every token value (access,
+ * refresh) never appear in a thrown error message anywhere in this module.
+ * Messages are built ONLY from HTTP status codes, the OAuth
+ * `error`/`error_description` fields (which by protocol design never carry
+ * credential material), and this module's own fixed prose — the same
+ * discipline as `./gmail-oauth.ts`.
  *
  * ## What this module does NOT do
  *
  * - **Import a concrete Gmail adapter.** {@link
- *   GmailConnectServiceDeps.createWatchClient} is injected — exactly how
- *   `./gmail-reconcile.ts` takes `createHistoryClient` — per
- *   `src/providers/README.md`'s rule that engine modules only ever see
- *   adapter INTERFACES, never `import` a concrete adapter module. The real
- *   `createGmailWatchClient` (`../providers/adapters/gmail/watch.ts`) is
- *   wired in at the composition root (HT-43); this module only imports its
- *   TYPE.
- * - **Token refresh / `invalid_grant` handling** → `./gmail-oauth.ts`
- *   (HT-38); this module mints and stores only the FIRST refresh token that
- *   service later reads.
- * - **`watch()` renewal + the reconciliation lease** → HT-42
- *   (gmail-push.md §6); this module arms `watch()` exactly once, at
- *   connect.
+ *   GmailConnectServiceDeps.createWatchClient} is injected, exactly as
+ *   `./gmail-reconcile.ts` takes `createHistoryClient`, per
+ *   `src/providers/README.md`'s rule that engine modules see adapter
+ *   INTERFACES only. The real `createGmailWatchClient`
+ *   (`../providers/adapters/gmail/watch.ts`) is wired at the composition
+ *   root; this module imports only its TYPE.
+ * - **Token refresh / `invalid_grant` handling** → `./gmail-oauth.ts`. This
+ *   module mints and stores only the FIRST refresh token that service later
+ *   reads.
+ * - **`watch()` renewal + the reconciliation lease** → gmail-push.md §6. This
+ *   module arms `watch()` at most once, at connect — and not at all when push
+ *   is unconfigured (step 4).
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
@@ -447,8 +449,16 @@ export interface GmailConnectServiceDeps {
   clientSecret: string
   /** Must exactly match `/api/v1/inbound/gmail/callback` on the deployment's public origin AND a redirect URI registered on the OAuth client (gmail-connect.md §3). */
   redirectUri: string
-  /** The Cloud Pub/Sub topic `watch()` arms notifications to (`projects/{project}/topics/{topic}`, HT-43-provisioned) — injected config. */
-  topicName: string
+  /**
+   * The Cloud Pub/Sub topic `watch()` arms notifications to
+   * (`projects/{project}/topics/{topic}`, HT-43-provisioned) — injected config.
+   *
+   * OPTIONAL as of HT-94. When absent, push is not configured for this
+   * deployment: connect skips the `watch()` arm entirely and seeds the
+   * baseline cursor from `getProfile()` instead, leaving the bounded
+   * scheduled fetch as the sole inbound transport.
+   */
+  topicName?: string
   /** OAuth scopes requested on the consent screen (gmail-connect.md §3: `gmail.readonly` + `gmail.send` for the dogfood). */
   scopes: string[]
   /** Signs/verifies the `state` CSRF token (module doc). */
@@ -524,7 +534,10 @@ export function createGmailConnectService(deps: GmailConnectServiceDeps): GmailC
   assertNonEmpty('clientId', clientId)
   assertNonEmpty('clientSecret', clientSecret)
   assertNonEmpty('redirectUri', redirectUri)
-  assertNonEmpty('topicName', topicName)
+  // Optional (HT-94): absent means push is not configured for this deployment.
+  // Present-but-blank is still a misconfiguration and still rejected — the
+  // all-or-nothing shape is enforced at the composition root (`resolveGmailPush`).
+  if (topicName !== undefined) assertNonEmpty('topicName', topicName)
   if (!Array.isArray(scopes) || scopes.length === 0) {
     throw new Error('createGmailConnectService: scopes must be a non-empty array')
   }
@@ -570,15 +583,32 @@ export function createGmailConnectService(deps: GmailConnectServiceDeps): GmailC
       const watchClient = createWatchClient(() => Promise.resolve(exchanged.accessToken))
       const profile = await watchClient.getProfile()
 
-      // --- Step 4: arm watch() BEFORE any persistence (module doc). ---
-      let armed: GmailWatchResult
-      try {
-        armed = await watchClient.watch({ topicName })
-      } catch (err) {
-        throw new GmailConnectError(
-          'watch_failed',
-          `Enabling Gmail push failed: ${errorMessage(err)}`,
-        )
+      // --- Step 4: arm watch() BEFORE any persistence (module doc).
+      //
+      // SKIPPED ENTIRELY when push is not configured (HT-94, CHARTER.md §2 as
+      // amended 2026-07-20): there is no topic to arm against, and the bounded
+      // scheduled fetch is the transport. The baseline then comes from the
+      // `getProfile()` call step 3 ALREADY made.
+      //
+      // That substitution is safe for exactly the reason the module doc gives
+      // for rejecting it in the push case: getProfile's separately-read
+      // historyId "could straddle the arm." With no arm, there is nothing to
+      // straddle — one read, one baseline, and the sweep resumes from it. No
+      // extra API call is made either; step 3's response carries the value. ---
+      let baseline: { historyId: string; watchExpiration?: Date }
+      if (topicName === undefined) {
+        baseline = { historyId: profile.historyId }
+      } else {
+        let armed: GmailWatchResult
+        try {
+          armed = await watchClient.watch({ topicName })
+        } catch (err) {
+          throw new GmailConnectError(
+            'watch_failed',
+            `Enabling Gmail push failed: ${errorMessage(err)}`,
+          )
+        }
+        baseline = { historyId: armed.historyId, watchExpiration: armed.expiration }
       }
 
       // --- Step 5: persist, now that the grant is proven usable — ONE atomic
@@ -599,11 +629,7 @@ export function createGmailConnectService(deps: GmailConnectServiceDeps): GmailC
           },
           tx,
         )
-        await watchStateStore.seedBaseline(
-          created.id,
-          { historyId: armed.historyId, watchExpiration: armed.expiration },
-          tx,
-        )
+        await watchStateStore.seedBaseline(created.id, baseline, tx)
         return created
       })
 

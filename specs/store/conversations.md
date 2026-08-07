@@ -1,6 +1,6 @@
 # Conversation Store Spec
 
-Status: draft, implemented (HT-14). Governs how conversations and threads are
+Status: draft, implemented. Governs how conversations and threads are
 persisted once a threading decision (specs/mail/threading.md) has been made.
 
 ## 1. Scope
@@ -40,14 +40,14 @@ replying to a closed/deleted/missing conversation:
 | `deleted` | nothing inserted; `{ ok: false, reason: 'deleted' }` |
 | missing (no such id) | nothing inserted; `{ ok: false, reason: 'not-found' }` |
 
-Reopen-on-reply matches the charter's Help Scout-like ease-of-use bar
-(CHARTER.md §1): a customer reply to a resolved ticket should land back in
+Reopen-on-reply keeps the conversation model predictable for operators
+(docs/history/CHARTER-v1.md §1): a customer reply to a resolved ticket should land back in
 the same conversation, not silently vanish or fork a duplicate. A deleted or
 missing target is different — there is no live conversation to reopen — so
 the caller (the mail-ingestion pipeline) is expected to fall back to
 starting a fresh conversation rather than resurrecting one an operator
 removed, or one that never existed. Either way, mail is never silently
-dropped (CHARTER.md invariant #1): the result is always a typed outcome the
+dropped (the charter's "Conversation integrity" rule): the result is always a typed outcome the
 caller must handle, never a thrown exception or a swallowed failure.
 
 The whole read-check-write is one transaction, with the conversation row

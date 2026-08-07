@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from '../db/client.js'
-import { migrate } from '../db/migrate.js'
+import { LATEST_MIGRATION_ID, migrate } from '../db/migrate.js'
 import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.js'
 import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
 import { FORGED_TOKEN_ALERT_THRESHOLD, type HealthReport, runHealthCheck } from './health.js'
@@ -19,7 +19,9 @@ describe('runHealthCheck', () => {
     db = database
     await migrate(database)
     const queue = createPostgresQueue(database)
-    const check = () => runHealthCheck({ db: database, queue })
+    // Default to push CONFIGURED so every pre-HT-94 case keeps asserting the
+    // behavior it was written for; the push-free cases pass `false` explicitly.
+    const check = (pushConfigured = true) => runHealthCheck({ db: database, queue, pushConfigured })
     return { database, check }
   }
 
@@ -233,7 +235,7 @@ describe('runHealthCheck', () => {
     })
   })
 
-  it('watch expiry: a healthy 7-day watch is silent; near-expiry, a NULL expiration, and a missing state row each trip watch-expiring', async () => {
+  it('watch expiry: a healthy 7-day watch is silent; near-expiry, a NULL expiration, and a missing state row each trip watch-expiring (push CONFIGURED)', async () => {
     const { database, check } = await fresh()
     await seedMailbox(database, 'healthy@example.test', 'active', {
       expiration: new Date(Date.now() + 7 * 24 * 3600 * 1000),
@@ -244,7 +246,10 @@ describe('runHealthCheck', () => {
     await seedMailbox(database, 'never-armed@example.test', 'active', { expiration: null })
     await seedMailbox(database, 'no-state-row@example.test', 'active')
 
-    const report = await check()
+    // Explicit `true` (not the default) — this is the case HT-94's
+    // `pushConfigured` gate exists to still catch: watch-expiring alerts fire
+    // when push IS configured, never suppressed by the gate.
+    const report = await check(true)
 
     expect(report.ok).toBe(false)
     expect(report.alerts).toHaveLength(3)
@@ -258,6 +263,40 @@ describe('runHealthCheck', () => {
     expect(byAddress.get('healthy@example.test')?.watchExpiresAt).toMatch(/^\d{4}-/)
     expect(byAddress.get('never-armed@example.test')?.watchExpiresAt).toBeNull()
     expect(byAddress.get('no-state-row@example.test')?.watchExpiresAt).toBeNull()
+  })
+
+  it('watch expiry is SILENT when push is NOT configured (HT-94) — an active mailbox with no watch_expiration is the designed steady state, not a fault', async () => {
+    const { database, check } = await fresh()
+    // Same shape as the "never-armed"/"no-state-row" cases above, which trip
+    // watch-expiring when push IS configured — this is the regression guard
+    // for the finding that the recommended push-free install path returned
+    // 503 permanently.
+    await seedMailbox(database, 'never-armed@example.test', 'active', { expiration: null })
+    await seedMailbox(database, 'no-state-row@example.test', 'active')
+
+    const report = await check(false)
+
+    expect(report.ok).toBe(true)
+    expect(report.alerts).toEqual([])
+    expect(report.alerts.some((a) => a.startsWith('watch-expiring: '))).toBe(false)
+  })
+
+  it('pushConfigured: false does NOT suppress mailbox-needs-attention — the gate is scoped to watch alerts only', async () => {
+    const { database, check } = await fresh()
+    await seedMailbox(database, 'paused@example.test', 'paused')
+    await seedMailbox(database, 'reconnect@example.test', 'needs_reconnect')
+
+    const report = await check(false)
+
+    expect(report.ok).toBe(false)
+    const attention = report.alerts.filter((a) => a.startsWith('mailbox-needs-attention: '))
+    expect(attention).toHaveLength(2)
+    expect(attention.join('\n')).toContain('paused@example.test')
+    expect(attention.join('\n')).toContain('reconnect@example.test')
+    // No watch-expiring alerts leak in either — these mailboxes aren't even
+    // `active`, so the watch-expiring branch is unreachable regardless of
+    // the gate, but assert it explicitly since this is the push-free path.
+    expect(report.alerts).toHaveLength(2)
   })
 
   it("mailbox statuses: paused and needs_reconnect trip mailbox-needs-attention; disconnected is silent (an operator's own action)", async () => {
@@ -393,6 +432,110 @@ describe('runHealthCheck', () => {
       expect(report.ok).toBe(true)
       expect(report.webauthn.counterRegressionsLast24h).toBe(0)
       expect(report.alerts.some((a) => a.startsWith('webauthn-counter-regression'))).toBe(false)
+    })
+  })
+
+  // The deploy-without-migrate window. `root.ts` never migrates on cold start,
+  // so a build can serve traffic against an older schema; before this check the
+  // only symptom was whichever query happened to fail first.
+  describe('schema version skew', () => {
+    it('is silent when the database matches the build', async () => {
+      const { check } = await fresh()
+
+      const report = await check()
+
+      expect(report.schema).toEqual({
+        expectedMigrationId: LATEST_MIGRATION_ID,
+        appliedMigrationId: LATEST_MIGRATION_ID,
+        missing: [],
+      })
+      expect(report.alerts.some((a) => a.startsWith('schema-'))).toBe(false)
+    })
+
+    it('alerts, names both versions, and names the fix when the database is BEHIND', async () => {
+      const { database, check } = await fresh()
+      // Simulate a deploy that landed before its migration ran.
+      await database.query('DELETE FROM _migrations WHERE id = $1', [LATEST_MIGRATION_ID])
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBe(LATEST_MIGRATION_ID - 1)
+      const alert = report.alerts.find((a) => a.startsWith('schema-migration-pending: '))
+      expect(alert).toBeDefined()
+      // The message has to be actionable on its own — someone reading a 503
+      // body at 3am should not need to go find this file.
+      expect(alert).toContain(`missing migration(s) ${LATEST_MIGRATION_ID}`)
+      expect(alert).toContain(`expects through ${LATEST_MIGRATION_ID}`)
+      expect(alert).toContain('npm run migrate')
+    })
+
+    it('alerts when the database is AHEAD of the build — a rollback, not a no-op', async () => {
+      const { database, check } = await fresh()
+      await database.query('INSERT INTO _migrations (id, name) VALUES ($1, $2)', [
+        LATEST_MIGRATION_ID + 1,
+        'from-a-newer-build',
+      ])
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBe(LATEST_MIGRATION_ID + 1)
+      expect(report.alerts.some((a) => a.startsWith('schema-newer-than-build: '))).toBe(true)
+    })
+
+    // A GENUINELY empty database — nothing migrated, no application tables at
+    // all. This is the fresh-install case, and the one the diagnostic exists
+    // for. Migrating first and then dropping only `_migrations` would leave
+    // every other table in place and prove nothing — the real code throws
+    // `relation "queue_jobs" does not exist` before ever reaching the schema
+    // check. The database has to be genuinely empty.
+    it('DIAGNOSES a completely empty database rather than throwing on the first missing table', async () => {
+      const database = await createPgliteDb()
+      db = database
+      const queue = createPostgresQueue(database)
+
+      const report = await runHealthCheck({ db: database, queue, pushConfigured: true })
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBeNull()
+      const alert = report.alerts.find((a) => a.startsWith('schema-migration-pending: '))
+      expect(alert).toContain('never been migrated')
+      expect(alert).toContain('npm run migrate')
+      // And it says why the rest of the report is empty, rather than pretending
+      // those sections were checked and found healthy.
+      expect(report.alerts.some((a) => a.startsWith('health-checks-unavailable: '))).toBe(true)
+    })
+
+    it('reports a GAP in the applied history — max(id) alone would call this healthy', async () => {
+      const { database, check } = await fresh()
+      // 1..26 + 29 applied, 27 and 28 missing. `max(id)` equals the build's
+      // latest, so a highest-id-only check sees nothing wrong.
+      await database.query('DELETE FROM _migrations WHERE id IN ($1, $2)', [
+        LATEST_MIGRATION_ID - 2,
+        LATEST_MIGRATION_ID - 1,
+      ])
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBe(LATEST_MIGRATION_ID)
+      expect(report.schema.missing).toEqual([LATEST_MIGRATION_ID - 2, LATEST_MIGRATION_ID - 1])
+      const alert = report.alerts.find((a) => a.startsWith('schema-migration-pending: '))
+      expect(alert).toContain(
+        `missing migration(s) ${LATEST_MIGRATION_ID - 2}, ${LATEST_MIGRATION_ID - 1}`,
+      )
+    })
+
+    it('reports an existing-but-empty _migrations table as missing everything', async () => {
+      const { database, check } = await fresh()
+      await database.query('DELETE FROM _migrations')
+
+      const report = await check()
+
+      expect(report.ok).toBe(false)
+      expect(report.schema.appliedMigrationId).toBeNull()
+      expect(report.schema.missing).toContain(LATEST_MIGRATION_ID)
     })
   })
 })

@@ -160,8 +160,8 @@ export interface WebAuthnStore {
    *
    * `expectedAgentId`, when given, adds `AND agent_id = $3` to that
    * predicate — the database-level half of step-up's Agent binding, so a
-   * challenge minted for one Agent can never be consumed by another (Codex
-   * review, PR #94). Omitted for the login ceremony, whose rows are minted
+   * challenge minted for one Agent can never be consumed by another
+   * (PR #94). Omitted for the login ceremony, whose rows are minted
    * with `agent_id IS NULL` by design (discoverable credential, spec §4.3).
    */
   consumeChallenge(
@@ -340,7 +340,7 @@ export function createWebAuthnStore(db: Db): WebAuthnStore {
         // serialize on this SELECT rather than each computing the
         // last-credential guard against a stale, unlocked count.
         //
-        // The bug this closes (CodeRabbit, PR #94): with a `FOR UPDATE`
+        // The bug this closes (PR #94): with a `FOR UPDATE`
         // scoped only to `id = $1`, two concurrent deletes of DIFFERENT
         // credentials for the same passwordless Agent each locked a
         // DIFFERENT row and then ran an UNLOCKED `count(*) WHERE id <> $2`

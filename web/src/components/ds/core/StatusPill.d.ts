@@ -5,4 +5,4 @@ export interface StatusPillProps {
   label?: string;
   style?: React.CSSProperties;
 }
-export declare function StatusPill(props: StatusPillProps): JSX.Element;
+export declare function StatusPill(props: StatusPillProps): React.JSX.Element;

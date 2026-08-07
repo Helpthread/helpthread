@@ -4,7 +4,7 @@ Thanks for your interest this early. **Helpthread is not accepting external code
 
 ## Why not yet
 
-Helpthread's core is AGPL-3.0, and contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/) — you sign off your commits (`git commit -s`), you keep your copyright, and there is no CLA and never will be. Because contributors keep their copyright, the plugin exception that draws the line between the AGPL core and commercial modules (see [CHARTER.md](CHARTER.md) §3) effectively cannot be broadened once outside code lands. **That exception text isn't counsel-final yet.** Until it is, we can't responsibly merge external code — not because your work wouldn't be welcome, but because merging it would freeze legal text we're still getting right, and we'd rather tell you up front than leave a PR hanging.
+Helpthread's core is AGPL-3.0, and contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/) — you sign off your commits (`git commit -s`), you keep your copyright, and there is no CLA and never will be. Because contributors keep their copyright, the [module API exception](legal/module-api-exception.md) that draws the line between the AGPL core and commercial modules effectively cannot be broadened once outside code lands. **That exception text isn't counsel-final yet.** Until it is, we can't responsibly merge external code — not because your work wouldn't be welcome, but because merging it would freeze legal text we're still getting right, and we'd rather tell you up front than leave a PR hanging.
 
 ## What you can do now
 

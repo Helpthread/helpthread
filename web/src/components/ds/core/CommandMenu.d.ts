@@ -17,4 +17,4 @@ export interface CommandMenuProps {
   width?: number;
   initialQuery?: string;
 }
-export declare function CommandMenu(props: CommandMenuProps): JSX.Element;
+export declare function CommandMenu(props: CommandMenuProps): React.JSX.Element;

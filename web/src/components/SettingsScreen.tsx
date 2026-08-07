@@ -2,13 +2,13 @@
 
 /**
  * /settings — the global Settings surface, now with the reference IA's left
- * section-sidebar (HT-54 fidelity correction, TJ's 2026-07-18 admin-IA
+ * section-sidebar (HT-54 fidelity correction, the maintainer's 2026-07-18 admin-IA
  * review; specs/ui/admin-ia.md): every Manage surface separates its content
  * into sections down a left rail, and Settings sections are the injection
  * points future increments (HT-56: Mail Settings, Alerts) and modules
  * extend. Sections today: **General** (deployment identity + the branding
  * note) and **Keyboard shortcuts**. Appearance moved to the Agent's own
- * profile (TJ, 2026-07-18): a theme is a PERSONAL preference, and the
+ * profile (maintainer, 2026-07-18): a theme is a PERSONAL preference, and the
  * three-scope rule puts personal things in the personal scope — device-local
  * persistence for now, account-synced with HT-61.
  *
@@ -19,6 +19,14 @@
  * Keyboard shortcuts moved here from the top bar's menus (a personal
  * preference is not a Manage- or avatar-scoped affordance); the global `?`
  * shortcut (`ShortcutsProvider`) is unchanged.
+ *
+ * Inboxes/mailbox connection is NOT a Settings section (specs/ui/admin-ia.md
+ * §1's three-scope rule): the mailbox LIST is Global-admin scope
+ * (`Manage ▾ → Mailboxes`, `app/manage/mailboxes/page.tsx`) and per-mailbox
+ * connection settings are Mailbox-scoped (the folder rail's gear →
+ * `InboxSettingsShell`, `app/mailbox/[id]/settings/[section]/page.tsx`) —
+ * HT-101's first pass hung both off this Settings screen, a scope
+ * violation corrected in the same ticket that added the two real homes.
  */
 
 import Link from 'next/link'

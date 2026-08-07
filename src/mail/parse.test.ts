@@ -251,8 +251,8 @@ describe('parseInboundEmail', () => {
     expect(parsed.date).toBeNull()
   })
 
-  // CodeRabbit follow-up: References may contain CFWS/comments between ids;
-  // only the angle-bracketed message-ids should be extracted (threading-critical).
+  // References may contain CFWS/comments between ids; only the
+  // angle-bracketed message-ids should be extracted (threading-critical).
   it('extracts only message-ids from a References header containing comments', async () => {
     const raw = [
       'From: alice@example.test',
@@ -272,7 +272,7 @@ describe('parseInboundEmail', () => {
     expect(parsed.inReplyTo).toBe('<root@example.test>')
   })
 
-  // CodeRabbit follow-up (RFC 6854): group-form From must not drop the sender —
+  // RFC 6854: group-form From must not drop the sender —
   // it maps to the group's first member rather than null.
   it('maps a group-form From to its first member instead of null', async () => {
     const raw = [
@@ -290,7 +290,7 @@ describe('parseInboundEmail', () => {
     expect(parsed.from).toEqual({ address: 'alice@example.test' })
   })
 
-  // CodeRabbit follow-up: header names come from untrusted senders. A header
+  // Follow-up: header names come from untrusted senders. A header
   // literally named `__proto__` or `constructor` must be stored as an ordinary
   // own key, not pollute the prototype or read an inherited value.
   it('safely stores headers named like reserved object keys', async () => {

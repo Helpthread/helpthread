@@ -13,13 +13,18 @@
  * - the `PostgresDb` (Supabase pooler) + every store over it,
  * - the token encryption seam (`createMailboxTokenStore` with the decoded key),
  * - the Gmail OAuth token service + the outbound `EmailSender`,
+ * - the per-conversation `SenderResolver` (HT-101 Stage 2b-ii), which routes
+ *   a reply through its OWN mailbox's Gmail token or IMAP/SMTP connection
+ *   instead of always through the single `EmailSender` above,
  * - the Gmail push signature verifier (JWKS source built ONCE — see below),
  * - the durable Postgres job queue,
  * - the Gmail connect/consent service and its disconnect counterpart (HT-47),
  * - `createInboxApi` with `gmailPush` + `gmailConnect` + `gmailDisconnect`
  *   PRESENT (they are absent-by-default on the engine; this root is where
  *   they get wired), and
- * - the two internal cron closures (queue drain, watch maintenance),
+ * - the six internal cron closures (queue drain, outbox drain, snooze wake,
+ *   Gmail watch maintenance, Gmail reconcile sweep, IMAP fetch) — the count
+ *   grew with HT-69/77/94/101 while this line still said "two",
  *
  * then hands them to {@link createAppHandler} (`./app.ts`) as one
  * `(request) => Promise<Response>`.
@@ -46,6 +51,7 @@ import {
   type GmailPushDeps,
   type GmailReconcileJob,
 } from '../api/gmail-webhook.js'
+import type { ImapConnectDeps } from '../api/imap-connect.js'
 import { createInboxApi } from '../api/index.js'
 import type { WebAuthnApiDeps } from '../api/webauthn.js'
 import { createPasswordAuthProvider } from '../auth/password-provider.js'
@@ -59,11 +65,18 @@ import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
 import { createGmailOAuthTokenService } from '../mail/gmail-oauth.js'
 import { createGmailReconcileHandler } from '../mail/gmail-reconcile.js'
 import {
+  type GmailReconcileSweepDeps,
+  runGmailReconcileSweep,
+} from '../mail/gmail-reconcile-sweep.js'
+import {
   type GmailWatchMaintenanceDeps,
   runGmailWatchMaintenance,
 } from '../mail/gmail-watch-maintenance.js'
-import { ingestInboundMessage } from '../mail/ingest.js'
+import { createImapConnectService } from '../mail/imap-connect.js'
+import { runImapFetch } from '../mail/imap-fetch.js'
+import { type IngestDeps, ingestInboundMessage } from '../mail/ingest.js'
 import type { Keyring } from '../mail/reply-token.js'
+import { createSenderResolver } from '../mail/sender-resolver.js'
 import { runSnoozeWake } from '../mail/snooze-wake.js'
 import {
   createGmailEmailSender,
@@ -72,12 +85,17 @@ import {
   createGmailWatchClient,
   createGooglePushKeySource,
 } from '../providers/adapters/gmail/index.js'
+import { createImapClient } from '../providers/adapters/imap/index.js'
 import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.js'
+import { createSmtpEmailSender, verifySmtpConnection } from '../providers/adapters/smtp/index.js'
 import { createSupabaseStorageBlobStore } from '../providers/adapters/supabase-storage/index.js'
 import type { BlobStore } from '../providers/blob.js'
 import type { QueueMessage, QueueMessageHandler } from '../providers/queue.js'
 import { createAgentStore } from '../store/agents.js'
 import { createAssistantStore } from '../store/assistants.js'
+import { createImapConfigStore } from '../store/imap-config.js'
+import { createImapCredentialStore } from '../store/imap-credentials.js'
+import { createImapWatchStateStore } from '../store/imap-watch-state.js'
 import {
   createConversationStore,
   createEventOutboxStore,
@@ -169,6 +187,15 @@ export async function buildApp(
   const savedReplyStore = createSavedReplyStore(db)
   const webAuthnStore = createWebAuthnStore(db)
 
+  // --- Per-inbox IMAP/SMTP connection stores (HT-101 Stage 2a-i/ii).
+  // `imapCredentialStore` reuses the SAME `tokenEncryptionKey` as `tokenStore`
+  // above — one crypto module (`token-crypto.ts`), every per-mailbox secret,
+  // not a second key hierarchy (mirrors `webhookEndpointStore`'s identical
+  // reuse below). ---
+  const imapConfigStore = createImapConfigStore(db)
+  const imapCredentialStore = createImapCredentialStore(db, config.tokenEncryptionKey)
+  const imapWatchStateStore = createImapWatchStateStore(db)
+
   // --- Module substrate (HT-69; specs/modules/substrate-v1.md §4/§5): the
   // event outbox and webhook endpoint stores. `webhookEndpointStore` reuses
   // the SAME `tokenEncryptionKey` as `tokenStore` above (mailbox OAuth
@@ -214,6 +241,25 @@ export async function buildApp(
       }
       return tokenService.getAccessToken(mailbox.id)
     },
+  })
+
+  // --- Per-conversation sender resolution (HT-101 Stage 2b-ii) — routes each
+  // outbound reply through the SAME inbox its conversation arrived at,
+  // rather than always through the single `sender` above. `createGmailEmailSender`/
+  // `createSmtpEmailSender` are injected rather than imported by
+  // `sender-resolver.ts` itself, per `src/providers/README.md`'s composition-
+  // root rule (mirrors every other `createWatchClient`/`createImapClient`
+  // injection in this file). `defaultAddress: config.supportAddress` is what
+  // a `null` mailboxId (a pre-2b-i conversation) falls back to — see that
+  // module's doc comment. ---
+  const senderResolver = createSenderResolver({
+    mailboxStore,
+    tokenService,
+    imapConfigStore,
+    imapCredentialStore,
+    createGmailEmailSender,
+    createSmtpEmailSender,
+    defaultAddress: config.supportAddress,
   })
 
   // --- Passkeys (HT-75; specs/auth/passkeys.md §3) — ONLY when
@@ -270,18 +316,26 @@ export async function buildApp(
   // --- Gmail push webhook deps. The JWKS key source is built ONCE here and
   // reused across every request (its fetch cache only caches if reused — see
   // createGooglePushKeySource's doc). ---
-  const gmailPush: GmailPushDeps = {
-    verifySignature: createGmailPushSignatureVerifier(
-      {
-        endpointUrl: `${config.publicBaseUrl}/api/v1/inbound/gmail`,
-        serviceAccountEmail: config.gmailPushServiceAccount,
-      },
-      createGooglePushKeySource(),
-    ),
-    subscription: config.gmailPubsubSubscription,
-    mailboxes: mailboxStore,
-    queue,
-  }
+  // Built ONLY when push is configured (HT-94). With `config.gmailPush`
+  // absent there is no subscription to authenticate against and no OIDC
+  // service account to match, so the webhook must not be routable at all —
+  // an endpoint that accepts deliveries it cannot verify is worse than one
+  // that isn't there.
+  const gmailPush: GmailPushDeps | undefined =
+    config.gmailPush === undefined
+      ? undefined
+      : {
+          verifySignature: createGmailPushSignatureVerifier(
+            {
+              endpointUrl: `${config.publicBaseUrl}/api/v1/inbound/gmail`,
+              serviceAccountEmail: config.gmailPush.serviceAccount,
+            },
+            createGooglePushKeySource(),
+          ),
+          subscription: config.gmailPush.subscription,
+          mailboxes: mailboxStore,
+          queue,
+        }
 
   // --- Gmail connect/consent service. ---
   const connectService = createGmailConnectService({
@@ -289,7 +343,9 @@ export async function buildApp(
     clientId: config.gmailOAuthClientId,
     clientSecret: config.gmailOAuthClientSecret,
     redirectUri: `${config.publicBaseUrl}/api/v1/inbound/gmail/callback`,
-    topicName: config.gmailPubsubTopic,
+    // Absent when push isn't configured: connect then skips the watch() arm
+    // and seeds the baseline from getProfile() (HT-94, gmail-connect.ts step 4).
+    ...(config.gmailPush !== undefined ? { topicName: config.gmailPush.topic } : {}),
     scopes: GMAIL_SCOPES,
     keyring,
     mailboxStore,
@@ -310,20 +366,47 @@ export async function buildApp(
   })
   const gmailDisconnect: GmailDisconnectDeps = { service: disconnectService }
 
-  // --- The Agent Inbox API, with gmailPush + gmailConnect + gmailDisconnect
-  // PRESENT (the engine leaves them absent by default; this root is the one
-  // place they are wired). openTracking is intentionally OMITTED — the
-  // shipped privacy default is OFF (v1.1 designed contract). ---
+  // --- IMAP/SMTP connect/check service (HT-101 Stage 2a-ii) — the per-inbox
+  // counterpart of the Gmail connect service above, wired to the SAME `db`
+  // (for its own atomic persist) and the three IMAP stores constructed
+  // earlier. `createImapClient`/`verifySmtpConnection` are the ONLY place
+  // either concrete adapter is constructed — engine modules never import
+  // them directly (`src/providers/README.md`'s rule; mirrors every other
+  // `createWatchClient`/`createHistoryClient` injection in this file). ---
+  const imapConnectService = createImapConnectService({
+    db,
+    mailboxStore,
+    configStore: imapConfigStore,
+    credentialStore: imapCredentialStore,
+    watchStateStore: imapWatchStateStore,
+    createImapClient,
+    verifySmtp: verifySmtpConnection,
+  })
+  // configStore/mailboxStore (HT-101 Stage 2b) back the read-only
+  // `GET .../mailboxes/{id}/imap-config` handler — the SAME instances
+  // `imapConnectService` above was built from, not a second copy.
+  const imapConnect: ImapConnectDeps = {
+    service: imapConnectService,
+    configStore: imapConfigStore,
+    mailboxStore,
+  }
+
+  // --- The Agent Inbox API, with gmailPush + gmailConnect + gmailDisconnect +
+  // imapConnect PRESENT (the engine leaves them absent by default; this root
+  // is the one place they are wired). openTracking is intentionally OMITTED —
+  // the shipped privacy default is OFF (v1.1 designed contract). ---
   const inboxApi = createInboxApi({
     store,
     apiToken: config.apiToken,
     sender,
+    senderResolver,
     keyring,
     mailDomain: config.mailDomain,
     supportAddress: config.supportAddress,
     gmailPush,
     gmailConnect,
     gmailDisconnect,
+    imapConnect,
     attachments: { store: attachmentStore, blobStore },
     // Agents & Authentication (HT-54) — CORE, required (unlike the
     // absent-by-default fields above). uiBaseUrl is spread in only when
@@ -352,7 +435,7 @@ export async function buildApp(
     // Passkeys (HT-75) — spread in only when configured (uiBaseUrl set),
     // matching agents.uiBaseUrl's own optional-field convention above.
     ...(webauthn !== undefined ? { webauthn } : {}),
-    // HT-49 review fix: Gmail delivers a sent reply's own copy back into the
+    // HT-49: Gmail delivers a sent reply's own copy back into the
     // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
     // it as a phantom inbound message (src/mail/send.ts's "The reply token's
     // own self-echo" section). Wired unconditionally here — every deployment
@@ -360,13 +443,19 @@ export async function buildApp(
     selfEchoGuard: { mailboxStore, inboundDeliveryStore },
   })
 
+  // --- Shared ingest deps — the SAME IngestDeps every inbound transport's
+  // `ingest` closure is built from (the Gmail reconcile handler below AND
+  // the IMAP fetch cron), so a fixture-proven ingest pipeline never diverges
+  // per transport. ---
+  const ingestDeps: IngestDeps = { db, inboundDeliveryStore, blobStore, keyring }
+
   // --- The reconcile handler the queue drain dispatches to. ---
   const reconcileHandler = createGmailReconcileHandler({
     tokenService,
     mailboxStore,
     watchStateStore,
     blobStore,
-    ingest: (raw) => ingestInboundMessage(raw, { db, inboundDeliveryStore, blobStore, keyring }),
+    ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
     createHistoryClient: (getAccessToken) => createGmailHistoryClient({ getAccessToken }),
   })
 
@@ -390,15 +479,29 @@ export async function buildApp(
       webhookDeliveryHandler(message as QueueMessage<WebhookDeliveryJob>),
   }
 
-  // --- Watch-maintenance deps (daily re-arm + sweep). ---
-  const watchMaintenanceDeps: GmailWatchMaintenanceDeps = {
-    tokenService,
+  // --- Reconciliation-sweep deps (HT-94). Deliberately NO tokenService and no
+  // watch client: the sweep reads a cursor and enqueues, making no Gmail call
+  // of its own, which is what makes every-minute cadence affordable. ---
+  const reconcileSweepDeps: GmailReconcileSweepDeps = {
     mailboxStore,
     watchStateStore,
     queue,
-    createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
-    topicName: config.gmailPubsubTopic,
   }
+
+  // --- Watch-maintenance deps (daily re-arm). Only meaningful when push is
+  // configured — with no topic there is no watch to re-arm. The reconciliation
+  // sweep is NOT part of this any more (HT-94): it runs on its own every-minute
+  // cron as the primary intake, independent of whether push exists. ---
+  const watchMaintenanceDeps: GmailWatchMaintenanceDeps | undefined =
+    config.gmailPush === undefined
+      ? undefined
+      : {
+          tokenService,
+          mailboxStore,
+          watchStateStore,
+          createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
+          topicName: config.gmailPush.topic,
+        }
 
   return createAppHandler({
     inboxApi,
@@ -438,7 +541,32 @@ export async function buildApp(
       }
       return report
     },
-    runWatchMaintenance: () => runGmailWatchMaintenance(watchMaintenanceDeps),
+    // The primary inbound transport (HT-94) — runs regardless of whether push
+    // is configured, since push only makes the SAME reconcile job run sooner.
+    // Quiet ticks are logged unlike the drains': a sweep that stops sweeping is
+    // an intake outage, and its every-minute silence is the only signal.
+    runReconcileSweep: async () => {
+      const report = await runGmailReconcileSweep(reconcileSweepDeps)
+      console.info(JSON.stringify({ event: 'reconcile_sweep', ...report }))
+      return report
+    },
+    // With push unconfigured there is no watch() to re-arm, so this cron has
+    // nothing to do. It stays ROUTED rather than 404-ing (HT-94): `vercel.json`
+    // is static, so a deployment without push would otherwise log a daily
+    // not-found that reads like a fault. Reporting a skip is the honest,
+    // greppable alternative — and it must never be silent, since a genuinely
+    // broken maintenance cron is the failure mode the runbook's external
+    // monitor exists to catch.
+    runWatchMaintenance: async () => {
+      if (watchMaintenanceDeps === undefined) {
+        const report = { skipped: 'push-not-configured' as const }
+        // Same event name the module itself logs under — one endpoint must not
+        // produce two event names, or a log filter finds half its own history.
+        console.info(JSON.stringify({ event: 'gmail_watch_maintenance', ...report }))
+        return report
+      }
+      return runGmailWatchMaintenance(watchMaintenanceDeps)
+    },
     // Snooze wake pass (HT-77) — a SEPARATE cron tick from the two drains
     // above: flips due `pending`+snoozed conversations back to `active`
     // (`runSnoozeWake`, `src/mail/snooze-wake.ts`) via the SAME
@@ -453,7 +581,36 @@ export async function buildApp(
       }
       return report
     },
-    runHealthCheck: () => runHealthCheck({ db, queue }),
+    // IMAP scheduled-fetch sweep (HT-101 Stage 2a-ii) — a SEPARATE cron tick
+    // (IMAP_FETCH_PATH) from every Gmail-specific job above: fetches bounded
+    // new mail for every active `provider === 'imap'` mailbox. `ingest`
+    // reuses the SAME `ingestDeps` the Gmail reconcile handler is built with
+    // above — one fixture-proven ingest pipeline, shared by both inbound
+    // transports. Quiet-tick log suppression matches every other cron
+    // closure here.
+    runImapFetch: async () => {
+      const report = await runImapFetch({
+        mailboxStore,
+        configStore: imapConfigStore,
+        credentialStore: imapCredentialStore,
+        watchStateStore: imapWatchStateStore,
+        createImapClient,
+        ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
+      })
+      // `skipped` counts too (2026-07-31). A mailbox skipped on every
+      // tick — a lease stuck by a crashed run, a missing config, credential,
+      // or baseline cursor — is an intake OUTAGE, not a quiet tick: mail is
+      // arriving and nothing is collecting it. Gating the summary on
+      // fetched/paused/failed alone made that state indistinguishable from
+      // "no mailboxes configured," which is the one case worth staying silent
+      // for. Only a run that touched nothing at all logs nothing.
+      if (report.fetched > 0 || report.paused > 0 || report.failed > 0 || report.skipped > 0) {
+        console.info(JSON.stringify({ event: 'imap_fetch', ...report }))
+      }
+      return report
+    },
+    runHealthCheck: () =>
+      runHealthCheck({ db, queue, pushConfigured: config.gmailPush !== undefined }),
   })
 }
 

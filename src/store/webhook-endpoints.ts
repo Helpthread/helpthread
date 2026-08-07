@@ -22,6 +22,20 @@
  * already-generated plaintext `secret` and only handles encrypting it at
  * rest.
  *
+ * ## `create` is idempotent on `url` (HT-119, migration 031)
+ *
+ * `url` now carries a unique index specifically so two callers racing to
+ * register the SAME url (the module installer's `bootstrap_pending` step,
+ * on a concurrent retry or a genuine two-worker race) cannot both leave a
+ * live, independently-delivered-to endpoint behind — see migration 031's
+ * doc comment. {@link WebhookEndpointStore.create} therefore uses the same
+ * `INSERT ... ON CONFLICT DO NOTHING` / fallback-`SELECT` shape
+ * `ModuleInstallStore.create` already uses for `idempotency_key`: a second
+ * `create` for a url that already has a row is coalesced onto that SAME
+ * row (returning ITS actual secret, decrypted — never the caller's
+ * freshly-supplied one, which the conflicting row may not actually hold)
+ * rather than throwing a raw unique-violation or silently duplicating.
+ *
  * ## Auto-disable (spec §5, spec §9 decision 2: 20, admin re-enable)
  *
  * {@link WebhookEndpointStore.recordDeliveryFailure} increments
@@ -58,6 +72,8 @@ export interface NewWebhookEndpoint {
   events: string[]
   /** The slug of the module that registered this endpoint, or omitted/`null` for an operator-registered one not tied to any module (spec §1's additive-forward rule). */
   module?: string | null
+  /** Initial status — defaults to the schema default `'active'`. The installer (`../modules/install/installer.ts`'s `stepBootstrapPending`) passes `'disabled'` explicitly to create the row BEFORE it has proven itself, promoting to `'active'` only after winning its own fenced CAS (module doc's "candidate-then-cutover" discipline). */
+  status?: 'active' | 'disabled'
 }
 
 /** A webhook endpoint as read back from storage — camelCase, timestamps as `Date`. Never carries the secret (see {@link WebhookEndpointStore.getSecret} for the one path that reaches it, decrypted). */
@@ -176,13 +192,38 @@ export function createWebhookEndpointStore(db: Db, encryptionKey: Buffer): Webho
   return {
     async create(input) {
       const secretCiphertext = encrypt(input.secret, encryptionKey)
-      const [row] = await db.query<WebhookEndpointRow>(
-        `INSERT INTO webhook_endpoints (url, secret_ciphertext, events, module)
-         VALUES ($1, $2, $3::jsonb, $4)
+      const inserted = await db.query<WebhookEndpointRow>(
+        `INSERT INTO webhook_endpoints (url, secret_ciphertext, events, module, status)
+         VALUES ($1, $2, $3::jsonb, $4, $5)
+         ON CONFLICT (url) DO NOTHING
          RETURNING ${WEBHOOK_ENDPOINT_COLUMNS}`,
-        [input.url, secretCiphertext, JSON.stringify(input.events), input.module ?? null],
+        [
+          input.url,
+          secretCiphertext,
+          JSON.stringify(input.events),
+          input.module ?? null,
+          input.status ?? 'active',
+        ],
       )
-      return { ...toStoredWebhookEndpoint(row), secret: input.secret }
+      if (inserted.length > 0) {
+        return { ...toStoredWebhookEndpoint(inserted[0]), secret: input.secret }
+      }
+
+      // Conflict on url — module doc's "create is idempotent on url".
+      const existing = await db.query<WebhookEndpointRow>(
+        `SELECT ${WEBHOOK_ENDPOINT_COLUMNS} FROM webhook_endpoints WHERE url = $1`,
+        [input.url],
+      )
+      const row = existing[0]
+      if (row === undefined) {
+        throw new Error(
+          `webhook-endpoints: create() conflicted on url ${input.url} but no existing row was found`,
+        )
+      }
+      return {
+        ...toStoredWebhookEndpoint(row),
+        secret: decrypt(row.secret_ciphertext, encryptionKey),
+      }
     },
 
     async list() {

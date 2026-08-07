@@ -16,4 +16,4 @@ export interface MessageBandProps {
   email?: string;
   children: React.ReactNode;
 }
-export declare function MessageBand(props: MessageBandProps): JSX.Element;
+export declare function MessageBand(props: MessageBandProps): React.JSX.Element;

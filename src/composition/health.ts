@@ -1,24 +1,40 @@
 /**
- * The internal health check (HT-44, specs/mail/inbound-ingestion.md §6;
- * runbook Part G) — one point-in-time report over everything the inbound
- * pipeline needs to stay alive, served by the CRON_SECRET-guarded
- * `GET /api/v1/internal/health` (`./app.ts`) and designed so a dumb HTTP
- * monitor becomes the alerter: the endpoint answers **200 when `ok`, 503
- * when any alert is tripped**, so status-code polling (UptimeRobot, Checkly,
- * a curl in cron — anything that can send one header) is a complete
- * alerting stack. There is deliberately no Datadog/OTel dependency here:
- * the platform aggregates logs (CHARTER.md §4), and this endpoint is the
- * one pull-based surface those logs can't provide.
+ * The internal health check (specs/mail/inbound-ingestion.md §6; runbook Part
+ * G) — one point-in-time report over everything the inbound pipeline needs to
+ * stay alive, served by the CRON_SECRET-guarded `GET
+ * /api/v1/internal/health` (`./app.ts`). It is designed so a dumb HTTP
+ * monitor becomes the alerter: **200 when `ok`, 503 when any alert is
+ * tripped**, so status-code polling (UptimeRobot, Checkly, a curl in cron —
+ * anything that can send one header) is a complete alerting stack. There is
+ * deliberately no Datadog/OTel dependency: the platform aggregates logs
+ * (CHARTER.md §4), and this endpoint is the one pull-based surface those
+ * logs cannot provide.
+ *
+ * ## Schema version: the one check about the deploy itself
+ *
+ * `src/composition/root.ts` deliberately does not migrate on cold start —
+ * schema changes are an operator step (`scripts/migrate.ts`). Every deploy
+ * therefore opens a window where the new build runs against the previous
+ * schema until someone runs `npm run migrate`, and with auto-deploy-on-merge
+ * that window opens without anyone deciding to open it.
+ *
+ * Observed 2026-08-02: three migrations shipped, the deploy landed first, and
+ * an `imap-fetch` cron spent the gap erroring every two minutes against
+ * tables that did not exist yet. Nothing named the cause; the only symptom
+ * was a failing cron. This check turns that into a 503 on a URL, with the fix
+ * in the message. It deliberately does NOT migrate anything — reporting the
+ * skew keeps the operator-step rule intact while removing the part that made
+ * it dangerous, that the violation was silent.
  *
  * ## What it reports, and the alert each section can trip
  *
  * - **Queue** (`PostgresQueue.getStats` + a 24h dead-letter window):
  *   `queue-drain-stalled` when the oldest ready job has waited longer than
  *   {@link QUEUE_OLDEST_READY_ALERT_SECONDS} (the drain cron runs every
- *   minute — a five-minute-old ready job means ~5 missed/failing ticks);
- *   `queue-dead-letter-growth` when any job was dead-lettered in the last
- *   24h (dead-letter rows are retained by design — migration 013 — so the
- *   signal is growth, never the standing count).
+ *   minute, so a five-minute-old ready job means ~5 missed or failing ticks);
+ *   `queue-dead-letter-growth` when any job was dead-lettered in the last 24h
+ *   (dead-letter rows are retained by design — migration 013 — so the signal
+ *   is growth, never the standing count).
  * - **Ingest ledger** (`inbound_deliveries`, 24h outcome counts):
  *   `ingest-dead-letter-growth`, same growth-not-backlog reasoning (a
  *   dead-lettered row's `updated_at` freezes when it parks, so a 24h
@@ -27,64 +43,64 @@
  *   `forged-token-burst` when {@link FORGED_TOKEN_ALERT_THRESHOLD} or more
  *   deliveries stored in the last 24h carried at least one forged token —
  *   threading.md §5's security signal ("a single forgery is unremarkable; a
- *   burst against one conversation or sender is a security signal"),
- *   finally consumable. The threshold is this module's own default, NOT a
- *   number threading.md §5 blesses (that spec deliberately leaves it open);
- *   it is a constant, not config, until dogfood traffic teaches us better.
+ *   burst against one conversation or sender is a security signal"). The
+ *   threshold is this module's own default, NOT a number threading.md §5
+ *   blesses (that spec deliberately leaves it open); a constant, not config,
+ *   until dogfood traffic teaches us better.
  * - **Mailboxes** (`mailboxes` LEFT JOIN `gmail_watch_state`):
- *   `mailbox-needs-attention` for `paused`/`needs_reconnect` rows (both
- *   mean inbound mail is NOT flowing until an operator acts — runbook Part
- *   G); `watch-expiring` for an `active` mailbox whose Gmail `watch()`
- *   expiration is missing or nearer than {@link WATCH_EXPIRY_ALERT_HOURS}
- *   (the daily maintenance cron re-arms it ~7 days out, so anything under
- *   72h means renewal has been failing for days — caught while there is
- *   still runway). `disconnected` mailboxes are deliberately silent: that
- *   state is an operator's own explicit action (HT-47).
- * - **Webhooks** (HT-69; specs/modules/substrate-v1.md §5: "surfaced by
- *   `/api/v1/internal/health` (runbook Part G gains a section)"):
+ *   `mailbox-needs-attention` for `paused`/`needs_reconnect` rows (both mean
+ *   inbound mail is NOT flowing until an operator acts); `watch-expiring` for
+ *   an `active` mailbox whose Gmail `watch()` expiration is missing or nearer
+ *   than {@link WATCH_EXPIRY_ALERT_HOURS} (the daily maintenance cron re-arms
+ *   ~7 days out, so anything under 72h means renewal has been failing for
+ *   days — caught while there is still runway). `disconnected` mailboxes are
+ *   deliberately silent: that state is an operator's own explicit action.
+ * - **Schema version** (`_migrations` vs the build's own
+ *   `LATEST_MIGRATION_ID`): `schema-migration-pending` when the database is
+ *   BEHIND the running build, `schema-newer-than-build` when it is ahead.
+ *   Unlike every other section, this reports on the DEPLOYMENT, not traffic.
+ * - **Webhooks** (specs/modules/substrate-v1.md §5):
  *   `webhook-endpoint-auto-disabled` for every `webhook_endpoints` row
  *   `WebhookEndpointStore.recordDeliveryFailure` flipped past the
- *   consecutive-failure threshold (spec §9 decision 2: 20) — spec's own
- *   rationale for alerting here ("conservative because a disabled endpoint
- *   silently stops a paid module"). `webhook-delivery-dead-letter-growth`
- *   for any `queue_jobs` row on `WEBHOOK_DELIVERY_TOPIC` dead-lettered in
- *   the last 24h — the SAME growth-not-backlog reasoning as `queue-dead-
- *   letter-growth`/`ingest-dead-letter-growth` above (a dead-lettered
- *   delivery's `webhook_endpoints.recordDeliveryFailure` write already
- *   happened by the time it reaches this state — `src/webhooks/
- *   delivery.ts`'s module doc — so this is a SEPARATE signal from the
- *   auto-disable alert: an endpoint can shed individual failed deliveries
- *   for a while before crossing 20 consecutive and auto-disabling).
- * - **Passkey counter regressions** (HT-75; specs/auth/passkeys.md §8):
+ *   consecutive-failure threshold (spec §9 decision 2: 20), whose own
+ *   rationale for alerting is that "a disabled endpoint silently stops a paid
+ *   module". `webhook-delivery-dead-letter-growth` for any `queue_jobs` row
+ *   on `WEBHOOK_DELIVERY_TOPIC` dead-lettered in the last 24h — the same
+ *   growth-not-backlog reasoning as above, and a SEPARATE signal from the
+ *   auto-disable alert: a dead-lettered delivery's `recordDeliveryFailure`
+ *   write already happened by the time it reaches this state
+ *   (`src/webhooks/delivery.ts`), and an endpoint can shed individual failed
+ *   deliveries for a while before crossing 20 consecutive.
+ * - **Passkey counter regressions** (specs/auth/passkeys.md §8):
  *   `webauthn-counter-regression` for any `webauthn_credentials` row whose
  *   `sign_count_regression_at` (set by `src/auth/webauthn-ceremony.ts` on a
- *   Tier-2 clone-signal rejection) falls in the last 24h — a directly
- *   analogous check to `forged-token-burst` above (a per-row marker column,
- *   not a log table; the signal is growth, never the standing count),
- *   except tripped on ANY count `> 0`, not a threshold: spec §8 is explicit
- *   this is a "high-quality clone signal for a non-synced credential," not
- *   noise to average over a burst window.
+ *   Tier-2 clone-signal rejection) falls in the last 24h — directly analogous
+ *   to `forged-token-burst` (a per-row marker column, not a log table; the
+ *   signal is growth), except tripped on ANY count `> 0` rather than a
+ *   threshold: spec §8 is explicit this is a "high-quality clone signal for a
+ *   non-synced credential," not noise to average over a burst window.
  *
  * ## What it deliberately does NOT check
  *
  * A "reconcile cursor is stale" alert was considered and dropped:
  * `gmail_watch_state.updated_at` is bumped by BOTH cursor advances and
- * watch-expiration renewals (`src/store/gmail-watch-state.ts`), so it
- * cannot distinguish "reconcile broken" from "renewal alive" — a health
- * signal that can't measure what it claims is worse than none. A stalled
- * reconcile still surfaces here indirectly (`queue-drain-stalled`, since
- * reconcile jobs retry rather than ack) and in the `gmail_reconcile` log
- * events. If dogfood shows a real blind spot, a dedicated cursor-write
- * timestamp column is the honest fix.
+ * watch-expiration renewals (`src/store/gmail-watch-state.ts`), so it cannot
+ * distinguish "reconcile broken" from "renewal alive" — a health signal that
+ * cannot measure what it claims is worse than none. A stalled reconcile still
+ * surfaces indirectly (`queue-drain-stalled`, since reconcile jobs retry
+ * rather than ack) and in the `gmail_reconcile` log events. If dogfood shows a
+ * real blind spot, a dedicated cursor-write timestamp column is the honest
+ * fix.
  *
  * ## Alert strings are contract-ish
  *
  * Each alert is `<kebab-code>: <human detail>`. The code prefix is stable
  * (runbook Part G documents each one); the detail after the colon is free
- * text for the human reading the monitor's notification, never parsed.
+ * text for the human reading the notification, never parsed.
  */
 
 import type { Db } from '../db/client.js'
+import { LATEST_MIGRATION_ID, MIGRATION_IDS } from '../db/migrate.js'
 import type { QueueStats } from '../providers/adapters/postgres-queue/index.js'
 import type { InboundDeliveryStatus } from '../store/inbound-deliveries.js'
 import { WEBHOOK_DELIVERY_TOPIC } from '../webhooks/delivery.js'
@@ -102,6 +118,21 @@ export const WATCH_EXPIRY_ALERT_HOURS = 72
 export interface HealthCheckDeps {
   db: Db
   queue: { getStats(): Promise<QueueStats> }
+  /**
+   * Whether Gmail push is configured for this deployment (HT-94) — i.e.
+   * whether `AppConfig.gmailPush` is present.
+   *
+   * Gates the `watch-expiring` alerts ONLY. With push unconfigured there is no
+   * `watch()` to arm, so `watch_expiration` is NULL by design for every active
+   * mailbox — alerting on it would return 503 permanently on the install path
+   * the runbook now recommends, and since this endpoint's contract is a single
+   * boolean, a permanent false alarm makes every REAL alert invisible.
+   *
+   * Deliberately a config fact rather than inferred from the data: a NULL
+   * expiration means "no push configured" on one deployment and "renewal cron
+   * is broken" on another, and only the config can tell those apart.
+   */
+  pushConfigured: boolean
 }
 
 /** One mailbox's health row — see the module doc's Mailboxes section. */
@@ -154,7 +185,26 @@ export interface HealthReport {
     /** `webauthn_credentials` rows whose `sign_count_regression_at` falls in the last 24h. Any value `> 0` trips the `webauthn-counter-regression` alert. */
     counterRegressionsLast24h: number
   }
+  /**
+   * Whether the database's schema matches what this build expects. See the
+   * module doc's Schema version section — this is the one check that reports
+   * on the DEPLOYMENT rather than on traffic.
+   */
+  schema: {
+    /** Highest migration id in this build (`LATEST_MIGRATION_ID`). */
+    expectedMigrationId: number
+    /** Highest id actually recorded in `_migrations`; `null` when the table does not exist, or exists with no rows. */
+    appliedMigrationId: number | null
+    /** Every migration id this build has that the database does not — empty when in step. A GAP is reported here, not hidden behind `max(id)`. */
+    missing: number[]
+  }
 }
+
+/** Alert code for a database behind the running build — the deploy-without-migrate window. */
+const SCHEMA_BEHIND_ALERT = 'schema-migration-pending'
+
+/** Alert code for a database AHEAD of the running build — a rollback, or a deploy that never shipped. */
+const SCHEMA_AHEAD_ALERT = 'schema-newer-than-build'
 
 /** Every ledger status, for zero-filling {@link HealthReport.ingest}'s per-status map (a status with no 24h rows must still appear, as `0`). */
 const ALL_DELIVERY_STATUSES: InboundDeliveryStatus[] = [
@@ -172,9 +222,144 @@ const ALL_DELIVERY_STATUSES: InboundDeliveryStatus[] = [
  * fails (a down database IS a health-check failure; the endpoint's generic
  * 500 — and the monitor alerting on any non-200 — reports it honestly).
  */
+/**
+ * Read the database's applied-migration state. Split out and run FIRST because
+ * every other check in this module queries an application table, and on a
+ * database that has not been migrated those queries throw — burying the one
+ * diagnostic that would have explained why.
+ *
+ * The ordering is load-bearing and easy to get wrong: a version of this that
+ * runs the migration check later fails exactly the fresh-install case it
+ * exists for, and a test can still pass if it migrates first and drops
+ * `_migrations` afterwards, leaving every other table in place.
+ *
+ * Existence is checked in its OWN statement. A single
+ * `CASE WHEN to_regclass(...) ... ELSE (SELECT max(id) FROM _migrations)`
+ * does not work: Postgres resolves the relation at parse time, so the subquery
+ * errors before the CASE can short-circuit.
+ *
+ * Returns every applied id, not just the highest. `max(id)` alone would call a
+ * database healthy when it holds 1..26 plus 29 and is missing 27 and 28 —
+ * `migrate()`'s single transaction makes that unreachable through the normal
+ * path, but manual repair and hand-edited bookkeeping are exactly when a
+ * health check earns its place.
+ */
+async function readSchemaState(db: Db): Promise<{ applied: number[] | null }> {
+  const table = await db.query<{ exists: string | null }>(
+    `SELECT to_regclass('_migrations')::text AS exists`,
+  )
+  if (table[0]?.exists == null) {
+    return { applied: null }
+  }
+  const rows = await db.query<{ id: number }>('SELECT id FROM _migrations ORDER BY id')
+  return { applied: rows.map((r) => r.id) }
+}
+
+/** Build the schema section + any alert it trips. Pure, so the ordering above stays obvious. */
+function assessSchema(applied: number[] | null): {
+  section: HealthReport['schema']
+  alerts: string[]
+} {
+  const expectedIds = [...MIGRATION_IDS]
+  if (applied === null) {
+    return {
+      section: {
+        expectedMigrationId: LATEST_MIGRATION_ID,
+        appliedMigrationId: null,
+        missing: expectedIds,
+      },
+      alerts: [
+        `${SCHEMA_BEHIND_ALERT}: the database has no _migrations table — it has never been migrated. This build expects migration ${LATEST_MIGRATION_ID}. Run \`npm run migrate\`.`,
+      ],
+    }
+  }
+  const appliedSet = new Set(applied)
+  const missing = expectedIds.filter((id) => !appliedSet.has(id))
+  const highestApplied = applied.length === 0 ? null : applied[applied.length - 1]
+  const section = {
+    expectedMigrationId: LATEST_MIGRATION_ID,
+    appliedMigrationId: highestApplied,
+    missing,
+  }
+  if (missing.length > 0) {
+    // Named individually rather than as "behind by N": a GAP is a different
+    // problem from simply being behind, and the list says which it is.
+    return {
+      section,
+      alerts: [
+        `${SCHEMA_BEHIND_ALERT}: database is missing migration(s) ${missing.join(', ')}; this build expects through ${LATEST_MIGRATION_ID}. Run \`npm run migrate\`. Until then, code paths using the newer schema will fail.`,
+      ],
+    }
+  }
+  if (highestApplied !== null && highestApplied > LATEST_MIGRATION_ID) {
+    return {
+      section,
+      alerts: [
+        `${SCHEMA_AHEAD_ALERT}: database is at migration ${highestApplied} but this build only knows ${LATEST_MIGRATION_ID}. The running deployment is older than the schema — likely a rollback, or a deploy that never shipped.`,
+      ],
+    }
+  }
+  return { section, alerts: [] }
+}
+
 export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthReport> {
   const alerts: string[] = []
 
+  // --- Schema version, FIRST. -----------------------------------------------
+  // Everything below queries an application table; on an un-migrated or older
+  // schema those throw. Knowing the schema state up front is what lets a
+  // failure below be reported as "you have not migrated" instead of a generic
+  // 500 naming whichever table happened to be queried first.
+  const { applied } = await readSchemaState(deps.db)
+  const schemaAssessment = assessSchema(applied)
+  alerts.push(...schemaAssessment.alerts)
+
+  // Everything from here queries an application table. If the schema is behind,
+  // a failure here is EXPLAINED by that, so report the explanation rather than
+  // letting a raw "relation ... does not exist" reach the operator as a 500.
+  // A failure with an in-step schema is a real fault and still propagates.
+  try {
+    return await runTrafficChecks(deps, alerts, schemaAssessment.section)
+  } catch (err) {
+    if (schemaAssessment.alerts.length === 0) {
+      throw err
+    }
+    return {
+      ok: false,
+      alerts: [
+        ...schemaAssessment.alerts,
+        `health-checks-unavailable: the remaining checks could not run against this schema (${err instanceof Error ? err.message : String(err)}).`,
+      ],
+      generatedAt: new Date().toISOString(),
+      queue: { ready: 0, oldestReadyAgeSeconds: null, deadLettered: 0, deadLetteredLast24h: 0 },
+      ingest: { last24hByStatus: emptyStatusCounts(), deadLetterTotal: 0 },
+      forgedTokens: {
+        deliveriesLast24h: 0,
+        tokensLast24h: 0,
+        alertThreshold: FORGED_TOKEN_ALERT_THRESHOLD,
+      },
+      mailboxes: [],
+      webhooks: { autoDisabled: [], deliveryFailuresLast24h: 0 },
+      webauthn: { counterRegressionsLast24h: 0 },
+      schema: schemaAssessment.section,
+    }
+  }
+}
+
+/** Zero-filled per-status map, for the degraded report above. */
+function emptyStatusCounts(): Record<InboundDeliveryStatus, number> {
+  return Object.fromEntries(ALL_DELIVERY_STATUSES.map((k) => [k, 0])) as Record<
+    InboundDeliveryStatus,
+    number
+  >
+}
+
+/** Every check that reads an application table. Split out so the schema guard above can wrap it. */
+async function runTrafficChecks(
+  deps: HealthCheckDeps,
+  alerts: string[],
+  schema: HealthReport['schema'],
+): Promise<HealthReport> {
   // --- Queue. ---------------------------------------------------------------
   const stats = await deps.queue.getStats()
   const deadLetteredLast24hRows = await deps.db.query<{ count: number }>(
@@ -263,7 +448,12 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
           'flowing until an operator acts (runbook Part G)',
       )
     }
-    if (row.status === 'active') {
+    // `watch()` only exists when push is configured (HT-94). With push off, a
+    // NULL expiration is the designed steady state, not a fault — see
+    // `HealthCheckDeps.pushConfigured`. Intake health on a push-free
+    // deployment is covered by the queue alerts above plus the reconcile
+    // sweep's own log line, not by watch state.
+    if (row.status === 'active' && deps.pushConfigured) {
       if (row.expires_in_seconds === null) {
         alerts.push(
           `watch-expiring: mailbox ${row.address} is active but has no Gmail watch() expiration ` +
@@ -343,6 +533,7 @@ export async function runHealthCheck(deps: HealthCheckDeps): Promise<HealthRepor
     mailboxes,
     webhooks: { autoDisabled, deliveryFailuresLast24h },
     webauthn: { counterRegressionsLast24h: webauthnCounterRegressionsLast24h },
+    schema,
   }
 }
 

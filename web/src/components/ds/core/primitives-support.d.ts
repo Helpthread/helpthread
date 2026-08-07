@@ -2,15 +2,15 @@
 export declare const RING: string;
 
 /** Directional chevron glyph. */
-export declare function chevron(dir?: "down" | "up" | "left" | "right", sz?: number): JSX.Element;
+export declare function chevron(dir?: "down" | "up" | "left" | "right", sz?: number): React.JSX.Element;
 
-export declare function IconKey(sz: number): JSX.Element;
-export declare function IconSearch(sz?: number): JSX.Element;
-export declare function IconReply(sz: number): JSX.Element;
-export declare function IconClock(sz: number): JSX.Element;
-export declare function IconPlus(sz?: number): JSX.Element;
-export declare function IconPencil(sz?: number): JSX.Element;
-export declare function IconTrash(sz?: number): JSX.Element;
+export declare function IconKey(sz: number): React.JSX.Element;
+export declare function IconSearch(sz?: number): React.JSX.Element;
+export declare function IconReply(sz: number): React.JSX.Element;
+export declare function IconClock(sz: number): React.JSX.Element;
+export declare function IconPlus(sz?: number): React.JSX.Element;
+export declare function IconPencil(sz?: number): React.JSX.Element;
+export declare function IconTrash(sz?: number): React.JSX.Element;
 
 /** Focusable helper: manages a :focus-visible-like ring via keyboard focus. */
 export declare function useFocusRing(): [boolean, { onFocus: () => void; onBlur: () => void }];

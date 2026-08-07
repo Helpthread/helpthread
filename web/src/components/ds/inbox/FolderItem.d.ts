@@ -9,4 +9,4 @@ export interface FolderItemProps {
   hasItems?: boolean;
   onClick?: () => void;
 }
-export declare function FolderItem(props: FolderItemProps): JSX.Element;
+export declare function FolderItem(props: FolderItemProps): React.JSX.Element;

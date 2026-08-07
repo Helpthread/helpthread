@@ -16,7 +16,7 @@ export const metadata: Metadata = {
  * sent to their own profile instead of a list they have no reason to browse
  * — never an engine 403 rendered as a crash.
  *
- * Moved off `/settings/team` per TJ's 2026-07-18 admin-IA fidelity review
+ * Moved off `/settings/team` per the maintainer's 2026-07-18 admin-IA fidelity review
  * (HT-54): Team management is `Manage ▾`-scoped, not a Settings subpage —
  * the avatar menu carries personal-scope items only (Your Profile, Log out).
  */

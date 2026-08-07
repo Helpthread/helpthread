@@ -283,7 +283,7 @@ export function InboxScreen({
         flexDirection: 'column',
       }}
     >
-      <ToolbarBand>
+      <ToolbarBand style={{ paddingRight: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, width: '100%' }}>
           {selected.size > 0 ? (
             <>
@@ -369,7 +369,6 @@ export function InboxScreen({
                 if (el) rowRefs.current.set(c.id, el)
                 else rowRefs.current.delete(c.id)
               }}
-              style={{ position: 'relative' }}
             >
               <ConversationRow
                 customerName={nameFromEmail(c.customerEmail)}
@@ -379,6 +378,11 @@ export function InboxScreen({
                 count={c.threadCount > 1 ? String(c.threadCount) : ''}
                 number={String(c.number)}
                 time={relativeTime(c.updatedAt)}
+                badge={
+                  c.status === 'pending' ? (
+                    <StatusPill status="pending" style={{ fontSize: 9.5, padding: '1px 7px' }} />
+                  ) : null
+                }
                 showCheckbox={showCheckboxColumn}
                 checked={selected.has(c.id)}
                 onCheck={() => toggleOne(c.id)}
@@ -390,11 +394,6 @@ export function InboxScreen({
                   router.push(`/conversations/${c.id}`)
                 }}
               />
-              {c.status === 'pending' && (
-                <span style={{ position: 'absolute', right: 14, top: 6 }}>
-                  <StatusPill status="pending" style={{ fontSize: 9.5, padding: '1px 7px' }} />
-                </span>
-              )}
             </div>
           ))}
           {cursor !== null && (

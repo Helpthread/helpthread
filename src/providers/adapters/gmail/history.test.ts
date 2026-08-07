@@ -130,7 +130,7 @@ describe('createGmailHistoryClient', () => {
       expect(result).toEqual({ kind: 'ok', messages: [], newHistoryId: 'h-unchanged' })
     })
 
-    // --- Folding in labelsAdded (review round 2, HT-50) — hardening
+    // --- Folding in labelsAdded (HT-50) — hardening
     // against Gmail possibly recording a self-addressed send's SENT and
     // INBOX labels as TWO separate history records instead of one
     // messagesAdded snapshot carrying both. See history.ts's "Folding in

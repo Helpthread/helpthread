@@ -23,7 +23,7 @@ Concrete implementations — **adapters** — live in `src/providers/adapters/<n
 (e.g. `src/providers/adapters/vercel-queues/`). This task defines the
 contracts only; no adapters are built here.
 
-The first real adapter is `src/providers/adapters/gmail/` (HT-19): a Node-runtime
+The first real adapter is `src/providers/adapters/gmail/`: a Node-runtime
 `EmailSender` for `users.messages.send`, built on `mimetext` for raw-MIME
 construction (see its `mime.ts` for the verbatim-`Message-ID` contract and a
 mimetext EOL gotcha) with OAuth2 token acquisition injected via a

@@ -10,16 +10,19 @@
  * fetched server-side in `app/layout.tsx` and handed down as props (no
  * client-side polling, no unread state — that's not in the API yet).
  *
- * ## The three-scope rule (HT-54 fidelity correction, TJ's 2026-07-18
+ * ## The three-scope rule (HT-54 fidelity correction, the maintainer's 2026-07-18
  * admin-IA review)
  *
  * `Manage ▾` is the **global-admin scope's** entry point — admins only, the
- * whole trigger, not just its entries (a non-admin reaches Settings via the
- * folder rail's gear icon instead). It carries Settings and Team (Agents);
- * Keyboard shortcuts lives under Settings now (`SettingsScreen`), not here.
- * The avatar menu is **personal scope, and personal scope only** — Your
- * Profile and Log out, nothing else, ever (the first draft wrongly hung
- * Team management off it; that was the defect this correction fixes).
+ * whole trigger, not just its entries (a non-admin reaches per-mailbox
+ * settings via the folder rail's gear icon instead). It carries Settings,
+ * Team (Agents), and Mailboxes (HT-101: the connected-mailbox LIST —
+ * per-mailbox connection settings are Mailbox-scoped instead, the folder
+ * rail's gear, never here — specs/ui/admin-ia.md §1). Keyboard shortcuts
+ * lives under Settings now (`SettingsScreen`), not here. The avatar menu is
+ * **personal scope, and personal scope only** — Your Profile and Log out,
+ * nothing else, ever. Team management is global admin scope and belongs
+ * under `Manage ▾`, never here.
  */
 
 import Link from 'next/link'
@@ -250,6 +253,14 @@ export function TopBar({
               }}
             >
               Team
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setOpenMenu(null)
+                router.push('/manage/mailboxes')
+              }}
+            >
+              Mailboxes
             </MenuItem>
           </DropdownMenu>
         </div>

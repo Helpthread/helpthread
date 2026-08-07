@@ -114,7 +114,7 @@ export async function revokeToken(options: RevokeTokenOptions): Promise<void> {
 
   if (!response.ok) {
     // The response body is deliberately NEVER read into this error — not
-    // even a bounded snippet (a review fix; a length cap bounds, it does
+    // even a bounded snippet (a length cap bounds, it does
     // not redact). A revocation error body can echo the submitted request
     // back — token included — and anything folded into this message ends up
     // in the caller's failure log (`disconnect`'s `console.error`),

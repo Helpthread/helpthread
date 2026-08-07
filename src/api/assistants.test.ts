@@ -66,6 +66,7 @@ describe('Assistants admin API (HT-70)', () => {
       store: createConversationStore(db),
       apiToken: TOKEN,
       sender,
+      senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
@@ -279,7 +280,7 @@ describe('Assistants admin API (HT-70)', () => {
       expect(res.status).toBe(404)
     })
   })
-  describe('assistant auth failure containment (CodeRabbit #80)', () => {
+  describe('Assistant authentication failure containment (PR #80)', () => {
     it('a store failure during assistant auth returns the controlled 500 envelope, not an uncontrolled throw', async () => {
       const { api, agentStore, assistantStore, db: freshDb } = await freshApi()
       const admin = await createActiveAgent(agentStore)
@@ -297,10 +298,18 @@ describe('Assistants admin API (HT-70)', () => {
           throw new Error('database exploded')
         },
       }
+      // ONE fake sender, used as both the direct `sender` and whatever the
+      // resolver hands back — two independently-constructed fakes meant the
+      // resolver path exercised a transport the test could not observe
+      // (2026-07-31).
+      const fake = createFakeSender().sender
       const failingApi = createInboxApi({
         store: createConversationStore(freshDb),
         apiToken: TOKEN,
-        sender: createFakeSender().sender,
+        sender: fake,
+        senderResolver: {
+          resolve: async () => ({ sender: fake, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,

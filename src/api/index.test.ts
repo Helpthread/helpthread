@@ -6,6 +6,7 @@ import { migrate } from '../db/migrate.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
 import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
 import type { GmailOAuthTokenService } from '../mail/gmail-oauth.js'
+import { ImapConnectError, type ImapConnectService } from '../mail/imap-connect.js'
 import type { Keyring } from '../mail/reply-token.js'
 import type { GmailWatchClient } from '../providers/adapters/gmail/index.js'
 import type {
@@ -257,6 +258,8 @@ describe('createInboxApi', () => {
   async function freshApi(
     overrides: {
       sender?: EmailSender
+      /** Overrides the WHOLE sender resolver (HT-101 Stage 2b-ii) — for tests exercising per-mailbox routing. When omitted, defaults to a resolver that ignores `mailboxId` and always resolves to `overrides.sender ?? defaultSender` + `SUPPORT_ADDRESS`, matching this suite's pre-2b-ii behavior byte-for-byte. */
+      senderResolver?: InboxApiDeps['senderResolver']
       openTracking?: { publicBaseUrl: string }
       gmailPush?: InboxApiDeps['gmailPush']
       gmailConnect?: InboxApiDeps['gmailConnect']
@@ -282,6 +285,12 @@ describe('createInboxApi', () => {
       store,
       apiToken: TOKEN,
       sender: overrides.sender ?? defaultSender,
+      senderResolver: overrides.senderResolver ?? {
+        resolve: async () => ({
+          sender: overrides.sender ?? defaultSender,
+          from: SUPPORT_ADDRESS,
+        }),
+      },
       keyring: KEYRING,
       mailDomain: MAIL_DOMAIN,
       supportAddress: SUPPORT_ADDRESS,
@@ -679,6 +688,76 @@ describe('createInboxApi', () => {
   // --- reply -------------------------------------------------------------------
 
   describe('reply', () => {
+    // --- per-mailbox sender routing (HT-101 Stage 2b-ii) ----------------------
+
+    it("routes a reply through the conversation's OWN mailbox: an imap-mailbox conversation sends via the SMTP sender the resolver returns for it, with that inbox's from-address — not the deployment default", async () => {
+      const imapFromAddress = 'inbox-imap@example.test'
+      const { sender: defaultSender } = createFakeSender()
+      const { sender: imapSender, sent: imapSent } = createFakeSender()
+      const resolvedMailboxIds: (string | null)[] = []
+      // Set AFTER the mailbox is created below — the resolver closure reads
+      // it at CALL time (during the `api(...)` request), not at construction
+      // time, so the forward reference is safe.
+      let imapMailboxId: string | undefined
+      const { db, store, api } = await freshApi({
+        senderResolver: {
+          async resolve(mailboxId) {
+            resolvedMailboxIds.push(mailboxId)
+            if (mailboxId === imapMailboxId) {
+              return { sender: imapSender, from: imapFromAddress }
+            }
+            return { sender: defaultSender, from: SUPPORT_ADDRESS }
+          },
+        },
+      })
+      const mailbox = await createMailboxStore(db).upsertConnectedMailbox({
+        address: imapFromAddress,
+        provider: 'imap',
+      })
+      imapMailboxId = mailbox.id
+      const { conversationId } = await store.createConversation(
+        newConversation({ mailboxId: mailbox.id }),
+      )
+
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+      )
+
+      expect(res.status).toBe(201)
+      expect(resolvedMailboxIds).toEqual([mailbox.id])
+      // Went out through the RESOLVED (imap) sender, not the default one —
+      // and with that mailbox's own address as `from`, not SUPPORT_ADDRESS.
+      expect(imapSent).toHaveLength(1)
+      expect(imapSent[0].from).toBe(imapFromAddress)
+
+      const body = (await res.json()) as { from: string }
+      expect(body.from).toBe(imapFromAddress)
+    })
+
+    it("null mailboxId (a pre-2b-i conversation) resolves through the deployment default — verified via the resolver's own null argument and the from-address on the sent envelope", async () => {
+      const defaultSender = createFakeSender()
+      const resolvedMailboxIds: (string | null)[] = []
+      const { store, api } = await freshApi({
+        senderResolver: {
+          async resolve(mailboxId) {
+            resolvedMailboxIds.push(mailboxId)
+            return { sender: defaultSender.sender, from: SUPPORT_ADDRESS }
+          },
+        },
+      })
+      // newConversation() omits mailboxId entirely — the pre-2b-i shape.
+      const { conversationId } = await store.createConversation(newConversation())
+
+      const res = await api(
+        replyPost(`/api/v1/conversations/${conversationId}/replies`, { text: 'On it!' }),
+      )
+
+      expect(res.status).toBe(201)
+      expect(resolvedMailboxIds).toEqual([null])
+      expect(defaultSender.sent).toHaveLength(1)
+      expect(defaultSender.sent[0].from).toBe(SUPPORT_ADDRESS)
+    })
+
     it('happy path: 201 with the outbound ThreadView; the fake sender received the derived headers verbatim; getConversation shows the outbound thread', async () => {
       const { store, api, sent } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
@@ -741,6 +820,7 @@ describe('createInboxApi', () => {
         store,
         apiToken: TOKEN,
         sender,
+        senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -851,6 +931,7 @@ describe('createInboxApi', () => {
         store: racedStore,
         apiToken: TOKEN,
         sender,
+        senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -959,7 +1040,7 @@ describe('createInboxApi', () => {
       expect(sent).toHaveLength(0)
     })
 
-    it('an Idempotency-Key starting with the reserved draft: prefix is 400 validation_failed (HT-70 review fix — a raw reply key could otherwise collide with an engine-owned draft key of the same name)', async () => {
+    it('an Idempotency-Key starting with the reserved draft: prefix is 400 validation_failed (HT-70 — a raw reply key could otherwise collide with an engine-owned draft key of the same name)', async () => {
       const { store, api, sent } = await freshApi()
       const { conversationId } = await store.createConversation(newConversation())
 
@@ -1077,6 +1158,7 @@ describe('createInboxApi', () => {
         store: realStore,
         apiToken: TOKEN,
         sender,
+        senderResolver: { resolve: async () => ({ sender, from: SUPPORT_ADDRESS }) },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -1156,7 +1238,7 @@ describe('createInboxApi', () => {
         ])
       })
 
-      // --- closed/spam-reopen interaction (F2 review fix) -----------------
+      // --- closed/spam-reopen interaction (F2) -----------------
       //
       // A reply to a closed/spam conversation reopens it SILENTLY (§4a's own
       // reopen rule — no event of its own), so thenSetStatus's `from` is
@@ -2269,6 +2351,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2303,6 +2388,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2441,6 +2529,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2677,6 +2768,9 @@ describe('createInboxApi', () => {
         store: createConversationStore(db),
         apiToken: TOKEN,
         sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
         keyring: KEYRING,
         mailDomain: MAIL_DOMAIN,
         supportAddress: SUPPORT_ADDRESS,
@@ -2766,9 +2860,239 @@ describe('createInboxApi', () => {
       expect(res.status).toBe(401)
     })
   })
+
+  // --- imap connect (HT-101 Stage 2a-ii) --------------------------------------
+  //
+  // Focused on the WIRING contract createInboxApi owns: both `POST
+  // .../imap/connect` and `POST .../imap/check` are ORDINARY Bearer-gated
+  // routes (no pre-auth carve-out at all — mirrors the "gmail disconnect"
+  // block above, not the "gmail connect" block's pre-auth callback), and
+  // `deps.imapConnect` absence 404s both. Handler-level response-shape
+  // details (body validation, error-code mapping) live in
+  // `src/api/imap-connect.test.ts` — this block does not re-derive those.
+  describe('imap connect', () => {
+    const CONNECT_PATH = '/api/v1/inbound/imap/connect'
+    const CHECK_PATH = '/api/v1/inbound/imap/check'
+
+    const VALID_BODY = {
+      address: 'support@example.test',
+      imapHost: 'imap.example.test',
+      imapPort: 993,
+      smtpHost: 'smtp.example.test',
+      smtpPort: 465,
+      username: 'support@example.test',
+      password: 'app-password',
+    }
+
+    /** A fake `ImapConnectService` — no real network, no real DB (that contract is `src/mail/imap-connect.test.ts`'s job). */
+    function fakeImapConnect(
+      overrides: Partial<ImapConnectService> = {},
+    ): InboxApiDeps['imapConnect'] {
+      const service: ImapConnectService = {
+        connect:
+          overrides.connect ??
+          (async () => ({
+            id: 'mb-1',
+            address: VALID_BODY.address,
+            provider: 'imap',
+            status: 'active',
+          })),
+        checkConnection:
+          overrides.checkConnection ?? (async () => ({ imap: { ok: true }, smtp: { ok: true } })),
+      }
+      return {
+        service,
+        configStore: { upsertConfig: async () => {}, getConfig: async () => null },
+        mailboxStore: {
+          getMailboxByAddress: async () => null,
+          getMailboxById: async () => null,
+          markNeedsReconnect: async () => {},
+          markPaused: async () => {},
+          markDisconnected: async () => {},
+          upsertConnectedMailbox: async (input) => ({
+            id: 'mb-1',
+            address: input.address,
+            provider: input.provider,
+            status: 'active',
+          }),
+          listActiveMailboxes: async () => [],
+          listMailboxes: async () => [],
+        },
+      }
+    }
+
+    /** Build a full `createInboxApi` instance wired to `db`, with `imapConnect` present (or, if omitted, absent entirely — for the "not configured" tests). */
+    function apiWithImapConnect(
+      db: Db,
+      imapConnect?: InboxApiDeps['imapConnect'],
+    ): (request: Request) => Promise<Response> {
+      return createInboxApi({
+        store: createConversationStore(db),
+        apiToken: TOKEN,
+        sender: createFakeSender().sender,
+        senderResolver: {
+          resolve: async () => ({ sender: createFakeSender().sender, from: SUPPORT_ADDRESS }),
+        },
+        keyring: KEYRING,
+        mailDomain: MAIL_DOMAIN,
+        supportAddress: SUPPORT_ADDRESS,
+        agents: testAgentsDeps(db),
+        webhooks: testWebhooksDeps(db),
+        assistants: testAssistantsDeps(db),
+        savedReplies: testSavedRepliesDeps(db),
+        ...(imapConnect !== undefined ? { imapConnect } : {}),
+      })
+    }
+
+    /**
+     * Create a real, active ADMIN Agent — both IMAP routes are admin-gated
+     * (HT-101, 2026-07-31), so the Bearer token alone no longer
+     * reaches the handler.
+     */
+    async function adminAgentId(db: Db): Promise<string> {
+      const result = await createAgentStore(db).createAgent({
+        name: 'IMAP Admin',
+        email: 'imap-admin@example.test',
+        role: 'admin',
+        status: 'active',
+        passwordHash: 'scrypt$unused',
+      })
+      if (!result.ok) throw new Error('expected ok')
+      return result.agent.id
+    }
+
+    /** Like {@link post}, additionally acting as `agentId`. */
+    function postAsAgent(path: string, body: unknown, agentId: string): Request {
+      const request = post(path, body)
+      const headers = new Headers(request.headers)
+      headers.set('X-Helpthread-Agent-Id', agentId)
+      return new Request(request.url, {
+        method: request.method,
+        headers,
+        body: JSON.stringify(body),
+      })
+    }
+
+    it('POST .../imap/connect with a valid Bearer token AND an admin acting Agent dispatches to the service: 200 with the mailbox', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(postAsAgent(CONNECT_PATH, VALID_BODY, await adminAgentId(db)))
+
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { address: string }
+      expect(body.address).toBe(VALID_BODY.address)
+    })
+
+    // The Bearer token alone is NOT sufficient for either route: both make the
+    // server dial an operator-supplied host:port, so they require an admin
+    // acting Agent on top of service authentication.
+    it.each([
+      ['connect', CONNECT_PATH],
+      ['check', CHECK_PATH],
+    ])(
+      'POST .../imap/%s with a valid Bearer token but NO acting Agent → 401',
+      async (_name, path) => {
+        const { db } = await freshApi()
+        const api = apiWithImapConnect(db, fakeImapConnect())
+
+        const res = await api(post(path, VALID_BODY))
+
+        expect(res.status).toBe(401)
+      },
+    )
+
+    it('POST .../imap/connect WITHOUT a Bearer token → 401, before the handler ever runs', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(post(CONNECT_PATH, VALID_BODY, undefined))
+      expect(res.status).toBe(401)
+    })
+
+    it('deps.imapConnect absent: POST .../imap/connect 404s (no route-table special case needed — Bearer-gated either way)', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db) // no imapConnect
+
+      const res = await api(post(CONNECT_PATH, VALID_BODY))
+      expect(res.status).toBe(404)
+    })
+
+    it('POST .../imap/check with a valid Bearer token AND an admin acting Agent dispatches to the service: 200 with per-leg results', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(postAsAgent(CHECK_PATH, VALID_BODY, await adminAgentId(db)))
+
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ imap: { ok: true }, smtp: { ok: true } })
+    })
+
+    it('POST .../imap/check WITHOUT a Bearer token → 401', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(post(CHECK_PATH, VALID_BODY, undefined))
+      expect(res.status).toBe(401)
+    })
+
+    it('deps.imapConnect absent: POST .../imap/check 404s', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db) // no imapConnect
+
+      const res = await api(post(CHECK_PATH, VALID_BODY))
+      expect(res.status).toBe(404)
+    })
+
+    // Acts as an ADMIN deliberately. Sending these unauthenticated made both
+    // calls 401 and the assertions pass vacuously — a handler that echoed the
+    // password in a 200 body would not have been caught (2026-07-31).
+    // The point of this test is the SUCCESS path's body, so it has to reach it.
+    it('never echoes the password anywhere in either response body', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+      const agentId = await adminAgentId(db)
+
+      const connectRes = await api(postAsAgent(CONNECT_PATH, VALID_BODY, agentId))
+      const checkRes = await api(postAsAgent(CHECK_PATH, VALID_BODY, agentId))
+
+      // Guard the guard: if these stop being 2xx the assertions below go
+      // vacuous again, and silently.
+      expect(connectRes.status).toBe(200)
+      expect(checkRes.status).toBe(200)
+      expect(await connectRes.text()).not.toContain(VALID_BODY.password)
+      expect(await checkRes.text()).not.toContain(VALID_BODY.password)
+    })
+
+    it('never echoes the password in a 4xx body either — the failure path an operator actually sees', async () => {
+      const { db } = await freshApi()
+      const failing = fakeImapConnect({
+        connect: async () => {
+          throw new ImapConnectError(
+            'imap_failed',
+            'Could not verify the IMAP connection: bad login',
+          )
+        },
+      })
+      const api = apiWithImapConnect(db, failing)
+
+      const res = await api(postAsAgent(CONNECT_PATH, VALID_BODY, await adminAgentId(db)))
+
+      expect(res.status).toBe(422)
+      expect(await res.text()).not.toContain(VALID_BODY.password)
+    })
+
+    it('existing routes are unaffected: /api/v1/conversations still 401s without a token', async () => {
+      const { db } = await freshApi()
+      const api = apiWithImapConnect(db, fakeImapConnect())
+
+      const res = await api(get('/api/v1/conversations', undefined))
+      expect(res.status).toBe(401)
+    })
+  })
 })
 
-describe('createInboxApi — hardening (Codex review)', () => {
+describe('createInboxApi — hardening', () => {
   const dummyStore = {} as unknown as ConversationStore
   const dummySender = createThrowingSender()
   // None of these tests ever exercise an /agents/*|/auth/* route, so a
@@ -2776,6 +3100,7 @@ describe('createInboxApi — hardening (Codex review)', () => {
   // construction-time validation and the conversations-route error paths.
   const dummyDeps = {
     sender: dummySender,
+    senderResolver: { resolve: async () => ({ sender: dummySender, from: SUPPORT_ADDRESS }) },
     keyring: KEYRING,
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,

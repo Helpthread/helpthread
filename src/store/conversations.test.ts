@@ -109,6 +109,15 @@ async function setSnoozedUntil(db: Db, conversationId: string, snoozedUntil: Dat
   ])
 }
 
+/** Insert a `mailboxes` row directly (HT-101 Stage 2b-i) — `conversations.mailbox_id` is a real FK, and creating mailboxes is not this store's concern. */
+async function createMailbox(db: Db, address = 'support@example.test'): Promise<string> {
+  const rows = await db.query<{ id: string }>(
+    "INSERT INTO mailboxes (address, provider) VALUES ($1, 'gmail') RETURNING id",
+    [address],
+  )
+  return rows[0].id
+}
+
 // --- suite ---------------------------------------------------------------------
 
 describe('createConversationStore', () => {
@@ -150,6 +159,25 @@ describe('createConversationStore', () => {
       bodyText: 'Where is my order?',
     })
     expect(conversation?.threads[0].createdAt).toBeInstanceOf(Date)
+  })
+
+  it('createConversation persists a supplied mailboxId; getConversation round-trips it as StoredConversation.mailboxId (HT-101 Stage 2b-i)', async () => {
+    const { db, store } = await freshStore()
+    const mailboxId = await createMailbox(db)
+
+    const { conversationId } = await store.createConversation(newConversation({ mailboxId }))
+    const conversation = await store.getConversation(conversationId)
+
+    expect(conversation?.mailboxId).toBe(mailboxId)
+  })
+
+  it('createConversation defaults mailboxId to NULL when omitted', async () => {
+    const { store } = await freshStore()
+
+    const { conversationId } = await store.createConversation(newConversation())
+    const conversation = await store.getConversation(conversationId)
+
+    expect(conversation?.mailboxId).toBeNull()
   })
 
   it('getConversation returns null for a conversation that does not exist', async () => {
@@ -1027,7 +1055,7 @@ describe('createConversationStore', () => {
       expect(await store.claimThreadForDelivery(threadId, 30_000)).toBeNull()
     })
 
-    // --- HT-16 CodeRabbit fix: claim re-checks delivery_status, not just the lease ---
+    // --- HT-16 fix: claim re-checks delivery_status, not just the lease ---
 
     it('claimThreadForDelivery returns null for a row already marked "sent", even with a free lease (closes the sent-row reclaim double-send)', async () => {
       const { store } = await freshStore()
@@ -1721,7 +1749,7 @@ describe('createConversationStore', () => {
         expect(resolved.draftResolvedAt).toBeInstanceOf(Date)
       })
 
-      it('approve on a CLOSED conversation reopens it to active (HT-70 review fix — the normal reply-reopen rule applies at approval time)', async () => {
+      it('approve on a CLOSED conversation reopens it to active (HT-70 — the normal reply-reopen rule applies at approval time)', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)
         const agentId = await createTestAgent(db)
@@ -1802,7 +1830,7 @@ describe('createConversationStore', () => {
         expect((await store.getConversation(conversationId))?.status).toBe('pending')
       })
 
-      it('approve on a DELETED conversation is refused (conversation-deleted), leaving the draft row completely untouched (HT-70 review fix, Codex — the TOCTOU close)', async () => {
+      it('approve on a DELETED conversation is refused (conversation-deleted), leaving the draft row completely untouched (HT-70 — the TOCTOU close)', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)
         const agentId = await createTestAgent(db)
@@ -1837,7 +1865,7 @@ describe('createConversationStore', () => {
         })
       })
 
-      it('approve on a SPAM conversation is refused (conversation-spam), leaving the draft row completely untouched (HT-70 review fix, Codex — the TOCTOU close)', async () => {
+      it('approve on a SPAM conversation is refused (conversation-spam), leaving the draft row completely untouched (HT-70 — the TOCTOU close)', async () => {
         const { store, db } = await freshStore()
         const assistantId = await createTestAssistant(db)
         const agentId = await createTestAgent(db)
@@ -2276,6 +2304,16 @@ describe('createConversationStore', () => {
         expect(await store.getConversationByThreadId(RANDOM_UUID)).toBeNull()
       })
 
+      it('round-trips mailboxId (HT-101 Stage 2b-i)', async () => {
+        const { store, db } = await freshStore()
+        const mailboxId = await createMailbox(db)
+        const { threadId } = await store.createConversation(newConversation({ mailboxId }))
+
+        const conversation = await store.getConversationByThreadId(threadId)
+
+        expect(conversation?.mailboxId).toBe(mailboxId)
+      })
+
       it('with includeDeleted: false, a thread on a soft-deleted conversation is indistinguishable from unknown', async () => {
         const { store } = await freshStore()
         const { conversationId, threadId } = await store.createConversation(newConversation())
@@ -2478,7 +2516,7 @@ describe('createConversationStore', () => {
       expect(events[0].data).toEqual({ threadId: sentThread.threadId, authorKind: 'agent' })
     })
 
-    it("a thread stranded 'pending'/claimed when its conversation is soft-deleted still delivers ('sent' recorded) but fires NO event (spec §4's absolute soft-delete exclusion, review fix)", async () => {
+    it("a thread stranded 'pending'/claimed when its conversation is soft-deleted still delivers ('sent' recorded) but fires NO event (spec §4's absolute soft-delete exclusion)", async () => {
       const { db, store } = await freshStore()
       const { conversationId } = await store.createConversation(newConversation())
       const strandedThread = await store.appendThread(conversationId, newThread())

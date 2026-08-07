@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from './client.js'
-import { migrate } from './migrate.js'
+import {
+  MIGRATION_027_LOCK_DOWN_DATA_API as MIGRATION_027_SQL,
+  migrate,
+  splitStatements,
+} from './migrate.js'
 
 describe('migrate', () => {
   let db: Db | undefined
@@ -66,6 +70,13 @@ describe('migrate', () => {
       { id: 24, name: 'saved_replies' },
       { id: 25, name: 'conversation_snooze' },
       { id: 26, name: 'webauthn' },
+      { id: 27, name: 'lock_down_data_api' },
+      { id: 28, name: 'imap_transport' },
+      { id: 29, name: 'conversation_mailbox_id' },
+      { id: 30, name: 'module_deployer' },
+      { id: 31, name: 'webhook_endpoints_url_unique' },
+      { id: 32, name: 'module_install_credential_escrow' },
+      { id: 33, name: 'module_installs_cleanup_pending_state' },
     ])
   })
 
@@ -102,6 +113,13 @@ describe('migrate', () => {
       { id: 24 },
       { id: 25 },
       { id: 26 },
+      { id: 27 },
+      { id: 28 },
+      { id: 29 },
+      { id: 30 },
+      { id: 31 },
+      { id: 32 },
+      { id: 33 },
     ])
   })
 
@@ -1415,6 +1433,73 @@ describe('migrate', () => {
     ).resolves.toBeDefined()
   })
 
+  it('migration 031 de-duplicates existing webhook_endpoints rows sharing a url — keeping the newest, disabling and renaming the rest — before creating the unique index, and the index then refuses a fresh duplicate', async () => {
+    db = await createPgliteDb()
+    // Stop short of 031 so duplicate urls can be inserted without the
+    // unique index (added by 031 itself) refusing them.
+    await migrate(db, { throughId: 30 })
+
+    const sharedUrl = 'https://example.test/shared-hook'
+    // Three rows racing for the same url, at three distinct created_at
+    // times set explicitly — never relying on insertion order or on two
+    // `now()` calls landing in different milliseconds (PGlite's clock is
+    // millisecond-only and can tie).
+    const [oldest] = await db.query<{ id: string }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext, created_at)
+       VALUES ($1, $2, '2026-01-01T00:00:00Z') RETURNING id`,
+      [sharedUrl, new Uint8Array([1])],
+    )
+    const [middle] = await db.query<{ id: string }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext, created_at)
+       VALUES ($1, $2, '2026-01-02T00:00:00Z') RETURNING id`,
+      [sharedUrl, new Uint8Array([2])],
+    )
+    const [newest] = await db.query<{ id: string }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext, created_at)
+       VALUES ($1, $2, '2026-01-03T00:00:00Z') RETURNING id`,
+      [sharedUrl, new Uint8Array([3])],
+    )
+    // A control row at a DIFFERENT url — must survive untouched.
+    const [control] = await db.query<{ id: string }>(
+      `INSERT INTO webhook_endpoints (url, secret_ciphertext) VALUES ($1, $2) RETURNING id`,
+      ['https://example.test/other-hook', new Uint8Array([4])],
+    )
+
+    // Applying 031 must not throw — the pre-existing duplicates are
+    // resolved before the unique index is created.
+    await migrate(db)
+
+    const rows = await db.query<{ id: string; url: string; status: string }>(
+      'SELECT id, url, status FROM webhook_endpoints ORDER BY created_at NULLS LAST',
+    )
+    const byId = new Map(rows.map((r) => [r.id, r]))
+
+    // The newest row keeps the original url and stays active.
+    expect(byId.get(newest.id)).toMatchObject({ url: sharedUrl, status: 'active' })
+
+    // The older two are disabled and their url is rewritten with a
+    // `#duplicate-<id>` suffix — renamed, not deleted.
+    expect(byId.get(oldest.id)?.status).toBe('disabled')
+    expect(byId.get(oldest.id)?.url).toBe(`${sharedUrl}#duplicate-${oldest.id}`)
+    expect(byId.get(middle.id)?.status).toBe('disabled')
+    expect(byId.get(middle.id)?.url).toBe(`${sharedUrl}#duplicate-${middle.id}`)
+
+    // The control row (a different url entirely) is untouched.
+    expect(byId.get(control.id)).toMatchObject({
+      url: 'https://example.test/other-hook',
+      status: 'active',
+    })
+
+    // The index now backs a real constraint: a FRESH insert at the
+    // already-used url is refused.
+    await expect(
+      db.query(`INSERT INTO webhook_endpoints (url, secret_ciphertext) VALUES ($1, $2)`, [
+        sharedUrl,
+        new Uint8Array([5]),
+      ]),
+    ).rejects.toThrow()
+  })
+
   it('migration 023 creates event_outbox keyed by event_id, ties conversation_id to a real conversation via FK cascade, and defaults dispatched_at to NULL', async () => {
     db = await createPgliteDb()
     await migrate(db)
@@ -1521,5 +1606,330 @@ describe('migrate', () => {
     await expect(
       db.query(`UPDATE conversations SET status = 'active' WHERE id = $1`, [row.id]),
     ).rejects.toThrow()
+  })
+
+  it('migration 027 enables RLS on every table in public — no table is left open to the PostgREST anon role', async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+
+    const open = await db.query<{ relname: string }>(
+      `SELECT c.relname
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity
+        ORDER BY c.relname`,
+    )
+
+    // Named rather than counted: a future migration that adds a table and
+    // forgets `ENABLE ROW LEVEL SECURITY` shows up here by name.
+    expect(open.map((row) => row.relname)).toEqual([])
+
+    // And the set is non-empty, so the assertion above cannot pass vacuously
+    // by matching zero tables.
+    const [{ n }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity`,
+    )
+    expect(n).toBeGreaterThan(0)
+  })
+
+  it("migration 027's role-guarded revokes are a no-op where anon/authenticated do not exist — migrate() succeeds on PGlite", async () => {
+    db = await createPgliteDb()
+
+    // PGlite has no Supabase roles, so an UNGUARDED `REVOKE ... FROM anon`
+    // would abort the whole migration transaction. Proving the premise
+    // first keeps this test honest if PGlite ever ships those roles.
+    const roles = await db.query<{ rolname: string }>(
+      `SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')`,
+    )
+    expect(roles).toEqual([])
+
+    await expect(migrate(db)).resolves.toBeUndefined()
+
+    const [applied] = await db.query<{ name: string }>('SELECT name FROM _migrations WHERE id = 27')
+    expect(applied.name).toBe('lock_down_data_api')
+  })
+
+  it("migration 027 actually revokes the grants when anon/authenticated DO exist — the guard's other branch", async () => {
+    db = await createPgliteDb()
+
+    // The role-present branch is the one that runs in production and the one
+    // no other test reaches: PGlite has no Supabase roles, so without this
+    // setup every assertion about REVOKE would pass vacuously. Creating the
+    // roles first is what makes the DO block's body execute at all.
+    await db.query('CREATE ROLE anon NOLOGIN')
+    await db.query('CREATE ROLE authenticated NOLOGIN')
+
+    await migrate(db)
+
+    // Stock-Supabase shape: grant the roles everything on every table, the
+    // exact state migration 027 exists to undo. Applied AFTER migrate() so
+    // it models a re-grant, then re-run the migration over it.
+    await db.query('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated')
+    // A default-ACL entry too, so the ALTER DEFAULT PRIVILEGES half has
+    // something to undo — `GRANT ALL ON ALL TABLES` does not create one, and
+    // without this the pg_default_acl assertion below counts 0 out of an
+    // empty table and would pass with every ALTER DEFAULT PRIVILEGES
+    // statement deleted from the migration.
+    await db.query('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon')
+    const [{ n: granted }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.role_table_grants
+        WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
+    )
+    expect(granted).toBeGreaterThan(0)
+    const [{ n: seededDefaults }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_default_acl`,
+    )
+    expect(seededDefaults).toBeGreaterThan(0)
+
+    // Re-running 027's body must strip them back off.
+    await db.query('DELETE FROM _migrations WHERE id = 27')
+    await migrate(db)
+
+    const [{ n: remaining }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.role_table_grants
+        WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
+    )
+    expect(remaining).toBe(0)
+
+    // And the roles genuinely cannot reach the sensitive tables.
+    const [privs] = await db.query<{ sel: boolean; ins: boolean }>(
+      `SELECT has_table_privilege('anon', 'public.mailbox_oauth_tokens', 'SELECT') AS sel,
+              has_table_privilege('anon', 'public.agents', 'INSERT') AS ins`,
+    )
+    expect(privs).toEqual({ sel: false, ins: false })
+
+    // The ALTER DEFAULT PRIVILEGES half leaves no table grant to count, so
+    // assert it directly against the entry seeded above.
+    const [{ n: defaults }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM pg_default_acl d
+         JOIN pg_namespace n ON n.oid = d.defaclnamespace
+        WHERE n.nspname = 'public'
+          AND array_to_string(d.defaclacl, ',') ~ '(^|,)(anon|authenticated)='`,
+    )
+    expect(defaults).toBe(0)
+  })
+
+  it("migration 027 revokes where the tables actually are, not merely at search_path's first entry", async () => {
+    db = await createPgliteDb()
+    await db.query('CREATE ROLE anon NOLOGIN')
+    await db.query('CREATE ROLE authenticated NOLOGIN')
+    await migrate(db)
+    await db.query('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated')
+    const [{ n: granted }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.role_table_grants
+        WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
+    )
+    expect(granted).toBeGreaterThan(0)
+
+    // What this pins down: the revokes must target the schema HOLDING the
+    // tables, which is what the unqualified `ALTER TABLE`s above resolve to
+    // (search_path scanned for a schema containing the name) — not
+    // `current_schema()`, merely search_path's first existing entry.
+    //
+    // Scope honestly: this is defence, not a reproduction of a live bug.
+    // Reaching the divergent state through `migrate()` is not possible today,
+    // because `migrate()`'s own `CREATE TABLE IF NOT EXISTS _migrations` uses
+    // creation semantics (current_schema()), so a shadowed search_path makes
+    // it land in the decoy, read zero applied rows, and re-bootstrap every
+    // table there — after which both rules agree on the decoy. The divergence
+    // needs `_migrations` in one schema and the app tables in another, which
+    // no code path here produces. So the body is replayed directly: this
+    // guards the migration's own resolution rule against a future caller that
+    // does create that state — the shape this resolution rule exists to
+    // handle.
+    await db.query('CREATE SCHEMA decoy')
+    await db.query('SET search_path TO decoy, public')
+    const [{ first }] = await db.query<{ first: string }>('SELECT current_schema() AS first')
+    expect(first).toBe('decoy')
+
+    // Assert the anchor before slicing: `indexOf` returning -1 would make
+    // `slice(-1)` yield the last character of the migration, quietly turning
+    // this into a test of a stray newline.
+    const doBlockStart = MIGRATION_027_SQL.indexOf('DO $migration027$')
+    expect(doBlockStart).toBeGreaterThan(-1)
+    await db.query(MIGRATION_027_SQL.slice(doBlockStart))
+
+    const [{ n: remaining }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.role_table_grants
+        WHERE table_schema = 'public' AND grantee IN ('anon', 'authenticated')`,
+    )
+    expect(remaining).toBe(0)
+  })
+
+  it('migration 027 closes privileges held via the PUBLIC pseudo-role, not just those granted to anon by name', async () => {
+    db = await createPgliteDb()
+    await db.query('CREATE ROLE anon NOLOGIN')
+    await db.query('CREATE ROLE authenticated NOLOGIN')
+    await migrate(db)
+
+    // A PUBLIC grant is held by every role, so `REVOKE ... FROM anon` has no
+    // ACL entry to strip and anon keeps the privilege regardless. Counting
+    // only direct grants therefore reports a lockdown that did not happen.
+    await db.query('GRANT SELECT ON public.conversations TO PUBLIC')
+    const [before] = await db.query<{ reachable: boolean; direct: number }>(
+      `SELECT has_table_privilege('anon', 'public.conversations', 'SELECT') AS reachable,
+              (SELECT count(*)::int FROM information_schema.role_table_grants
+                WHERE table_schema = 'public' AND grantee = 'anon') AS direct`,
+    )
+    // The precondition that makes this test meaningful: reachable by anon,
+    // yet invisible to a direct-grants-only check.
+    expect(before).toEqual({ reachable: true, direct: 0 })
+
+    const doBlockStart = MIGRATION_027_SQL.indexOf('DO $migration027$')
+    expect(doBlockStart).toBeGreaterThan(-1)
+    await db.query(MIGRATION_027_SQL.slice(doBlockStart))
+
+    const [after] = await db.query<{ reachable: boolean }>(
+      `SELECT has_table_privilege('anon', 'public.conversations', 'SELECT') AS reachable`,
+    )
+    expect(after.reachable).toBe(false)
+  })
+
+  it('migration 029 adds conversations.mailbox_id: no backfill for pre-existing rows, real FK to mailboxes, ON DELETE RESTRICT', async () => {
+    const database = await createPgliteDb()
+    db = database
+
+    // Apply only through migration 28, then write a conversation the way a
+    // pre-029 deployment would have — no mailbox_id column yet.
+    await migrate(database, { throughId: 28 })
+    const [existing] = await database.query<{ id: string }>(
+      'INSERT INTO conversations (customer_email) VALUES ($1) RETURNING id',
+      ['customer@example.test'],
+    )
+
+    await expect(migrate(database)).resolves.toBeUndefined()
+
+    // No backfill: the pre-existing row reads NULL, exactly the value
+    // Stage 2b-ii's send path treats as "use the deployment default sender."
+    const [row] = await database.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(row.mailbox_id).toBeNull()
+
+    // Setting a real mailbox works.
+    const [mailbox] = await database.query<{ id: string }>(
+      `INSERT INTO mailboxes (address, provider) VALUES ('support@example.test', 'gmail') RETURNING id`,
+    )
+    await database.query('UPDATE conversations SET mailbox_id = $1 WHERE id = $2', [
+      mailbox.id,
+      existing.id,
+    ])
+
+    // Deleting that mailbox is REFUSED, not silently un-set. `SET NULL` would
+    // overload NULL's existing "predates the column, use the deployment
+    // default" meaning with "had an inbox, it was deleted" — indistinguishable
+    // afterwards, so every in-flight reply on this conversation would go out
+    // from a different From: address with no error. See the migration's doc.
+    await expect(
+      database.query('DELETE FROM mailboxes WHERE id = $1', [mailbox.id]),
+    ).rejects.toThrow()
+
+    // ...and the conversation still points at its own inbox.
+    const [afterDelete] = await database.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [existing.id],
+    )
+    expect(afterDelete.mailbox_id).toBe(mailbox.id)
+
+    // A nonexistent mailbox id violates the FK.
+    await expect(
+      database.query('UPDATE conversations SET mailbox_id = $1 WHERE id = $2', [
+        '00000000-0000-0000-0000-000000000000',
+        existing.id,
+      ]),
+    ).rejects.toThrow()
+  })
+})
+
+describe('splitStatements', () => {
+  // The scanner replaced a naive `sql.split(';')`. Every case below is a
+  // string where the two disagree, or where a plausible scanner bug would
+  // show up — the old implementation is not a safety net here.
+
+  it('splits on semicolons outside any quoting context, trimming and dropping empties', () => {
+    expect(splitStatements('SELECT 1; SELECT 2;')).toEqual(['SELECT 1', 'SELECT 2'])
+    expect(splitStatements('  ;;  SELECT 1 ;; ')).toEqual(['SELECT 1'])
+    expect(splitStatements('')).toEqual([])
+    // A trailing statement with no terminating semicolon still comes back.
+    expect(splitStatements('SELECT 1')).toEqual(['SELECT 1'])
+  })
+
+  it('does not split on a semicolon inside a dollar-quoted body', () => {
+    expect(splitStatements('DO $$ BEGIN a; b; END $$; SELECT 1;')).toEqual([
+      'DO $$ BEGIN a; b; END $$',
+      'SELECT 1',
+    ])
+  })
+
+  it('closes a dollar-quoted body only on its exact tag, so a nested $$ does not end it', () => {
+    expect(splitStatements('DO $outer$ x $$ y; z $$ w $outer$; SELECT 1;')).toEqual([
+      'DO $outer$ x $$ y; z $$ w $outer$',
+      'SELECT 1',
+    ])
+  })
+
+  it('treats $1 placeholders as ordinary text, not as a dollar-quote tag', () => {
+    // A tag may not start with a digit. If it did, everything after `$1`
+    // would be swallowed as a quoted body and the split would be lost.
+    expect(splitStatements('SELECT $1; SELECT $2;')).toEqual(['SELECT $1', 'SELECT $2'])
+  })
+
+  it('does not split on a semicolon inside a string literal or a quoted identifier', () => {
+    expect(splitStatements("SELECT 'a;b'; SELECT 2;")).toEqual(["SELECT 'a;b'", 'SELECT 2'])
+    expect(splitStatements('SELECT "we;ird"; SELECT 2;')).toEqual(['SELECT "we;ird"', 'SELECT 2'])
+  })
+
+  it("treats a doubled '' as an escaped quote rather than a close", () => {
+    expect(splitStatements("SELECT 'it''s; fine'; SELECT 2;")).toEqual([
+      "SELECT 'it''s; fine'",
+      'SELECT 2',
+    ])
+  })
+
+  it('honours backslash escapes inside an E-string, so an escaped quote does not close it', () => {
+    // The regression this guards: the plain-quote branch would stop at the
+    // backslash-escaped quote and split mid-literal into invalid fragments.
+    expect(splitStatements("SELECT E'a\\';b'; SELECT 2;")).toEqual(["SELECT E'a\\';b'", 'SELECT 2'])
+  })
+
+  it('does not mistake an identifier ending in e for the start of an E-string', () => {
+    // `table'...'` is not an escape string; firing there would swallow the
+    // following semicolon and merge two statements into one.
+    expect(splitStatements("SELECT nappe'x;y'; SELECT 2;")).toEqual([
+      "SELECT nappe'x;y'",
+      'SELECT 2',
+    ])
+  })
+
+  it('ignores a semicolon inside a line comment, and a -- inside a string literal', () => {
+    expect(splitStatements('SELECT 1 -- a; b\n; SELECT 2;')).toEqual([
+      'SELECT 1 -- a; b',
+      'SELECT 2',
+    ])
+    expect(splitStatements("SELECT 'a -- b'; SELECT 2;")).toEqual(["SELECT 'a -- b'", 'SELECT 2'])
+  })
+
+  it('counts nested block comments, so an inner close does not end the outer one', () => {
+    expect(splitStatements('SELECT 1 /* a /* b; */ c; */ ; SELECT 2;')).toEqual([
+      'SELECT 1 /* a /* b; */ c; */',
+      'SELECT 2',
+    ])
+  })
+
+  it('consumes to end of input on an unterminated quote or comment rather than looping', () => {
+    expect(splitStatements("SELECT 'unterminated; still going")).toEqual([
+      "SELECT 'unterminated; still going",
+    ])
+    expect(splitStatements('SELECT 1 /* unterminated; still going')).toEqual([
+      'SELECT 1 /* unterminated; still going',
+    ])
+    expect(splitStatements('DO $x$ unterminated; still going')).toEqual([
+      'DO $x$ unterminated; still going',
+    ])
   })
 })

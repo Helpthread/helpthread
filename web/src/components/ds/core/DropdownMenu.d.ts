@@ -6,4 +6,4 @@ export interface DropdownMenuProps {
   minWidth?: number;
   children: React.ReactNode;
 }
-export declare function DropdownMenu(props: DropdownMenuProps): JSX.Element;
+export declare function DropdownMenu(props: DropdownMenuProps): React.JSX.Element;

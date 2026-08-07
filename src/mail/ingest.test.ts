@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPgliteDb, type Db, type Queryable } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
-import type { BlobStore, RawInboundMessage } from '../providers/index.js'
+import type { BlobStore, ProviderSpamVerdict, RawInboundMessage } from '../providers/index.js'
 import { createThreadAttachmentStore } from '../store/attachments.js'
 import { createInboundDeliveryStore } from '../store/inbound-deliveries.js'
 import {
@@ -50,12 +50,14 @@ function inboundDelivery(
   mailboxId: string,
   providerMessageId: string,
   bytes: Uint8Array,
+  providerSpamVerdict?: ProviderSpamVerdict,
 ): RawInboundMessage {
   return {
     content: { kind: 'inline', bytes },
     mailboxId,
     providerMessageId,
     receivedAt: new Date('2026-07-13T12:00:00.000Z'),
+    ...(providerSpamVerdict === undefined ? {} : { providerSpamVerdict }),
   }
 }
 
@@ -334,6 +336,208 @@ describe('ingestInboundMessage', () => {
     expect(await countRows(db, 'threads')).toBe(2)
   })
 
+  // --- specs/mail/spam-classification.md §4: the provider's spam verdict
+  // decides the STATUS a newly-created conversation is filed under, and
+  // nothing else. It never drops a message, and it never touches a
+  // conversation that already exists. -------------------------------------
+
+  describe('provider spam verdict', () => {
+    async function statusOf(db: Db, conversationId: string): Promise<string> {
+      const rows = await db.query<{ status: string }>(
+        'SELECT status FROM conversations WHERE id = $1',
+        [conversationId],
+      )
+      return rows[0].status
+    }
+
+    it("a 'spam' verdict files the NEW conversation as spam — stored and threaded exactly as normal, just not in the inbox", async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+
+      const outcome = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-junk-1', freshCustomerRaw(), 'spam'),
+        deps,
+      )
+
+      expect(outcome).toMatchObject({ kind: 'stored' })
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+      expect(await statusOf(db, outcome.conversationId)).toBe('spam')
+      // Never dropped: the message itself is stored in full, so an Agent who
+      // opens the Spam folder sees the real thing and can reopen it.
+      expect(await countRows(db, 'conversations')).toBe(1)
+      expect(await countRows(db, 'threads')).toBe(1)
+    })
+
+    it("a 'clean' verdict files the new conversation as active", async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+
+      const outcome = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw(), 'clean'),
+        deps,
+      )
+
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+      expect(await statusOf(db, outcome.conversationId)).toBe('active')
+    })
+
+    it("an 'unknown' verdict files the new conversation as active — absent evidence is never evidence of junk", async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+
+      const outcome = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw(), 'unknown'),
+        deps,
+      )
+
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+      expect(await statusOf(db, outcome.conversationId)).toBe('active')
+    })
+
+    it('an omitted verdict (a provider that does not classify) files the new conversation as active', async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+
+      const outcome = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+        deps,
+      )
+
+      if (outcome.kind !== 'stored') throw new Error('unreachable')
+      expect(await statusOf(db, outcome.conversationId)).toBe('active')
+    })
+
+    it("a 'spam'-verdict REPLY that threads onto an existing conversation never re-files it as spam — the token is the stronger signal, and an Agent's own judgment is never overridden", async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+
+      const first = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw(), 'clean'),
+        deps,
+      )
+      if (first.kind !== 'stored') throw new Error('unreachable')
+
+      const replyToken = mintReplyMessageId(
+        { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+        keyring,
+      )
+      const replyRaw = rawMessage(
+        {
+          From: 'customer@example.test',
+          To: 'support@example.test',
+          Subject: 'Re: Help with my order',
+          'Message-ID': '<cust-2@customer.example.test>',
+          'In-Reply-To': replyToken,
+        },
+        'Still broken, please help.',
+      )
+
+      // Gmail called this reply junk. It still threads, and the existing
+      // conversation stays exactly where the Agent left it.
+      const second = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-msg-2', replyRaw, 'spam'),
+        deps,
+      )
+
+      expect(second).toMatchObject({ kind: 'stored', conversationId: first.conversationId })
+      expect(await statusOf(db, first.conversationId)).toBe('active')
+      expect(await countRows(db, 'conversations')).toBe(1)
+      expect(await countRows(db, 'threads')).toBe(2)
+    })
+
+    it("a 'spam'-verdict reply onto an ALREADY-spam conversation still REOPENS it to active — the reopen rule (agent-inbox-v1.md §4a) outranks the verdict, because a customer who replies is a customer", async () => {
+      const { db, deps, mailboxId } = await freshDeps()
+
+      // A first message the provider called junk: filed as spam.
+      const first = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-junk-1', freshCustomerRaw(), 'spam'),
+        deps,
+      )
+      if (first.kind !== 'stored') throw new Error('unreachable')
+      expect(await statusOf(db, first.conversationId)).toBe('spam')
+
+      const replyToken = mintReplyMessageId(
+        { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+        keyring,
+      )
+      const replyRaw = rawMessage(
+        {
+          From: 'customer@example.test',
+          To: 'support@example.test',
+          Subject: 'Re: Help with my order',
+          'Message-ID': '<cust-2@customer.example.test>',
+          'In-Reply-To': replyToken,
+        },
+        'Still broken, please help.',
+      )
+
+      // The provider called THIS one junk too. It still reopens: the token
+      // proves we wrote to this address first, which outranks a classifier.
+      const second = await ingestInboundMessage(
+        inboundDelivery(mailboxId, 'provider-junk-2', replyRaw, 'spam'),
+        deps,
+      )
+
+      expect(second).toMatchObject({ kind: 'stored', conversationId: first.conversationId })
+      expect(await statusOf(db, first.conversationId)).toBe('active')
+      expect(await countRows(db, 'conversations')).toBe(1)
+    })
+  })
+
+  // --- HT-101 Stage 2b-i: mailbox_id is stamped once, at creation, never
+  // re-stamped on append (purely additive — no other ingest behavior above
+  // this line is touched by these two tests). ------------------------------
+
+  it('a new conversation records the mailbox its first message arrived at', async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+
+    const outcome = await ingestInboundMessage(
+      inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+      deps,
+    )
+    if (outcome.kind !== 'stored') throw new Error('unreachable')
+
+    const rows = await db.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [outcome.conversationId],
+    )
+    expect(rows[0].mailbox_id).toBe(mailboxId)
+  })
+
+  it('a reply threaded onto an existing conversation does NOT change its recorded mailbox_id, even when the reply arrives at a DIFFERENT connected mailbox', async () => {
+    const { db, deps, mailboxId } = await freshDeps()
+    const otherMailboxId = await createMailbox(db, 'other@example.test')
+
+    const first = await ingestInboundMessage(
+      inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw()),
+      deps,
+    )
+    if (first.kind !== 'stored') throw new Error('unreachable')
+
+    const replyToken = mintReplyMessageId(
+      { conversationId: first.conversationId, threadId: 'outbound-t1', mailDomain: MAIL_DOMAIN },
+      keyring,
+    )
+    const replyRaw = rawMessage(
+      {
+        From: 'customer@example.test',
+        To: 'support@example.test',
+        Subject: 'Re: Help with my order',
+        'Message-ID': '<cust-2@customer.example.test>',
+        'In-Reply-To': replyToken,
+      },
+      'Still broken, please help.',
+    )
+
+    const second = await ingestInboundMessage(
+      inboundDelivery(otherMailboxId, 'provider-msg-2', replyRaw),
+      deps,
+    )
+    expect(second).toMatchObject({ kind: 'stored', conversationId: first.conversationId })
+
+    // Still the FIRST mailbox — the append branch never touches mailbox_id.
+    const rows = await db.query<{ mailbox_id: string | null }>(
+      'SELECT mailbox_id FROM conversations WHERE id = $1',
+      [first.conversationId],
+    )
+    expect(rows[0].mailbox_id).toBe(mailboxId)
+  })
+
   // --- HT-49: the exact live-production failure, reproduced as a fixture ---
   //
   // Live evidence (2026-07-17, first HT-44 run against real Gmail): Gmail's
@@ -399,7 +603,7 @@ describe('ingestInboundMessage', () => {
     expect(await countRows(db, 'threads')).toBe(2)
   })
 
-  // --- HT-49 review fix: the OUTBOUND reply's own self-echo, ingested by the
+  // --- HT-49: the OUTBOUND reply's own self-echo, ingested by the
   // SAME mailbox it was sent from, must not be re-appended as a phantom
   // inbound message. ----------------------------------------------------------
   //
@@ -415,7 +619,7 @@ describe('ingestInboundMessage', () => {
   // `send.ts` has pre-seeded `(mailboxId, providerMessageId)` as suppressed
   // (`InboundDeliveryStore.preSuppressOwnSend`), reconcile's later `ingest`
   // call for that SAME provider id is suppressed instead — never appended.
-  it("HT-49 review fix: a self-echo of the agent's own sent reply — From the mailbox's OWN address, a foreign (Gmail-rewritten) Message-ID, our token as the FINAL References entry — is suppressed, not appended, once send.ts has pre-seeded its providerMessageId", async () => {
+  it("HT-49: a self-echo of the Agent's own sent reply — From the mailbox's OWN address, a foreign (Gmail-rewritten) Message-ID, our token as the FINAL References entry — is suppressed, not appended, once send.ts has pre-seeded its providerMessageId", async () => {
     const { db, deps, mailboxId } = await freshDeps()
 
     const first = await ingestInboundMessage(
@@ -596,7 +800,7 @@ describe('ingestInboundMessage', () => {
     expect(await countRows(db, 'threads')).toBe(1)
   })
 
-  // --- HT-45 review fix (should-fix #2): a message that always crashes
+  // --- HT-45: a message that always crashes
   // (never reaches a recorded failed/dead-letter outcome, only ever a lapsed
   // lease) must still converge to dead-letter, the same as one that always
   // throws — not retry forever. ------------------------------------------
@@ -743,7 +947,7 @@ describe('ingestInboundMessage', () => {
       }
     })
 
-    it('a replay (the SAME raw delivery — mailboxId+providerMessageId — redelivered) fires conversation.message_received exactly ONCE, never a second time with a fresh eventId (review fix)', async () => {
+    it('a replay (the SAME raw delivery — mailboxId+providerMessageId — redelivered) fires conversation.message_received exactly ONCE, never a second time with a fresh eventId', async () => {
       const { db, deps, mailboxId } = await freshDeps()
       const raw = inboundDelivery(mailboxId, 'provider-msg-1', freshCustomerRaw())
 

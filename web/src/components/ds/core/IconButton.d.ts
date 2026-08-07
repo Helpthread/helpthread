@@ -10,4 +10,4 @@ export interface IconButtonProps {
   /** a solid 13-16px SVG glyph */
   children: React.ReactNode;
 }
-export declare function IconButton(props: IconButtonProps): JSX.Element;
+export declare function IconButton(props: IconButtonProps): React.JSX.Element;

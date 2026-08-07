@@ -215,7 +215,7 @@ describe('non-token headers', () => {
   })
 })
 
-// --- CFWS / multi-id headers (Codex: In-Reply-To must be tokenized) ---------
+// --- CFWS / multi-id headers (In-Reply-To must be tokenized) ---------
 
 describe('tokenized In-Reply-To (RFC 5322 CFWS / multiple ids)', () => {
   it('a valid token embedded after a comment in In-Reply-To → append', () => {
@@ -255,7 +255,7 @@ describe('tokenized In-Reply-To (RFC 5322 CFWS / multiple ids)', () => {
   })
 
   it('a valid token INSIDE a comment is ignored; the real reference wins (no wrong-conversation)', () => {
-    // CodeRabbit: a <...> in a comment must not be treated as a reference.
+    // a <...> in a comment must not be treated as a reference.
     const commented = mint('c-in-comment', 't9')
     const real = mint('c-real', 't1')
     const result = decideThreading(email({ inReplyTo: `(${commented}) ${real}` }), ring)

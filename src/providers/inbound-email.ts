@@ -3,11 +3,23 @@
  * webhooks.
  *
  * See `src/providers/README.md` for the pattern this fits into. Per
- * CHARTER.md §2/§4, inbound mail arrives via **push webhooks**, never IMAP
- * polling — "no daemons, no polling loops" applies to inbound mail first
- * and foremost. This is where Gmail-push-via-Pub/Sub plugs in today, and
- * where later providers (Postmark inbound, SES inbound, a forwarding-
- * address transport, ...) plug in without the engine changing.
+ * CHARTER.md §2/§4 (as amended 2026-07-20, HT-92), inbound mail arrives
+ * either by **push webhook** or by a **bounded, stateless scheduled fetch** —
+ * the constraint is "no daemons, no long-running processes," not "no
+ * fetching on a schedule." Nothing may stay resident either way: no IMAP
+ * IDLE, no held connections, no worker loops.
+ *
+ * **This interface is the WEBHOOK-shaped half of that seam** — both its
+ * methods take an HTTP `Request`, so a cron-driven fetch (which has no
+ * `Request`) does not fit here and must not be forced into it. Adding a
+ * scheduled-fetch transport means a sibling seam sharing this module's DATA
+ * contract (`RawInboundMessage`, raw bytes, one `parseInboundEmail`), not an
+ * implementation of this interface. That gap is called out in
+ * `specs/mail/mailbox-connection.md` §2 and is unresolved.
+ *
+ * This is where Gmail-push-via-Pub/Sub plugs in today, and where later
+ * webhook providers (Postmark inbound, SES inbound, ...) plug in without the
+ * engine changing.
  *
  * ## Raw bytes in, nothing pre-parsed
  *
@@ -23,11 +35,11 @@
  * invariant forbids — threading would end up depending on how faithfully a
  * given provider happened to preserve headers we never controlled.
  *
- * This is a correction (HT-35) of the interface as first drafted, which
- * returned a `NormalizedInboundEmail` — headers and body already parsed,
- * attachments already blob-referenced — putting the parse inside the
- * provider and handing attachment ownership to the transport. See
- * specs/mail/inbound-ingestion.md §2's "Correction (HT-35)" note.
+ * **Why not return a `NormalizedInboundEmail`** — headers and body already
+ * parsed, attachments already blob-referenced? That puts the parse inside the
+ * provider and hands attachment ownership to the transport, which is exactly
+ * the coupling this interface exists to avoid (HT-35). See
+ * specs/mail/inbound-ingestion.md §2.
  *
  * A provider MAY still need to interpret its OWN transport envelope to do
  * its job — e.g. a Gmail-push adapter reads a Pub/Sub JSON body to learn a
@@ -91,7 +103,40 @@ export interface RawInboundMessage {
 
   /** When the provider recorded/delivered the message — not a header-parsed `Date`. */
   receivedAt: Date
+
+  /**
+   * What the TRANSPORT already concluded about this message being junk
+   * (specs/mail/spam-classification.md §3) — the provider's own verdict,
+   * carried through verbatim, never re-derived here.
+   *
+   * Every mail provider we intake from runs its own spam classifier before
+   * we ever see the message, and that verdict is both free and better than
+   * anything we would compute from headers alone. This field is how it
+   * survives the provider→pipeline seam instead of being discarded.
+   *
+   * Three states, deliberately not a boolean:
+   *
+   * - `'spam'` — the provider affirmatively classified it as junk (for
+   *   Gmail, the system `SPAM` label on the message).
+   * - `'clean'` — the provider classified it and did NOT call it junk.
+   * - `'unknown'` — no verdict is available (the provider does not classify,
+   *   or omitted the field on this delivery). Distinct from `'clean'`
+   *   because "we asked and it said no" and "we have no idea" must not
+   *   collapse: only the former is evidence.
+   *
+   * Omitted entirely by a provider that has no concept of a spam verdict;
+   * `src/mail/ingest.ts` reads an absent field exactly like `'unknown'`.
+   *
+   * A verdict NEVER causes a message to be dropped — inbound-ingestion.md
+   * §1's third invariant (at-least-once, never silently lost) is not
+   * negotiable, and a false positive that vanished would be unrecoverable.
+   * It only decides the STATUS a newly-created conversation is filed under.
+   */
+  providerSpamVerdict?: ProviderSpamVerdict
 }
+
+/** See {@link RawInboundMessage.providerSpamVerdict}. */
+export type ProviderSpamVerdict = 'spam' | 'clean' | 'unknown'
 
 /**
  * Provider for turning one inbound-mail provider's webhook delivery into

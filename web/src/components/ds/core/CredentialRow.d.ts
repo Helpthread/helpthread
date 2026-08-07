@@ -15,7 +15,7 @@ export interface CredentialRowProps {
   /** true for the first row in the list; suppresses the top divider */
   first?: boolean;
 }
-export declare function CredentialRow(props: CredentialRowProps): JSX.Element;
+export declare function CredentialRow(props: CredentialRowProps): React.JSX.Element;
 
 /** The passkey list: registered credentials plus the add affordance, or the
  *  empty state when nothing is registered yet. */
@@ -25,4 +25,4 @@ export interface PasskeyListProps {
   empty?: boolean;
   onAdd?: () => void;
 }
-export declare function PasskeyList(props: PasskeyListProps): JSX.Element;
+export declare function PasskeyList(props: PasskeyListProps): React.JSX.Element;

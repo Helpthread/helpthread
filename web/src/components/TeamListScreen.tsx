@@ -7,9 +7,9 @@
  * UI (the engine enforces the actual mutations anyway); a non-admin never
  * reaches this screen — `app/manage/agents/page.tsx` sends them to their own
  * profile instead (the simpler of the brief's two options). **NEW designed
- * surface — requires TJ fidelity sign-off.**
+ * surface — requires maintainer fidelity sign-off.**
  *
- * Moved off `/settings/team` per TJ's 2026-07-18 admin-IA fidelity review
+ * Moved off `/settings/team` per the maintainer's 2026-07-18 admin-IA fidelity review
  * (HT-54): Team is `Manage ▾`-scoped, not a Settings subpage, so the back
  * link now returns to the Inbox rather than to Settings — the same
  * top-level-peer back affordance `SettingsScreen` itself uses.
