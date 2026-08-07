@@ -39,6 +39,11 @@ The operator inbox, automation, AI, and future interfaces are clients of public
 contracts. The maintained Agent Inbox contract lives in
 [specs/api/agent-inbox-v1.md](../../specs/api/agent-inbox-v1.md).
 
+An integrating product serves support inside its own interface through
+[specs/api/customer-conversations-v1.md](../../specs/api/customer-conversations-v1.md) —
+the same conversations, scoped to one customer, with the operator-only surface
+(internal notes, unapproved drafts, assignment and workflow metadata) excluded.
+
 The exact product surface and delivery state live in the
 [Helpthread OSS Roadmap](https://github.com/orgs/Helpthread/projects/1).
 
