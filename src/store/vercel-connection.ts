@@ -1,73 +1,65 @@
 /**
  * `VercelConnectionStore` — persistence for `vercel_connections` (migration
- * 030, `src/db/migrate.ts`; HT-119). See that migration's doc comment for
- * the full reasoning — this module is deliberately thin over it, the same
- * "reserve the column, a dedicated store owns the crypto" split
- * `imap-credentials.ts` and `mailbox-tokens.ts` already establish for
- * `token-crypto.ts`.
+ * 030). See that migration's doc for the schema reasoning; this module is
+ * deliberately thin over it, the same "reserve the column, a dedicated store
+ * owns the crypto" split `imap-credentials.ts` and `mailbox-tokens.ts`
+ * establish for `token-crypto.ts`.
  *
  * ## Why a connection, not a token, is the unit of storage
  *
  * The operator connects ONE Vercel account to their own engine (CHARTER.md's
- * never-hold-operator-credentials invariant — the credential lives in the
- * operator's own database, encrypted, never in Resonant IQ's hands). This
- * store models that connection as a first-class row rather than a bare env
- * var precisely so the non-negotiable conditions from the two adversarial
- * design constraints have somewhere to attach: an immutable `team_id` every
- * `module_installs` row can trust, a `connected_by_agent_id` for provenance,
- * and a `token_fingerprint` an operator can recognize without the engine
- * ever re-exposing the reversible secret.
+ * never-hold-operator-credentials invariant: the credential lives in the
+ * operator's own database, encrypted, never in Resonant IQ's hands). Modeling
+ * that as a first-class row rather than a bare env var gives the design's
+ * non-negotiable conditions somewhere to attach — an immutable `team_id`
+ * every `module_installs` row can trust, a `connected_by_agent_id` for
+ * provenance, and a `token_fingerprint` an operator can recognize without the
+ * engine re-exposing the reversible secret.
  *
  * ## The plaintext token NEVER leaves {@link VercelConnectionStore.getToken}
  *
- * Exactly like `ImapCredentialStore.getPassword`'s write-only-into-outbound-
- * fetches contract: {@link VercelConnectionStore.getToken} exists ONLY for
- * the deploy adapter to authenticate its own outbound calls to Vercel's API.
- * No method on this interface returns it inside a value shaped like an API
- * response ({@link VercelConnectionRecord} never carries a `token` field),
- * and nothing in this module logs it or embeds it in a thrown error —
- * matching condition 1's "never return the plaintext token from any API,
- * log, or error" verbatim.
+ * Same write-only-into-outbound-fetches contract as
+ * `ImapCredentialStore.getPassword`: `getToken` exists ONLY for the deploy
+ * adapter to authenticate its own outbound calls to Vercel's API. No method
+ * returns it inside an API-response-shaped value ({@link
+ * VercelConnectionRecord} never carries a `token` field), and nothing here
+ * logs it or embeds it in a thrown error.
  *
- * ## This connection gets its OWN encryption key, not the mailbox key
+ * ## This connection gets its OWN encryption key
  *
- * `imap-credentials.ts` and `mailbox-tokens.ts` share `HELPTHREAD_TOKEN_ENC_
- * KEY` because they protect the same class of secret (credentials to the
- * operator's OWN mail infrastructure) — a compromise of one already implies
- * the other is exposed to the same blast radius. A Vercel connection token
- * is not that class: per `../modules/deploy/vercel-adapter.ts`'s module doc,
- * it is team-admin-equivalent over the operator's ENTIRE Vercel account —
- * project creation/deletion, every env var (including other members'
- * secrets), domains, membership. `module-license.ts` makes exactly this
- * argument for its own key and this store follows its precedent verbatim:
- * the caller (composition root) MUST decode a key from a var dedicated to
- * this store — `HELPTHREAD_VERCEL_TOKEN_ENC_KEY`, never the shared mailbox
- * key — via `token-crypto.ts`'s `decodeEncryptionKey`, exactly as
- * `createModuleLicenseStore` and `createImapCredentialStore` already do for
- * their own keys. A leaked mailbox key must not also decrypt the most
- * powerful credential this engine holds, and vice versa.
+ * `imap-credentials.ts` and `mailbox-tokens.ts` share
+ * `HELPTHREAD_TOKEN_ENC_KEY` because they protect the same class of secret —
+ * credentials to the operator's own mail infrastructure, where a compromise
+ * of one already implies the other. A Vercel connection token is not that
+ * class: per `../modules/deploy/vercel-adapter.ts`, it is
+ * team-admin-equivalent over the operator's ENTIRE Vercel account — project
+ * creation and deletion, every env var including other members' secrets,
+ * domains, membership.
  *
- * Stated honestly (same caveat `module-license.ts` states for itself):
- * at-rest encryption protects exactly one thing — a stolen COPY of the
- * database does not hand over a usable token along with it. It does NOT
- * protect against a compromised RUNNING engine process, which already holds
- * the decryption key in memory and can call {@link
- * VercelConnectionStore.getToken} itself. The threat model here is a
- * database dump, not a compromised running process.
+ * So the composition root MUST decode a key from a var dedicated to this
+ * store — `HELPTHREAD_VERCEL_TOKEN_ENC_KEY`, never the shared mailbox key —
+ * via `token-crypto.ts`'s `decodeEncryptionKey`, exactly as
+ * `createModuleLicenseStore` and `createImapCredentialStore` do for theirs. A
+ * leaked mailbox key must not also decrypt the most powerful credential this
+ * engine holds, and vice versa.
+ *
+ * Same honest caveat `module-license.ts` states: at-rest encryption protects
+ * exactly one thing — a stolen COPY of the database does not hand over a
+ * usable token. It does NOT protect against a compromised RUNNING engine
+ * process, which already holds the decryption key in memory and can call
+ * `getToken` itself. The threat model is a database dump.
  *
  * ## `team_id` immutability is enforced twice, on purpose
  *
- * Migration 030's `vercel_connections_team_id_immutable` trigger is the
- * real enforcement (a database-level guarantee no application bug can
- * bypass). This store additionally never exposes an `updateTeamId` (or any
- * general-purpose `update`) method at all — {@link
- * VercelConnectionStore.connect} only INSERTs, {@link
- * VercelConnectionStore.recordVerification} only touches
+ * Migration 030's `vercel_connections_team_id_immutable` trigger is the real
+ * enforcement — a database-level guarantee no application bug can bypass.
+ * This store additionally exposes no `updateTeamId`, and no general-purpose
+ * `update`, at all: {@link VercelConnectionStore.connect} only INSERTs,
+ * {@link VercelConnectionStore.recordVerification} only touches
  * `last_verified_at`, and {@link VercelConnectionStore.revoke} only touches
- * `revoked_at`. Belt-and-suspenders deliberately: the trigger is the
- * invariant the schema guarantees; the narrow interface is what makes it
- * obvious from reading this file alone that nothing here could even attempt
- * to violate it.
+ * `revoked_at`. The trigger is the invariant the schema guarantees; the
+ * narrow interface is what makes it obvious from this file alone that nothing
+ * here could even attempt to violate it.
  */
 
 import type { Db } from '../db/client.js'

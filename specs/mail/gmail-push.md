@@ -70,9 +70,15 @@ reconciliation step (§3) do the fetching.
 
 **Recording the notification is a durable enqueue, not an in-process continuation.** The
 endpoint **enqueues a "reconcile mailbox X" job onto the `QueueProvider`**
-(`src/providers/queue.ts`; Vercel Queues per architecture guide), then acks. A `QueueProvider`
-consumer runs §3. This is deliberate, and it is the near-real-time path — the §6 daily sweep
-is the 24h-bounded *fallback*, not the primary trigger — so the hand-off must not rely on a
+(`src/providers/queue.ts`), then acks. A `QueueProvider` consumer runs §3. The shipped
+implementation is `createPostgresQueue` (`src/providers/adapters/postgres-queue/`), wired at
+the composition root — deliberately Postgres-backed rather than Vercel Queues, reusing the
+database every deployment already provisions instead of adding a second durable-work
+dependency.
+
+Push is the low-latency path, not the mechanism of record: §6's every-minute sweep is the
+primary inbound transport, and a deployment with no Pub/Sub topic ingests through it alone.
+The hand-off must still not rely on a
 `waitUntil`/after-response continuation, which a serverless runtime does not guarantee to
 execute: a dropped continuation would silently degrade push to "eventually caught by the
 sweep" with no signal, whereas a durable queue job cannot vanish that way. It also keeps the
@@ -151,9 +157,12 @@ which client sent the mail.
 
 ## 4. The cursor: monotonic, transactional with persistence
 
-Each mailbox stores a `historyId` cursor. Its one rule: **it advances only after
-the ingest pipeline confirms every message HANDED TO IT is `stored` or `suppressed`**
-(inbound-ingestion.md §4) — "the batch" here is scoped to messages the pipeline actually
+Each mailbox stores a `historyId` cursor. Its one rule: **it advances only after the ingest
+pipeline confirms every message HANDED TO IT reached a TERMINAL, durably-recorded ledger
+outcome — `stored`, `suppressed`, or `dead-letter`** (inbound-ingestion.md §4). A
+dead-lettered message is visible and recoverable for manual review, so it satisfies the
+never-drop invariant; treating it as non-terminal instead would wedge the cursor on that one
+poison message forever and block every healthy message behind it in history order — "the batch" here is scoped to messages the pipeline actually
 received, not every `messagesAdded` entry `history.list` returned. Two kinds of entry are
 filtered out before ever reaching the pipeline and so contribute no outcome for this rule
 to inspect: a message deleted between `history.list` and the raw fetch (§3, "deleted
@@ -195,20 +204,30 @@ here the cursor itself is unrecoverable.)
   (the cursor's starting point) and an expiration (~7 days out).
 - **`watch` expires and MUST be re-armed at least every 7 days, or notifications silently
   stop** — no error on either side, mail just keeps arriving with nothing telling us. A daily
-  `SchedulerProvider` cron (`registerCron`, `src/providers/scheduler.ts`) re-arms `watch` for
-  every active mailbox. Daily rather than every-6-days buys margin against a missed run;
-  `watch` is idempotent, so re-arming early is free.
-- **The same daily cron also runs a bounded reconciliation `history.list` from each active
-  mailbox's stored cursor.** Because push is best-effort (§1), a dropped or delayed
-  notification — most damagingly the *last* one before a quiet spell — would otherwise leave
-  a mailbox stale indefinitely, since nothing else triggers a fetch. The sweep is the
-  charter's "bounded reconciliation fetch, never a long-running poller": it reuses the §3–§4
-  fetch/cursor path, is bounded per run, and fires on the same once-daily tick. It feeds the
-  identical idempotent ingest pipeline, so any message already delivered by push is deduped,
-  never doubled (inbound-ingestion.md §4). Cadence is a tuning knob: daily bounds worst-case
-  staleness to ~24h for a dropped tail notification.
+  Vercel Cron (`/api/v1/internal/cron/watch-maintenance`, `vercel.json`) re-arms `watch` for
+  every active mailbox. `SchedulerProvider` (`src/providers/scheduler.ts`) is an interface only
+  — no adapter implements it, and `registerCron` is not called in production. Daily rather
+  than every-6-days buys margin against a missed run; `watch` is idempotent, so re-arming
+  early is free.
+- **A SEPARATE, every-minute cron runs the bounded reconciliation `history.list` from each
+  active mailbox's stored cursor** (`/api/v1/internal/cron/reconcile-sweep`, `vercel.json`;
+  `src/mail/gmail-reconcile-sweep.ts`). This is not a backstop on the renewal cron — since
+  the 2026-07-20 charter amendment it is the engine's **primary inbound transport**, and a
+  deployment with no Pub/Sub topic ingests mail through it alone. Push, where configured,
+  becomes the low-latency accelerator rather than the mechanism of record.
+
+  It is the charter's "bounded scheduled fetch, never a long-running poller": it reuses the
+  §3–§4 fetch/cursor path, is bounded per run, and feeds the identical idempotent ingest
+  pipeline, so any message already delivered by push is deduped, never doubled
+  (inbound-ingestion.md §4).
+
+  **Renewal and the sweep are deliberately separate crons**, not two steps of one pass. Their
+  cadences differ by three orders of magnitude, and renewal must acquire a per-mailbox access
+  token (it calls `watch()`) while the sweep needs none — welding them together would mean a
+  token refresh per mailbox per minute for a Gmail call the sweep never makes.
+
 - **Reconciliation is serialized per mailbox by a reconciliation lease.** Push-triggered
-  reconciliation (§2–§3) and the daily sweep both advance the same mailbox's cursor, so a
+  reconciliation (§2–§3) and the every-minute sweep both advance the same mailbox's cursor, so a
   mailbox's runs are serialized by a **reconciliation lease** — the inbound analogue of the
   outbound delivery lease (sending.md §3a) — held on `gmail_watch_state.claimed_until`
   (migration 016, `src/store/gmail-watch-state.ts`'s
@@ -226,7 +245,9 @@ here the cursor itself is unrecoverable.)
   **Acking on a failed claim would be unsafe**: the holder's `history.list` snapshot is fixed
   the moment it runs, so a message arriving in Gmail's history *after* that snapshot is
   invisible to the holder's cursor advance — acking its notification would drop it until the
-  next trigger, up to ~24h of added latency on a quiet mailbox. Retrying instead means the job
+  next trigger — at the sweep's every-minute cadence that is bounded latency rather than the
+  ~24h a daily sweep would have implied, but it is still avoidable latency on a message this
+  run already knew about. Retrying instead means the job
   is redelivered shortly after the holder has very likely released, at which point its own
   `history.list` picks up anything the holder missed. The backoff is sized so that, combined
   with the queue's exponential backoff and `maxAttempts` dead-letter ceiling
@@ -266,9 +287,9 @@ here the cursor itself is unrecoverable.)
 - **Parsing, threading, storage, idempotency, attachment extraction, loop-suppression,
   observability** → inbound-ingestion.md. This transport hands over raw bytes and provider
   metadata and stops.
-- **OAuth token acquisition/refresh** →; the **connect/consent flow**
-  (authorization-code grant, initial `watch` arm, baseline cursor seed) →
-, [gmail-connect.md](./gmail-connect.md).
+- **OAuth token acquisition/refresh** → `src/mail/gmail-oauth.ts`; the **connect/consent
+  flow** (authorization-code grant, initial `watch` arm, baseline cursor seed) →
+  [gmail-connect.md](./gmail-connect.md).
 - **One-time GCP/Pub-Sub provisioning** (Internal OAuth app; enable the Gmail + Pub/Sub APIs;
   create the topic; grant `gmail-api-push@system.gserviceaccount.com` the Pub/Sub Publisher
   role; create the push subscription → our endpoint) is an **operator runbook**, not
@@ -294,8 +315,9 @@ Against a **faked** Gmail API + Pub/Sub push (no cloud):
   `inbound_deliveries` row created, cursor still advances past it ("the self-echo
   filter" above). A self-addressed entry labeled both `SENT` and `INBOX` → still ingested
   normally.
-- The daily reconciliation sweep re-lists from the stored cursor and ingests a message a
-  *dropped* push never delivered — with no duplication of messages push already delivered.
+- The every-minute reconciliation sweep (§6) re-lists from the stored cursor and ingests a
+  message a *dropped* push never delivered — with no duplication of messages push already
+  delivered.
 
 The **live** end-to-end proof against real Gmail — send via the Gmail API, assert the
 delivered message carries our verbatim token-bearing `Message-ID`, reply from a real Gmail

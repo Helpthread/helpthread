@@ -1,66 +1,65 @@
 /**
- * The webhook delivery queue consumer (HT-69; specs/modules/substrate-v1.md
- * §5's "Delivery" bullet) — one `QueueMessageHandler<WebhookDeliveryJob>`
- * that POSTs a signed event envelope to one endpoint and reports the
- * outcome back to `QueueProvider` (`src/providers/queue.ts`) and to the
- * endpoint's own failure/success counters (`WebhookEndpointStore`,
- * `src/store/webhook-endpoints.ts`).
+ * The webhook delivery queue consumer (specs/modules/substrate-v1.md §5's
+ * "Delivery" bullet) — one `QueueMessageHandler<WebhookDeliveryJob>` that
+ * POSTs a signed event envelope to one endpoint and reports the outcome back
+ * to `QueueProvider` and to the endpoint's own failure/success counters
+ * (`WebhookEndpointStore`).
  *
  * ## Where a `WebhookDeliveryJob` comes from
  *
  * Every job on {@link WEBHOOK_DELIVERY_TOPIC} was enqueued either by the
- * outbox drain (`./outbox-drain.ts`, one job per matching active endpoint
- * per real domain event) or by the admin `POST /api/v1/webhooks/{id}/test`
- * handler (`src/api/webhooks.ts`, one synthetic `test.ping` job addressed
- * to the one endpoint under test, bypassing `event_outbox` entirely — spec
- * §4: "test.ping is a synthetic type fired only by the test endpoint"). This
- * handler treats both origins identically: it has no idea which produced
- * the job it's holding, and doesn't need to.
+ * outbox drain (`./outbox-drain.ts`, one job per matching active endpoint per
+ * real domain event) or by the admin `POST /api/v1/webhooks/{id}/test`
+ * handler (one synthetic `test.ping` job addressed to the endpoint under
+ * test, bypassing `event_outbox` entirely — spec §4: "test.ping is a
+ * synthetic type fired only by the test endpoint"). This handler treats both
+ * identically; it has no idea which produced the job it holds, and does not
+ * need to.
  *
  * ## Envelope, headers, signature (spec §4's JSON shape, §5's headers)
  *
  * The JSON body is exactly spec §4's envelope: `eventId`, `type`,
- * `occurredAt`, `conversationId`, `data`. `conversationId` is `null` only
- * for `test.ping` (not tied to any conversation — see
- * `src/webhooks/event-types.ts`'s doc comment); every real domain event
- * always carries one (`event_outbox.conversation_id` is `NOT NULL`).
+ * `occurredAt`, `conversationId`, `data`. `conversationId` is `null` only for
+ * `test.ping`, which is tied to no conversation; every real domain event
+ * carries one, since `event_outbox.conversation_id` is `NOT NULL`.
  *
- * `X-Helpthread-Delivery` is freshly minted on EVERY invocation of this
- * handler — including a queue-driven redelivery of the SAME
- * `QueueMessage.id` — because spec §5 requires it to "differ per attempt";
- * `eventId` (in the body, and dedupe-key material at enqueue time) is the
- * stable identity a consumer dedupes on, not this header.
+ * `X-Helpthread-Delivery` is freshly minted on EVERY invocation — including a
+ * queue-driven redelivery of the SAME `QueueMessage.id` — because spec §5
+ * requires it to differ per attempt. `eventId`, in the body and used as
+ * dedupe-key material at enqueue time, is the stable identity a consumer
+ * dedupes on; this header is not.
  *
  * `X-Helpthread-Signature` is signed over `${unixTimestamp}.${body}` with
- * HMAC-SHA256 under the endpoint's plaintext secret (decrypted per-call via
- * `WebhookEndpointStore.getSecret` — never cached across deliveries, the
- * same "fetch fresh, don't cache a decrypted secret" posture
- * `gmail-oauth.ts`'s token service already uses for OAuth tokens).
+ * HMAC-SHA256 under the endpoint's plaintext secret, decrypted per-call via
+ * `WebhookEndpointStore.getSecret` and never cached across deliveries — the
+ * same fetch-fresh posture `gmail-oauth.ts` uses for OAuth tokens.
  *
  * ## Retry vs. dead-letter is THIS handler's decision, not the queue's
  *
- * `QueueProvider`'s generic retry/backoff (`createPostgresQueue`) has no
- * notion of "endpoint" or "consecutive failure count" — it is
- * topic-agnostic infra. So this handler tracks its own attempt ceiling
- * ({@link WEBHOOK_DELIVERY_MAX_ATTEMPTS}, matching the queue's own factory
- * default so the two layers agree) against `QueueMessage.attempts`: while
- * under the ceiling, a failed attempt returns `{ kind: 'retry' }` with NO
- * store write (spec: "consecutive-failure counter increments... at the
- * threshold" describes `WebhookEndpointStore.recordDeliveryFailure`'s OWN
- * per-EVENT counter, which must not be double-incremented per HTTP attempt);
- * once `attempts` reaches the ceiling, THIS attempt calls
- * `recordDeliveryFailure` and returns `{ kind: 'deadLetter' }` itself,
- * rather than returning a bare `retry` and hoping the queue's own
- * (unrelated) ceiling eventually dead-letters the row without ever touching
- * the store. An SSRF refusal ({@link SsrfRefusedError}) is dead-lettered
- * IMMEDIATELY regardless of `attempts` — retrying can never change what a
- * hostname is configured to resolve to, so burning the retry budget on it
- * only delays the operator-visible signal.
+ * `QueueProvider`'s generic retry/backoff has no notion of "endpoint" or
+ * "consecutive failure count" — it is topic-agnostic infrastructure. So this
+ * handler tracks its own ceiling ({@link WEBHOOK_DELIVERY_MAX_ATTEMPTS},
+ * matching the queue factory's default so the two layers agree) against
+ * `QueueMessage.attempts`:
  *
- * A 2xx response is the only success: `recordDeliverySuccess` + `ack`.
- * Everything else — non-2xx (including a 3xx, since redirects are never
- * followed — spec §5), a timeout, a connection error — is a failed
- * attempt, handled by the retry/dead-letter branch above.
+ * - **Under the ceiling**, a failed attempt returns `{ kind: 'retry' }` with
+ *   NO store write. Spec's "consecutive-failure counter increments... at the
+ *   threshold" describes `WebhookEndpointStore.recordDeliveryFailure`'s OWN
+ *   per-ENDPOINT counter (`webhook_endpoints.consecutive_failures`), which
+ *   must not be double-incremented per HTTP attempt.
+ * - **At the ceiling**, THIS attempt calls `recordDeliveryFailure` and
+ *   returns `{ kind: 'deadLetter' }` itself, rather than returning a bare
+ *   `retry` and hoping the queue's own unrelated ceiling eventually
+ *   dead-letters the row without ever touching the store.
+ * - **An SSRF refusal** ({@link SsrfRefusedError}) is dead-lettered
+ *   IMMEDIATELY regardless of `attempts`: retrying cannot change what a
+ *   hostname resolves to, and burning the retry budget only delays the
+ *   operator-visible signal.
+ *
+ * A 2xx response is the only success — `recordDeliverySuccess` plus `ack`.
+ * Everything else is a failed attempt handled above: non-2xx including 3xx,
+ * since redirects are never followed (spec §5), plus timeouts and connection
+ * errors.
  */
 
 import { createHmac, randomUUID } from 'node:crypto'

@@ -1,70 +1,65 @@
 /**
- * Endpoint-possession challenge (HT-119) — the last gate before a
- * newly-deployed module's webhook endpoint is ever activated (non-negotiable
- * condition 5, candidate-then-cutover: "never activate a webhook endpoint
- * until the deployed module proves possession via a signed challenge").
+ * Endpoint-possession challenge — the last gate before a newly-deployed
+ * module's webhook endpoint is ever activated (the candidate-then-cutover
+ * condition: never activate an endpoint until the deployed module proves
+ * possession via a signed challenge).
  *
  * ## Why this exists
  *
- * By the time `../install/installer.ts` reaches this check, the module's
- * deployment is `'ready'` (`../deploy/provider.ts`'s
- * `DeployProvider.getDeploymentState`) and has already been handed the
- * webhook signing secret the installer minted at its `credentials_issued`
- * step, as an engine-managed env var. Neither of those facts proves
- * anything about what is actually LIVE and answering at the deployment's
- * URL: a build can succeed while serving stale or wrong code, a DNS/proxy
- * misconfiguration can point the URL somewhere else entirely, and — the
- * case this module exists specifically to close — a mistyped or
- * adversarial URL would otherwise start receiving another customer's
- * conversation events the moment the installer registers it as a webhook
- * endpoint. If the installer activated delivery on "the deployment record
- * says ready" alone, none of those cases would ever be caught.
+ * By the time `./installer.ts` reaches this check, the deployment is
+ * `'ready'` (`../deploy/provider.ts`'s `getDeploymentState`) and has been
+ * handed the webhook signing secret the installer minted at
+ * `credentials_issued`, as an engine-managed env var. Neither fact proves
+ * anything about what is actually LIVE at the deployment's URL: a build can
+ * succeed while serving stale or wrong code, a DNS or proxy misconfiguration
+ * can point the URL elsewhere, and — the case this exists to close — a
+ * mistyped or adversarial URL would start receiving another customer's
+ * conversation events the moment the installer registers it.
  *
- * {@link verifyEndpointPossession} closes it: it sends a fresh, single-use
- * nonce, signed the SAME way `../../webhooks/delivery.ts` signs every real
+ * {@link verifyEndpointPossession} closes that: it sends a fresh, single-use
+ * nonce signed the SAME way `../../webhooks/delivery.ts` signs every real
  * delivery, and only a caller that can present the correct HMAC over that
- * exact nonce — i.e., something that already holds the secret the
- * installer minted for THIS deployment — passes. Only after this call
- * succeeds does the installer create the real `webhook_endpoints` row
- * (`../install/installer.ts`'s `bootstrap_pending` step) — before that,
- * there is no row for `../../webhooks/outbox-drain.ts` to ever fan events
- * out to, so a failed or not-yet-attempted challenge cannot leak anything
- * by construction, not merely by this module's own refusal.
+ * exact nonce — something already holding the secret minted for THIS
+ * deployment — passes.
+ *
+ * Only after it succeeds does the installer create the real
+ * `webhook_endpoints` row. Before that there is no row for
+ * `../../webhooks/outbox-drain.ts` to fan events out to, so a failed or
+ * not-yet-attempted challenge cannot leak anything by construction, not
+ * merely by this module's refusal.
  *
  * ## Wire contract
  *
- * No prior contract for this exchange exists elsewhere in this codebase —
- * this module defines it, deliberately reusing an already-reviewed shape
- * rather than inventing a new one: the SAME envelope/signature scheme
- * `../../webhooks/delivery.ts` uses for a real delivery (`X-Helpthread-
- * Event`, `X-Helpthread-Delivery`, `X-Helpthread-Signature` — see
- * {@link signWebhookPayload}), with `type: 'module.challenge'` and a body
- * of `{ nonce }`. The deployed module is expected to verify that inbound
- * signature exactly as a real delivery's signature is verified, then
- * respond `200` with a JSON body `{ signature: <hex HMAC-SHA256(secret,
- * nonce)> }`. {@link verifyEndpointPossession} recomputes that same HMAC
- * locally and compares it to the response with `timingSafeEqual` — never a
- * plain `===`, since a byte-by-byte comparison against a secret-derived
- * value can leak timing information a probing attacker could exploit to
- * forge a response one byte at a time.
+ * No prior contract for this exchange exists in this codebase; this module
+ * defines it, deliberately reusing an already-reviewed shape rather than
+ * inventing one. The SAME envelope and signature scheme
+ * `../../webhooks/delivery.ts` uses for a real delivery
+ * (`X-Helpthread-Event`, `X-Helpthread-Delivery`, `X-Helpthread-Signature` —
+ * see {@link signWebhookPayload}), with `type: 'module.challenge'` and a body
+ * of `{ nonce }`.
  *
- * A later ticket that formalizes the module-authoring contract (e.g. an
- * SDK a module imports) should treat this file's wire shape as the source
- * of truth to implement against — it is not currently pinned in any
- * `specs/` document.
+ * The deployed module verifies that inbound signature exactly as it would a
+ * real delivery's, then responds `200` with `{ signature: <hex
+ * HMAC-SHA256(secret, nonce)> }`. {@link verifyEndpointPossession} recomputes
+ * the same HMAC locally and compares with `timingSafeEqual`, never `===`: a
+ * byte-by-byte comparison against a secret-derived value leaks timing a
+ * probing attacker could use to forge a response one byte at a time.
+ *
+ * A later change formalizing the module-authoring contract (an SDK a module
+ * imports) should treat this file's wire shape as the source of truth — it is
+ * not currently pinned in any `specs/` document.
  *
  * ## SSRF posture
  *
- * {@link sendChallengeRequest}, this module's default transport, reuses
+ * {@link sendChallengeRequest}, the default transport, reuses
  * `../../webhooks/ssrf.ts`'s `resolveSafeAddress` — the exact
- * resolve-then-connect pinning `../../webhooks/delivery.ts`'s
- * `sendWebhookRequest` already applies to webhook egress. A deployment's
- * URL is provider-returned rather than operator-typed, but it is still an
- * outbound request this engine makes to a host it does not control, to
- * which the module doc's own threat model above explicitly applies (a
- * misdirected or adversarial URL) — so it gets the same treatment as any
- * other egress this codebase already refuses to trust blindly, never a
- * carve-out for "this one came from our own deploy provider."
+ * resolve-then-connect pinning `sendWebhookRequest` applies to webhook
+ * egress. A deployment's URL is provider-returned rather than
+ * operator-typed, but it is still an outbound request to a host this engine
+ * does not control, and the threat model above (a misdirected or adversarial
+ * URL) applies directly. It gets the same treatment as any other egress this
+ * codebase refuses to trust blindly — never a carve-out for "this one came
+ * from our own deploy provider."
  */
 
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'

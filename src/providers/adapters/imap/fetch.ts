@@ -2,71 +2,69 @@
  * `fetchImapInboundMessages` — the pure, cron-invocation-shaped fetch logic
  * for one mailbox: given a stored cursor (or none) and an {@link ImapClient}
  * factory, connect, `SELECT INBOX`, fetch everything new (bounded), and
- * return the raw messages plus the cursor's next value. specs/mail/mailbox-
- * connection.md §5's "Inbound — bounded scheduled fetch" section is the
- * contract this implements; §7 build order item 2 is this ticket (HT-101
- * Stage 1).
+ * return the raw messages plus the cursor's next value. Implements
+ * specs/mail/mailbox-connection.md §5, "Inbound — bounded scheduled fetch".
  *
  * ## Deliberately NOT the `InboundEmailProvider` seam
  *
- * specs/mail/mailbox-connection.md's own header flags (unresolved question
- * #3) that `InboundEmailProvider` is webhook-shaped
- * (`verifySignature(request)` / `receiveDelivery(request)`) and a
- * cron-driven fetch has no `Request` to hand it. This function is the
- * *data* contract that spec calls satisfiable on its own — raw bytes,
- * `RawInboundMessage`, a single later `parseInboundEmail` — without forcing
- * a `Request` shape that does not exist for this transport. It is the IMAP
- * analogue of `src/mail/gmail-reconcile.ts`'s `reconcileOneMailbox`, scoped
- * down to Stage 1: no mailbox-status check, no store reads/writes, no
- * `ingest` call, no lease. Stage 2 wires those in exactly the way
- * `gmail-reconcile.ts` wires Gmail's — this function only takes the cursor
- * as a plain argument and returns the next one; persisting it (only after
- * the pipeline durably commits every message — §5's "cursor advances on
- * COMMIT, not on fetch") is the caller's job, not this function's.
+ * `InboundEmailProvider` is webhook-shaped (`verifySignature(request)` /
+ * `receiveDelivery(request)`) and a cron-driven fetch has no `Request` to
+ * hand it — mailbox-connection.md's unresolved question #3. This function is
+ * the *data* contract that spec calls satisfiable on its own: raw bytes, a
+ * `RawInboundMessage`, a single later `parseInboundEmail`, with no `Request`
+ * shape invented for a transport that has none.
+ *
+ * It is the IMAP analogue of `src/mail/gmail-reconcile.ts`'s
+ * `reconcileOneMailbox`, scoped down: no mailbox-status check, no store
+ * reads or writes, no `ingest` call, no lease. This function takes the cursor
+ * as a plain argument and returns the next one; persisting it — only after
+ * the pipeline durably commits every message, per §5's "cursor advances on
+ * COMMIT, not on fetch" — is `src/mail/imap-fetch.ts`'s job.
  *
  * ## UIDVALIDITY handling (§5)
  *
  * If `cursor` is non-null and the server's current `uidValidity` no longer
- * matches it, every stored UID is meaningless (UIDs are only ever unique
- * within one `(mailbox, UIDVALIDITY)` epoch — RFC 3501 §2.3.1.1). This
- * function's answer, consistent with CHARTER.md §2's never-drop invariant:
- * discard `lastUid` and refetch from UID 1 under the NEW `uidValidity`,
- * bounded by `maxPerInvocation` same as any other tick. This trades
- * possible RE-fetching of already-seen mail (safe: `parseInboundEmail` is
- * pure and re-running it is harmless; Stage 2's ingest dedup — inbound-
- * ingestion.md §4 — is what makes a redundant fetch cheap all the way
- * through) against the alternative of silently skipping mail that arrived
- * under the new epoch, which invariant #1 forbids. `uidValidityReset` on
- * the result is `true` only for this genuine reset case (a PRE-EXISTING
- * cursor whose `uidValidity` no longer matches) so a caller can log/alert
- * on it specifically — a brand new mailbox (`cursor === null`) rebuilds
- * from UID 1 too, but that is the ordinary first-run case, not an anomaly,
- * so it is reported as `false`.
+ * matches it, every stored UID is meaningless — UIDs are unique only within
+ * one `(mailbox, UIDVALIDITY)` epoch (RFC 3501 §2.3.1.1). This function
+ * discards `lastUid` and refetches from UID 1 under the NEW `uidValidity`,
+ * bounded by `maxPerInvocation` like any other tick.
  *
- * Rebuilding "safely" in the full sense specs/mail/mailbox-connection.md's
- * header calls out (unresolved question #2: `providerMessageId` has no
- * transport-stable identity for IMAP, so a UID-keyed idempotency ledger
- * cannot survive the very reset it exists to recover from) is explicitly
- * OUT of Stage 1's scope — this function has no ledger, no store, nothing
- * to survive. See `providerMessageIdFor`'s doc for the placeholder id this
- * function mints in the meantime, and this ticket's report for why it does
- * not resolve that open question.
+ * That trades possible RE-fetching of already-seen mail — safe, since
+ * `parseInboundEmail` is pure and re-running it is harmless — against
+ * silently skipping mail that arrived under the new epoch, which CHARTER.md
+ * §2's never-drop invariant forbids.
  *
- * ## Bounding (§5 "Bound the batch, and bound the clock")
+ * `uidValidityReset` on the result is `true` only for a genuine reset (a
+ * PRE-EXISTING cursor whose `uidValidity` no longer matches), so a caller can
+ * alert on it specifically. A brand-new mailbox (`cursor === null`) also
+ * rebuilds from UID 1, but that is the ordinary first run, so it reports
+ * `false`.
  *
- * `maxPerInvocation` caps how many messages one call fetches — passed
- * straight through to {@link ImapClient.uidFetchRawSince}, which bounds by
- * message COUNT: it asks the server which UIDs above `sinceUid` actually
- * exist (`SEARCH`), takes the lowest `max`, and fetches exactly those. NOT by
- * UID arithmetic — a `sinceUid+1 : sinceUid+max` range can span zero real
- * messages while mail waits just above it, since UIDs are not dense (RFC 3501
- * §2.3.1.1). That range shape is the stall bug `./client.ts`'s module doc
- * records; this comment described it as the intended design until 2026-07-31.
- * The full remaining-invocation-budget
- * scheme (§5: "every network operation... carries its own timeout derived
- * from the remaining invocation budget") is Stage 2/3 cron-wiring, not this
- * function — see `./client.ts`'s `ImapClientOptions.timeoutMs` doc for the
- * one safety-net bound this Stage 1 client does provide.
+ * Rebuilding "safely" in the fuller sense — mailbox-connection.md's
+ * unresolved question #2, that `providerMessageId` has no transport-stable
+ * identity for IMAP, so a UID-keyed idempotency ledger cannot survive the
+ * very reset it exists to recover from — is out of scope here: this function
+ * has no ledger and no store, nothing to survive. `src/mail/imap-fetch.ts`
+ * is where that consequence bites, and it pauses the mailbox rather than
+ * ingesting a rebuilt batch. See `providerMessageIdFor` for the placeholder
+ * id minted in the meantime.
+ *
+ * ## Bounding (§5, "Bound the batch, and bound the clock")
+ *
+ * `maxPerInvocation` caps how many messages one call fetches, passed straight
+ * to {@link ImapClient.uidFetchRawSince}, which bounds by message COUNT: it
+ * asks the server which UIDs above `sinceUid` actually exist (`SEARCH`),
+ * takes the lowest `max`, and fetches exactly those.
+ *
+ * **Not by UID arithmetic.** A `sinceUid+1 : sinceUid+max` range can span
+ * zero real messages while mail waits just above it, because UIDs are not
+ * dense (RFC 3501 §2.3.1.1) — the stall `./client.ts` records.
+ *
+ * The full remaining-invocation-budget scheme (§5: "every network
+ * operation... carries its own timeout derived from the remaining invocation
+ * budget") belongs to the cron wiring, not here — see
+ * `ImapClientOptions.timeoutMs` for the one safety-net bound this client
+ * provides.
  */
 
 import type { RawInboundMessage } from '../../inbound-email.js'

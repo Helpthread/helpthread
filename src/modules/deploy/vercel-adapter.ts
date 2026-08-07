@@ -1,82 +1,75 @@
 /**
  * `createVercelDeployProvider` — the `DeployProvider` (`./provider.ts`)
  * implementation against Vercel's REST API, for the operator's OWN Vercel
- * account (HT-119).
+ * account.
  *
  * ## The token is team-admin-equivalent — the allowlist is what bounds it
  *
  * A Vercel access token scoped to a team can do almost anything that team
  * can do in the dashboard: create and delete projects, read and write env
- * vars (including other members' secrets), manage domains, invite/remove
- * members, on and on. There is no narrower Vercel token scope this adapter
- * could request instead — team tokens are simply that broad. So the
- * token's OWN scope contributes nothing to this module's threat model; the
- * only thing standing between "this adapter has a team-admin token" and
- * "this adapter can do team-admin things" is {@link ALLOWLIST}: an
- * exhaustive, closed list of the exact `(method, path shape)` pairs this
- * code will ever construct a request for. Every method below composes its
- * request through {@link vercelFetch}, which checks the allowlist BEFORE
- * building the request — there is no code path in this file that reaches
- * Vercel's API without passing through that check first. Adding a seventh
- * capability to this adapter later means adding a seventh allowlist entry,
- * deliberately, in a diff a reviewer can see — not merely writing a new
- * fetch call.
+ * vars including other members' secrets, manage domains, invite and remove
+ * members. There is no narrower Vercel scope this adapter could request —
+ * team tokens are simply that broad. So the token's own scope contributes
+ * nothing to this module's threat model; the only thing standing between
+ * "this adapter has a team-admin token" and "this adapter can do team-admin
+ * things" is {@link ALLOWLIST}: an exhaustive, closed list of the exact
+ * `(method, path shape)` pairs this code will ever construct a request for.
+ *
+ * Every method composes its request through {@link vercelFetch}, which
+ * checks the allowlist BEFORE building the request. No code path in this
+ * file reaches Vercel's API without passing that check. Adding a seventh
+ * capability later means adding a seventh allowlist entry, deliberately, in
+ * a diff a reviewer can see — not merely writing a new fetch call.
  *
  * ## Team-id binding
  *
  * A connection is bound to exactly one immutable `teamId` at construction
  * (`VercelAdapterConfig.teamId`). Every method also takes `teamId` on its
- * input (the `DeployProvider` contract) and throws if it doesn't match the
- * bound value — this is deliberately redundant with "just always use the
- * bound value and ignore the parameter," because a caller passing the
- * wrong team id is a bug worth surfacing loudly (a project silently
- * created in the wrong team is exactly the kind of mistake that's hard to
- * notice and expensive to unwind) rather than one this adapter silently
- * papers over by preferring its own config.
+ * input (the `DeployProvider` contract) and throws if it does not match the
+ * bound value. Deliberately redundant with "always use the bound value and
+ * ignore the parameter": a caller passing the wrong team id is a bug worth
+ * surfacing loudly, since a project silently created in the wrong team is
+ * hard to notice and expensive to unwind.
  *
- * ## Prebuilt output only (non-negotiable condition 4)
+ * ## Prebuilt output only
  *
  * This adapter never runs, requests, or accepts a build. `createDeployment`
  * hard-codes `projectSettings: { buildCommand: null, installCommand: null,
- * framework: null }` on every request — even though `uploadArtifact`
- * already rejects an artifact that TRIES to declare its own build
- * settings (see {@link assertPrebuiltArtifactOnly}), this is defense in
- * depth: the artifact check protects against a hostile artifact, this
- * flag protects against a Vercel-side default ever reintroducing a build
- * step this adapter didn't ask for. Treating module artifacts as hostile
- * input (module doc) means neither layer is allowed to be "the one that
- * would have caught it."
+ * framework: null }` on every request. `uploadArtifact` already rejects an
+ * artifact that TRIES to declare its own build settings (see {@link
+ * assertPrebuiltArtifactOnly}), so this is defense in depth: the artifact
+ * check protects against a hostile artifact, this flag against a
+ * Vercel-side default ever reintroducing a build step the adapter did not
+ * ask for. Treating module artifacts as hostile input means neither layer
+ * is allowed to be the one that would have caught it.
  *
  * ## Token never leaves this file in the open
  *
- * No method here returns the token, includes it in a thrown `Error`
- * message, or logs it. {@link redact} additionally scrubs it out of any
- * text this module derives from a Vercel response before that text is
- * ever used to build an error message — defense against a pathological
- * response (or a test double) that happens to echo request data back.
+ * No method returns the token, includes it in a thrown `Error`, or logs it.
+ * {@link redact} additionally scrubs it from any text derived from a Vercel
+ * response before that text builds an error message — defense against a
+ * pathological response, or a test double, echoing request data back.
  *
  * ## Bounded responses, capped redirects
  *
- * {@link vercelFetch} enforces a byte cap on every response body (via
- * `Content-Length` when present, and a streaming cap regardless — a
- * missing or lying `Content-Length` header does not get a free pass) and
- * a request timeout. Redirects are never followed blindly: a 3xx response
- * is inspected, and only a same-host (`api.vercel.com`, or the configured
- * test host) redirect is followed, for at most one hop — a redirect to
- * any other host is refused outright, which is what stops a compromised
- * or MITM'd API endpoint from bouncing this adapter's Authorization header
- * to an attacker-controlled host.
+ * {@link vercelFetch} enforces a byte cap on every response body — via
+ * `Content-Length` when present, and a streaming cap regardless, so a
+ * missing or lying header gets no free pass — plus a request timeout.
+ * Redirects are never followed blindly: a 3xx is inspected, and only a
+ * same-host (`api.vercel.com`, or the configured test host) redirect is
+ * followed, for at most one hop. A redirect to any other host is refused,
+ * which is what stops a compromised or MITM'd endpoint from bouncing this
+ * adapter's Authorization header to an attacker-controlled host.
  *
  * ## What this adapter deliberately does NOT do
  *
- * It does not check "did the engine create this project" — that
- * invariant (non-negotiable condition 1's second half) lives in the
- * caller's own persisted record of projects it created (module doc's
- * "Async by construction": the caller persists `projectId` immediately
- * after `createProject` returns), not in this stateless HTTP client. A
- * `DeployProvider` implementation has no database of its own to consult
- * and must not invent one — that would be a second, competing source of
- * truth for exactly the fact the install orchestration already owns.
+ * It does not check "did the engine create this project." That invariant
+ * lives in the caller's own persisted record of projects it created — the
+ * install orchestration persists `projectId` immediately after
+ * `createProject` returns — not in this stateless HTTP client. A
+ * `DeployProvider` has no database of its own and must not invent one; that
+ * would be a second, competing source of truth for a fact the orchestration
+ * already owns.
  */
 
 import { createHash } from 'node:crypto'

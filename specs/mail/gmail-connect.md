@@ -171,7 +171,8 @@ no armed watch to clean up.
      **and** `watch_expiration = watch.expiration` (migration 011's
      `watch_expiration` column, which previously had no writer).
 6. **Success page.** The mailbox is live: push will now arrive (gmail-push.md
-   §2), and the daily sweep + renewal  will keep it so.
+   §2), and the daily `watch` renewal plus the every-minute reconciliation
+   sweep will keep it so.
 
 **`watch` failure** (step 4): abort with an error page, nothing persisted —
 the operator retries. (This differs from gmail-push.md §6's "mark

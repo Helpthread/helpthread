@@ -1,67 +1,58 @@
 /**
- * The delivery worker (HT-16) — a periodic sweep that retries outbound
- * threads still stuck `pending` or `failed`, using the SAME `threadId`/
- * `Message-ID` each row already has (never re-minted; specs/mail/sending.md
- * §3, `src/mail/send.ts`'s module doc).
+ * The delivery worker — a periodic sweep that retries outbound threads still
+ * stuck `pending` or `failed`, using the SAME `threadId`/`Message-ID` each
+ * row already has, never re-minted (specs/mail/sending.md §3).
  *
  * ## A plain sweep function, not a queue/cron adapter
  *
  * `runDeliveryWorker` is deliberately a plain `async function`, not built on
- * `QueueProvider`/`SchedulerProvider` (`src/providers/`) — no such adapter
- * exists yet, and CHARTER.md §4's provider-seam discipline is exactly why
- * this stays a pure function of its dependencies rather than reaching for a
- * platform primitive that isn't wired up. Wiring a real schedule (Vercel Cron
- * calling this on an interval, or a future `SchedulerProvider` adapter) is
- * deferred to whenever that seam is built — at that point it is a one-line
- * call to this function, not a rewrite of it.
+ * `QueueProvider`/`SchedulerProvider` — no scheduler adapter exists, and
+ * CHARTER.md §4's provider-seam discipline is why this stays a pure function
+ * of its dependencies rather than reaching for a platform primitive that is
+ * not wired up. Scheduling it (Vercel Cron on an interval, or a future
+ * `SchedulerProvider` adapter) is a one-line call to this function.
  *
  * ## What one sweep does
  *
  * 1. `ConversationStore.listDeliverableThreads` selects a batch of eligible
  *    outbound rows: `delivery_status = 'failed'`, OR `'pending'` older than
- *    `staleAfterMs` (a young `'pending'` row may just be a normal send still
- *    in flight elsewhere) — see that method's doc comment for the full
- *    eligibility rule, including why a row with no stored `send_envelope`
- *    (pre-HT-16 data) is never included.
+ *    `staleAfterMs`, since a young `'pending'` row may just be a normal send
+ *    still in flight elsewhere. See that method's doc for the full rule,
+ *    including why a row with no stored `send_envelope` is never included.
  * 2. For each candidate, `ConversationStore.claimThreadForDelivery` attempts
- *    to take its delivery lease. A row can be eligible in the LISTING
- *    snapshot but already claimed by the time this worker gets to it — by a
- *    concurrent keyed `sendReply` retry, or another worker sweep — in which
- *    case the claim returns `null` and this sweep simply skips it; there is
- *    no retry-the-claim loop here, the next sweep will see it again if it's
- *    still eligible then.
- * 3. A successful claim is handed to `attemptDeliveryOfClaimedThread`
- *    (`src/mail/send.ts`) — the SAME helper `sendReply`'s own keyed-retry
- *    path uses — which rebuilds the exact `OutboundEmail` from the row
- *    (`messageId`, `fromAddress`, `bodyText`/`bodyHtml`, `inReplyTo`,
- *    `sendEnvelope`), calls the sender, and marks `sent`/`failed` while
- *    releasing the lease.
+ *    its delivery lease. A row can be eligible in the LISTING snapshot but
+ *    already claimed by the time this worker reaches it — by a concurrent
+ *    keyed `sendReply` retry, or another sweep — in which case the claim
+ *    returns `null` and this sweep skips it. There is no retry-the-claim
+ *    loop; the next sweep sees it again if it is still eligible.
+ * 3. A successful claim goes to `attemptDeliveryOfClaimedThread`
+ *    (`./send.ts`) — the SAME helper `sendReply`'s keyed-retry path uses —
+ *    which rebuilds the exact `OutboundEmail` from the row (`messageId`,
+ *    `fromAddress`, `bodyText`/`bodyHtml`, `inReplyTo`, `sendEnvelope`),
+ *    calls the sender, and marks `sent`/`failed` while releasing the lease.
  *
- * ## Per-mailbox sender resolution (HT-101 Stage 2b-ii)
+ * ## Per-mailbox sender resolution
  *
- * Before this feature, every retried row was sent through ONE fixed
- * `EmailSender` regardless of which inbox its conversation belonged to. Now,
- * for each successfully-claimed row, this worker looks up its conversation
- * (`ConversationStore.getConversationByThreadId`, the same lookup HT-70's
- * draft-approval path uses to derive per-conversation state from only a
- * `threadId`) and resolves a sender bound to THAT conversation's OWN mailbox
- * via `SenderResolver` (`./sender-resolver.js`) — never the single global
- * default. `attemptDeliveryOfClaimedThread` itself is unchanged: it still
- * rebuilds `from` from the row's own persisted `fromAddress` (set at the
- * ORIGINAL `sendReply` call and never recomputed), so only WHICH transport
- * sends it varies here, never the envelope.
+ * For each successfully-claimed row this worker looks up its conversation
+ * (`ConversationStore.getConversationByThreadId`) and resolves a sender bound
+ * to THAT conversation's OWN mailbox via `SenderResolver`
+ * (`./sender-resolver.js`) — never a single global default.
+ * `attemptDeliveryOfClaimedThread` is unchanged: it still rebuilds `from`
+ * from the row's own persisted `fromAddress`, set at the ORIGINAL `sendReply`
+ * call and never recomputed. Only WHICH transport sends varies here, never
+ * the envelope.
  *
- * A `SenderResolutionError` (the claimed row's mailbox has no usable IMAP
- * config/credential, or names no mailbox at all) is treated as a per-row
- * send failure — mirroring `attemptDeliveryOfClaimedThread`'s own
+ * A `SenderResolutionError` — the claimed row's mailbox has no usable IMAP
+ * config or credential, or names no mailbox at all — is treated as a per-row
+ * send failure, mirroring `attemptDeliveryOfClaimedThread`'s own
  * provider-rejection handling: the row is marked `'failed'` (or left
- * `'pending'` if even that mark fails) and the sweep continues with the next
- * candidate, rather than aborting the whole batch over one misconfigured
- * mailbox. Any OTHER fault from resolution (a lease/`maxSendMs`
- * misconfiguration `assertLeaseExceedsSenderBound` catches, or a genuinely
- * unexpected store error) is a wiring bug, not a routine per-row outcome —
- * it propagates and aborts the sweep, same as `listDeliverableThreads`
- * itself failing always has.
+ * `'pending'` if even that mark fails) and the sweep continues, rather than
+ * aborting the batch over one misconfigured mailbox.
+ *
+ * Any OTHER fault from resolution — a lease/`maxSendMs` misconfiguration
+ * `assertLeaseExceedsSenderBound` catches, or an unexpected store error — is
+ * a wiring bug, not a routine per-row outcome. It propagates and aborts the
+ * sweep, exactly as `listDeliverableThreads` itself failing always has.
  */
 
 import type { EmailSender } from '../providers/index.js'

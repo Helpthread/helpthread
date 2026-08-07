@@ -1,67 +1,67 @@
 /**
  * SMTP `EmailSender` adapter — transmits `OutboundEmail`s through the
- * operator's OWN mail server (specs/mail/mailbox-connection.md §5,
- * "Outbound — the operator's own SMTP"; §7 build order item 4, HT-101
- * Stage 1). Built on **nodemailer** (MIT-0 — verified in
+ * operator's OWN mail server (specs/mail/mailbox-connection.md §5, "Outbound
+ * — the operator's own SMTP"). Built on **nodemailer** (MIT-0, verified in
  * `node_modules/nodemailer/package.json` at adoption, 2026-07-20), injected
- * as a `transporter` port (mirrors the Gmail adapter's `fetchImpl`
- * injection, `../gmail/sender.ts`) so the mapping logic below is
- * unit-testable with a fake — no real SMTP server, no network call.
+ * as a `transporter` port — mirroring the Gmail adapter's `fetchImpl`
+ * injection — so the mapping logic is unit-testable with a fake, no real
+ * SMTP server and no network call.
  *
- * ## The `Message-ID` contract — verified against nodemailer's own source
+ * ## The `Message-ID` contract, traced through nodemailer's source
  *
- * Per `../../email-sender.ts`'s module doc, every `EmailSender` MUST
- * transmit `messageId`/`inReplyTo`/`references` verbatim and must NOT let
- * the provider generate or overwrite `Message-ID`. Traced directly (not
- * assumed) in `node_modules/nodemailer/lib/mail-composer/index.js`'s
- * `compile()`: when `mail.messageId` is set, it calls
- * `this.message.setHeader('message-id', mail.messageId)` explicitly, THEN
- * calls `this.message.messageId()` to ensure the header is present.
- * `mime-node`'s `messageId()` (`lib/mime-node/index.js`) only generates and
- * sets a RANDOM id when `getHeader('Message-ID')` is falsy — since
- * `compile()` already set it, the random generator never fires. This is the
- * SAME "pre-declared field, generator only fires if unset" shape the Gmail
- * adapter's `mime.ts` documents for `mimetext`, verified independently here
- * for nodemailer. `references`/`in-reply-to` are set the same explicit way.
+ * Per `../../email-sender.ts`, every `EmailSender` MUST transmit
+ * `messageId`/`inReplyTo`/`references` verbatim and must NOT let the provider
+ * generate or overwrite `Message-ID`. Traced directly rather than assumed, in
+ * `lib/mail-composer/index.js`'s `compile()`: when `mail.messageId` is set it
+ * calls `this.message.setHeader('message-id', mail.messageId)` explicitly,
+ * THEN `this.message.messageId()` to ensure the header is present.
+ * `mime-node`'s `messageId()` only generates a RANDOM id when
+ * `getHeader('Message-ID')` is falsy — and `compile()` already set it, so the
+ * generator never fires. The same "pre-declared field, generator only fires
+ * if unset" shape `../gmail/mime.ts` documents for mimetext, verified
+ * independently here. `references`/`in-reply-to` are set the same explicit
+ * way.
+ *
  * `mime-node`'s `_encodeHeaderValue` wraps `Message-ID`/`In-Reply-To` in
- * angle brackets ONLY IF NOT ALREADY PRESENT (`OutboundEmail.messageId`/
- * `.inReplyTo` already carry them — see that module's doc), so this is
- * idempotent, not a rewrite.
+ * angle brackets ONLY IF NOT ALREADY PRESENT, and `OutboundEmail` already
+ * carries them, so this is idempotent rather than a rewrite.
+ *
+ * ## `providerMessageId` is usually just an echo here
  *
  * `EmailSendResult.providerMessageId` is read from nodemailer's own
- * `info.messageId` — NEVER copied from `OutboundEmail.messageId` in this
- * module's code, per the seam's module doc. Note for the reviewer: unlike
- * Gmail's `users.messages.send` (which returns a genuinely distinct
- * Gmail-internal id), nodemailer's own type doc for `SentMessageInfo`
- * states "most transports should return the final Message-Id value used" —
- * i.e. for SMTP, `info.messageId` is typically just an ECHO of the same
- * `Message-ID` header we set, not a separate provider id. Confirmed
- * empirically in `sender.test.ts` via nodemailer's real (no-network)
- * `streamTransport`. This is directly relevant to specs/mail/mailbox-
- * connection.md's still-UNRESOLVED self-echo-suppression question
- * (candidate answer: suppress on our own minted Message-ID) — flagged for
- * the reviewer, not resolved here; Stage 1 does not wire the suppression
- * ledger at all.
+ * `info.messageId`, NEVER copied from `OutboundEmail.messageId` in this
+ * module. But unlike Gmail's `users.messages.send`, which returns a genuinely
+ * distinct internal id, nodemailer's `SentMessageInfo` doc states "most
+ * transports should return the final Message-Id value used" — so for SMTP
+ * this is typically an ECHO of the header we set, not a separate provider id.
+ * Confirmed empirically in `sender.test.ts` via nodemailer's real,
+ * no-network `streamTransport`.
  *
- * ## Injection hardening — verified, then added anyway where verification
+ * That matters for mailbox-connection.md's still-unresolved
+ * self-echo-suppression question, whose candidate answer is to suppress on
+ * our own minted Message-ID. Flagged, not resolved here; this adapter wires
+ * no suppression ledger.
+ *
+ * ## Injection hardening — verified, then one guard added where verification
  * left a gap
  *
  * Traced `_normalizeAddress` (`lib/mime-node/index.js`): address headers
- * (`from`/`to`/`cc`) already strip control characters (including CR/LF) and
- * angle brackets before assembly. `_encodeHeaderValue`'s `Message-ID`/
- * `In-Reply-To`/`References`/`default` branches all strip embedded newlines
- * too. So nodemailer already neutralizes header-injection at the VALUE
- * level for everything this adapter sends — verified by reading the
- * source, not assumed. The one gap that verification does NOT close: those
- * strips are silent (a newline becomes a space), which would silently
- * mangle `email.messageId` — the one sacred, verbatim-or-nothing field —
- * into something that no longer matches what `mintReplyMessageId` produced,
- * without ever throwing. So this module adds ONE loud guard on `messageId`
- * specifically (not the whole gmail/mime.ts guard suite, which exists to
- * work around mimetext NOT sanitizing at all — a different library with a
- * different gap): a stray control character there means the engine itself
- * minted something malformed, which should fail loudly rather than be
- * silently reformatted.
+ * (`from`/`to`/`cc`) already strip control characters including CR/LF, and
+ * angle brackets, before assembly. `_encodeHeaderValue`'s
+ * `Message-ID`/`In-Reply-To`/`References`/`default` branches all strip
+ * embedded newlines too. So nodemailer already neutralizes header injection
+ * at the value level for everything this adapter sends — read from the
+ * source, not assumed.
+ *
+ * The gap that does NOT close: those strips are SILENT. A newline becomes a
+ * space, which would quietly mangle `email.messageId` — the one sacred,
+ * verbatim-or-nothing field — into something no longer matching what
+ * `mintReplyMessageId` produced, without ever throwing. So this module adds
+ * ONE loud guard, on `messageId` specifically. Not the whole `gmail/mime.ts`
+ * guard suite, which exists to work around mimetext not sanitizing at all — a
+ * different library with a different gap. A stray control character here
+ * means the engine itself minted something malformed, and that should fail
+ * loudly rather than be silently reformatted.
  */
 
 import nodemailer from 'nodemailer'

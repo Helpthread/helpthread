@@ -1,76 +1,69 @@
 /**
  * `runGmailReconcileSweep` — the bounded scheduled fetch that is Helpthread's
- * PRIMARY inbound transport (HT-94; CHARTER.md §2 as amended 2026-07-20:
+ * PRIMARY inbound transport (CHARTER.md §2 as amended 2026-07-20:
  * "push-based delivery where providers offer it, bounded scheduled fetches
  * where they don't — and no resident process either way").
  *
  * One pass enqueues a reconcile job per active mailbox that has a baseline
  * cursor. The job is the SAME `GMAIL_RECONCILE_TOPIC` job the push webhook
- * enqueues (`../api/gmail-webhook.ts`) and the same one `./gmail-reconcile.ts`
- * consumes — this module changes *what triggers* reconciliation, never how
- * reconciliation works. That equivalence is the whole point: a deployment
- * without Pub/Sub ingests mail through exactly the code path a deployment with
- * it does, just triggered by a clock instead of a notification.
+ * enqueues (`../api/gmail-webhook.ts`) and `./gmail-reconcile.ts` consumes —
+ * this module changes *what triggers* reconciliation, never how it works.
+ * That equivalence is the point: a deployment without Pub/Sub ingests mail
+ * through exactly the code path a deployment with it does, triggered by a
+ * clock instead of a notification.
  *
- * ## Split out of `./gmail-watch-maintenance.ts` (HT-94)
+ * ## Why this is its own entry point, not a flag on watch renewal
  *
- * This logic previously lived as "step 3" inside that module's daily
- * per-mailbox pass, where it was framed as a *backstop* for push. Two reasons
- * it had to become its own entry point rather than a flag on that one:
+ * This logic once lived inside `./gmail-watch-maintenance.ts`'s daily
+ * per-mailbox pass, framed as a backstop for push. Two reasons it cannot
+ * share a cron with renewal:
  *
- * 1. **Cadence.** As a backstop it ran daily. As the primary transport it runs
- *    every minute — a mailbox whose only intake is a daily sweep is not a
- *    helpdesk. Those cadences cannot share a cron.
- * 2. **Cost, and this is the load-bearing one.** Watch renewal must acquire an
- *    access token per mailbox (it calls `users.watch()`); the sweep must not.
- *    All the sweep needs is a stored cursor and a queue write — no Gmail API
- *    call happens here at all. Keeping them welded together would have meant a
- *    token refresh per mailbox per MINUTE against Google's token endpoint, for
- *    a call the sweep never makes. The reconcile CONSUMER acquires its own
- *    token when it actually talks to Gmail.
+ * 1. **Cadence.** A backstop runs daily; the primary transport runs every
+ *    minute. A mailbox whose only intake is a daily sweep is not a helpdesk.
+ * 2. **Cost, the load-bearing one.** Watch renewal must acquire an access
+ *    token per mailbox, because it calls `users.watch()`. The sweep must not:
+ *    all it needs is a stored cursor and a queue write, and no Gmail API call
+ *    happens here at all. Welding them together would mean a token refresh
+ *    per mailbox per MINUTE against Google's token endpoint, for a call the
+ *    sweep never makes. The reconcile CONSUMER acquires its own token when it
+ *    actually talks to Gmail.
  *
- * What remains in `./gmail-watch-maintenance.ts` is renewal alone, still
- * daily, and now only scheduled when push is configured.
+ * ## The dedupe key is the bare `mailboxId`
  *
- * ## The dedupe key is the bare `mailboxId` — corrected after review
+ * Not a composite like `mailboxId:historyId`, which would pin suppression to
+ * a cursor value and could wedge a quiet mailbox indefinitely. And not
+ * omitted: the queue's partial unique index only suppresses against jobs
+ * still LIVE (`../providers/adapters/postgres-queue/`: `WHERE dedupe_key IS
+ * NOT NULL AND dead_lettered_at IS NULL`), so once a mailbox's job completes
+ * the next tick enqueues again and a quiet mailbox is still swept every
+ * minute.
  *
- * The inherited behavior was NO `dedupeKey`, on the reasoning that "a sweep of
- * an already-current, quiet mailbox must still run rather than be suppressed
- * as a duplicate." That reasoning is sound, and it argues against a COMPOSITE
- * key like `mailboxId:historyId` — which would pin suppression to a cursor
- * value and could wedge a quiet mailbox indefinitely. It does not argue
- * against the bare `mailboxId`, because the queue's partial unique index only
- * suppresses against jobs that are still LIVE
- * (`../providers/adapters/postgres-queue/`: `WHERE dedupe_key IS NOT NULL AND
- * dead_lettered_at IS NULL`). Once a mailbox's job completes, the next tick
- * enqueues again. A quiet mailbox is still swept every minute.
- *
- * Carrying "no dedupeKey" from a DAILY cadence to an every-minute one was the
- * actual mistake, and it was not benign:
+ * Omitting the key would be safe at a daily cadence and is not at an
+ * every-minute one, for two reasons:
  *
  * - **The consumer lease does not make contention free.** A failed claim
  *   returns `{ kind: 'retry' }` (`./gmail-reconcile.ts`), and the queue counts
- *   attempts and DEAD-LETTERS at the cap. A reconcile that runs longer than
- *   the retry window (a large history batch, or one multi-MB raw message
- *   through blob write + ingest) causes every tick behind it to burn its
- *   attempts and dead-letter — which then trips the `queue-dead-letter-growth`
- *   health alert. The lease prevents duplicated *work*; it does nothing about
- *   duplicated *rows*.
- * - **There was no backpressure whatsoever.** Enqueue rate was one job per
+ *   attempts and DEAD-LETTERS at the cap. A reconcile running longer than the
+ *   retry window — a large history batch, or one multi-MB raw message through
+ *   blob write plus ingest — makes every tick behind it burn its attempts and
+ *   dead-letter, which then trips the `queue-dead-letter-growth` health alert.
+ *   The lease prevents duplicated *work*; it does nothing about duplicated
+ *   *rows*.
+ * - **There would be no backpressure at all.** Enqueue rate is one job per
  *   active mailbox per minute, unconditional; drain capacity is a bounded
  *   batch per tick, shared with webhook delivery. Past roughly that many
- *   mailboxes, `queue_jobs` grew monotonically and intake latency grew without
- *   bound. Keying on `mailboxId` collapses the redundant pending ticks that
- *   caused it.
+ *   mailboxes `queue_jobs` grows monotonically and intake latency grows
+ *   without bound. Keying on `mailboxId` collapses the redundant pending
+ *   ticks.
  *
- * Note this also aligns the sweep with the push path, which has always
- * enqueued with a dedupe key (`../api/gmail-webhook.ts`).
+ * This also aligns the sweep with the push path, which has always enqueued
+ * with a dedupe key.
  *
  * ## Failure isolation
  *
  * Per-mailbox failures never stop the batch — one mailbox with an unreadable
- * cursor must not stall intake for every other mailbox. A fault outside the
- * per-mailbox loop (e.g. `listActiveMailboxes` itself failing) propagates,
+ * cursor must not stall intake for every other. A fault outside the
+ * per-mailbox loop (`listActiveMailboxes` itself failing) propagates,
  * matching `./gmail-watch-maintenance.ts`'s discipline.
  */
 

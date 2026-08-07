@@ -3,73 +3,70 @@
  * (`users.messages.send` takes a base64url-encoded raw MIME message, not a
  * structured JSON body — see `sender.ts`).
  *
- * ## Why this file exists separately from `sender.ts`
+ * ## Why this is separate from `sender.ts`
  *
  * `specs/mail/sending.md` §4 requires every real `EmailSender` adapter to
  * ship a WIRE-LEVEL contract test proving the engine-minted `Message-ID`
  * (`src/mail/reply-token.ts`) survives unaltered. Isolating "build the raw
  * MIME string" from "call the Gmail HTTP API" lets `mime.test.ts` assert
  * against the exact bytes that leave the process, independent of any network
- * mocking — the strongest form of that contract test the spec calls for.
+ * mocking — the strongest form of that contract test.
  *
- * ## mimetext, and a `node`-entrypoint gotcha worth flagging
+ * ## mimetext, and two API details that matter
  *
  * We use `mimetext` (MIT, purpose-built for Gmail-API/SES-style raw-MIME
- * senders) to assemble the message. Two API details mattered enough to call
- * out:
+ * senders) to assemble the message.
  *
  * 1. **Setting `Message-ID` verbatim.** `MIMEMessage`'s header table
- *    pre-declares a `Message-ID` field with an auto-`generator` (a random
- *    id) that only fires if the field's `value` is still unset when the
- *    message is dumped. Calling `msg.setHeader('Message-ID', value)` goes
- *    through `MIMEMessageHeader#set`, which looks up the field
- *    case-insensitively, finds the pre-declared one, and overwrites its
- *    `value` directly — bypassing the generator entirely. Crucially, the
- *    `Message-ID` field has no custom `dump` transform (unlike `Subject`,
- *    which always RFC-2047-encodes), so a string value is emitted literally:
- *    `value` goes in, `value` comes out, byte-for-byte. That is exactly the
- *    verbatim contract `OutboundEmail.messageId` requires — see
- *    `../email-sender.ts`'s module doc. Verified directly in `mime.test.ts`.
- *    (`In-Reply-To`/`References` are not pre-declared fields at all, so
- *    `setHeader` falls through to `setCustom`, which dumps a string value
- *    the same way: literally, when present, and simply absent from the
- *    output when we never call `setHeader` for them.)
+ *    pre-declares a `Message-ID` field with an auto-`generator` that only
+ *    fires if the value is still unset at dump time. `msg.setHeader(
+ *    'Message-ID', value)` goes through `MIMEMessageHeader#set`, which finds
+ *    the pre-declared field case-insensitively and overwrites its `value`
+ *    directly, bypassing the generator. `Message-ID` has no custom `dump`
+ *    transform (unlike `Subject`, which always RFC-2047-encodes), so a string
+ *    value is emitted literally, byte for byte — exactly the verbatim
+ *    contract `OutboundEmail.messageId` requires. Verified in `mime.test.ts`.
+ *
+ *    `In-Reply-To`/`References` are not pre-declared fields, so `setHeader`
+ *    falls through to `setCustom`, which dumps a string value the same way:
+ *    literally when present, and simply absent when we never set it.
  *
  * 2. **`import 'mimetext'` does NOT reliably give CRLF.** RFC 5322 requires
- *    CRLF line endings, and mimetext's own docs describe CRLF output — but
- *    its default Node entrypoint (`mimetext.node.es.js`, what plain
- *    `import { createMimeMessage } from 'mimetext'` resolves to under
- *    Node/NodeNext ESM) sets `eol` from `node:os`'s `EOL` constant, which is
- *    `'\n'` on Linux/macOS and only `'\r\n'` on Windows. Vercel's Node
- *    functions run on Linux, so importing the bare `mimetext` package here
- *    would silently emit LF-only messages in production despite passing
- *    tests on a Windows dev machine (or vice versa) — a real, environment-
- *    dependent correctness gap, not a hypothetical one (confirmed by reading
- *    `node_modules/mimetext/dist/mimetext.node.es.js`). mimetext's
- *    `./browser` entrypoint hardcodes `eol: '\r\n'` unconditionally, so we
- *    import from `mimetext/browser` instead — its types and API surface are
- *    identical to the default entrypoint (same `MIMEMessage` class), it has
- *    no DOM/window dependency (its base64 helpers use `TextEncoder`/manual
- *    base64, not `Buffer`, so it runs fine under Node), and it gives us
- *    deterministic CRLF regardless of the host OS. This is a deliberate
- *    workaround for what looks like an upstream oversight (the "node"
- *    entrypoint choosing an OS-dependent EOL is backwards — Node programs
- *    are exactly the ones that most often run headless on Linux); if
- *    mimetext fixes this upstream, `mimetext/browser` still works fine, so
- *    there is nothing to revert.
+ *    CRLF, and mimetext's docs describe CRLF output — but its default Node
+ *    entrypoint (`mimetext.node.es.js`, what plain `import { createMimeMessage
+ *    } from 'mimetext'` resolves to under Node/NodeNext ESM) sets `eol` from
+ *    `node:os`'s `EOL`, which is `'\n'` on Linux and macOS and only
+ *    `'\r\n'` on Windows. Vercel's Node functions run on Linux, so importing
+ *    the bare package would silently emit LF-only messages in production
+ *    while passing tests on a Windows dev machine, or vice versa — an
+ *    environment-dependent correctness gap, confirmed by reading
+ *    `node_modules/mimetext/dist/mimetext.node.es.js`.
  *
- * 3. **Header-injection & line-length guards.** mimetext writes address and
- *    custom-header values, and body `data`, LITERALLY — it does not sanitize
- *    CRLF, does not fold long headers, and does not encode bodies to match the
- *    declared CTE. So this module adds three guards around it: (a) reject any
- *    control/newline char in every externally-influenced header atom
- *    (`assertHeaderSafe`), so a stored inbound Message-ID or a customer
- *    address cannot inject a second header line (`\r\nBcc: …`); (b)
- *    base64-encode bodies wrapped at 76 chars (`base64Body`), so a long HTML
- *    line or URL cannot exceed RFC 5322's 998-octet line limit; (c) fold a
- *    long `References` chain at WSP between msg-ids (`foldHeaderAtoms`), same
- *    limit. mimetext preserves the engine-inserted CRLF+WSP folds and the
- *    pre-encoded body verbatim — both verified in `mime.test.ts`.
+ *    So we import from `mimetext/browser`, whose entrypoint hardcodes `eol:
+ *    '\r\n'` unconditionally. Its types and API surface are identical (same
+ *    `MIMEMessage` class), it has no DOM dependency — its base64 helpers use
+ *    `TextEncoder` and manual base64 rather than `Buffer`, so it runs fine
+ *    under Node — and it gives deterministic CRLF regardless of host OS. A
+ *    deliberate workaround for what looks like an upstream oversight; if
+ *    mimetext fixes it, `mimetext/browser` still works, so there is nothing
+ *    to revert.
+ *
+ * ## Header-injection and line-length guards
+ *
+ * mimetext writes address values, custom-header values, and body `data`
+ * LITERALLY — it does not sanitize CRLF, fold long headers, or encode bodies
+ * to match the declared CTE. This module therefore adds three guards:
+ *
+ * - `assertHeaderSafe` rejects any control or newline character in every
+ *   externally-influenced header atom, so a stored inbound Message-ID or a
+ *   customer address cannot inject a second header line (`\r\nBcc: …`).
+ * - `base64Body` encodes bodies wrapped at 76 chars, so a long HTML line or
+ *   URL cannot exceed RFC 5322's 998-octet line limit.
+ * - `foldHeaderAtoms` folds a long `References` chain at WSP between
+ *   msg-ids, against the same limit.
+ *
+ * mimetext preserves the engine-inserted CRLF+WSP folds and the pre-encoded
+ * body verbatim — both verified in `mime.test.ts`.
  */
 
 import { createMimeMessage } from 'mimetext/browser'

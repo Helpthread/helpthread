@@ -468,84 +468,79 @@ CREATE TABLE gmail_watch_state (
 `
 
 /**
- * Migration 012 — `inbound_deliveries`, the delivery ledger (HT-36;
- * specs/mail/inbound-ingestion.md §4).
+ * Migration 012 — `inbound_deliveries`, the delivery ledger
+ * (specs/mail/inbound-ingestion.md §4).
  *
  * One row per `(mailbox_id, provider_message_id)` — simultaneously the
- * **idempotency record**, the **claim/lease**, and the **retry queue** (spec
- * §4's own three-way framing). `provider_message_id`, not the RFC
- * `Message-ID`, is the dedup authority: the inbound `Message-ID` is optional
- * and entirely sender-controlled (`NewThread.messageId` permits `null`,
- * `src/store/conversations.ts`), while the transport's own message id is
- * stable and provider-issued (spec §4).
+ * **idempotency record**, the **claim/lease**, and the **retry queue**.
+ * `provider_message_id`, not the RFC `Message-ID`, is the dedup authority:
+ * the inbound `Message-ID` is optional and entirely sender-controlled
+ * (`NewThread.messageId` permits `null`), while the transport's own id is
+ * stable and provider-issued.
  *
- * `id` is a conventional surrogate `uuid` PRIMARY KEY (matching every other
- * table in this schema), separate from the UNIQUE claim key below — the
- * same "surrogate PK + a separate business-key unique index" shape
- * migration 003 already uses for `threads`' own idempotency key
- * (`threads_conversation_idempotency_key_idx`).
+ * `id` is a conventional surrogate `uuid` PRIMARY KEY, separate from the
+ * UNIQUE claim key below — the same "surrogate PK plus a separate
+ * business-key unique index" shape migration 003 uses for `threads`'
+ * idempotency key.
  *
  * ## The claim key
  *
- * `inbound_deliveries_mailbox_id_provider_message_id_key` is what the
- * ingest pipeline's step 1 targets (spec §3 step 1): `INSERT ... ON
- * CONFLICT (mailbox_id, provider_message_id) DO NOTHING RETURNING *`. A
- * fresh insert means the caller owns processing this delivery; a conflict
- * means a concurrent or prior delivery already claimed or completed it, and
- * the caller must return THAT row's outcome rather than double-process
- * (spec §3 step 1, §8's "two concurrent deliveries... exactly one
- * conversation" acceptance case). Ordinary `UNIQUE`, not partial: unlike
- * `threads.idempotency_key` (optional, migration 003),
- * `provider_message_id` is always present (spec §2: the transport rejects a
- * delivery it cannot resolve to a `providerMessageId`), so every row
+ * `inbound_deliveries_mailbox_id_provider_message_id_key` is what the ingest
+ * pipeline's step 1 targets: `INSERT ... ON CONFLICT (mailbox_id,
+ * provider_message_id) DO NOTHING RETURNING *`. A fresh insert means the
+ * caller owns processing; a conflict means a concurrent or prior delivery
+ * already claimed or completed it, and the caller must return THAT row's
+ * outcome rather than double-process (spec §3 step 1, and §8's "two
+ * concurrent deliveries... exactly one conversation" acceptance case).
+ *
+ * Ordinary `UNIQUE`, not partial: unlike `threads.idempotency_key`
+ * (optional, migration 003), `provider_message_id` is always present — the
+ * transport rejects a delivery it cannot resolve to one — so every row
  * participates in the constraint.
  *
- * `status` defaults to `'received'` — the state a row is inserted in at the
- * step-1 claim, before parse/thread/store (steps 2-5) even run. The CHECK
- * list is spelled `'dead-letter'` (hyphen) to match
- * specs/mail/inbound-ingestion.md §4's own spelling, used consistently
- * throughout that spec (and matching the industry-standard "dead-letter
- * queue" term); HT-36's ticket text listed the same value with an
- * underscore (`dead_letter`) in one place, which reads as a transcription
- * slip against the spec's consistent hyphenated usage — flagged for
- * explicit confirmation in the implementation report rather than resolved
- * silently.
+ * `status` defaults to `'received'`, the state a row is inserted in at the
+ * step-1 claim, before parse/thread/store run. The CHECK list is spelled
+ * `'dead-letter'` (hyphen) to match the spec's own consistent spelling and
+ * the industry-standard "dead-letter queue" term.
  *
- * `attempts`/`last_error` are the retry-queue bookkeeping the spec's "retry
- * queue" framing implies (§4) — no schema-level opinion on the attempts
- * ceiling or backoff; that policy belongs to the worker that consumes this
- * table (a later ticket).
+ * `attempts`/`last_error` are the retry-queue bookkeeping. No schema-level
+ * opinion on the attempts ceiling or backoff: that policy belongs to
+ * `src/mail/ingest.ts` and `src/store/inbound-deliveries.ts`.
  *
- * `thread_id` is the ledger's recorded OUTCOME (spec §3 step 5, §4),
- * nullable because most statuses (`received`, `suppressed`, `failed`,
- * `dead-letter`) never resolve to one. The resulting CONVERSATION is
+ * ## `thread_id` is the recorded outcome
+ *
+ * Nullable, because most statuses (`received`, `suppressed`, `failed`,
+ * `dead-letter`) never resolve to a thread. The resulting CONVERSATION is
  * deliberately NOT a second column: a thread belongs to exactly one
- * conversation (`threads.conversation_id`, NOT NULL, migration 001), so
- * `thread_id` already determines it — a separate `conversation_id` would be
+ * conversation (`threads.conversation_id`, `NOT NULL`, migration 001), so
+ * `thread_id` already determines it. A separate column would be
  * derivable-but-denormalized, and two independent FKs would let a row pair a
- * `conversation_id` with a `thread_id` from a DIFFERENT conversation, a
- * corrupt outcome the schema simply should not be able to represent. Derive
- * the conversation with a join to `threads` when an audit query needs it.
+ * conversation with a thread from a DIFFERENT conversation — a corrupt
+ * outcome the schema should not be able to represent. Join to `threads` when
+ * an audit query needs it.
+ *
  * Declared a real FK (this schema's convention for id-shaped columns) but
- * `ON DELETE SET NULL` rather than `CASCADE` (unlike migration 001's
- * `threads`): a ledger row's audit/idempotency value ("we received message X
- * for mailbox Y, and here is what happened") does not depend on the thread it
- * produced still existing — invariant #1's never-silently-lost applies to the
- * fact of ingestion, so the ledger row survives and only the now-unresolvable
- * pointer clears.
+ * `ON DELETE SET NULL` rather than `CASCADE`, unlike migration 001's
+ * `threads`: a ledger row's audit and idempotency value — "we received
+ * message X for mailbox Y, and here is what happened" — does not depend on
+ * the thread it produced still existing. Invariant #1's never-silently-lost
+ * applies to the fact of ingestion, so the row survives and only the
+ * now-unresolvable pointer clears.
  *
- * No cross-column CHECK tying `status` to `conversation_id`/`thread_id`
- * nullability (e.g. "non-null iff `stored`") — deliberately deferred: the
- * exact invariant depends on retry/dead-letter edge cases the consuming
- * store methods (a later ticket) haven't been written yet to pin down, and
- * this ticket is schema-only. Worth adding once that implementation settles
- * the question for real.
+ * ## Two deliberate omissions
  *
- * No index beyond the UNIQUE claim key: the ticket's own framing ("the
- * unique index IS the claim key") reads as the one index this migration
- * needs; a `status`-scoped index for a future retry-sweep/dead-letter-review
- * query is deferred to whichever ticket implements that query, so as not to
- * carry write-time index cost for a read pattern that doesn't exist yet.
+ * No cross-column CHECK tying `status` to `thread_id` nullability (e.g.
+ * "non-null iff `stored`"): the exact invariant depends on
+ * retry/dead-letter edge cases, and this migration is schema-only. Worth
+ * adding now that the consuming store methods have settled the question.
+ *
+ * No index beyond the UNIQUE claim key — the unique index IS the claim key.
+ * A `status`-scoped index was left to whichever change first needed one,
+ * rather than carrying write-time cost for a read pattern that did not yet
+ * exist. `src/composition/health.ts` has since added two (a `GROUP BY
+ * status` over a 24h window, and a `status = 'dead-letter'` count), so the
+ * question is now whether those warrant the index, not whether a reader
+ * exists.
  */
 const MIGRATION_012_INBOUND_DELIVERIES = `
 CREATE TABLE inbound_deliveries (
@@ -564,100 +559,85 @@ CREATE UNIQUE INDEX inbound_deliveries_mailbox_id_provider_message_id_key ON inb
 
 /**
  * Migration 013 — `queue_jobs`, the durable Postgres-backed queue behind
- * `createPostgresQueue` (HT-43; `src/providers/adapters/postgres-queue/`).
- * This is the production `QueueProvider` for the RIQ dogfood: the Gmail
- * push webhook (`src/api/gmail-webhook.ts`) enqueues a "reconcile" job here,
- * and a Vercel Cron tick drains and processes a bounded batch
- * (`PostgresQueue.drainOnce`) — chosen over Vercel Queues (still beta)
- * because it reuses the Supabase Postgres every deployment already
- * provisions, rather than adding a second durable-work dependency.
+ * `createPostgresQueue` (`src/providers/adapters/postgres-queue/`). The
+ * production `QueueProvider`: the Gmail push webhook
+ * (`src/api/gmail-webhook.ts`) enqueues a reconcile job, and a Vercel Cron
+ * tick drains a bounded batch (`PostgresQueue.drainOnce`). Chosen over
+ * Vercel Queues (still beta) because it reuses the Supabase Postgres every
+ * deployment already provisions.
  *
  * One row per enqueued job, simultaneously the **dedupe record**, the
  * **claim/lease**, and the **retry/dead-letter bookkeeping** — the same
- * three-way framing migration 012's doc comment uses for
- * `inbound_deliveries`, applied here to outbound queue work instead of
- * inbound delivery ledgering.
+ * three-way framing migration 012 uses for `inbound_deliveries`, applied to
+ * outbound queue work.
  *
- * ## Dedupe: a partial unique index, mirroring migration 003's precedent
+ * ## Dedupe: a partial unique index
  *
  * `queue_jobs_topic_dedupe_key` constrains `(topic, dedupe_key)` only when
- * `dedupe_key IS NOT NULL` — the same partial-index shape migration 003's
- * `threads_conversation_idempotency_key_idx` established for `threads`:
- * only rows that opted into dedup (a caller-supplied key) constrain each
- * other, and every `NULL`-key row is invisible to the index, so ordinary
- * (non-deduped) enqueues never collide with one another. The adapter's
- * `enqueue` targets this exact index with `INSERT ... ON CONFLICT (topic,
- * dedupe_key) WHERE dedupe_key IS NOT NULL AND dead_lettered_at IS NULL DO
- * NOTHING` — a retried enqueue call sharing the same `(topic, dedupeKey)`
- * as a still-live job is silently suppressed, matching
- * `EnqueueOptions.dedupeKey`'s "SHOULD suppress duplicate enqueues"
- * contract (`src/providers/queue.ts`).
+ * `dedupe_key IS NOT NULL` — the shape migration 003's
+ * `threads_conversation_idempotency_key_idx` established: only rows that
+ * opted into dedup constrain each other, and every `NULL`-key row is
+ * invisible to the index, so ordinary enqueues never collide. `enqueue`
+ * targets this index with `INSERT ... ON CONFLICT (topic, dedupe_key) WHERE
+ * dedupe_key IS NOT NULL AND dead_lettered_at IS NULL DO NOTHING`, so a
+ * retried enqueue sharing a `(topic, dedupeKey)` with a still-live job is
+ * silently suppressed, matching `EnqueueOptions.dedupeKey`'s contract.
  *
  * The `AND dead_lettered_at IS NULL` arm is a deliberate WIDENING beyond
- * migration 003's precedent, not a copy-paste: a `threads` row is never
- * reprocessed after it reaches a terminal send state, so 003's index needed
- * no such arm. A queue job's dedupe key, by contrast, must become reusable
- * once the job it protected reaches ITS OWN terminal failure
- * (dead-lettered) — otherwise a poison job's dedupe key would permanently
- * block every future enqueue attempt for that same key, even after an
- * operator fixes the root cause and wants to try again. Excluding
- * dead-lettered rows from the constraint is what makes that re-enqueue
- * possible while still retaining the dead-lettered row itself (see below).
+ * migration 003, not a copy-paste. A `threads` row is never reprocessed
+ * after a terminal send state, so 003 needed no such arm. A queue job's
+ * dedupe key must become reusable once the job it protected reaches its own
+ * terminal failure — otherwise a poison job's key would permanently block
+ * every future enqueue for that key, even after an operator fixes the root
+ * cause. Excluding dead-lettered rows is what makes re-enqueue possible
+ * while still retaining the dead-lettered row.
  *
- * ## `run_after` + `locked_until`: "eligible" and "leased" are separate axes
+ * ## `run_after` + `locked_until`: eligible and leased are separate axes
  *
  * `run_after` is the earliest time a job may be claimed — `now()` for an
  * immediate enqueue, later for `delaySeconds` or a backed-off retry.
- * `locked_until` is a lease: `drainOnce`'s claim sets it to a near-future
- * expiry so a crashed or timed-out worker's claim eventually lapses and the
- * job becomes reclaimable, rather than stuck forever behind a lock nobody
- * will release — the same lease shape migration 003's `threads.claimed_until`
- * uses for outbound-send delivery claims, applied here to queue jobs
- * instead. A job is claimable exactly when BOTH are satisfied: `run_after
- * <= now()` (eligible) AND `locked_until IS NULL OR locked_until < now()`
- * (unleased) — two independent conditions kept as two columns rather than
- * folded into one, because "eligible but currently leased" (another worker
- * has it) is a real, common state that a single combined timestamp could
- * not distinguish from "not yet eligible."
+ * `locked_until` is a lease: `drainOnce`'s claim sets a near-future expiry
+ * so a crashed or timed-out worker's claim lapses and the job becomes
+ * reclaimable rather than stuck behind a lock nobody will release — the
+ * lease shape migration 003's `threads.claimed_until` uses, applied to queue
+ * jobs.
  *
- * ## `dead_lettered_at` rows are retained forever — never silently dropped
+ * A job is claimable exactly when BOTH hold: `run_after <= now()` (eligible)
+ * AND `locked_until IS NULL OR locked_until < now()` (unleased). Two columns
+ * rather than one combined timestamp, because "eligible but currently
+ * leased" is a real, common state a single value could not distinguish from
+ * "not yet eligible."
  *
- * A job that exhausts its retry ceiling is dead-lettered, not deleted:
- * `dead_lettered_at` is stamped and the row stays in the table permanently,
- * queryable via `PostgresQueue.getStats()`'s `deadLettered` count or a
- * direct `SELECT ... WHERE dead_lettered_at IS NOT NULL`. This is
- * CHARTER.md invariant #1 ("never silently drop") applied to queue work —
- * the same retention discipline migration 012 uses for
- * `inbound_deliveries.status = 'dead-letter'`: a poison job is parked and
- * visible for manual review, never erased. Deleting it on terminal failure
- * would make "did this job ever run, and why did it fail?" an unanswerable
- * question during an incident.
+ * ## `dead_lettered_at` rows are retained forever
+ *
+ * A job exhausting its retry ceiling is dead-lettered, not deleted: the
+ * column is stamped and the row stays permanently, queryable via
+ * `PostgresQueue.getStats()`'s `deadLettered` count or a direct `SELECT ...
+ * WHERE dead_lettered_at IS NOT NULL`. CHARTER.md invariant #1 ("never
+ * silently drop") applied to queue work, matching migration 012's retention
+ * of `inbound_deliveries.status = 'dead-letter'`. Deleting on terminal
+ * failure would make "did this job ever run, and why did it fail?"
+ * unanswerable during an incident.
  *
  * ## The two indexes
  *
- * - `queue_jobs_topic_dedupe_key` — the dedupe constraint above; also
- *   doubles as the lookup a future admin tool would use to find "the live
- *   job for key X."
+ * - `queue_jobs_topic_dedupe_key` — the dedupe constraint above; also the
+ *   lookup a future admin tool would use to find the live job for a key.
  * - `queue_jobs_ready_idx` — `(topic, run_after) WHERE dead_lettered_at IS
- *   NULL`, sized for the drain hot path: `drainOnce`'s claim filters to a
- *   specific topic set and orders by `run_after`, and excluding
- *   dead-lettered rows keeps the index from accumulating entries for jobs
- *   that can never be claimed again. `locked_until` is deliberately NOT
- *   part of this index — it churns on every claim/release, and the "find
- *   the oldest eligible, unleased jobs" read pattern is already served by
- *   ordering on `(topic, run_after)` and re-checking `locked_until` in the
- *   claim query's `WHERE` clause, rather than indexing a column that
- *   changes this fast.
+ *   NULL`, sized for the drain hot path, which filters to a topic set and
+ *   orders by `run_after`. Excluding dead-lettered rows keeps the index from
+ *   accumulating entries for jobs that can never be claimed again.
+ *   `locked_until` is deliberately NOT indexed: it churns on every
+ *   claim/release, and "find the oldest eligible, unleased jobs" is already
+ *   served by ordering on `(topic, run_after)` and re-checking
+ *   `locked_until` in the claim query's `WHERE`.
  *
- * No CHECK constraint ties `dead_lettered_at` to `attempts`/`max_attempts`
- * (unlike, say, migration 002's direction-tied CHECKs): the
+ * No CHECK ties `dead_lettered_at` to `attempts`/`max_attempts`: the
  * attempts-vs-ceiling decision is adapter-level policy
- * (`PostgresQueue.drainOnce`'s own `maxAttempts` option — see that
- * module's doc comment for why it reads as a call-level knob rather than
- * this row's `max_attempts` column), not a database-level invariant the
- * schema should enforce. `max_attempts` is retained as per-row schema
- * head-room for a future per-job ceiling override, matching migration
- * 010's "the column is reserved, the logic lands in a later ticket"
+ * (`PostgresQueue.drainOnce`'s own `maxAttempts` option — see that module's
+ * doc for why it is a call-level knob rather than this row's column), not a
+ * database-level invariant. `max_attempts` is retained as head-room for a
+ * future per-job override, matching migration 010's reserve-the-column
  * precedent.
  */
 const MIGRATION_013_QUEUE_JOBS = `
@@ -766,9 +746,9 @@ CREATE INDEX thread_attachments_thread_id_idx ON thread_attachments (thread_id);
  *
  * Unlike the outbound lease, there is no accompanying "status" to record on
  * release — this lease guards nothing but redundant Gmail API work
- * (`history.list`/`messages.get`) between a push-triggered reconcile
- * (HT-41) and the daily sweep (HT-42) landing on the SAME mailbox at
- * overlapping times. It is a pure efficiency guard, not a correctness one:
+ * (`history.list`/`messages.get`) between a push-triggered reconcile and
+ * the every-minute reconciliation sweep (`src/mail/gmail-reconcile-sweep.ts`)
+ * landing on the SAME mailbox at overlapping times. It is a pure efficiency guard, not a correctness one:
  * `src/mail/gmail-reconcile.ts`'s own cursor-advance rule (step 6) and the
  * ingest pipeline's dedup on `(mailboxId, providerMessageId)`
  * (inbound-ingestion.md §4) already make either ordering safe with no lease
@@ -997,116 +977,103 @@ CREATE TABLE assistants (
 `
 
 /**
- * Migration 021 — the `threads` actor model + draft lifecycle (HT-68;
- * specs/plugins/substrate-v1.md §2). Closes the gap that spec names
- * explicitly: CHARTER.md §4 promises an authoring-actor-kind + draft-before-
- * send schema shape "day one," but the shipped schema (migrations 001/007)
- * only ever had `direction IN ('inbound','outbound','note')`. This migration
- * is that promise, kept late but in full — the contradiction and its
- * resolution are recorded here deliberately (CLAUDE.md's coding-discipline
- * commandment: name the contradiction, don't code through it).
+ * Migration 021 — the `threads` actor model + draft lifecycle
+ * (specs/modules/substrate-v1.md §2). Closes a gap that spec names:
+ * CHARTER.md §4 promises an authoring-actor-kind and draft-before-send shape
+ * "day one," but the shipped schema (migrations 001/007) only ever had
+ * `direction IN ('inbound','outbound','note')`. Recorded here rather than
+ * coded through.
  *
- * ## `author_kind` + identity (spec §2, backfill-before-constraint order)
+ * ## `author_kind` + identity (backfill before constraint)
  *
- * Same discipline as migration 004/005's own backfill-before-constraint
- * ordering: `author_kind` is added nullable, backfilled (`inbound` →
- * `customer`; `outbound`/`note` → `agent` — every pre-substrate row was
- * authored by a human, since Assistants didn't exist before this
- * migration), THEN set `NOT NULL` and CHECK-constrained. NO column
- * `DEFAULT` is added: every application insert
- * (`src/store/conversations.ts`'s `insertThread`) ALWAYS computes and
- * supplies `author_kind` explicitly (spec §2: "every insert path supplies
- * it in the same change"), so a default would only ever mask a hand-written
- * INSERT that forgot the column — exactly the kind of silent wrong-value
- * risk this schema's CHECK-heavy convention exists to avoid, not paper
- * over. **No `DEFAULT 'agent'`**, however convenient it would be for test
- * fixtures: a masking default is strictly worse than giving the handful of
- * raw-SQL fixtures an explicit value (see `src/db/migrate.test.ts`'s
- * `threads` inserts).
+ * Same ordering as migrations 004/005: added nullable, backfilled (`inbound`
+ * → `customer`; `outbound`/`note` → `agent`, since every pre-substrate row
+ * was human-authored — Assistants did not exist yet), THEN `NOT NULL` and
+ * CHECK-constrained.
  *
- * `threads_author_kind_direction_check` is the real invariant a default
- * would have masked: `(direction = 'inbound') = (author_kind = 'customer')`
- * — a biconditional, both sides always boolean (never NULL: `direction` is
- * `NOT NULL` since migration 001, `author_kind` is `NOT NULL` as of the
- * statement just above). Inbound mail is ALWAYS customer-authored, and only
- * inbound mail is — outbound/note rows are free to be `'agent'` or
- * `'assistant'`, but never `'customer'`. This is stronger than the backfill
- * CASE alone: the backfill sets the right value once; this CHECK keeps it
- * right forever, rejecting e.g. an inbound row mislabeled `'agent'` or an
- * outbound row mislabeled `'customer'` at insert/update time, not just at
- * migration time.
+ * **No column `DEFAULT`.** Every application insert
+ * (`src/store/conversations.ts`'s `insertThread`) always computes and
+ * supplies `author_kind` explicitly, so a default could only ever mask a
+ * hand-written INSERT that forgot the column. That silent-wrong-value risk
+ * is exactly what this schema's CHECK-heavy convention exists to avoid. Not
+ * even `DEFAULT 'agent'` for fixture convenience: a masking default is worse
+ * than giving the handful of raw-SQL fixtures an explicit value (see
+ * `src/db/migrate.test.ts`).
  *
- * `author_agent_id`/`author_assistant_id` need no backfill: `NULL` is the
- * correct, honest value for every backfilled row and every future
- * service-token caller with no acting-agent header (spec §3: "a
- * service-token caller without the header still writes author_kind='agent'
- * with NULL identity — the pre-HT-54 posture, preserved rather than
- * broken"). `threads_author_identity_check` makes the spec's three-way
- * consistency rule unrepresentable-otherwise: a `customer` row carries
- * neither id; an `assistant` row carries `author_assistant_id` and never
- * `author_agent_id`; an `agent` row may carry `author_agent_id` (or not)
- * and never `author_assistant_id`.
+ * `threads_author_kind_direction_check` is the invariant a default would
+ * have masked: `(direction = 'inbound') = (author_kind = 'customer')` — a
+ * biconditional, both sides always boolean, never NULL (`direction` is `NOT
+ * NULL` since migration 001, `author_kind` as of the statement above).
+ * Inbound mail is ALWAYS customer-authored and only inbound mail is;
+ * outbound and note rows may be `'agent'` or `'assistant'` but never
+ * `'customer'`. Stronger than the backfill alone: the backfill sets the
+ * right value once, this keeps it right forever, rejecting a mislabeled row
+ * at insert/update time.
  *
- * ## Draft lifecycle (spec §2)
+ * `author_agent_id`/`author_assistant_id` need no backfill — `NULL` is the
+ * honest value for every backfilled row and every future service-token
+ * caller with no acting-agent header (spec §3: "a service-token caller
+ * without the header still writes author_kind='agent' with NULL identity").
+ * `threads_author_identity_check` makes the three-way rule
+ * unrepresentable-otherwise: a `customer` row carries neither id; an
+ * `assistant` row carries `author_assistant_id` and never
+ * `author_agent_id`; an `agent` row may carry `author_agent_id` and never
+ * `author_assistant_id`.
  *
- * `draft_status` is nullable — legal only on `direction = 'outbound'`
- * (`threads_draft_status_outbound_only`, matching the shape of every other
- * outbound-only column in this schema, e.g. migration 003's `idempotency_
- * key`) and only from the closed set `awaiting_review`/`approved`/
- * `discarded` (`threads_draft_status_check`). The audit columns
- * (`approved_by_agent_id`, `draft_resolved_at`, `draft_edited`) need no
- * CHECK of their own — they are meaningful only alongside a non-null
- * `draft_status`, which the store layer (not the schema) is responsible for
- * only ever setting together; no illegal state results from setting them on
- * a non-draft row, so no constraint is needed to forbid it.
+ * ## Draft lifecycle
  *
- * ## The delivery/draft CHECK replacement — spec §2's exact predicate
+ * `draft_status` is nullable, legal only on `direction = 'outbound'`
+ * (`threads_draft_status_outbound_only`, matching every other outbound-only
+ * column, e.g. migration 003's `idempotency_key`) and only from the closed
+ * set `awaiting_review`/`approved`/`discarded`
+ * (`threads_draft_status_check`). The audit columns (`approved_by_agent_id`,
+ * `draft_resolved_at`, `draft_edited`) need no CHECK: they are meaningful
+ * only alongside a non-null `draft_status`, which the store layer is
+ * responsible for setting together, and no illegal state results from them
+ * on a non-draft row.
  *
- * This DROPS migration 007's `threads_delivery_status_by_direction` (which
- * still carries the `note` arm — reproduced verbatim below, not narrowed)
- * and replaces it with the spec's two-CHECK predicate, copied here exactly
- * as spec §2 shows it, not paraphrased:
+ * ## The delivery/draft CHECK replacement
  *
- * 1. `threads_draft_status_outbound_only` — already listed above, but doing
- *    real work here too: without it, the second CHECK's outbound branches
- *    say nothing about a `note` row carrying a stray `draft_status`, since
- *    the first arm of the second CHECK (`direction IN ('inbound','note')
- *    AND delivery_status IS NULL`) never inspects `draft_status` at all.
- * 2. `threads_delivery_draft_status_check` — the illegal-state-proof rule
- *    spec §2 requires: an unapproved draft (`awaiting_review`/`discarded`)
- *    MUST have `delivery_status IS NULL` (invisible to the delivery worker,
- *    which scopes every query to `delivery_status IN (...)`), and only
- *    `draft_status IS NULL` (an ordinary send/note — the pre-substrate
- *    shape) or `'approved'` may carry a real delivery status.
+ * DROPS migration 007's `threads_delivery_status_by_direction` (whose `note`
+ * arm is reproduced verbatim below, not narrowed) and replaces it with two
+ * CHECKs:
  *
- *    **Deviation from spec §2's literal SQL, found by this migration's own
- *    tests**: the spec's predicate text omits explicit `IS NOT NULL` guards
- *    on both `IN (...)` membership tests over nullable columns — the
- *    second arm's `draft_status IN ('awaiting_review','discarded')` and the
- *    third arm's `delivery_status IN ('pending','sent','failed')`. Copied
- *    verbatim, an ORDINARY outbound row (`draft_status IS NULL`,
- *    `delivery_status IS NULL` — never a legal state; a plain send always
- *    carries a delivery status) slipped through: `NULL IN (...)` evaluates
- *    to SQL NULL, not FALSE, so both the second and third arm evaluated to
- *    NULL rather than FALSE, and a CHECK treats NULL as a PASS. This is the
- *    EXACT trap migration 002's own doc comment names ("a CHECK constraint
- *    passes on TRUE *or* NULL... the guard forces that case to FALSE so it
- *    is rejected") — applied here, with both guards restored, rather than
- *    reproducing the bug spec §2's prose missed.
+ * 1. `threads_draft_status_outbound_only` — listed above, but load-bearing
+ *    here too: without it the second CHECK says nothing about a `note` row
+ *    carrying a stray `draft_status`, since its first arm (`direction IN
+ *    ('inbound','note') AND delivery_status IS NULL`) never inspects
+ *    `draft_status`.
+ * 2. `threads_delivery_draft_status_check` — an unapproved draft
+ *    (`awaiting_review`/`discarded`) MUST have `delivery_status IS NULL`, so
+ *    it is invisible to the delivery worker, which scopes every query to
+ *    `delivery_status IN (...)`. Only `draft_status IS NULL` (an ordinary
+ *    send or note) or `'approved'` may carry a real delivery status.
  *
- * `listDeliverableThreads`/`claimThreadForDelivery` (`src/store/
- * conversations.ts`) additionally gain an explicit `draft_status IS
- * DISTINCT FROM 'awaiting_review'` guard in the same change — belt on top
- * of this CHECK's braces, per spec §2's closing paragraph.
+ * **Deviation from spec §2's literal SQL, caught by this migration's own
+ * tests.** The spec's predicate omits explicit `IS NOT NULL` guards on both
+ * `IN (...)` tests over nullable columns — the second arm's `draft_status IN
+ * ('awaiting_review','discarded')` and the third's `delivery_status IN
+ * ('pending','sent','failed')`. Copied verbatim, an ordinary outbound row
+ * with both columns NULL — never a legal state, since a plain send always
+ * carries a delivery status — slipped through: `NULL IN (...)` evaluates to
+ * SQL NULL rather than FALSE, both arms evaluated to NULL, and a CHECK
+ * treats NULL as a PASS. This is the trap migration 002's doc comment names
+ * ("a CHECK constraint passes on TRUE *or* NULL... the guard forces that
+ * case to FALSE so it is rejected"). Both guards are restored here rather
+ * than reproducing the bug the spec's prose missed.
+ *
+ * `listDeliverableThreads`/`claimThreadForDelivery` additionally gain an
+ * explicit `draft_status IS DISTINCT FROM 'awaiting_review'` guard — belt on
+ * top of this CHECK's braces.
  *
  * ## The partial index
  *
- * `threads_awaiting_review_idx` serves `ConversationStore.listAwaitingDrafts`
- * (`GET /api/v1/drafts?status=awaiting_review`, spec §6) — a real,
- * shipped-in-this-change query, not speculative head-room, so it is added
- * alongside the column it scans rather than deferred (matching migration
- * 013's `queue_jobs_ready_idx` precedent: an index ships with the query
- * that needs it, not before).
+ * `threads_awaiting_review_idx` serves
+ * `ConversationStore.listAwaitingDrafts` (`GET
+ * /api/v1/drafts?status=awaiting_review`, spec §6) — a query shipped in this
+ * same change, not speculative head-room, so it lands alongside the column
+ * it scans (matching migration 013's `queue_jobs_ready_idx`: an index ships
+ * with the query that needs it).
  */
 const MIGRATION_021_THREADS_ACTOR_MODEL = `
 ALTER TABLE threads ADD COLUMN author_kind text;
@@ -1452,86 +1419,79 @@ CREATE INDEX webauthn_stepup_tokens_expires ON webauthn_stepup_tokens (expires_a
  * ## What was wrong
  *
  * Supabase exposes the `public` schema through PostgREST, and its stock
- * setup grants `anon` and `authenticated` full `SELECT/INSERT/UPDATE/
- * DELETE/TRUNCATE` on tables in that schema. Row-Level Security is what is
- * normally supposed to make those grants safe — but no migration up to 026
- * ever enabled RLS, so every table stood fully open to anyone holding the
- * project's anon key. The anon key is public by design (it ships to
- * browsers), so that is effectively unauthenticated read AND write:
- * dumping `conversations`/`threads`, but also INSERTing into `agents`,
+ * setup grants `anon` and `authenticated` full
+ * `SELECT/INSERT/UPDATE/DELETE/TRUNCATE` there. RLS is what normally makes
+ * those grants safe, but no migration up to 026 enabled it, so every table
+ * stood open to anyone holding the project's anon key — which is public by
+ * design, since it ships to browsers. That is unauthenticated read AND
+ * write: dumping `conversations`/`threads`, INSERTing into `agents`,
  * `agent_auth_identities`, `agent_mailbox_access` and
  * `webauthn_credentials` to self-provision an authenticated Agent, or
  * TRUNCATEing the lot. `mailbox_oauth_tokens` is the one partial mercy —
- * its token columns are AES-256-GCM ciphertext (`src/store/token-crypto.
- * ts`) keyed outside the database, so a dump yields ciphertext.
+ * its token columns are AES-256-GCM ciphertext
+ * (`src/store/token-crypto.ts`) keyed outside the database, so a dump
+ * yields ciphertext.
  *
  * Nothing in this codebase uses that surface: the app reaches Postgres
  * directly over the pooler (`DATABASE_URL`, `src/db/postgres.ts`) and
- * Supabase Storage with the `service_role` key
- * (`src/providers/adapters/supabase-storage/`). There is no anon-key
- * client anywhere in the repo. The Data API was pure attack surface with
- * zero application value, which is what makes closing it entirely safe.
+ * Supabase Storage with the `service_role` key. There is no anon-key client
+ * anywhere in the repo, which is what makes closing it entirely safe.
  *
  * ## Defence in depth, not either/or
  *
- * Both halves below are applied because they fail independently: RLS alone
- * would be undone by a future `GRANT` plus a permissive policy, and
- * revoked grants alone would be undone by anything that re-grants. Neither
- * layer is load-bearing on its own.
+ * Both halves are applied because they fail independently: RLS alone would
+ * be undone by a future `GRANT` plus a permissive policy, and revoked grants
+ * alone by anything that re-grants.
  *
- * Be precise about what the `ALTER DEFAULT PRIVILEGES` calls do and do
- * NOT buy, because it is easy to overrate them. `ALTER DEFAULT PRIVILEGES
- * ... REVOKE` *deletes a default-ACL entry*; it does not install a
- * standing deny. And without `FOR ROLE` it applies only to the role that
- * executes it — the one running this migration. So it stops tables
- * created by THIS role from arriving pre-granted, and nothing more. It
- * does not survive Supabase re-running its stock bootstrap (which simply
- * re-creates the entry), and it does not touch default privileges defined
- * for other roles such as `supabase_admin`. The durable protection is the
- * standing rule below, not this statement.
+ * **The `ALTER DEFAULT PRIVILEGES` calls are easy to overrate.** `ALTER
+ * DEFAULT PRIVILEGES ... REVOKE` *deletes a default-ACL entry*; it does not
+ * install a standing deny. Without `FOR ROLE` it applies only to the role
+ * executing it — the one running this migration. So it stops tables created
+ * by THIS role from arriving pre-granted, and nothing more. It does not
+ * survive Supabase re-running its stock bootstrap, and it does not touch
+ * defaults defined for other roles such as `supabase_admin`. The durable
+ * protection is the standing rule below.
  *
  * 1. **RLS on every table**, spelled out one `ALTER TABLE` per table rather
  *    than looped, so the set is reviewable in the diff and a table added
- *    later fails loudly by omission instead of being silently swept in.
- *    With no policies attached this is deny-by-default. It does not affect
- *    the application: these tables are owned by `postgres`, and a table
- *    owner bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set (which we
- *    deliberately do not set).
- * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` (subject
- *    to the limits spelled out above) so tables created by future
- *    migrations do not silently arrive pre-granted. Note that `REVOKE
- *    ... FROM anon` removes only that role's own ACL entry — privileges
- *    held via the `PUBLIC` pseudo-role are unaffected, which is why
- *    `anon` still reports schema `USAGE` afterwards. The table-level
- *    grants are the gate that matters; schema `USAGE` alone conveys no
- *    access to any table.
+ *    later fails loudly by omission instead of being silently swept in. With
+ *    no policies attached this is deny-by-default. It does not affect the
+ *    application: these tables are owned by `postgres`, and an owner
+ *    bypasses RLS unless `FORCE ROW LEVEL SECURITY` is set, which we
+ *    deliberately do not set.
+ * 2. **Revoke the grants**, including `ALTER DEFAULT PRIVILEGES` subject to
+ *    the limits above. `REVOKE ... FROM anon` removes only that role's own
+ *    ACL entry — privileges held via the `PUBLIC` pseudo-role are
+ *    unaffected, which is why `anon` still reports schema `USAGE`
+ *    afterwards. The table-level grants are the gate that matters; schema
+ *    `USAGE` alone conveys no access to any table.
  *
  * Neither half hardcodes `public`, because `PostgresDb` supports a `schema`
- * option (`src/db/postgres.ts`) that puts every table in a named schema
- * instead. The `ALTER TABLE`s are unqualified, so they resolve wherever
- * search_path finds the table; the revokes then derive that SAME schema
- * from `'conversations'::regclass` rather than from `current_schema()`.
- * That distinction is load-bearing and the reason for the comment in the
- * `DO` block below — the two rules disagree whenever the first entry on
- * search_path is not the schema holding the tables, and picking the wrong
- * one fails silently, leaving the grants in place while reporting success.
+ * option that puts every table in a named schema. The `ALTER TABLE`s are
+ * unqualified, so they resolve wherever search_path finds the table; the
+ * revokes then derive that SAME schema from `'conversations'::regclass`
+ * rather than `current_schema()`. That distinction is load-bearing and is
+ * why the `DO` block below carries its own comment: the two disagree
+ * whenever the first entry on search_path is not the schema holding the
+ * tables, and picking the wrong one fails silently, leaving the grants in
+ * place while reporting success.
  *
  * ## Why the `DO` block
  *
  * `anon`/`authenticated` are Supabase-created roles. They do not exist in
- * PGlite, which is what the test suite runs `migrate()` against
- * (`createPgliteDb`, `src/db/client.ts`), and an unguarded `REVOKE ... FROM
- * anon` is a hard error when the role is missing — it would fail every
- * test that migrates. The `pg_roles` guard makes the revokes a no-op off
- * Supabase while still applying in production. This block is also why
- * {@link splitStatements} had to learn about dollar quoting.
+ * PGlite, which the test suite runs `migrate()` against (`createPgliteDb`,
+ * `src/db/client.ts`), and an unguarded `REVOKE ... FROM anon` is a hard
+ * error when the role is missing — it would fail every test that migrates.
+ * The `pg_roles` guard makes the revokes a no-op off Supabase while still
+ * applying in production. This block is also why {@link splitStatements} had
+ * to learn about dollar quoting.
  *
  * ## Standing rule for future migrations
  *
- * A migration that adds a table MUST also `ENABLE ROW LEVEL SECURITY` on
- * it. The `ALTER DEFAULT PRIVILEGES` above means such a table
- * arrives without anon grants, so RLS is the second layer rather than the
- * only one — but the rule stands so the two layers stay in step.
+ * A migration that adds a table MUST also `ENABLE ROW LEVEL SECURITY` on it.
+ * The `ALTER DEFAULT PRIVILEGES` above means such a table arrives without
+ * anon grants, so RLS is the second layer rather than the only one — but the
+ * rule stands so the two stay in step.
  */
 export const MIGRATION_027_LOCK_DOWN_DATA_API = `
 ALTER TABLE _migrations ENABLE ROW LEVEL SECURITY;
@@ -1650,116 +1610,109 @@ $migration027$;
 
 /**
  * Migration 028 — `imap_mailbox_config`, `imap_mailbox_credentials`,
- * `imap_watch_state` (HT-101 Stage 2a-i; specs/mail/mailbox-connection.md).
+ * `imap_watch_state` (specs/mail/mailbox-connection.md).
+ *
  * Stage 1 (`src/providers/adapters/imap/*`, `smtp/*`) built the pure
- * fetch/send adapters behind the existing `InboundEmailProvider`-adjacent
- * and `EmailSender` seams with NO persistence of their own — every
- * dependency (an `ImapClient`, an `SmtpTransporter`) is injected by the
- * caller. This migration is where that persistence lands: three per-mailbox
- * sidecar tables, kept OUT of the generic `mailboxes` schema exactly like
- * `mailbox_oauth_tokens`/`gmail_watch_state` (migrations 010/011) are —
- * `mailboxes` stays provider-agnostic, and an IMAP-specific column set adds
- * nothing to a schema a future non-IMAP, non-Gmail transport would also have
- * to carry. Same 1:1-sidecar shape throughout: `mailbox_id` is the PRIMARY
- * KEY on all three tables (one row per mailbox), not a separate surrogate
- * `id`.
+ * fetch/send adapters with NO persistence of their own — every dependency
+ * (an `ImapClient`, an `SmtpTransporter`) is injected. This migration is
+ * where that persistence lands: three per-mailbox sidecar tables, kept OUT
+ * of the generic `mailboxes` schema exactly as
+ * `mailbox_oauth_tokens`/`gmail_watch_state` (migrations 010/011) are, so
+ * `mailboxes` stays provider-agnostic and an IMAP-specific column set adds
+ * nothing a future non-IMAP, non-Gmail transport would have to carry. Same
+ * 1:1-sidecar shape throughout: `mailbox_id` is the PRIMARY KEY on all
+ * three, not a separate surrogate `id`.
  *
  * ## `imap_mailbox_config` — the non-secret connection parameters
  *
- * Host/port for BOTH transports (`imap_host`/`imap_port` for fetch,
- * `smtp_host`/`smtp_port` for send) live in one row, not two, because a
- * single IMAP/SMTP mailbox connection is configured as one unit in the
- * connect flow this table backs — an operator supplies one server pair (or
- * one provider's well-known pair) and one account, never a fetch-only or
- * send-only half-connection. `username` is a single column shared by both
- * transports: the overwhelmingly common case for an app-password-based
- * mailbox (the credential this ticket's sibling table stores) is one
- * account authenticating both IMAP and SMTP identically; a future
- * split-credential mailbox is a schema change for whoever needs it; not a
- * checkbox this migration is guessing at today. `secure` defaults `true`
- * (TLS-first posture for both connections) — `imapflow`/`nodemailer` both
- * take an explicit boolean, so this is a plain pass-through, not a schema
- * opinion about how either library behaves.
+ * Host/port for BOTH transports (`imap_host`/`imap_port`,
+ * `smtp_host`/`smtp_port`) live in one row, because a single IMAP/SMTP
+ * mailbox is configured as one unit in the connect flow this table backs —
+ * an operator supplies one server pair and one account, never a fetch-only
+ * or send-only half-connection. `username` is one column shared by both
+ * transports: for an app-password mailbox the overwhelmingly common case is
+ * one account authenticating IMAP and SMTP identically, and a
+ * split-credential mailbox is a schema change for whoever needs it rather
+ * than a checkbox guessed at now. `secure` defaults `true` (TLS-first);
+ * `imapflow`/`nodemailer` both take an explicit boolean, so this is a
+ * pass-through, not a schema opinion about either library.
  *
- * ## `imap_mailbox_credentials` — the secret, kept in its OWN table
+ * ## `imap_mailbox_credentials` — the secret, in its OWN table
  *
- * Deliberately a separate table from `imap_mailbox_config`, not one more
- * nullable column on it — narrows which code path ever needs to `SELECT` an
- * encrypted column at all: the connect-flow / settings-display code that
- * reads back host/port/username for an operator to review never has a
- * reason to touch ciphertext, and keeping the secret physically apart from
- * the config makes "this query cannot possibly leak the password" true by
- * construction for every config-only reader, not just true by discipline.
- * `password_ciphertext` is `bytea NOT NULL` — this migration only reserves
- * the column shape, exactly like migration 010's own framing for
- * `mailbox_oauth_tokens`; `src/store/imap-credentials.ts` (this same
- * ticket) is what actually encrypts/decrypts, reusing `token-crypto.ts`'s
- * existing AES-256-GCM envelope rather than inventing a second one — one
- * crypto module, two callers.
+ * Deliberately separate from `imap_mailbox_config` rather than one more
+ * nullable column on it, which narrows which code path ever `SELECT`s an
+ * encrypted column: the connect-flow and settings-display code that reads
+ * back host/port/username never has a reason to touch ciphertext. Keeping
+ * the secret physically apart makes "this query cannot leak the password"
+ * true by construction for every config-only reader, not merely by
+ * discipline.
+ *
+ * `password_ciphertext bytea NOT NULL` — this migration only reserves the
+ * column shape, as migration 010 does for `mailbox_oauth_tokens`;
+ * `src/store/imap-credentials.ts` does the encrypting, reusing
+ * `token-crypto.ts`'s AES-256-GCM envelope rather than inventing a second
+ * one.
  *
  * ## `imap_watch_state` — the fetch cursor, reusing `ImapCursor` verbatim
  *
  * `uid_validity`/`last_uid` are the exact two fields of
- * `src/providers/adapters/imap/fetch.ts`'s `ImapCursor` — `bigint`, not
- * `integer`: IMAP UIDs and UIDVALIDITY values are unsigned 32-bit per RFC
- * 3501 §2.3.1, so `bigint` gives full headroom with no risk of the
- * range-overflow question migration 011's doc comment raised (and
- * sidestepped with `text`) for Gmail's `historyId` — an IMAP UID is a true
- * integer counter this store needs to compare and increment, so `bigint`
- * (not `text`) is the right column type here, `pg`/PGlite's usual
- * string-or-number wire representation for it handled the same way
- * `webauthn_credentials.sign_count` already is (`src/store/webauthn.ts`'s
- * `toSignCount`). Both columns are `NOT NULL`, unlike `gmail_watch_state
- * .history_id` (nullable until Gmail's first async `watch()` call
- * completes): an IMAP `SELECT INBOX` returns `UIDVALIDITY` synchronously in
- * the very same connect-time round trip that establishes the mailbox
- * (`fetch.ts`'s `selectInbox`), so there is no "connected but not yet
- * baselined" gap for this transport — a row is only ever inserted once both
- * values are already known, by `ImapWatchStateStore.seedBaseline`.
+ * `src/providers/adapters/imap/fetch.ts`'s `ImapCursor`. `bigint`, not
+ * `integer`: IMAP UIDs and UIDVALIDITY are unsigned 32-bit (RFC 3501
+ * §2.3.1), so `bigint` gives full headroom without the range-overflow
+ * question migration 011 sidestepped with `text` for Gmail's `historyId`.
+ * An IMAP UID is a true integer counter this store compares and increments,
+ * so `bigint` is right here; `pg`/PGlite's string-or-number wire
+ * representation is handled the same way `webauthn_credentials.sign_count`
+ * already is (`src/store/webauthn.ts`'s `toSignCount`).
  *
- * `claimed_until` is the fetch lease (the never-double-fetch guard) —
- * folded into this table from the start, unlike Gmail's own lease, which
- * shipped two migrations after its cursor (011, then 016) once HT-48
- * identified the need. IMAP's overlapping-invocation hazard (a cron tick
- * still running when the next tick fires) exists from Stage 2a-i's first
- * cursor-advancing caller, so the lease column ships in the same migration
- * as the cursor rather than as a later patch. Nullable, `NULL` meaning
- * "unclaimed" — same convention as `gmail_watch_state.claimed_until`
- * (migration 016) and `threads.claimed_until` (migration 003).
- * `lease_token` is a per-claim `uuid`, and it — not `claimed_until` — is the
- * value a holder proves ownership with. Gmail's lease
+ * Both columns are `NOT NULL`, unlike `gmail_watch_state.history_id`
+ * (nullable until Gmail's first async `watch()` completes): an IMAP `SELECT
+ * INBOX` returns `UIDVALIDITY` synchronously in the same connect-time round
+ * trip that establishes the mailbox (`fetch.ts`'s `selectInbox`), so there
+ * is no "connected but not yet baselined" gap for this transport — a row is
+ * inserted only once both values are known, by
+ * `ImapWatchStateStore.seedBaseline`.
+ *
+ * `claimed_until` is the fetch lease (the never-double-fetch guard), folded
+ * in from the start — unlike Gmail's, which shipped two migrations after its
+ * cursor (011, then 016). IMAP's overlapping-invocation hazard (a cron tick
+ * still running when the next fires) exists from the first cursor-advancing
+ * caller, so the lease ships with the cursor rather than as a later patch.
+ * Nullable, `NULL` meaning unclaimed — same convention as
+ * `gmail_watch_state.claimed_until` and `threads.claimed_until`.
+ *
+ * `lease_token` is a per-claim `uuid`, and it — not `claimed_until` — is
+ * what a holder proves ownership with. Gmail's lease
  * (`GmailWatchStateStore.claimReconcileLease`) uses the rendered
- * `claimed_until::text` as its token; HT-101
- * (2026-07-31) showed why that is too weak to fence a *write*: two successive
- * claims that land within one clock tick mint the SAME token, so a stale
- * holder's token compares equal to the live holder's and passes the check.
- * A test forced exactly that collision. A fresh `gen_random_uuid()` per claim
- * cannot collide regardless of clock resolution.
+ * `claimed_until::text` as its token, which is too weak to fence a *write*:
+ * two successive claims landing within one clock tick mint the SAME token,
+ * so a stale holder's compares equal to the live holder's and passes the
+ * check. A test forced exactly that collision (2026-07-31). A fresh
+ * `gen_random_uuid()` per claim makes a collision negligibly unlikely and
+ * removes the dependence on clock resolution
+ * altogether. `claimed_until` is retained for expiry (`WHERE claimed_until
+ * IS NULL OR claimed_until < now()`), the token for ownership — two
+ * questions, both needed.
  *
- * `claimed_until` is retained for expiry (`WHERE claimed_until IS NULL OR
- * claimed_until < now()`); the token is retained for ownership. The two
- * answer different questions and both are needed.
- *
- * NOTE — the same weakness remains in `gmail_watch_state`'s timestamp-derived
- * token. It is NOT fixed here (out of HT-101's scope) and is filed as a
- * follow-up; Gmail's token guards only `releaseReconcileLease`, never a
- * cursor advance, so the blast radius there is a prematurely-cleared lease
- * rather than a corrupted cursor.
+ * **The same weakness remains in `gmail_watch_state`'s timestamp-derived
+ * token.** Not fixed here and filed as a follow-up; Gmail's token guards
+ * only `releaseReconcileLease`, never a cursor advance, so the blast radius
+ * there is a prematurely-cleared lease rather than a corrupted cursor.
  *
  * ## RLS, per migration 027's standing rule
  *
- * All three tables `ENABLE ROW LEVEL SECURITY` here. Migration 027 closed the
- * PostgREST Data API surface by enabling RLS on every table that existed at
- * that point and states the rule plainly: "a migration that adds a table MUST
- * also ENABLE ROW LEVEL SECURITY on it." These tables are created AFTER 027
- * runs, so 027 cannot cover them — without this they would ship reachable
- * through the Data API, and `imap_mailbox_credentials` holds encrypted app
- * passwords. Caught by 027's own test when this branch merged main.
+ * All three tables `ENABLE ROW LEVEL SECURITY` here. Migration 027 enabled
+ * RLS on every table existing at that point and states the rule: a migration
+ * that adds a table MUST also enable RLS on it. These are created AFTER 027
+ * runs, so its per-table `ALTER`s cannot cover them. 027's `ALTER DEFAULT
+ * PRIVILEGES` means they should arrive without anon grants, but that layer is
+ * narrow — it binds only to the migrating role and does not survive Supabase
+ * re-running its stock bootstrap (027's own doc) — so RLS here is the durable
+ * layer rather than a redundant one. `imap_mailbox_credentials` holds
+ * encrypted app passwords.
  *
- * No index beyond each table's PRIMARY KEY: every lookup across all three
- * tables is a single-row fetch by `mailbox_id`, which the PK already serves
- * — matching migration 016's own "no index: this column is only ever read
- * via an equality match on the `mailbox_id` PRIMARY KEY" precedent.
+ * No index beyond each PRIMARY KEY: every lookup across all three tables is
+ * a single-row fetch by `mailbox_id`, which the PK already serves.
  */
 const MIGRATION_028_IMAP_TRANSPORT = `
 CREATE TABLE imap_mailbox_config (

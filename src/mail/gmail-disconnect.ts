@@ -1,69 +1,66 @@
 /**
- * Gmail OAuth disconnect (HT-47; specs/mail/gmail-connect.md's disconnect
- * section) — the admin action that is the inverse of HT-40's connect flow
- * (`./gmail-connect.ts`): revoke the stored OAuth grant at Google, unarm the
- * mailbox's Gmail push watch, and deactivate the mailbox locally.
+ * Gmail OAuth disconnect (specs/mail/gmail-connect.md's disconnect section)
+ * — the admin action inverse to `./gmail-connect.ts`: revoke the stored OAuth
+ * grant at Google, unarm the mailbox's push watch, and deactivate the mailbox
+ * locally.
  *
- * ## The three steps, and why THIS order (the best-effort ordering decision)
+ * ## The three steps, and why this order
  *
- * 1. **Stop the watch** ({@link GmailWatchClient.stop}, `users.stop` —
- *    `../providers/adapters/gmail/watch.ts`) using a LIVE access token
- *    ({@link GmailOAuthTokenService.getAccessToken}, HT-38). This runs
- *    FIRST, before revoke, because revoking the refresh token (step 2) can
- *    invalidate every access token issued under that grant immediately —
- *    calling `stop()` AFTER that would likely fail against a token Google
- *    has already killed. Best-effort: a failure is caught and recorded
- *    (`watchStopped: false`) rather than aborting the disconnect.
+ * 1. **Stop the watch** ({@link GmailWatchClient.stop}, `users.stop`) using a
+ *    LIVE access token ({@link GmailOAuthTokenService.getAccessToken}). This
+ *    runs FIRST because revoking the refresh token can immediately invalidate
+ *    every access token issued under that grant, so calling `stop()` after
+ *    revoke would likely fail against a token Google has already killed.
+ *    Best-effort: a failure is caught and recorded (`watchStopped: false`)
+ *    rather than aborting the disconnect.
  * 2. **Revoke the refresh token** ({@link revokeToken}, Google's
- *    `https://oauth2.googleapis.com/revoke`, RFC 7009) — the grant itself,
- *    so Google stops trusting Helpthread for this mailbox even if local
- *    state were somehow restored later. Also best-effort
- *    (`revoked: false` on failure).
+ *    `https://oauth2.googleapis.com/revoke`, RFC 7009) — the grant itself, so
+ *    Google stops trusting Helpthread for this mailbox even if local state
+ *    were somehow restored later. Also best-effort (`revoked: false`).
  * 3. **Deactivate locally, UNCONDITIONALLY** — mark the mailbox
- *    `disconnected` (migration 017) and delete its `mailbox_oauth_tokens`
- *    and `gmail_watch_state` rows, in ONE transaction, regardless of
- *    whether steps 1/2 succeeded. The status flip runs FIRST inside that
- *    transaction — its row lock is what fences out a concurrent token
- *    refresh (see the step-3 comment in `disconnect()` and
- *    `MailboxTokenStore.upsertTokensUnlessDisconnected`'s doc).
+ *    `disconnected` (migration 017) and delete its `mailbox_oauth_tokens` and
+ *    `gmail_watch_state` rows, in ONE transaction, regardless of whether
+ *    steps 1 and 2 succeeded. The status flip runs FIRST inside that
+ *    transaction: its row lock is what fences out a concurrent token refresh
+ *    (see `MailboxTokenStore.upsertTokensUnlessDisconnected`).
  *
  * Steps 1 and 2 being best-effort is a deliberate asymmetry with the connect
- * flow (gmail-connect.md §4, which aborts on the FIRST failure and persists
- * nothing): HT-47's own framing is "a revoked-at-Google-but-active-locally
- * mailbox is worse than the reverse." An operator who disconnects a mailbox
- * wants it OFF locally no matter what — a Google-side hiccup (a network
- * blip on revoke, a watch that already lapsed) must never leave Helpthread
- * still ingesting/sending as that mailbox. Local state always wins; the
- * returned {@link DisconnectResult}'s `revoked`/`watchStopped` flags tell
- * the caller which remote step(s), if any, need a manual follow-up at
- * Google's end.
+ * flow, which aborts on the FIRST failure and persists nothing. A
+ * revoked-at-Google-but-active-locally mailbox is worse than the reverse: an
+ * operator who disconnects a mailbox wants it OFF locally no matter what, and
+ * a Google-side hiccup — a network blip on revoke, a watch that already
+ * lapsed — must never leave Helpthread still ingesting or sending as that
+ * mailbox. Local state always wins; {@link DisconnectResult}'s
+ * `revoked`/`watchStopped` flags tell the caller which remote steps, if any,
+ * need a manual follow-up at Google's end.
  *
- * ## Idempotency (ticket §5)
+ * ## Idempotency
  *
  * Disconnecting an already-`disconnected` mailbox is a no-op success:
- * `alreadyDisconnected: true`, no remote calls attempted (its token/
- * watch-state rows are normally already gone — there's nothing left to
- * revoke or stop). It STILL re-runs the step-3 transactional deletes,
- * though — as belt-and-braces cleanup, not a required recovery path: the
- * token-resurrection race a concurrent refresh (`./gmail-oauth.ts`'s
- * `refresh()`) used to be able to win is closed at the SQL layer
- * (`MailboxTokenStore.upsertTokensUnlessDisconnected`'s guarded write plus
- * this module's flip-first transaction ordering), so re-running the
- * (idempotent, cheap) deletes here just means an operator retry also
- * sweeps anything an unforeseen writer might strand. An unknown address
- * throws {@link GmailDisconnectError} `not_found`, which the API layer
- * (`src/api/gmail-disconnect.ts`) maps to `404`.
+ * `alreadyDisconnected: true`, no remote calls attempted, since its token and
+ * watch-state rows are normally already gone.
+ *
+ * It STILL re-runs the step-3 transactional deletes — belt-and-braces
+ * cleanup, not a required recovery path. The token-resurrection race a
+ * concurrent refresh (`./gmail-oauth.ts`'s `refresh()`) could once win is
+ * closed at the SQL layer, by
+ * `MailboxTokenStore.upsertTokensUnlessDisconnected`'s guarded write plus
+ * this module's flip-first ordering. Re-running the cheap, idempotent deletes
+ * just means an operator retry also sweeps anything an unforeseen writer
+ * might strand.
+ *
+ * An unknown address throws {@link GmailDisconnectError} `not_found`, which
+ * the API layer maps to `404`.
  *
  * ## Never log or leak a token
  *
- * Same discipline as `./gmail-connect.ts`/`./gmail-oauth.ts`: the refresh
- * token is read once (via `tokenStore.getTokens`) to hand to
- * {@link revokeToken} and never appears in a thrown error or a log line —
- * failures are logged with the mailbox id and the caught error only, and
- * {@link revokeToken} keeps that caught error token-free structurally: a
- * non-2xx revoke response's body is never read into the thrown error at
- * all, since an error body can echo the submitted token back (see the
- * comment on its throw).
+ * Same discipline as `./gmail-connect.ts` and `./gmail-oauth.ts`: the refresh
+ * token is read once (via `tokenStore.getTokens`) to hand to {@link
+ * revokeToken}, and never appears in a thrown error or a log line. Failures
+ * are logged with the mailbox id and caught error only, and {@link
+ * revokeToken} keeps that error token-free structurally — a non-2xx revoke
+ * response's body is never read into the thrown error at all, since an error
+ * body can echo the submitted token back.
  */
 
 import type { Db } from '../db/client.js'

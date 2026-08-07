@@ -56,10 +56,11 @@
  * lease (`GmailWatchStateStore.claimReconcileLease`, `claimed_until` on
  * `gmail_watch_state`, migration 016) — the inbound analogue of the
  * outbound delivery lease (`ConversationStore.claimThreadForDelivery`,
- * sending.md §3a). It exists ONLY to stop a push-triggered reconcile and
- * the daily sweep from doing the same `history.list`/`messages.get` work
- * concurrently on one mailbox. It is an efficiency guard, not a correctness
- * one: step 6's cursor rule and the ingest dedup already make either
+ * sending.md §3a). It exists ONLY to stop a push-triggered reconcile and the
+ * every-minute reconciliation sweep (`./gmail-reconcile-sweep.ts`) from doing
+ * the same `history.list`/`messages.get` work concurrently on one mailbox. It
+ * is an efficiency guard, not a correctness one: step 6's cursor rule and the
+ * ingest dedup already make either
  * ordering safe with no lease at all. Different mailboxes never contend —
  * the lease is keyed by `mailboxId`.
  *
@@ -76,7 +77,8 @@
  * consumed by a second run while the first still holds the lease, so its
  * claim fails. Acking there discards the notification outright — the
  * holder's `setCursor` only reaches `H1`, so `H2` waits for the next
- * trigger, up to ~24h of silent latency on a quiet mailbox. The ingest
+ * trigger — bounded by the every-minute sweep's cadence, but still
+ * avoidable latency on a message this run already knew about. The ingest
  * dedup does not cover this: it guards against DOUBLING work, not against a
  * snapshot predating a message. Retrying means the same job is redelivered
  * after the holder has very likely released (see {@link
@@ -256,9 +258,10 @@ export const DEFAULT_RECONCILE_LEASE_MS = 5 * 60_000
  * `reconcileLeaseMs`). Even in the pathological case where every retry
  * still loses the race and the job is eventually dead-lettered, no message
  * is dropped: cursor-advance (step 6) and ingest dedup (inbound-
- * ingestion.md §4) mean the next trigger — a further push, or the daily
- * sweep (gmail-push.md §6) — reconciles this mailbox from wherever the
- * holder left the cursor, exactly as before this lease existed at all. This
+ * ingestion.md §4) mean the next trigger — a further push, or the
+ * every-minute reconciliation sweep (`./gmail-reconcile-sweep.ts`) —
+ * reconciles this mailbox from wherever the holder left the cursor, exactly
+ * as before this lease existed at all. This
  * constant only trades a little redundant queue churn against how quickly a
  * message that arrived mid-holder-run gets reconciled, never data safety.
  * If `reconcileLeaseMs` is overridden well above its default at the

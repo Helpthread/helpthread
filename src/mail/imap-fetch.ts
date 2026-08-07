@@ -1,77 +1,70 @@
 /**
  * `runImapFetch` — the scheduled-fetch cron for per-inbox IMAP mailboxes
- * (HT-101 Stage 2a-ii; specs/mail/mailbox-connection.md §5's "Inbound —
- * bounded scheduled fetch" section). The IMAP analogue of
- * `./gmail-reconcile.ts`'s `reconcileOneMailbox`, replayed here per active
- * IMAP mailbox: claim the lease, fetch bounded, ingest each message, and
- * advance the cursor ONLY once every message is terminal. This file is the
- * Stage 2 wiring `../providers/adapters/imap/fetch.ts`'s module doc
- * anticipated: "Stage 2 wires those in exactly the way gmail-reconcile.ts
- * wires Gmail's."
+ * (specs/mail/mailbox-connection.md §5, "Inbound — bounded scheduled
+ * fetch"). The IMAP analogue of `./gmail-reconcile.ts`'s
+ * `reconcileOneMailbox`, replayed per active IMAP mailbox: claim the lease,
+ * fetch bounded, ingest each message, and advance the cursor ONLY once every
+ * message is terminal.
  *
- * ## Per-mailbox failure isolation (mirrors `./gmail-watch-maintenance.ts`)
+ * ## Per-mailbox failure isolation
  *
  * `runImapFetch` lists every ACTIVE mailbox with `provider === 'imap'`, then
  * runs {@link fetchOneMailbox} for each inside its OWN try/catch — one
- * mailbox's unexpected throw (a store blip, a thrown-not-caught client
- * error) never aborts the batch, exactly like
- * `runGmailWatchMaintenance`/`maintainOneMailbox`'s split.
+ * mailbox's unexpected throw never aborts the batch, exactly like
+ * `runGmailWatchMaintenance`/`maintainOneMailbox`.
  *
  * ## The fetch lease — never-double-fetch, not correctness
  *
  * `ImapWatchStateStore.claimFetchLease`/`releaseFetchLease`
- * (`../store/imap-watch-state.ts`) prevent an overlapping cron invocation
- * from fetching the same UID range twice — released in a `finally` around
- * every step past the claim, so a mailbox that throws mid-fetch is never
- * locked out until the lease naturally expires (mirrors
- * `./gmail-reconcile.ts`'s reconciliation lease "release on every exit path"
- * discipline). A `null` claim (another invocation holds it, OR this mailbox
- * has no `imap_watch_state` row yet — `ImapWatchStateStore.claimFetchLease`'s
- * own doc) is a silent skip: nothing to do this tick either way.
+ * (`../store/imap-watch-state.ts`) stop an overlapping cron invocation
+ * fetching the same UID range twice. Released in a `finally` around every
+ * step past the claim, so a mailbox that throws mid-fetch is never locked out
+ * until the lease naturally expires — the same release-on-every-exit-path
+ * discipline as `./gmail-reconcile.ts`'s reconciliation lease. A `null` claim
+ * (another invocation holds it, or this mailbox has no `imap_watch_state` row
+ * yet) is a silent skip: nothing to do this tick either way.
  *
  * ## SACRED — UIDVALIDITY reset: pause, never re-ingest, never advance
  *
  * `fetchImapInboundMessages`'s `uidValidityReset: true` means the server
  * renumbered this mailbox's UIDs since the stored cursor was recorded (RFC
- * 3501 §2.3.1.1) — every stored UID is now meaningless. This is the IMAP
- * analogue of Gmail's expired-cursor 404 (`./gmail-reconcile.ts` step 4:
- * "pause the mailbox, do NOT advance the cursor... a human must rebaseline"),
- * but the failure mode on the WRONG choice is worse here: `fetchImap
- * InboundMessages` itself already documents that a reset makes it rebuild
- * from UID 1 under the new epoch (its own module doc's "UIDVALIDITY
- * handling" section) — if this cron blindly ingested that rebuilt batch, it
- * would RE-INGEST the mailbox's entire visible history under the new epoch's
- * UIDs. Unlike Gmail (where the ingest ledger key is the STABLE
- * `providerMessageId` `messages.get` always returns for the same physical
- * message, so a redundant reconcile is deduped for free), IMAP's
- * `providerMessageId` is `imap:<uidValidity>:<uid>`
- * (`../providers/adapters/imap/fetch.ts`'s `providerMessageIdFor` — flagged
- * there as specs/mail/mailbox-connection.md's still-open unresolved question
- * #2) — the SAME physical message re-fetched under a NEW `uidValidity`
- * mints a DIFFERENT id, so `InboundDeliveryStore`'s `(mailboxId,
- * providerMessageId)` dedup (inbound-ingestion.md §4) would NOT catch it:
- * every message would be stored again as if new. So this cron never ingests
- * on a reset at all — it marks the mailbox `paused` (the same operator-
- * visible, resolvable state `MailboxStore.markPaused` already means for
- * Gmail's cursor-expiry case) and returns without touching the cursor,
- * surfacing the reset for manual rebaseline rather than silently reseeding
- * (or silently duplicating) anything.
+ * 3501 §2.3.1.1), so every stored UID is now meaningless. This is the IMAP
+ * analogue of Gmail's expired-cursor 404 — pause, do not advance, a human
+ * rebaselines — but the cost of the wrong choice is worse here.
+ *
+ * `fetchImapInboundMessages` rebuilds from UID 1 under the new epoch on a
+ * reset (its own module doc). If this cron blindly ingested that batch it
+ * would RE-INGEST the mailbox's entire visible history. Gmail is safe from
+ * the equivalent because its ledger key is the STABLE `providerMessageId`
+ * `messages.get` returns for the same physical message, so a redundant
+ * reconcile dedupes for free. IMAP's is `imap:<uidValidity>:<uid>`
+ * (`../providers/adapters/imap/fetch.ts`'s `providerMessageIdFor`, flagged
+ * there as mailbox-connection.md's still-open question #2), so the SAME
+ * physical message re-fetched under a NEW `uidValidity` mints a DIFFERENT id
+ * and `InboundDeliveryStore`'s `(mailboxId, providerMessageId)` dedup would
+ * NOT catch it — every message would be stored again as if new.
+ *
+ * So this cron never ingests on a reset. It marks the mailbox `paused` — the
+ * same operator-visible, resolvable state `MailboxStore.markPaused` means for
+ * Gmail's cursor expiry — and returns without touching the cursor, surfacing
+ * the reset for manual rebaseline rather than silently reseeding or
+ * duplicating anything.
  *
  * ## SACRED — the cursor advances on COMMIT, not on fetch
  *
- * Mirrors `./gmail-reconcile.ts` step 6 EXACTLY: every fetched message is
+ * Mirrors `./gmail-reconcile.ts` step 6 exactly: every fetched message is
  * handed to `ingest` in order, and the cursor advances to
  * `fetchImapInboundMessages`'s `newCursor` ONLY if every resulting
  * `IngestOutcome` is TERMINAL — `stored`, `suppressed`, or `dead-letter` all
- * count (a `dead-letter`ed message is still durably, recoverably recorded —
- * see `./gmail-reconcile.ts`'s module doc, "`dead-letter` advances the
- * cursor," for why blocking on it would wedge every healthy message behind
- * it in UID order forever). Any `failed`/`in-progress` outcome blocks the
- * advance entirely and the WHOLE batch is retried next tick — the ingest
- * pipeline's own dedup on `(mailboxId, providerMessageId)` (inbound-
- * ingestion.md §4) makes re-fetching the already-terminal messages in that
- * retried batch free, so biasing toward "retry the batch" over "skip past
- * the stuck message" never drops anything (charter invariant #1).
+ * count, since a dead-lettered message is still durably and recoverably
+ * recorded, and blocking on it would wedge every healthy message behind it in
+ * UID order forever.
+ *
+ * Any `failed`/`in-progress` outcome blocks the advance entirely and the
+ * WHOLE batch retries next tick. The ingest pipeline's dedup on `(mailboxId,
+ * providerMessageId)` makes re-fetching the already-terminal messages free,
+ * so biasing toward "retry the batch" over "skip the stuck message" never
+ * drops anything (charter invariant #1).
  */
 
 import {

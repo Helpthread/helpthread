@@ -1060,7 +1060,7 @@ describe('createGmailReconcileHandler', () => {
       )
 
       // Two triggers landing on the SAME mailbox at once — e.g. a push
-      // notification and the daily sweep both enqueuing/consuming a
+      // notification and the every-minute sweep both enqueuing/consuming a
       // reconcile job for it around the same moment.
       const [first, second] = await Promise.all([handler(job()), handler(job())])
 
