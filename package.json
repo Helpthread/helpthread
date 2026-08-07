@@ -24,7 +24,7 @@
     "@simplewebauthn/server": "^13.3.2",
     "@supabase/supabase-js": "^2.110.6",
     "imapflow": "^1.4.7",
-    "jose": "^6.2.3",
+    "jose": "^6.2.8",
     "mimetext": "^3.0.28",
     "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
