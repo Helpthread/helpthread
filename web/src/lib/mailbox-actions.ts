@@ -18,13 +18,34 @@
  */
 
 import { revalidatePath } from 'next/cache'
+import { cookies } from 'next/headers'
 import { ApiError, gmailBeginConnect, imapCheckConnection, imapConnect } from './api'
 import type { ConnectedMailbox, ImapCheckResult, ImapConnectionInput } from './api-types'
+import { SESSION_COOKIE_NAME, verifySessionCookie } from './session'
 
 export interface MailboxActionResult {
   ok: boolean
   code?: string
   message?: string
+}
+
+const UNAUTHORIZED_RESULT: MailboxActionResult = {
+  ok: false,
+  code: 'unauthorized',
+  message: 'Your session has expired. Please sign in again.',
+}
+
+/**
+ * Verifies the operator session on THIS invocation — `actions.ts`'s module
+ * doc explains why middleware cannot be the only gate: Next.js dispatches
+ * Server Actions by a build-stable action-ID hash that is invokable against
+ * any route, including the one public path middleware waves through. Every
+ * action in this module holds the server-only Bearer token, so each one
+ * authorizes itself before touching the API.
+ */
+async function hasValidSession(): Promise<boolean> {
+  const cookieStore = await cookies()
+  return (await verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value)) !== null
 }
 
 function toActionResult(error: unknown): MailboxActionResult {
@@ -42,6 +63,7 @@ export interface CheckMailboxConnectionResult extends MailboxActionResult {
 export async function checkMailboxConnection(
   config: ImapConnectionInput,
 ): Promise<CheckMailboxConnectionResult> {
+  if (!(await hasValidSession())) return UNAUTHORIZED_RESULT
   try {
     const result = await imapCheckConnection(config)
     return { ok: true, result }
@@ -58,6 +80,7 @@ export interface ConnectMailboxActionResult extends MailboxActionResult {
 export async function connectMailbox(
   config: ImapConnectionInput,
 ): Promise<ConnectMailboxActionResult> {
+  if (!(await hasValidSession())) return UNAUTHORIZED_RESULT
   try {
     const mailbox = await imapConnect(config)
     revalidatePath('/manage/mailboxes')
@@ -80,6 +103,7 @@ export interface BeginGoogleConnectResult extends MailboxActionResult {
  * forward.
  */
 export async function beginGoogleConnect(): Promise<BeginGoogleConnectResult> {
+  if (!(await hasValidSession())) return UNAUTHORIZED_RESULT
   try {
     const { consentUrl } = await gmailBeginConnect()
     return { ok: true, consentUrl }
