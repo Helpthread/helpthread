@@ -308,12 +308,12 @@ approved.
 | D5 | `Auto-Submitted` is a loop-guard concern, not a spam signal | ⚠️ INFERRED |
 | D6 | Gmail's "labels present, none of them `SPAM`" keeps reporting `'clean'` rather than `'unknown'`; §3.1 states the justification instead of the code changing | Maintainer, 2026-08-02: chose "Keep code, tighten §3.1" over narrowing the code, on the question of whether `'clean'` is honest for a message with no `SPAM` label |
 | D7 | A `TRASH`-labeled Gmail message is filed as `spam`, sharing one verdict value with classifier-flagged junk rather than getting a separate signal and status | Maintainer, 2026-08-02: chose "file as `spam`" over a separate provider signal filed as `closed`, and over leaving it `active`, once told the writeback hazard behind the original recommendation was void per D3 |
-| D7a | A message carrying **both** `SPAM` and `TRASH` is filed as `spam` | Follows mechanically from D7 — the two map to one value, so the combination needs no rule of its own |
+| D7a | A message carrying **both** `SPAM` and `TRASH` is filed as `spam` | Maintainer decision, 2026-08-07 — put as its own question rather than left to follow mechanically from D7 |
 | D8 | A message deleted and then restored inside one reconcile window is filed `spam` anyway; the label union is not corrected by reading `labelRemoved` | ⚠️ INFERRED — surfaced by adversarial review of D7. Accepted because the alternative re-opens the split-delta race the union closed, and the misfile is stored, visible and reply-reversible. Not put to the maintainer as its own question |
 
 **One-way door:** none, in what is built or specified. The only candidate was writing
 classification state back into the operator's own mailbox, and D3 closed that door rather
 than walking through it — Helpthread reads the operator's mail and does not write its own
-opinions into it. Every remaining INFERRED row above (D0, D1a, D2, D4, D5) is a two-way
+opinions into it. Every remaining INFERRED row above (D0, D1a, D2, D4, D5, D8) is a two-way
 door: each changes a default or a threshold, and reversing any of them costs one edit and
 no migration.
