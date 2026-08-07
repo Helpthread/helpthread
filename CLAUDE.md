@@ -2,6 +2,12 @@
 
 Helpthread is open-source support infrastructure (AGPL-3.0 core; a Resonant IQ, Inc. product). **CHARTER.md is the constitution** — read it before substantive work.
 
+## PR verdict protocol
+
+Every PR opens with a verdict the maintainer can act on in under 30 seconds, and **no decision is ever attributed to the maintainer without a direct quote**. Mirrored from the canonical rule so it loads in every session that reads this repo. Enforced mechanically for the constitution, `legal/`, and licensing specs by `.github/workflows/pr-verdict.yml`.
+
+@.claude/rules/pr-verdict.md
+
 ## References & provenance
 
 - Helpthread is an independent implementation. No code copied or derived from copyleft-licensed projects, ever.

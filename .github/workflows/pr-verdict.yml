@@ -1,0 +1,222 @@
+name: PR verdict
+
+# High-blast-radius changes — the constitution, legal text, licensing and pricing —
+# must carry a verdict and a decision-provenance table in the PR body.
+#
+# Why this is a CI check and not a documented convention: on 2026-07-20 an audit of
+# PRs #87-#100 found nine normative decisions merged that the maintainer never made,
+# including two amendments to CHARTER.md. Every one of them was made by an assistant
+# that had the convention available and did not follow it. Instructions drift; a
+# required check does not.
+#
+# The rule this enforces lives at .claude/rules/pr-verdict.md.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verdict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Does this PR touch the high-risk tier?
+        id: tier
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # via env, not inline — refs may contain $, backtick, or ;
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
+
+          # THREE-dot: what this PR changed, not what main changed since it forked.
+          # Two-dot compares tips, so a branch merely behind main reports every file
+          # main touched — measured at 74 files against this PR's actual 3. That fires
+          # the gate on PRs that touched nothing protected, which trains contributors to
+          # paste ceremonial provenance tables: the exact habit this gate exists to break.
+          #
+          # --no-renames: with rename detection on, `git mv CHARTER.md docs/old.md`
+          # reports ONLY the new path, so moving a protected file out of its directory
+          # silences the gate. Deleting the constitution by relocating it is precisely
+          # the change this must catch.
+          CHANGED=$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA" \
+            || git diff --no-renames --name-only "origin/$BASE_REF...HEAD")
+          echo "Changed files:"; echo "$CHANGED"
+
+          # The tier: constitution, legal text, and the specs that carry licensing,
+          # pricing, and the free/paid line.
+          # Files that carry a promise, a licensing boundary, or money.
+          HIGH_RISK=$(echo "$CHANGED" | grep -E \
+            -e '^CHARTER\.md$' \
+            -e '^README\.md$' \
+            -e '^legal/' \
+            -e '^LICENSE' \
+            -e '^specs/modules/' \
+            -e '^\.github/workflows/pr-verdict\.yml$' \
+            -e '^\.claude/rules/pr-verdict\.md$' \
+            || true)
+
+          if [ -n "$HIGH_RISK" ]; then
+            echo "high_risk=true" >> "$GITHUB_OUTPUT"
+            { echo 'files<<EOF'; echo "$HIGH_RISK"; echo 'EOF'; } >> "$GITHUB_OUTPUT"
+          else
+            echo "high_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require a verdict and decision provenance
+        if: steps.tier.outputs.high_risk == 'true'
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          FILES: ${{ steps.tier.outputs.files }}
+        run: |
+          set -euo pipefail
+          # Pin the locale: several patterns below contain non-ASCII characters
+          # (the verdict emoji, curly quotes). Under a byte-oriented locale grep
+          # matches those byte-by-byte, so a bracket or case-fold over them
+          # silently stops working — the check would pass everything and look green.
+          export LC_ALL=C.UTF-8
+          fail() { echo "::error::$1"; FAILED=1; }
+          FAILED=0
+
+          echo "This PR touches the high-risk tier:"
+          echo "$FILES"
+          echo
+
+          # Normalize the body ONCE, before any check reads it, stripping the two
+          # things that look like content to a regex and like nothing to a human:
+          #   - HTML comments: `<!-- 🟢 SAFE TO MERGE -->` as the first line satisfied
+          #     the verdict and bot-line checks while rendering invisible. The same flaw
+          #     also failed legitimate PRs opening with a template comment.
+          #   - Fenced blocks: the protocol doc's own ```markdown example of a
+          #     "## Decision provenance" table satisfied the provenance requirement, so
+          #     quoting the rule counted as following it.
+          BODY=$(printf '%s\n' "$BODY" \
+            | perl -0777 -pe 's/<!--.*?-->//gs' \
+            | awk '/^[[:space:]]*(```|~~~)/ { f = !f; next } !f')
+
+          # 1. A verdict marker, one of exactly three, ALONE on the FIRST non-empty
+          #    line. Matching anywhere would let a PR bury the verdict under arbitrary
+          #    prose — the whole point is that it is the first thing read.
+          #
+          #    The whole line must BE the verdict, not merely contain it: leading `#`s
+          #    and the emoji are allowed (`## 🟢 SAFE TO MERGE`), but trailing words are
+          #    not, so `Status: SAFE TO MERGE pending review` is rejected. `[^[:alnum:]]*`
+          #    covers the emoji without this file having to carry a Unicode class.
+          #
+          #    VERDICT is captured here and reused by check 5, so a body that merely
+          #    *mentions* another verdict cannot change how it is validated.
+          FIRST_LINE=$(grep -m1 -vE '^[[:space:]]*$' <<<"$BODY" || true)
+          verdict_is() {
+            grep -qE "^#{0,6}[[:space:]]*[^[:alnum:]]*[[:space:]]*$1[[:space:]]*$" <<<"$FIRST_LINE"
+          }
+          VERDICT=""
+          if verdict_is 'SAFE TO MERGE'; then VERDICT=safe
+          elif verdict_is 'NEEDS YOUR DECISION'; then VERDICT=needs
+          elif verdict_is 'DO NOT MERGE'; then VERDICT=blocked
+          fi
+          if [ -z "$VERDICT" ]; then
+            fail "The PR body's first line must be exactly the verdict, on its own: 🟢 SAFE TO MERGE / 🟡 NEEDS YOUR DECISION / 🔴 DO NOT MERGE. Found: ${FIRST_LINE:0:80}"
+          fi
+
+          # 2. A decision-provenance section.
+          # Anchored: "## Decision provenance deliberately omitted" is a heading that
+          # says the opposite of what it would otherwise satisfy.
+          if ! grep -qiE '^#+[[:space:]]*Decision provenance[[:space:]]*$' <<<"$BODY"; then
+            fail "No '## Decision provenance' section. Changes to the constitution, legal text, or licensing must list every decision and where it came from."
+          fi
+
+          # 3. Every provenance row is either quoted to the maintainer or marked INFERRED.
+          #    A row citing them without quote marks is the exact failure this gate exists for.
+          #    sed form is BRE-portable (BSD and GNU) — `\+` is a GNU extension.
+          if grep -qiE '^#{1,}[[:space:]]*Decision provenance[[:space:]]*$' <<<"$BODY"; then
+            # Stop at the next heading — reading to end-of-body swallows any later
+            # table (a test-results table, for instance) and parses it as provenance rows.
+            # Terminate on an ATX heading (# Foo) OR a setext underline (--- / ===),
+            # which the earlier awk missed — a "Test results" setext heading let the
+            # table under it be parsed as provenance rows.
+            ROWS=$(awk '/^#+[[:space:]]*[Dd]ecision provenance[[:space:]]*$/{f=1;next} \
+                        f&&/^#+[[:space:]]/{exit} \
+                        f&&/^(-{3,}|={3,})[[:space:]]*$/{exit} f' <<<"$BODY" \
+                   | grep -E '^\|' | grep -vE '^\|[[:space:]]*[-:[:space:]]+\|' | tail -n +2 || true)
+            if [ -z "$ROWS" ]; then
+              fail "The 'Decision provenance' section has no rows. If this PR encodes no decisions, say so in a row ('None — no new decisions')."
+            else
+              while IFS= read -r row; do
+                [ -z "$row" ] && continue
+                # Only an explicit INFERRED label, or an explicit no-decision row, excuses a
+                # missing quote. 'no authorization' alone does NOT — the protocol requires
+                # the INFERRED label itself so the disclosure is unmissable.
+                #
+                # An INFERRED row also forces the verdict to yellow. The protocol is
+                # explicit that one inferred item means 🟡 and never 🟢, and without this
+                # a PR could disclose an unauthorized decision and still call itself
+                # safe to merge — disclosure without the consequence.
+                if grep -qiE 'INFERRED' <<<"$row"; then
+                  if [ "$VERDICT" = safe ]; then
+                    fail "Verdict is SAFE TO MERGE but a provenance row is marked INFERRED. One inferred decision means the verdict is NEEDS YOUR DECISION: ${row}"
+                  fi
+                  continue
+                fi
+                if grep -qiE 'none —|no new decision' <<<"$row"; then continue; fi
+                # A sourced row must contain an actual quotation.
+                if ! grep -qE '["“”]' <<<"$row"; then
+                  fail "Provenance row has no quote and is not marked INFERRED: ${row}"
+                fi
+              done <<<"$ROWS"
+            fi
+          fi
+
+          # 4. Attribution without a quote, anywhere in the body.
+          #    "your decision" is deliberately NOT in this list — it matches the
+          #    "NEEDS YOUR DECISION" verdict marker itself.
+          #
+          #    Backticked code spans are stripped before matching: a doc that
+          #    *discusses* these patterns (`maintainer decision` as a literal example,
+          #    in a checklist or an adjudication table) is not attributing anything.
+          #    Without this, any text explaining the rule trips the rule.
+          #
+          #    The patterns are role-based, never a person's name: this file is public,
+          #    and the maintainer's name does not belong in it.
+          BODY_NO_CODE=$(sed 's/`[^`]*`//g' <<<"$BODY")
+          while IFS= read -r line; do
+            grep -qE '["“”]' <<<"$line" && continue
+            grep -qiE 'INFERRED' <<<"$line" && continue
+            fail "Attributes a decision to the maintainer without quoting them: ${line}"
+          done < <(grep -iE "(maintainer('|’)s (decision|call|choice)|per the maintainer('|’)s|maintainer decided|per your decision|you decided|you chose|as you decided|decided by the maintainer|CONFIRMED by the maintainer|SIGNED OFF by the maintainer|\(maintainer,? [0-9]{4}-|maintainer decision, [0-9]{4}-)" <<<"$BODY_NO_CODE" || true)
+
+          # 5. A green verdict must show the review bots were adjudicated.
+          #    Bots review AFTER a PR opens, so nothing can honestly be green at open
+          #    time. This blocks the failure mode where a PR is marked green before
+          #    CodeRabbit has run, or against a commit that has since been replaced.
+          #
+          #    Keyed to the VERDICT parsed in check 1, never to the phrase appearing
+          #    anywhere: a 🟡 body that merely names the three verdicts, or quotes this
+          #    protocol, was otherwise forced to carry an adjudication line it had no
+          #    business carrying yet. Read against BODY_NO_CODE for the same reason
+          #    check 4 does — a backticked example is documentation, not an adjudication.
+          #
+          #    Matched by SHAPE — "<reviewer>: <n> findings ..." — rather than against a
+          #    list of vendors. The protocol allows a substitute reviewer when the usual
+          #    one is unavailable, so hardcoding names would fail an honest substitution;
+          #    it also keeps third-party product names out of a public repo.
+          if [ "$VERDICT" = safe ]; then
+            if ! grep -qiE ':[^:]*[^[:alnum:]]*\b([0-9]+|no|none|zero)[[:space:]]+findings?\b' <<<"$BODY_NO_CODE"; then
+              fail "Verdict is SAFE TO MERGE but no review adjudication line is present. Add one line naming the reviewer and giving a COUNT — e.g. '<reviewer>: 7 findings, 5 real and fixed, 2 wrong (misread the token scope)' or '<reviewer>: no findings'. The bare word 'findings' does not adjudicate anything. If no review has run on the current head yet, the verdict cannot be green."
+            fi
+          fi
+
+          if [ "$FAILED" = "1" ]; then
+            echo
+            echo "See .claude/rules/pr-verdict.md for the protocol."
+            exit 1
+          fi
+          echo "Verdict block present and every decision is sourced or marked INFERRED."
