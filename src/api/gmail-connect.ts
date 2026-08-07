@@ -43,12 +43,25 @@
  * success) the resolved address.
  */
 
-import { GmailConnectError, type GmailConnectService } from '../mail/gmail-connect.js'
+import {
+  GmailConnectError,
+  type GmailConnectErrorCode,
+  type GmailConnectService,
+} from '../mail/gmail-connect.js'
 import { apiError, json } from './responses.js'
 
 /** Dependencies both handlers need. ABSENT BY DEFAULT on `InboxApiDeps` (`src/api/index.ts`) — a deployment that hasn't provisioned Gmail OAuth yet (HT-43) simply never configures this. */
 export interface GmailConnectDeps {
   service: GmailConnectService
+  /**
+   * The operator UI's bare origin (`AppConfig.uiBaseUrl`, same field
+   * `src/composition/app.ts` uses for the bare-root redirect). OPTIONAL —
+   * when absent, the callback falls back to the plain HTML page below
+   * exactly as before (no UI to send the operator back to). When present,
+   * the callback redirects there instead so the operator lands back in the
+   * app rather than stranded on a bare page.
+   */
+  uiBaseUrl?: string
 }
 
 /** Minimal HTML escaping for the handful of dynamic values ever spliced into a callback page — see the module doc. */
@@ -87,6 +100,35 @@ function htmlResponse(status: number, title: string, bodyHtml: string): Response
   })
 }
 
+/** The mailbox list screen the callback redirects back to when `uiBaseUrl` is configured. */
+const MAILBOXES_PATH = '/manage/mailboxes'
+
+/** Short, secret-free codes the redirect's `connect_error` query param can carry — never a `GmailConnectError` message, `code`, `state`, or token. */
+type ConnectRedirectErrorCode = GmailConnectErrorCode | 'missing_params' | 'server_error'
+
+/**
+ * Build the `302` back to `${uiBaseUrl}${MAILBOXES_PATH}`, carrying ONLY the
+ * connected address (on success) or a short error code (on failure) —
+ * never a token, `code`, `state`, or secret (module doc). `URL`'s own
+ * encoding handles the query-string escaping, so no HTML-escaping is
+ * needed here (this is a redirect header, not rendered markup).
+ */
+function redirectToMailboxes(
+  uiBaseUrl: string,
+  query: { connected: string } | { connect_error: ConnectRedirectErrorCode },
+): Response {
+  const url = new URL(MAILBOXES_PATH, uiBaseUrl)
+  if ('connected' in query) {
+    url.searchParams.set('connected', query.connected)
+  } else {
+    url.searchParams.set('connect_error', query.connect_error)
+  }
+  return new Response(null, {
+    status: 302,
+    headers: { Location: url.toString(), 'Cache-Control': 'no-store' },
+  })
+}
+
 /**
  * Handle `POST /api/v1/inbound/gmail/connect` (gmail-connect.md §2a). The
  * router (`src/api/router.ts`) guarantees the method is `POST` and the
@@ -106,7 +148,13 @@ export async function handleGmailConnect(
     const { consentUrl } = deps.service.beginConnect()
     return json(200, { consentUrl })
   } catch (err) {
-    console.error('[gmail-connect] unhandled error beginning connect', err)
+    // Log the error's CLASS only, never the caught object or its message: an
+    // unexpected failure on the OAuth path can originate upstream (a token
+    // exchange, a provider HTTP error) and carry a token or `code` in its
+    // text. The "never log a secret" guarantee outranks log fidelity here.
+    console.error('[gmail-connect] unhandled error beginning connect', {
+      error: err instanceof Error ? err.name : typeof err,
+    })
     return apiError(500, 'server_error', 'Internal server error.')
   }
 }
@@ -127,6 +175,16 @@ export async function handleGmailConnect(
  *   unexpected) → `500`, generic message.
  * - Success → `200` confirming the connected address.
  *
+ * **When `deps.uiBaseUrl` is configured**, every one of those outcomes
+ * becomes a `302` to `${uiBaseUrl}/manage/mailboxes` instead, so the
+ * operator lands back in the app rather than on a bare page: `?connected=
+ * <address>` on success, `?connect_error=<short code>` on every failure
+ * branch (HT-123). The redirect never carries a token, `code`, `state`, or
+ * any `GmailConnectError` message — only the resolved address or one of
+ * {@link ConnectRedirectErrorCode}'s fixed codes ({@link
+ * redirectToMailboxes}). **When `uiBaseUrl` is absent, this is unchanged**:
+ * the plain HTML pages below, exactly as before.
+ *
  * Wrapped in its own try/catch: like `handleGmailPushWebhook`
  * (`src/api/gmail-webhook.ts`), this handler runs in a PRE-AUTH branch of
  * `createInboxApi` (`src/api/index.ts`), before the outer try/catch that
@@ -137,12 +195,16 @@ export async function handleGmailConnectCallback(
   request: Request,
   deps: GmailConnectDeps,
 ): Promise<Response> {
+  const { uiBaseUrl } = deps
   try {
     const params = new URL(request.url).searchParams
     const code = params.get('code')
     const state = params.get('state')
 
     if (code === null || code.length === 0 || state === null || state.length === 0) {
+      if (uiBaseUrl !== undefined) {
+        return redirectToMailboxes(uiBaseUrl, { connect_error: 'missing_params' })
+      }
       return htmlResponse(
         400,
         'Connection failed',
@@ -152,6 +214,9 @@ export async function handleGmailConnectCallback(
 
     try {
       const { address } = await deps.service.completeConnect({ code, state })
+      if (uiBaseUrl !== undefined) {
+        return redirectToMailboxes(uiBaseUrl, { connected: address })
+      }
       return htmlResponse(
         200,
         'Mailbox connected',
@@ -159,12 +224,23 @@ export async function handleGmailConnectCallback(
       )
     } catch (err) {
       if (err instanceof GmailConnectError) {
+        if (uiBaseUrl !== undefined) {
+          return redirectToMailboxes(uiBaseUrl, { connect_error: err.code })
+        }
         return htmlResponse(400, 'Connection failed', `<p>${escapeHtml(err.message)}</p>`)
       }
       throw err
     }
   } catch (err) {
-    console.error('[gmail-connect] unhandled error completing connect', err)
+    // Class only, never the caught object/message — see handleGmailConnect's
+    // identical guard. This path is reached AFTER a token exchange, so an
+    // upstream error's text is exactly where a leaked token would surface.
+    console.error('[gmail-connect] unhandled error completing connect', {
+      error: err instanceof Error ? err.name : typeof err,
+    })
+    if (uiBaseUrl !== undefined) {
+      return redirectToMailboxes(uiBaseUrl, { connect_error: 'server_error' })
+    }
     return htmlResponse(
       500,
       'Connection failed',

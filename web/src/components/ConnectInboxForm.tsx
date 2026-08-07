@@ -30,11 +30,43 @@
  * type="password">` — `ds/core/TextInput` hardcodes `type="text"` and has
  * no variant for this, so a raw input matching its exact visual style is
  * the established pattern here, not a deviation from it.
+ *
+ * ## OAuth-first ordering (HT-123)
+ *
+ * Applies only to the fresh "New inbox" flow (`!lockAddress`) — reconnect
+ * (`lockAddress`, `initialConfig` set) always reached this form because a
+ * mailbox is already connected over IMAP/SMTP (`GET .../imap-config`
+ * returning something to prefill), so it stays app-password-only,
+ * unchanged, exactly as before.
+ *
+ * For a fresh connect, the typed address routes the operator to the right
+ * method (`specs/mail/mailbox-connection.md` §3's recommended default:
+ * OAuth for Google, app password everywhere else):
+ *
+ * - `gmail.com`/`googlemail.com` → "Connect with Google" is PRIMARY, with a
+ *   collapsed "Use an app password instead" disclosure revealing this same
+ *   form.
+ * - An {@link OAUTH_ONLY_DOMAINS} match (Microsoft) → plainly not yet
+ *   supported. No button is offered — Microsoft OAuth is a separate,
+ *   unbuilt connector, and a button that cannot work is worse than none.
+ * - Every other domain, including an unrecognized one (self-hosted, or a
+ *   Google Workspace org's own domain — {@link PROVIDER_PRESETS} has no way
+ *   to tell) → the app-password form stays PRIMARY, with a small "Connect
+ *   with Google Workspace instead" alternative. A domain WITH a known
+ *   non-Google preset (Fastmail, Zoho, iCloud, Yahoo) never gets that
+ *   alternative — offering Google there is just confusing, not helpful.
+ *
+ * The typed address is a routing HINT only: the engine resolves the real
+ * connected address from the OAuth grant itself
+ * (`GmailConnectService.completeConnect`'s `getProfile()` step,
+ * gmail-connect.md §4 step 3), not from what the operator typed here. The
+ * engine's `beginConnect()` takes no login-hint parameter today, so none is
+ * invented or sent — see `mailbox-actions.ts`'s `beginGoogleConnect` doc.
  */
 
 import { useRouter } from 'next/navigation'
 import { useState, useTransition } from 'react'
-import { checkMailboxConnection, connectMailbox } from '../lib/mailbox-actions'
+import { beginGoogleConnect, checkMailboxConnection, connectMailbox } from '../lib/mailbox-actions'
 import { Button } from './ds/core/Button'
 import { StatusPill } from './ds/core/StatusPill'
 import { TextInput } from './ds/core/TextInput'
@@ -268,6 +300,7 @@ export function ConnectInboxForm({
   const showToast = useToast()
   const [isChecking, startChecking] = useTransition()
   const [isConnecting, startConnecting] = useTransition()
+  const [isBeginningOAuth, startOAuth] = useTransition()
 
   const [address, setAddress] = useState(initialConfig?.address ?? '')
   const [password, setPassword] = useState('')
@@ -291,11 +324,40 @@ export function ConnectInboxForm({
     ReturnType<typeof checkMailboxConnection>
   > | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
+  // OAuth-first ordering (HT-123, module doc). `null` = use the
+  // domain-derived default; set once the operator explicitly toggles
+  // between "Connect with Google" and "Use an app password instead".
+  const [connectModeOverride, setConnectModeOverride] = useState<'oauth' | 'password' | null>(null)
 
   const domain = domainFromAddress(address)
   const preset = domain !== null ? PROVIDER_PRESETS[domain] : undefined
   const oauthOnlyLabel = domain !== null ? OAUTH_ONLY_DOMAINS[domain] : undefined
   const advancedOpen = manualAdvancedOverride ?? preset === undefined
+
+  // OAuth-first routing (module doc) — only for a fresh connect.
+  // Reconnect (`lockAddress`) always stays on the app-password form below.
+  const isGoogleDomain = domain === 'gmail.com' || domain === 'googlemail.com'
+  const microsoftOnly = !lockAddress && oauthOnlyLabel !== undefined
+  // Offered whenever Google is a real possibility for this address: a Google
+  // domain (so someone who opened the app-password option can get BACK to
+  // OAuth — without this they are stuck in password mode until they retype the
+  // address), or an unrecognized domain that may belong to a Workspace org. A
+  // known non-Google preset (Fastmail, Zoho, iCloud, Yahoo) never offers it —
+  // there, Google is just confusing, not helpful (module doc).
+  //
+  // `domain !== null` keeps it off an EMPTY address: no domain has been typed,
+  // so there is nothing to route on yet, and `preset === undefined` would
+  // otherwise be trivially true and offer Workspace on a blank form.
+  const offerGoogleAlternative =
+    !lockAddress && !microsoftOnly && domain !== null && (isGoogleDomain || preset === undefined)
+  const defaultConnectMode: 'oauth' | 'password' = isGoogleDomain ? 'oauth' : 'password'
+  const connectRenderMode: 'oauth' | 'password' | 'unsupported' = lockAddress
+    ? 'password'
+    : microsoftOnly
+      ? 'unsupported'
+      : (connectModeOverride ?? defaultConnectMode)
+  const showGooglePrimary = connectRenderMode === 'oauth'
+  const passwordFormVisible = connectRenderMode === 'password'
 
   function clearCheckState(): void {
     setCheckResult(null)
@@ -305,6 +367,10 @@ export function ConnectInboxForm({
   function handleAddressChange(value: string): void {
     setAddress(value)
     clearCheckState()
+    // A domain change recomputes the OAuth-vs-password default from
+    // scratch — an override made for gmail.com must not stick around once
+    // the operator has typed a Fastmail address (module doc).
+    setConnectModeOverride(null)
     const nextDomain = domainFromAddress(value)
     // An OAuth-only domain clears whatever a previous preset left behind.
     // Without this, typing gmail.com and then outlook.com leaves Gmail's hosts
@@ -367,7 +433,7 @@ export function ConnectInboxForm({
   }
 
   const canSubmit = buildConfig() !== null
-  const isPending = isChecking || isConnecting
+  const isPending = isChecking || isConnecting || isBeginningOAuth
 
   function handleCheck(): void {
     const config = buildConfig()
@@ -412,6 +478,34 @@ export function ConnectInboxForm({
       })
       router.refresh()
       onConnected()
+    })
+  }
+
+  /**
+   * "Connect with Google" (HT-123, module doc). Mints the consent URL
+   * server-side, then does a full top-level navigation to it — Google's
+   * consent screen cannot be reached from inside this SPA, and a
+   * `window.location.href` assignment is the plain, correct way to leave
+   * the app for it. `beginGoogleConnect` never forwards anything from the
+   * engine response beyond `consentUrl` (see its own doc), so there is
+   * nothing secret to have handled here in the first place.
+   */
+  function handleConnectWithGoogle(): void {
+    if (isPending) return
+    setFormError(null)
+    startOAuth(async () => {
+      let response: Awaited<ReturnType<typeof beginGoogleConnect>>
+      try {
+        response = await beginGoogleConnect()
+      } catch {
+        setFormError('Could not reach the server. Please try again.')
+        return
+      }
+      if (!response.ok || response.consentUrl === undefined) {
+        setFormError(response.message ?? 'Could not start the Google connection. Please try again.')
+        return
+      }
+      window.location.href = response.consentUrl
     })
   }
 
@@ -491,204 +585,262 @@ export function ConnectInboxForm({
             {oauthOnlyLabel} does not allow app passwords for IMAP or SMTP — it requires OAuth.
             {lockAddress
               ? ' Reconnecting this inbox will not work.'
-              : ' Connecting this address here will not work.'}
+              : ` Connecting a ${oauthOnlyLabel} inbox is not yet supported.`}
           </p>
         )}
       </div>
 
-      <div>
-        <FieldLabel htmlFor="ht-connect-inbox-password">App password</FieldLabel>
-        <input
-          id="ht-connect-inbox-password"
-          name="password"
-          type="password"
-          autoComplete="new-password"
-          value={password}
-          onChange={(event) => {
-            setPassword(event.target.value)
-            clearCheckState()
-          }}
-          style={{
-            width: '100%',
-            boxSizing: 'border-box',
-            fontFamily: 'var(--ht-sans)',
-            fontSize: 12.5,
-            color: 'var(--ht-ink)',
-            background: 'var(--ht-bg)',
-            border: '1px solid var(--ht-divider)',
-            borderRadius: 'var(--ht-radius-sm)',
-            padding: '6px 10px',
-            outline: 'none',
-          }}
-        />
-        <p style={{ margin: '6px 0 0', fontSize: 11.5, color: 'var(--ht-ink-dim)' }}>
-          {lockAddress
-            ? "The engine never returns a stored password — re-enter it to reconnect, even if it hasn't changed."
-            : "Generated in your provider's security settings — not your account's main password."}
-        </p>
-      </div>
-
-      <div>
-        <button
-          type="button"
-          aria-expanded={advancedOpen}
-          onClick={() => setManualAdvancedOverride(!advancedOpen)}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            border: 'none',
-            background: 'none',
-            padding: 0,
-            fontSize: 12.5,
-            fontWeight: 600,
-            color: 'var(--ht-accent)',
-            cursor: 'pointer',
-          }}
-        >
-          <span
-            aria-hidden="true"
+      {showGooglePrimary && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Button variant="primary" disabled={isPending} onClick={handleConnectWithGoogle}>
+            {isBeginningOAuth ? 'Redirecting to Google…' : 'Connect with Google'}
+          </Button>
+          <p style={{ margin: 0, fontSize: 11.5, color: 'var(--ht-ink-dim)' }}>
+            Helpthread only requests the access it needs to read and send mail for this inbox, and
+            you can revoke it from your Google account at any time. An app password can&apos;t be
+            scoped this way and never expires.
+          </p>
+          <button
+            type="button"
+            onClick={() => setConnectModeOverride('password')}
+            disabled={isPending}
             style={{
-              display: 'inline-flex',
-              transform: advancedOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
-              transition: 'transform 0.15s',
+              alignSelf: 'flex-start',
+              border: 'none',
+              background: 'none',
+              padding: 0,
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--ht-ink-muted)',
+              cursor: 'pointer',
             }}
           >
-            <ChevronDownIcon />
-          </span>
-          Advanced
-        </button>
+            Use an app password instead
+          </button>
+        </div>
+      )}
 
-        {advancedOpen && (
-          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <div style={{ flex: 1 }}>
-                <FieldLabel htmlFor="ht-connect-inbox-imap-host">IMAP host</FieldLabel>
-                <TextInput
-                  id="ht-connect-inbox-imap-host"
-                  value={imapHost}
-                  onChange={(event: { target: { value: string } }) => {
-                    setImapHost(event.target.value)
-                    clearCheckState()
-                  }}
-                  placeholder="imap.yourprovider.com"
-                />
-              </div>
-              <div style={{ width: 90 }}>
-                <FieldLabel htmlFor="ht-connect-inbox-imap-port">Port</FieldLabel>
-                <TextInput
-                  id="ht-connect-inbox-imap-port"
-                  value={imapPort}
-                  onChange={(event: { target: { value: string } }) => {
-                    setImapPort(event.target.value)
-                    clearCheckState()
-                  }}
-                  placeholder="993"
-                />
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: 12 }}>
-              <div style={{ flex: 1 }}>
-                <FieldLabel htmlFor="ht-connect-inbox-smtp-host">SMTP host</FieldLabel>
-                <TextInput
-                  id="ht-connect-inbox-smtp-host"
-                  value={smtpHost}
-                  onChange={(event: { target: { value: string } }) => {
-                    setSmtpHost(event.target.value)
-                    clearCheckState()
-                  }}
-                  placeholder="smtp.yourprovider.com"
-                />
-              </div>
-              <div style={{ width: 90 }}>
-                <FieldLabel htmlFor="ht-connect-inbox-smtp-port">Port</FieldLabel>
-                <TextInput
-                  id="ht-connect-inbox-smtp-port"
-                  value={smtpPort}
-                  onChange={(event: { target: { value: string } }) => {
-                    setSmtpPort(event.target.value)
-                    clearCheckState()
-                  }}
-                  placeholder="587"
-                />
-              </div>
-            </div>
-
+      {passwordFormVisible && (
+        <>
+          {offerGoogleAlternative && (
             <button
               type="button"
-              aria-pressed={secure}
-              onClick={() => {
-                setSecure((current) => !current)
+              onClick={() => setConnectModeOverride('oauth')}
+              disabled={isPending}
+              style={{
+                alignSelf: 'flex-start',
+                border: 'none',
+                background: 'none',
+                padding: 0,
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--ht-accent)',
+                cursor: 'pointer',
+              }}
+            >
+              {isGoogleDomain
+                ? 'Connect with Google instead'
+                : 'Connect with Google Workspace instead'}
+            </button>
+          )}
+
+          <div>
+            <FieldLabel htmlFor="ht-connect-inbox-password">App password</FieldLabel>
+            <input
+              id="ht-connect-inbox-password"
+              name="password"
+              type="password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(event) => {
+                setPassword(event.target.value)
                 clearCheckState()
               }}
               style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                fontFamily: 'var(--ht-sans)',
+                fontSize: 12.5,
+                color: 'var(--ht-ink)',
+                background: 'var(--ht-bg)',
+                border: '1px solid var(--ht-divider)',
+                borderRadius: 'var(--ht-radius-sm)',
+                padding: '6px 10px',
+                outline: 'none',
+              }}
+            />
+            <p style={{ margin: '6px 0 0', fontSize: 11.5, color: 'var(--ht-ink-dim)' }}>
+              {lockAddress
+                ? "The engine never returns a stored password — re-enter it to reconnect, even if it hasn't changed."
+                : "Generated in your provider's security settings — not your account's main password."}
+            </p>
+          </div>
+
+          <div>
+            <button
+              type="button"
+              aria-expanded={advancedOpen}
+              onClick={() => setManualAdvancedOverride(!advancedOpen)}
+              style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: 8,
-                border: '1px solid var(--ht-border)',
-                background: 'var(--ht-surface)',
-                borderRadius: 'var(--ht-radius-md)',
-                padding: '10px 12px',
+                gap: 6,
+                border: 'none',
+                background: 'none',
+                padding: 0,
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: 'var(--ht-accent)',
                 cursor: 'pointer',
-                width: '100%',
-                textAlign: 'left',
               }}
             >
               <span
                 aria-hidden="true"
                 style={{
-                  width: 32,
-                  height: 18,
-                  borderRadius: 999,
-                  background: secure ? 'var(--ht-accent)' : 'var(--ht-surface-2)',
-                  position: 'relative',
-                  flexShrink: 0,
-                  transition: 'background 0.15s',
+                  display: 'inline-flex',
+                  transform: advancedOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
+                  transition: 'transform 0.15s',
                 }}
               >
-                <span
-                  style={{
-                    position: 'absolute',
-                    top: 2,
-                    left: secure ? 16 : 2,
-                    width: 14,
-                    height: 14,
-                    borderRadius: '50%',
-                    background: 'var(--ht-surface)',
-                    transition: 'left 0.15s',
-                  }}
-                />
+                <ChevronDownIcon />
               </span>
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ht-ink)' }}>Use TLS</span>
+              Advanced
             </button>
-          </div>
-        )}
-      </div>
 
-      {checkResult !== null && checkResult.result !== undefined && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <StatusPill
-              status={checkResult.result.imap.ok ? 'active' : 'spam'}
-              label={checkResult.result.imap.ok ? 'IMAP ✓' : 'IMAP ✗'}
-            />
-            <StatusPill
-              status={checkResult.result.smtp.ok ? 'active' : 'spam'}
-              label={checkResult.result.smtp.ok ? 'SMTP ✓' : 'SMTP ✗'}
-            />
+            {advancedOpen && (
+              <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <FieldLabel htmlFor="ht-connect-inbox-imap-host">IMAP host</FieldLabel>
+                    <TextInput
+                      id="ht-connect-inbox-imap-host"
+                      value={imapHost}
+                      onChange={(event: { target: { value: string } }) => {
+                        setImapHost(event.target.value)
+                        clearCheckState()
+                      }}
+                      placeholder="imap.yourprovider.com"
+                    />
+                  </div>
+                  <div style={{ width: 90 }}>
+                    <FieldLabel htmlFor="ht-connect-inbox-imap-port">Port</FieldLabel>
+                    <TextInput
+                      id="ht-connect-inbox-imap-port"
+                      value={imapPort}
+                      onChange={(event: { target: { value: string } }) => {
+                        setImapPort(event.target.value)
+                        clearCheckState()
+                      }}
+                      placeholder="993"
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <FieldLabel htmlFor="ht-connect-inbox-smtp-host">SMTP host</FieldLabel>
+                    <TextInput
+                      id="ht-connect-inbox-smtp-host"
+                      value={smtpHost}
+                      onChange={(event: { target: { value: string } }) => {
+                        setSmtpHost(event.target.value)
+                        clearCheckState()
+                      }}
+                      placeholder="smtp.yourprovider.com"
+                    />
+                  </div>
+                  <div style={{ width: 90 }}>
+                    <FieldLabel htmlFor="ht-connect-inbox-smtp-port">Port</FieldLabel>
+                    <TextInput
+                      id="ht-connect-inbox-smtp-port"
+                      value={smtpPort}
+                      onChange={(event: { target: { value: string } }) => {
+                        setSmtpPort(event.target.value)
+                        clearCheckState()
+                      }}
+                      placeholder="587"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  aria-pressed={secure}
+                  onClick={() => {
+                    setSecure((current) => !current)
+                    clearCheckState()
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    border: '1px solid var(--ht-border)',
+                    background: 'var(--ht-surface)',
+                    borderRadius: 'var(--ht-radius-md)',
+                    padding: '10px 12px',
+                    cursor: 'pointer',
+                    width: '100%',
+                    textAlign: 'left',
+                  }}
+                >
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 32,
+                      height: 18,
+                      borderRadius: 999,
+                      background: secure ? 'var(--ht-accent)' : 'var(--ht-surface-2)',
+                      position: 'relative',
+                      flexShrink: 0,
+                      transition: 'background 0.15s',
+                    }}
+                  >
+                    <span
+                      style={{
+                        position: 'absolute',
+                        top: 2,
+                        left: secure ? 16 : 2,
+                        width: 14,
+                        height: 14,
+                        borderRadius: '50%',
+                        background: 'var(--ht-surface)',
+                        transition: 'left 0.15s',
+                      }}
+                    />
+                  </span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ht-ink)' }}>
+                    Use TLS
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
-          {!checkResult.result.imap.ok && (
-            <p style={{ margin: 0, fontSize: 12, color: 'var(--ht-critical)' }}>
-              IMAP: {checkResult.result.imap.error}
-            </p>
+
+          {checkResult !== null && checkResult.result !== undefined && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <StatusPill
+                  status={checkResult.result.imap.ok ? 'active' : 'spam'}
+                  label={checkResult.result.imap.ok ? 'IMAP ✓' : 'IMAP ✗'}
+                />
+                <StatusPill
+                  status={checkResult.result.smtp.ok ? 'active' : 'spam'}
+                  label={checkResult.result.smtp.ok ? 'SMTP ✓' : 'SMTP ✗'}
+                />
+              </div>
+              {!checkResult.result.imap.ok && (
+                <p style={{ margin: 0, fontSize: 12, color: 'var(--ht-critical)' }}>
+                  IMAP: {checkResult.result.imap.error}
+                </p>
+              )}
+              {!checkResult.result.smtp.ok && (
+                <p style={{ margin: 0, fontSize: 12, color: 'var(--ht-critical)' }}>
+                  SMTP: {checkResult.result.smtp.error}
+                </p>
+              )}
+            </div>
           )}
-          {!checkResult.result.smtp.ok && (
-            <p style={{ margin: 0, fontSize: 12, color: 'var(--ht-critical)' }}>
-              SMTP: {checkResult.result.smtp.error}
-            </p>
-          )}
-        </div>
+        </>
       )}
 
       {formError !== null && (
@@ -702,12 +854,16 @@ export function ConnectInboxForm({
       )}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <Button variant="outline" disabled={!canSubmit || isPending} onClick={handleCheck}>
-          {isChecking ? 'Checking…' : 'Check connection'}
-        </Button>
-        <Button variant="primary" disabled={!canSubmit || isPending} onClick={handleConnect}>
-          {isConnecting ? 'Connecting…' : 'Connect'}
-        </Button>
+        {passwordFormVisible && (
+          <>
+            <Button variant="outline" disabled={!canSubmit || isPending} onClick={handleCheck}>
+              {isChecking ? 'Checking…' : 'Check connection'}
+            </Button>
+            <Button variant="primary" disabled={!canSubmit || isPending} onClick={handleConnect}>
+              {isConnecting ? 'Connecting…' : 'Connect'}
+            </Button>
+          </>
+        )}
         <span style={{ flex: 1 }} />
         <Button variant="ghost" disabled={isPending} onClick={onCancel}>
           Cancel

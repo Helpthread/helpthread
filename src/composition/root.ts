@@ -353,7 +353,13 @@ export async function buildApp(
     watchStateStore,
     createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
   })
-  const gmailConnect: GmailConnectDeps = { service: connectService }
+  const gmailConnect: GmailConnectDeps = {
+    service: connectService,
+    // Optional (HT-123): when configured, the callback redirects the
+    // operator back into the app instead of rendering a bare HTML page —
+    // same field `app.ts` uses for the bare-root redirect.
+    ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),
+  }
 
   // --- Gmail disconnect admin action (HT-47) — the inverse of connect. ---
   const disconnectService = createGmailDisconnectService({

@@ -45,6 +45,7 @@ import type {
   ConversationListResponse,
   ConversationStatus,
   ConversationSummary,
+  GmailBeginConnectResult,
   ImapCheckResult,
   ImapConnectionInput,
   ImapMailboxConfigView,
@@ -413,4 +414,18 @@ export function imapConnect(input: ImapConnectionInput): Promise<ConnectedMailbo
  */
 export function getMailboxImapConfig(mailboxId: string): Promise<ImapMailboxConfigView> {
   return request(`/api/v1/mailboxes/${mailboxId}/imap-config`, { actingAgent: true })
+}
+
+// --- Gmail OAuth connect (HT-40/HT-123; specs/mail/gmail-connect.md §2a) ---
+
+/**
+ * `POST /api/v1/inbound/gmail/connect` — mints the Google consent URL. An
+ * ORDINARY Bearer-gated route (`src/api/router.ts`'s own comment), unlike
+ * the IMAP connect routes above: no acting-Agent header. Never returns a
+ * token, `code`, or `state` — only the consent URL the caller navigates the
+ * browser to (`gmailBeginConnect` in `mailbox-actions.ts` is the one
+ * server action allowed to call this).
+ */
+export function gmailBeginConnect(): Promise<GmailBeginConnectResult> {
+  return request('/api/v1/inbound/gmail/connect', { method: 'POST' })
 }
