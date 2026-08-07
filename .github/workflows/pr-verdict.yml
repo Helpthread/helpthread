@@ -107,16 +107,21 @@ jobs:
           #    line. Matching anywhere would let a PR bury the verdict under arbitrary
           #    prose — the whole point is that it is the first thing read.
           #
-          #    The whole line must BE the verdict, not merely contain it: leading `#`s
-          #    and the emoji are allowed (`## 🟢 SAFE TO MERGE`), but trailing words are
-          #    not, so `Status: SAFE TO MERGE pending review` is rejected. `[^[:alnum:]]*`
-          #    covers the emoji without this file having to carry a Unicode class.
+          #    The line must OPEN with the verdict: leading `#`s and the emoji are
+          #    allowed (`## 🟢 SAFE TO MERGE`), and a trailing clause is allowed
+          #    (`## 🔴 DO NOT MERGE — review and CI pending`), but nothing may precede
+          #    it. That rejects `Status: SAFE TO MERGE pending review`, where the verdict
+          #    is buried and qualified, while leaving the ordinary habit of appending a
+          #    reason alone — a gate that fails honest bodies teaches people to paste
+          #    ceremony, which is the exact habit this exists to break.
+          #    `[^[:alnum:]]*` covers the emoji without this file having to carry a
+          #    Unicode class.
           #
           #    VERDICT is captured here and reused by check 5, so a body that merely
           #    *mentions* another verdict cannot change how it is validated.
           FIRST_LINE=$(grep -m1 -vE '^[[:space:]]*$' <<<"$BODY" || true)
           verdict_is() {
-            grep -qE "^#{0,6}[[:space:]]*[^[:alnum:]]*[[:space:]]*$1[[:space:]]*$" <<<"$FIRST_LINE"
+            grep -qE "^#{0,6}[[:space:]]*[^[:alnum:]]*[[:space:]]*$1([[:space:]]|$)" <<<"$FIRST_LINE"
           }
           VERDICT=""
           if verdict_is 'SAFE TO MERGE'; then VERDICT=safe
