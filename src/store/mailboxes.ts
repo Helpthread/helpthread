@@ -18,10 +18,11 @@
  *   returns-regardless-of-status split.
  * - {@link MailboxStore.markNeedsReconnect} — mark a mailbox
  *   `needs_reconnect` when its OAuth grant turns out revoked or expired
- *   (`../mail/gmail-oauth.ts`'s `getAccessToken`, on `invalid_grant`).
- *   `watch()` renewal needs the SAME transition on a failed renewal
- *   (gmail-push.md §6) and calls this rather than duplicating the SQL — that
- *   shared reuse is why this is a store module, not an inline query.
+ *   (`../mail/gmail-oauth.ts`'s `getAccessToken`, on `invalid_grant`). That
+ *   token layer is its ONLY caller. A failed `watch()` renewal does NOT
+ *   make this transition — past a valid token it is transient and merely
+ *   counted, as `../mail/gmail-watch-maintenance.ts`'s module doc spells
+ *   out.
  * - {@link MailboxStore.markPaused} — mark a mailbox `paused`, the deliberate
  *   response to an expired (404) Gmail history cursor (gmail-push.md §5):
  *   pause and flag for manual rebaseline, rather than an automatic

@@ -1,6 +1,6 @@
 /**
- * AES-256-GCM authenticated encryption — the ONE envelope every secret this
- * engine stores at rest is wrapped in.
+ * AES-256-GCM authenticated encryption — the ONE envelope every DECRYPTABLE
+ * secret this engine stores at rest is wrapped in.
  *
  * It began as the OAuth-token envelope (`mailbox_oauth_tokens
  * .refresh_token_ciphertext`/`access_token_ciphertext`, migration 010, whose

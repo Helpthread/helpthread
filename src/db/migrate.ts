@@ -1688,8 +1688,9 @@ $migration027$;
  * two successive claims landing within one clock tick mint the SAME token,
  * so a stale holder's compares equal to the live holder's and passes the
  * check. A test forced exactly that collision (2026-07-31). A fresh
- * `gen_random_uuid()` per claim cannot collide regardless of clock
- * resolution. `claimed_until` is retained for expiry (`WHERE claimed_until
+ * `gen_random_uuid()` per claim makes a collision negligibly unlikely and
+ * removes the dependence on clock resolution
+ * altogether. `claimed_until` is retained for expiry (`WHERE claimed_until
  * IS NULL OR claimed_until < now()`), the token for ownership — two
  * questions, both needed.
  *

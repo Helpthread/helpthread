@@ -45,7 +45,8 @@
  * - **Under the ceiling**, a failed attempt returns `{ kind: 'retry' }` with
  *   NO store write. Spec's "consecutive-failure counter increments... at the
  *   threshold" describes `WebhookEndpointStore.recordDeliveryFailure`'s OWN
- *   per-EVENT counter, which must not be double-incremented per HTTP attempt.
+ *   per-ENDPOINT counter (`webhook_endpoints.consecutive_failures`), which
+ *   must not be double-incremented per HTTP attempt.
  * - **At the ceiling**, THIS attempt calls `recordDeliveryFailure` and
  *   returns `{ kind: 'deadLetter' }` itself, rather than returning a bare
  *   `retry` and hoping the queue's own unrelated ceiling eventually
