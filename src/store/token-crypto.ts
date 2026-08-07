@@ -8,7 +8,12 @@
  * encrypted). It is now the shared implementation behind every
  * secret-bearing store: `./mailbox-tokens.ts`, `./imap-credentials.ts`,
  * `./module-license.ts`, `./vercel-connection.ts`, `./webhook-endpoints.ts`,
- * and `./assistants.ts`.
+ * and `../modules/install/installer.ts`'s credential escrow.
+ * `../composition/config.ts` decodes the mailbox key at startup.
+ *
+ * Not every secret at rest is ciphertext: `./assistants.ts` persists a
+ * SHA-256 `token_hash` and never calls this module. A hash is verified, not
+ * decrypted — do not route one through this envelope.
  *
  * **One crypto implementation, many independent KEYS.** The envelope is not
  * class-specific; the key material is. Several of those callers deliberately

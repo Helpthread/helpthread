@@ -194,12 +194,12 @@ export async function runGmailWatchMaintenance(
 }
 
 /**
- * Re-arm `watch()` and run the reconciliation sweep for ONE mailbox. See
- * the module doc for the full step-by-step rationale. Increments `counts`
- * directly rather than returning a result, so a partial success (e.g. the
- * re-arm succeeds but the sweep step then throws unexpectedly) is never
- * lost — the caller's outer catch only ADDS to `counts` on top of whatever
- * this function already recorded, never replaces it.
+ * Re-arm `watch()` for ONE mailbox. See the module doc for the full
+ * step-by-step rationale. Increments `counts` directly rather than
+ * returning a result, so a partial success (e.g. the token probe succeeds
+ * but the re-arm then throws unexpectedly) is never lost — the caller's
+ * outer catch only ADDS to `counts` on top of whatever this function
+ * already recorded, never replaces it.
  */
 async function maintainOneMailbox(
   mailboxId: string,
@@ -247,10 +247,10 @@ async function maintainOneMailbox(
     return
   }
 
-  // --- Step 2: re-arm watch() — independent of the sweep below. Past a
-  // valid token, a failure here is TRANSIENT (module doc: the token layer,
-  // not this cron, owns needs_reconnect). Does NOT `return` on failure —
-  // the sweep still runs even when renewal fails. ---
+  // --- Step 2: re-arm watch(). Past a valid token, a failure here is
+  // TRANSIENT (module doc: the token layer, not this cron, owns
+  // needs_reconnect), so it is counted and logged rather than rethrown —
+  // one mailbox's renewal failure never aborts the batch. ---
   try {
     const watchClient = createWatchClient(() => Promise.resolve(accessToken))
     const { expiration } = await watchClient.watch({ topicName })

@@ -535,9 +535,12 @@ CREATE TABLE gmail_watch_state (
  * adding now that the consuming store methods have settled the question.
  *
  * No index beyond the UNIQUE claim key — the unique index IS the claim key.
- * A `status`-scoped index for a retry-sweep or dead-letter-review query
- * belongs to whichever change implements that query, rather than carrying
- * write-time index cost for a read pattern that does not exist.
+ * A `status`-scoped index was left to whichever change first needed one,
+ * rather than carrying write-time cost for a read pattern that did not yet
+ * exist. `src/composition/health.ts` has since added two (a `GROUP BY
+ * status` over a 24h window, and a `status = 'dead-letter'` count), so the
+ * question is now whether those warrant the index, not whether a reader
+ * exists.
  */
 const MIGRATION_012_INBOUND_DELIVERIES = `
 CREATE TABLE inbound_deliveries (

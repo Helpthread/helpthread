@@ -258,9 +258,10 @@ export const DEFAULT_RECONCILE_LEASE_MS = 5 * 60_000
  * `reconcileLeaseMs`). Even in the pathological case where every retry
  * still loses the race and the job is eventually dead-lettered, no message
  * is dropped: cursor-advance (step 6) and ingest dedup (inbound-
- * ingestion.md §4) mean the next trigger — a further push, or the daily
- * sweep (gmail-push.md §6) — reconciles this mailbox from wherever the
- * holder left the cursor, exactly as before this lease existed at all. This
+ * ingestion.md §4) mean the next trigger — a further push, or the
+ * every-minute reconciliation sweep (`./gmail-reconcile-sweep.ts`) —
+ * reconciles this mailbox from wherever the holder left the cursor, exactly
+ * as before this lease existed at all. This
  * constant only trades a little redundant queue churn against how quickly a
  * message that arrived mid-holder-run gets reconciled, never data safety.
  * If `reconcileLeaseMs` is overridden well above its default at the
