@@ -117,6 +117,7 @@
  */
 
 import type { Db, Queryable, SqlValue } from '../db/client.js'
+import { insertThreadAttachmentsInTx, type NewThreadAttachment } from './attachments.js'
 import { appendOutboxEventInTx } from './event-outbox.js'
 
 /**
@@ -504,6 +505,29 @@ export interface ConversationStore {
    * with zero threads as a persisted state.
    */
   createConversation(input: NewConversation): Promise<{ conversationId: string; threadId: string }>
+
+  /**
+   * Insert a conversation opened through the customer API
+   * (specs/api/customer-conversations-v1.md §6a) — its row, its first
+   * inbound thread, any attachment references, and the
+   * `conversation.message_received` outbox event, all in ONE transaction.
+   *
+   * Distinct from {@link createConversation} rather than an option on it:
+   * that method is the plain two-row insert every other caller wants, and
+   * widening it would give existing callers attachment and event behavior
+   * they never asked for. The difference that matters is atomicity of the
+   * whole set — §6a makes attachments all-or-nothing, so a failed
+   * attachment row must leave no conversation behind.
+   *
+   * `attachments` carries blob references whose bytes the caller has
+   * ALREADY written (mirroring `src/mail/ingest.ts`, which writes blobs
+   * before opening its transaction). A blob write that fails must abort
+   * before this is called; this method's failure mode is a rolled-back
+   * transaction, which cannot unwrite a blob.
+   */
+  createCustomerConversation(
+    input: NewConversation & { attachments?: readonly Omit<NewThreadAttachment, 'threadId'>[] },
+  ): Promise<{ conversationId: string; threadId: string }>
 
   /**
    * Append `thread` to the conversation `conversationId`, applying the
@@ -1272,6 +1296,31 @@ export function createConversationStore(db: Db): ConversationStore {
   return {
     async createConversation(input) {
       return db.transaction((tx) => createConversationInTx(tx, input))
+    },
+
+    async createCustomerConversation(input) {
+      const { attachments = [], ...conversation } = input
+      return db.transaction(async (tx) => {
+        const created = await createConversationInTx(tx, conversation)
+        await insertThreadAttachmentsInTx(
+          tx,
+          attachments.map((ref) => ({ ...ref, threadId: created.threadId })),
+        )
+        // Same pair, same order, same payloads a mail-ingested new
+        // conversation emits (`src/mail/ingest.ts`) — a conversation opened
+        // through the API must be indistinguishable to every event consumer.
+        await appendOutboxEventInTx(tx, {
+          type: 'conversation.created',
+          conversationId: created.conversationId,
+          data: {},
+        })
+        await appendOutboxEventInTx(tx, {
+          type: 'conversation.message_received',
+          conversationId: created.conversationId,
+          data: { threadId: created.threadId, reopened: false },
+        })
+        return created
+      })
     },
 
     async appendThread(conversationId, thread, options) {

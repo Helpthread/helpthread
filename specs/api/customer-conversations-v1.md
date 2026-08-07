@@ -1,6 +1,7 @@
 # Customer conversations API v1
 
-Status: proposed (HT-126). One open decision blocks implementation of `authorKind` (§4d).
+Status: §6a implemented (HT-126). §6b–§6d specified, not yet built; `authorKind` is an
+open decision (§4d) and gates the read endpoints, not the create path.
 
 ## 1. Purpose
 
@@ -311,8 +312,11 @@ interface AttachmentUpload {
 }
 ```
 
-Responds `201` with `CustomerConversationDetail`. The conversation is created `active` and
-unassigned.
+Responds `201` with a create receipt — `{ id, number, subject, status, createdAt }` — not a
+full `CustomerConversationDetail`. A freshly created conversation has exactly the one
+thread the caller just supplied, so returning a thread array would restate the request,
+and `CustomerThreadView` carries `authorKind`, still an open decision (§4d). The full
+representation arrives with §6c. The conversation is created `active` and unassigned.
 
 Intake spam classification ([spam-classification.md](../mail/spam-classification.md) §4)
 does **not** apply — that classifier reads transport headers, and there is no inbound

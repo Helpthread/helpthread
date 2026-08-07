@@ -26,6 +26,18 @@ interface RouteDef {
   methods: readonly string[]
 }
 
+/**
+ * `/api/v1/customer/conversations` — the customer-side create path
+ * (specs/api/customer-conversations-v1.md §6a), POST only. Anchored under its
+ * own `/customer` prefix so that spec's exclusion rules attach to a routing
+ * boundary rather than to each handler's discipline; it cannot collide with
+ * `CONVERSATIONS_LIST`, whose pattern is rooted at `/api/v1/conversations`.
+ */
+const CUSTOMER_CONVERSATIONS: RouteDef = {
+  pattern: /^\/api\/v1\/customer\/conversations$/,
+  methods: ['POST'],
+}
+
 /** `/api/v1/conversations` — list only (spec §3a); no customer-create in v1. */
 const CONVERSATIONS_LIST: RouteDef = {
   pattern: /^\/api\/v1\/conversations$/,
@@ -339,6 +351,7 @@ const DRAFT_DISCARD: RouteDef = {
 
 /** Every route this API recognizes, checked in order. */
 const ROUTES: readonly RouteDef[] = [
+  CUSTOMER_CONVERSATIONS,
   CONVERSATIONS_LIST,
   CONVERSATION_ITEM,
   CONVERSATION_REPLIES,
@@ -385,6 +398,7 @@ const ROUTES: readonly RouteDef[] = [
 
 /** The outcome of matching a `(method, pathname)` pair against {@link ROUTES}. */
 export type RouteMatch =
+  | { kind: 'customer-conversation-create' }
   | { kind: 'conversations-list' }
   | { kind: 'conversation-item'; id: string }
   | { kind: 'conversation-patch'; id: string }
@@ -534,6 +548,9 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
       return { kind: 'method-not-allowed', allow: [...route.methods] }
     }
 
+    if (route === CUSTOMER_CONVERSATIONS) {
+      return { kind: 'customer-conversation-create' }
+    }
     if (route === CONVERSATIONS_LIST) {
       return { kind: 'conversations-list' }
     }
