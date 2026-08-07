@@ -2,13 +2,13 @@
 
 **Applies to every repo, every project, every surface.** The maintainer reviewing a PR is not necessarily an engineer, and a diff plus a wall of review-bot output does not answer the only question that matters: is this safe to merge? This protocol makes a PR answerable in under 30 seconds.
 
-Earned 2026-07-20, after an audit found **nine normative decisions** merged across PRs #87–#100 of the Helpthread repo that TJ never made — including two amendments to the project's constitution — each authored, self-reviewed, and merged with zero human review comments, several later cited back to him as "per TJ's decision."
+Earned 2026-07-20, after an audit found **nine normative decisions** merged across PRs #87–#100 of the Helpthread repo that the maintainer never made — including two amendments to the project's constitution — each authored, self-reviewed, and merged with zero human review comments, several later cited back as "per the maintainer's decision."
 
 ## The one rule that matters most
 
 **Never attribute a decision to the maintainer without quoting them.**
 
-Not "per your decision," not "as you chose earlier," not "TJ decided," not "(TJ, 2026-07-19)" — unless you can paste his actual words. If you cannot quote it, it is **yours**, and it must be labelled `INFERRED` wherever it is written: PR body, spec text, commit message, ticket, charter amendment.
+Not "per your decision," not "as you chose earlier," not "the maintainer decided," not "(maintainer, 2026-07-19)" — unless you can paste their actual words. If you cannot quote it, it is **yours**, and it must be labelled `INFERRED` wherever it is written: PR body, spec text, commit message, ticket, charter amendment.
 
 This single rule would have prevented every finding in that audit.
 
@@ -16,7 +16,7 @@ This single rule would have prevented every finding in that audit.
 
 Writing "N decisions shape this" — or "the key question is X" — and then answering it yourself without a user turn in between.
 
-If you pose a decision, **stop and ask**. Do not declare it "locked," "recorded," or "decided" until TJ has answered in his own words. A tool result is not an answer. Silence is not consent.
+If you pose a decision, **stop and ask**. Do not declare it "locked," "recorded," or "decided" until the maintainer has answered in their own words. A tool result is not an answer. Silence is not consent.
 
 ## Required PR body structure
 
@@ -32,7 +32,7 @@ Three verdicts, nothing else:
 | Verdict | Means |
 |---|---|
 | 🟢 **SAFE TO MERGE** | No new decisions. Gates green. Review findings adjudicated and resolved. |
-| 🟡 **NEEDS YOUR DECISION** | Encodes N decisions TJ has not made. Listed below. Do not merge until answered. |
+| 🟡 **NEEDS YOUR DECISION** | Encodes N decisions the maintainer has not made. Listed below. Do not merge until answered. |
 | 🔴 **DO NOT MERGE** | Unresolved defect, failing gate, or a one-way door not yet accepted. |
 
 When the verdict is 🟡 or 🔴, a **Decision provenance** table follows immediately:
@@ -46,7 +46,7 @@ When the verdict is 🟡 or 🔴, a **Decision provenance** table follows immedi
 | Resonant IQ runs module code on its own servers | ⚠️ INFERRED — no authorization found |
 ```
 
-**Plain words, not jargon.** "Resonant IQ runs module code on its own servers" — not "managed hosting becomes the mainline install path." If TJ would need to ask what a row means, the row is written wrong. The noun that would make him say "wait, what?" must appear in the row.
+**Plain words, not jargon.** "Resonant IQ runs module code on its own servers" — not "managed hosting becomes the mainline install path." If the maintainer would need to ask what a row means, the row is written wrong. The noun that would make them say "wait, what?" must appear in the row.
 
 ## One-way doors get their own line
 
@@ -62,14 +62,14 @@ Two-way doors need no flag. Match the noise to the cost of undo.
 
 | PR touches | Treatment |
 |---|---|
-| A charter, `README`, `legal/`, `LICENSE`, licensing, pricing, or any public promise | Full block + provenance table + TJ reads the changed text itself |
+| A charter, `README`, `legal/`, `LICENSE`, licensing, pricing, or any public promise | Full block + provenance table + the maintainer reads the changed text itself |
 | Specs, ADRs, architecture docs | Full block + provenance table |
 | Code, tests, config | Verdict line only |
 | Typos, formatting, dependency bumps | Verdict line only |
 
 Most PRs are one line. Reserve the ceremony for what can hurt.
 
-## Review bots are yours, never his
+## Review bots are yours, never the maintainer's
 
 The maintainer never reads CodeRabbit, Codex, or any bot output raw. You adjudicate and report one line:
 
@@ -86,20 +86,20 @@ If a finding is real, fix it or explain why not. "The bot said something" is not
 3. Adjudicate every finding: real or not, fixed or why not.
 4. If you pushed fixes, **request re-review explicitly** — incremental review is off in these repos, so a fix-up push is otherwise never looked at.
 5. Only then update the verdict to 🟢 and add the one-line bot summary.
-6. Tell TJ it is ready. **A PR he has not been told about is not ready**, whatever its checks say.
+6. Tell the maintainer it is ready. **A PR they have not been told about is not ready**, whatever its checks say.
 
 The gate enforces step 5 mechanically: a 🟢 verdict with no review-bot adjudication line fails.
 
 ## Before you write the verdict
 
 1. Diff the PR against the base. List every change that adds or alters a **rule, default, invariant, commitment, licensing term, price, or public promise**.
-2. For each, find TJ's authorizing words in the conversation. Quote them with a timestamp.
+2. For each, find the maintainer's authorizing words in the conversation. Quote them with a timestamp.
 3. Anything without a quote is `INFERRED`. Say so plainly. Do not soften it.
 4. If there is at least one INFERRED item, the verdict is 🟡. Never 🟢.
 
 ## What "approval" is and is not
 
-- "merge it," "looks good," "go ahead," "please merge everything else" → **approval to merge**, not evidence he decided the contents.
+- "merge it," "looks good," "go ahead," "please merge everything else" → **approval to merge**, not evidence they decided the contents.
 - "I agree with everything above" → covers **the message it replies to**, nothing else. If that message was about refunds and the PR also encodes a hosting model, the hosting model is INFERRED.
 - Approving one PR never authorizes the next.
 

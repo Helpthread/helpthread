@@ -4,12 +4,12 @@ name: PR verdict
 # must carry a verdict and a decision-provenance table in the PR body.
 #
 # Why this is a CI check and not a documented convention: on 2026-07-20 an audit of
-# PRs #87-#100 found nine normative decisions merged that TJ never made, including two
-# amendments to CHARTER.md. Every one of them was made by an assistant that had the
-# convention available and did not follow it. Instructions drift; a required check
-# does not.
+# PRs #87-#100 found nine normative decisions merged that the maintainer never made,
+# including two amendments to CHARTER.md. Every one of them was made by an assistant
+# that had the convention available and did not follow it. Instructions drift; a
+# required check does not.
 #
-# The rule this enforces lives at ~/.claude/rules/pr-verdict.md.
+# The rule this enforces lives at .claude/rules/pr-verdict.md.
 
 on:
   pull_request:
@@ -86,20 +86,11 @@ jobs:
           echo "$FILES"
           echo
 
-          # Normalize the body ONCE, before any check, removing the two things that
-          # look like content to a regex and like nothing to a human:
-          #   - HTML comments: `<!-- 🟢 SAFE TO MERGE -->` as the first line satisfied
-          #     the verdict and the bot-line check while rendering invisible. A leading
-          #     PR-template comment also wrongly failed the verdict check.
-          #   - Fenced code blocks: the protocol doc's own ```markdown example of a
-          #     "## Decision provenance" table satisfied the provenance requirement,
-          #     so quoting the rule counted as following it.
-          # Every check below reads BODY_CLEAN, never the raw body.
-          # Strip the two things that look like content to a regex and like nothing
-          # to a human, BEFORE any check reads the body:
+          # Normalize the body ONCE, before any check reads it, stripping the two
+          # things that look like content to a regex and like nothing to a human:
           #   - HTML comments: `<!-- 🟢 SAFE TO MERGE -->` as the first line satisfied
           #     the verdict and bot-line checks while rendering invisible. The same flaw
-           #    also failed legitimate PRs opening with a template comment.
+          #     also failed legitimate PRs opening with a template comment.
           #   - Fenced blocks: the protocol doc's own ```markdown example of a
           #     "## Decision provenance" table satisfied the provenance requirement, so
           #     quoting the rule counted as following it.
@@ -120,8 +111,8 @@ jobs:
             fail "No '## Decision provenance' section. Changes to the constitution, legal text, or licensing must list every decision and where it came from."
           fi
 
-          # 3. Every provenance row is either quoted to TJ or marked INFERRED.
-          #    A row citing TJ without quote marks is the exact failure this gate exists for.
+          # 3. Every provenance row is either quoted to the maintainer or marked INFERRED.
+          #    A row citing them without quote marks is the exact failure this gate exists for.
           #    sed form is BRE-portable (BSD and GNU) — `\+` is a GNU extension.
           if grep -qiE '^#{1,}[[:space:]]*Decision provenance' <<<"$BODY"; then
             # Stop at the next heading — reading to end-of-body swallows any later
@@ -155,16 +146,18 @@ jobs:
           #    "NEEDS YOUR DECISION" verdict marker itself.
           #
           #    Backticked code spans are stripped before matching: a doc that
-          #    *discusses* these patterns (`TJ's decision` as a literal example, in a
-          #    checklist or an adjudication table) is not attributing anything. Without
-          #    this, any text explaining the rule trips the rule — which is exactly how
-          #    this gate first failed, on its own PR body.
+          #    *discusses* these patterns (`maintainer decision` as a literal example,
+          #    in a checklist or an adjudication table) is not attributing anything.
+          #    Without this, any text explaining the rule trips the rule.
+          #
+          #    The patterns are role-based, never a person's name: this file is public,
+          #    and the maintainer's name does not belong in it.
           BODY_NO_CODE=$(sed 's/`[^`]*`//g' <<<"$BODY")
           while IFS= read -r line; do
             grep -qE '["“”]' <<<"$line" && continue
             grep -qiE 'INFERRED' <<<"$line" && continue
-            fail "Attributes a decision to TJ without quoting him: ${line}"
-          done < <(grep -iE "(TJ's (decision|call|choice)|per TJ's|TJ decided|you decided|you chose|as you decided|decided by TJ|CONFIRMED by TJ|SIGNED OFF by TJ|\(TJ,? [0-9]{4}-|, TJ [0-9]{4}-)" <<<"$BODY_NO_CODE" || true)
+            fail "Attributes a decision to the maintainer without quoting them: ${line}"
+          done < <(grep -iE "(maintainer's (decision|call|choice)|per the maintainer's|maintainer decided|you decided|you chose|as you decided|decided by the maintainer|CONFIRMED by the maintainer|SIGNED OFF by the maintainer|\(maintainer,? [0-9]{4}-|maintainer decision, [0-9]{4}-)" <<<"$BODY_NO_CODE" || true)
 
           # 5. A green verdict must show the review bots were adjudicated.
           #    Bots review AFTER a PR opens, so nothing can honestly be green at open
@@ -178,7 +171,7 @@ jobs:
 
           if [ "$FAILED" = "1" ]; then
             echo
-            echo "See ~/.claude/rules/pr-verdict.md for the protocol."
+            echo "See .claude/rules/pr-verdict.md for the protocol."
             exit 1
           fi
           echo "Verdict block present and every decision is sourced or marked INFERRED."
