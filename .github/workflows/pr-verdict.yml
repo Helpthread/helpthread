@@ -132,6 +132,25 @@ jobs:
             fail "The PR body's first line must be exactly the verdict, on its own: 🟢 SAFE TO MERGE / 🟡 NEEDS YOUR DECISION / 🔴 DO NOT MERGE. Found: ${FIRST_LINE:0:80}"
           fi
 
+          # 1b. A green verdict cannot itself carry an INFERRED token in the trailing
+          #     clause this PR just started allowing — e.g. "SAFE TO MERGE — INFERRED"
+          #     — because check 3 below only reads INFERRED out of provenance-table
+          #     rows, never out of the verdict line. The protocol already forbids the
+          #     combination ("If there is at least one INFERRED item, the verdict is
+          #     🟡. Never 🟢"), so this fails rather than silently downgrading the
+          #     author's stated verdict.
+          #
+          #     Matched case-SENSITIVELY on the literal token INFERRED, unlike check 3.
+          #     The protocol's own examples always write the marker in caps; matching
+          #     case-insensitively here would fail an honest clause like "no inferred
+          #     items" for using the plain word, reintroducing the failure mode this
+          #     PR exists to fix. A provenance row still catches "inferred" in any case
+          #     via check 3, unchanged.
+          if [ "$VERDICT" = safe ] \
+            && grep -qE '(^|[^[:alnum:]])INFERRED([^[:alnum:]]|$)' <<<"$FIRST_LINE"; then
+            fail "Verdict is SAFE TO MERGE but the opening line itself is marked INFERRED: ${FIRST_LINE:0:80}"
+          fi
+
           # 2. A decision-provenance section.
           # Anchored: "## Decision provenance deliberately omitted" is a heading that
           # says the opposite of what it would otherwise satisfy.
