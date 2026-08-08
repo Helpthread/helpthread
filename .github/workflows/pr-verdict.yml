@@ -107,16 +107,21 @@ jobs:
           #    line. Matching anywhere would let a PR bury the verdict under arbitrary
           #    prose — the whole point is that it is the first thing read.
           #
-          #    The whole line must BE the verdict, not merely contain it: leading `#`s
-          #    and the emoji are allowed (`## 🟢 SAFE TO MERGE`), but trailing words are
-          #    not, so `Status: SAFE TO MERGE pending review` is rejected. `[^[:alnum:]]*`
-          #    covers the emoji without this file having to carry a Unicode class.
+          #    The line must OPEN with the verdict: leading `#`s and the emoji are
+          #    allowed (`## 🟢 SAFE TO MERGE`), and a trailing clause is allowed
+          #    (`## 🔴 DO NOT MERGE — review and CI pending`), but nothing may precede
+          #    it. That rejects `Status: SAFE TO MERGE pending review`, where the verdict
+          #    is buried and qualified, while leaving the ordinary habit of appending a
+          #    reason alone — a gate that fails honest bodies teaches people to paste
+          #    ceremony, which is the exact habit this exists to break.
+          #    `[^[:alnum:]]*` covers the emoji without this file having to carry a
+          #    Unicode class.
           #
           #    VERDICT is captured here and reused by check 5, so a body that merely
           #    *mentions* another verdict cannot change how it is validated.
           FIRST_LINE=$(grep -m1 -vE '^[[:space:]]*$' <<<"$BODY" || true)
           verdict_is() {
-            grep -qE "^#{0,6}[[:space:]]*[^[:alnum:]]*[[:space:]]*$1[[:space:]]*$" <<<"$FIRST_LINE"
+            grep -qE "^#{0,6}[[:space:]]*[^[:alnum:]]*[[:space:]]*$1([[:space:]]|$)" <<<"$FIRST_LINE"
           }
           VERDICT=""
           if verdict_is 'SAFE TO MERGE'; then VERDICT=safe
@@ -125,6 +130,25 @@ jobs:
           fi
           if [ -z "$VERDICT" ]; then
             fail "The PR body's first line must be exactly the verdict, on its own: 🟢 SAFE TO MERGE / 🟡 NEEDS YOUR DECISION / 🔴 DO NOT MERGE. Found: ${FIRST_LINE:0:80}"
+          fi
+
+          # 1b. A green verdict cannot itself carry an INFERRED token in the trailing
+          #     clause this PR just started allowing — e.g. "SAFE TO MERGE — INFERRED"
+          #     — because check 3 below only reads INFERRED out of provenance-table
+          #     rows, never out of the verdict line. The protocol already forbids the
+          #     combination ("If there is at least one INFERRED item, the verdict is
+          #     🟡. Never 🟢"), so this fails rather than silently downgrading the
+          #     author's stated verdict.
+          #
+          #     Matched case-SENSITIVELY on the literal token INFERRED, unlike check 3.
+          #     The protocol's own examples always write the marker in caps; matching
+          #     case-insensitively here would fail an honest clause like "no inferred
+          #     items" for using the plain word, reintroducing the failure mode this
+          #     PR exists to fix. A provenance row still catches "inferred" in any case
+          #     via check 3, unchanged.
+          if [ "$VERDICT" = safe ] \
+            && grep -qE '(^|[^[:alnum:]])INFERRED([^[:alnum:]]|$)' <<<"$FIRST_LINE"; then
+            fail "Verdict is SAFE TO MERGE but the opening line itself is marked INFERRED: ${FIRST_LINE:0:80}"
           fi
 
           # 2. A decision-provenance section.
