@@ -323,16 +323,17 @@ describe('POST /api/v1/customer/conversations (spec §6a)', () => {
     expect(all).toHaveLength(0)
   })
 
-  it('rejects a method other than POST with 405', async () => {
+  it('rejects an unsupported method with 405 and an Allow header', async () => {
     const { api } = await harness()
+    // GET is the list endpoint (§6b), so DELETE is the unsupported verb here.
     const res = await api(
       new Request(`https://x.example.test${PATH}`, {
-        method: 'GET',
+        method: 'DELETE',
         headers: { Authorization: `Bearer ${TOKEN}` },
       }),
     )
     expect(res.status).toBe(405)
-    expect(res.headers.get('Allow')).toBe('POST')
+    expect(res.headers.get('Allow')).toBe('GET, POST')
   })
 })
 
@@ -363,5 +364,296 @@ describe('normalizeCustomerEmail (spec §3b)', () => {
     ]) {
       expect(normalizeCustomerEmail(value), value).toBeNull()
     }
+  })
+})
+
+describe('customer reads and replies (spec §6b–§6d)', () => {
+  let open2: Db | null = null
+
+  afterEach(async () => {
+    await open2?.close()
+    open2 = null
+  })
+
+  const CUSTOMER = 'customer@example.test'
+  const OTHER = 'someone-else@example.test'
+
+  async function harness() {
+    const db = await createPgliteDb()
+    open2 = db
+    await migrate(db)
+    const mailboxStore = createMailboxStore(db)
+    const conversations = createConversationStore(db)
+    const mailbox = await mailboxStore.upsertConnectedMailbox({
+      address: SUPPORT_ADDRESS,
+      provider: 'gmail',
+    })
+    const api = createInboxApi({
+      store: conversations,
+      apiToken: TOKEN,
+      sender: NOOP_SENDER,
+      senderResolver: { resolve: async () => ({ sender: NOOP_SENDER, from: SUPPORT_ADDRESS }) },
+      keyring: KEYRING,
+      mailDomain: MAIL_DOMAIN,
+      supportAddress: SUPPORT_ADDRESS,
+      agents: { store: createAgentStore(db), providers: [], mailboxStore },
+      webhooks: {
+        store: createWebhookEndpointStore(db, randomBytes(ENCRYPTION_KEY_BYTES)),
+        queue: { async enqueue() {} },
+      },
+      assistants: { store: createAssistantStore(db) },
+      savedReplies: { store: createSavedReplyStore(db), mailboxStore },
+    })
+    return { db, api, conversations, mailbox }
+  }
+
+  function get(path: string, email: string | null = CUSTOMER): Request {
+    const headers: Record<string, string> = { Authorization: `Bearer ${TOKEN}` }
+    if (email !== null) headers[CUSTOMER_HEADER] = email
+    return new Request(`https://x.example.test${path}`, { method: 'GET', headers })
+  }
+
+  /** A conversation owned by `email` with one visible inbound thread. */
+  async function seed(
+    conversations: ReturnType<typeof createConversationStore>,
+    mailboxId: string,
+    email: string,
+    subject = 'Seeded',
+  ) {
+    return conversations.createCustomerConversation({
+      subject,
+      customerEmail: email,
+      mailboxId,
+      firstMessage: {
+        direction: 'inbound',
+        messageId: null,
+        fromAddress: email,
+        bodyText: 'first message',
+      },
+    })
+  }
+
+  it('lists only the caller’s own conversations', async () => {
+    const { api, conversations, mailbox } = await harness()
+    await seed(conversations, mailbox.id, CUSTOMER, 'Mine')
+    await seed(conversations, mailbox.id, OTHER, 'Theirs')
+
+    const res = await api(get('/api/v1/customer/conversations'))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.conversations.map((c: { subject: string }) => c.subject)).toEqual(['Mine'])
+  })
+
+  it('matches a stored address that differs only by case (§3b)', async () => {
+    const { api, conversations, mailbox } = await harness()
+    await seed(conversations, mailbox.id, 'Mixed.Case@Example.TEST', 'Mine')
+
+    const res = await api(get('/api/v1/customer/conversations', 'mixed.case@example.test'))
+    const body = await res.json()
+    expect(body.conversations).toHaveLength(1)
+  })
+
+  it('hides notes, unapproved drafts, and approved-but-unsent replies (§4a)', async () => {
+    const { api, conversations, mailbox } = await harness()
+    const { conversationId } = await seed(conversations, mailbox.id, CUSTOMER)
+
+    await conversations.appendThread(conversationId, {
+      direction: 'note',
+      messageId: null,
+      fromAddress: SUPPORT_ADDRESS,
+      bodyText: 'INTERNAL: customer is on the free plan',
+    })
+    await conversations.appendThread(conversationId, {
+      direction: 'outbound',
+      messageId: null,
+      fromAddress: SUPPORT_ADDRESS,
+      bodyText: 'DRAFT: not approved yet',
+      draftStatus: 'awaiting_review',
+    })
+    // Approved but never actually sent — the trap the predicate exists for.
+    await conversations.appendThread(conversationId, {
+      direction: 'outbound',
+      messageId: null,
+      fromAddress: SUPPORT_ADDRESS,
+      bodyText: 'APPROVED BUT UNSENT',
+      draftStatus: 'approved',
+      deliveryStatus: 'pending',
+    })
+
+    const res = await api(get(`/api/v1/customer/conversations/${conversationId}`))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    const serialized = JSON.stringify(body)
+
+    expect(serialized).not.toContain('INTERNAL')
+    expect(serialized).not.toContain('DRAFT')
+    expect(serialized).not.toContain('APPROVED BUT UNSENT')
+    expect(body.threads).toHaveLength(1)
+    expect(body.threadCount).toBe(1)
+    expect(body.preview).toBe('first message')
+  })
+
+  it('shows an approved reply once it is sent', async () => {
+    const { api, conversations, mailbox } = await harness()
+    const { conversationId } = await seed(conversations, mailbox.id, CUSTOMER)
+    await conversations.appendThread(conversationId, {
+      direction: 'outbound',
+      messageId: null,
+      fromAddress: SUPPORT_ADDRESS,
+      bodyText: 'here is your answer',
+      draftStatus: 'approved',
+      deliveryStatus: 'sent',
+    })
+
+    const res = await api(get(`/api/v1/customer/conversations/${conversationId}`))
+    const body = await res.json()
+    expect(body.threads).toHaveLength(2)
+    expect(body.threads[1].bodyText).toBe('here is your answer')
+  })
+
+  it('hides a third-party inbound thread (§4c)', async () => {
+    const { api, conversations, mailbox } = await harness()
+    const { conversationId } = await seed(conversations, mailbox.id, CUSTOMER)
+    await conversations.appendThread(conversationId, {
+      direction: 'inbound',
+      messageId: null,
+      fromAddress: 'stranger@elsewhere.test',
+      bodyText: 'FORWARDED TOKEN REPLY',
+    })
+
+    const res = await api(get(`/api/v1/customer/conversations/${conversationId}`))
+    const body = await res.json()
+    expect(JSON.stringify(body)).not.toContain('FORWARDED')
+    expect(body.threads).toHaveLength(1)
+  })
+
+  it('does not let an internal note change the customer’s updatedAt or ordering (§4b)', async () => {
+    const { api, conversations, mailbox } = await harness()
+    const older = await seed(conversations, mailbox.id, CUSTOMER, 'Older')
+    await seed(conversations, mailbox.id, CUSTOMER, 'Newer')
+
+    const before = await (await api(get('/api/v1/customer/conversations'))).json()
+    expect(before.conversations.map((c: { subject: string }) => c.subject)).toEqual([
+      'Newer',
+      'Older',
+    ])
+
+    // A note bumps the STORED updated_at; the customer must see neither the
+    // timestamp change nor the reordering it would cause.
+    await conversations.appendThread(older.conversationId, {
+      direction: 'note',
+      messageId: null,
+      fromAddress: SUPPORT_ADDRESS,
+      bodyText: 'internal chatter',
+    })
+
+    const after = await (await api(get('/api/v1/customer/conversations'))).json()
+    expect(after.conversations.map((c: { subject: string }) => c.subject)).toEqual([
+      'Newer',
+      'Older',
+    ])
+    const olderBefore = before.conversations.find((c: { subject: string }) => c.subject === 'Older')
+    const olderAfter = after.conversations.find((c: { subject: string }) => c.subject === 'Older')
+    expect(olderAfter.updatedAt).toBe(olderBefore.updatedAt)
+  })
+
+  it('returns the same 404 for another customer’s conversation and an unknown id (§5)', async () => {
+    const { api, conversations, mailbox } = await harness()
+    const theirs = await seed(conversations, mailbox.id, OTHER)
+
+    const foreign = await api(get(`/api/v1/customer/conversations/${theirs.conversationId}`))
+    const unknown = await api(
+      get('/api/v1/customer/conversations/00000000-0000-4000-8000-000000000000'),
+    )
+    expect(foreign.status).toBe(unknown.status)
+    expect(await foreign.json()).toEqual(await unknown.json())
+    expect(foreign.status).toBe(404)
+  })
+
+  it('hides a spam conversation across list, get, and reply — and does not reopen it (§3c)', async () => {
+    const { api, conversations, mailbox } = await harness()
+    const { conversationId } = await seed(conversations, mailbox.id, CUSTOMER)
+    await conversations.setConversationStatus(conversationId, 'spam')
+
+    const list = await (await api(get('/api/v1/customer/conversations'))).json()
+    expect(list.conversations).toHaveLength(0)
+
+    expect((await api(get(`/api/v1/customer/conversations/${conversationId}`))).status).toBe(404)
+
+    const reply = await api(
+      new Request(
+        `https://x.example.test/api/v1/customer/conversations/${conversationId}/replies`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${TOKEN}`,
+            [CUSTOMER_HEADER]: CUSTOMER,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ bodyText: 'are you there?' }),
+        },
+      ),
+    )
+    expect(reply.status).toBe(404)
+
+    // The refusal must happen BEFORE appendThread, which reopens closed OR
+    // spam — a reopened row would leak the verdict by side-effect.
+    const stored = await conversations.getConversation(conversationId)
+    expect(stored?.status).toBe('spam')
+    expect(stored?.threads).toHaveLength(1)
+  })
+
+  it('applies §6d’s transition table', async () => {
+    const { api, conversations, mailbox } = await harness()
+
+    async function replyTo(id: string) {
+      return api(
+        new Request(`https://x.example.test/api/v1/customer/conversations/${id}/replies`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${TOKEN}`,
+            [CUSTOMER_HEADER]: CUSTOMER,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ bodyText: 'following up' }),
+        }),
+      )
+    }
+
+    // closed → active
+    const closed = await seed(conversations, mailbox.id, CUSTOMER, 'Closed')
+    await conversations.setConversationStatus(closed.conversationId, 'closed')
+    expect((await replyTo(closed.conversationId)).status).toBe(201)
+    expect((await conversations.getConversation(closed.conversationId))?.status).toBe('active')
+
+    // plain pending → stays pending (an operator statement a reply must not override)
+    const pending = await seed(conversations, mailbox.id, CUSTOMER, 'Pending')
+    await conversations.setConversationStatus(pending.conversationId, 'pending')
+    expect((await replyTo(pending.conversationId)).status).toBe(201)
+    expect((await conversations.getConversation(pending.conversationId))?.status).toBe('pending')
+  })
+
+  it('binds the cursor to the customer and folder (§3d)', async () => {
+    const { api, conversations, mailbox } = await harness()
+    for (let i = 0; i < 3; i++) await seed(conversations, mailbox.id, CUSTOMER, `C${i}`)
+
+    const first = await (await api(get('/api/v1/customer/conversations?limit=1'))).json()
+    expect(first.conversations).toHaveLength(1)
+    expect(first.nextCursor).toBeTruthy()
+
+    const cursor = encodeURIComponent(first.nextCursor)
+    // Same customer, same folder — accepted.
+    expect((await api(get(`/api/v1/customer/conversations?limit=1&cursor=${cursor}`))).status).toBe(
+      200,
+    )
+    // Different customer — rejected.
+    expect(
+      (await api(get(`/api/v1/customer/conversations?limit=1&cursor=${cursor}`, OTHER))).status,
+    ).toBe(400)
+    // Different folder — rejected.
+    expect(
+      (await api(get(`/api/v1/customer/conversations?status=closed&limit=1&cursor=${cursor}`)))
+        .status,
+    ).toBe(400)
   })
 })

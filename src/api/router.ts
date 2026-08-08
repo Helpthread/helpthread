@@ -35,6 +35,18 @@ interface RouteDef {
  */
 const CUSTOMER_CONVERSATIONS: RouteDef = {
   pattern: /^\/api\/v1\/customer\/conversations$/,
+  methods: ['GET', 'POST'],
+}
+
+/** `/api/v1/customer/conversations/{id}` — one conversation (spec §6c), GET only. Anchored so it never swallows the `/replies` suffix below. */
+const CUSTOMER_CONVERSATION_ITEM: RouteDef = {
+  pattern: /^\/api\/v1\/customer\/conversations\/(?<id>[^/]+)$/,
+  methods: ['GET'],
+}
+
+/** `/api/v1/customer/conversations/{id}/replies` — the customer replies (spec §6d), POST only. */
+const CUSTOMER_CONVERSATION_REPLIES: RouteDef = {
+  pattern: /^\/api\/v1\/customer\/conversations\/(?<id>[^/]+)\/replies$/,
   methods: ['POST'],
 }
 
@@ -351,6 +363,8 @@ const DRAFT_DISCARD: RouteDef = {
 
 /** Every route this API recognizes, checked in order. */
 const ROUTES: readonly RouteDef[] = [
+  CUSTOMER_CONVERSATION_REPLIES,
+  CUSTOMER_CONVERSATION_ITEM,
   CUSTOMER_CONVERSATIONS,
   CONVERSATIONS_LIST,
   CONVERSATION_ITEM,
@@ -399,6 +413,9 @@ const ROUTES: readonly RouteDef[] = [
 /** The outcome of matching a `(method, pathname)` pair against {@link ROUTES}. */
 export type RouteMatch =
   | { kind: 'customer-conversation-create' }
+  | { kind: 'customer-conversation-list' }
+  | { kind: 'customer-conversation-get'; id: string }
+  | { kind: 'customer-conversation-reply'; id: string }
   | { kind: 'conversations-list' }
   | { kind: 'conversation-item'; id: string }
   | { kind: 'conversation-patch'; id: string }
@@ -549,7 +566,15 @@ export function matchRoute(method: string, pathname: string): RouteMatch {
     }
 
     if (route === CUSTOMER_CONVERSATIONS) {
-      return { kind: 'customer-conversation-create' }
+      return method === 'GET'
+        ? { kind: 'customer-conversation-list' }
+        : { kind: 'customer-conversation-create' }
+    }
+    if (route === CUSTOMER_CONVERSATION_ITEM) {
+      return { kind: 'customer-conversation-get', id: match.groups?.id ?? '' }
+    }
+    if (route === CUSTOMER_CONVERSATION_REPLIES) {
+      return { kind: 'customer-conversation-reply', id: match.groups?.id ?? '' }
     }
     if (route === CONVERSATIONS_LIST) {
       return { kind: 'conversations-list' }

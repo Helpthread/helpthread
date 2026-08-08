@@ -2215,6 +2215,31 @@ ALTER TABLE module_installs ADD CONSTRAINT module_installs_state_check CHECK (st
 `
 
 /**
+ * Migration 034 — the customer-lookup index
+ * (specs/api/customer-conversations-v1.md §3b).
+ *
+ * The customer API scopes every read to conversations whose `customer_email`
+ * matches an asserted address under that spec's normalization: trim → NFC →
+ * lowercase. Existing rows are stored VERBATIM (`createConversationInTx`
+ * writes `input.customerEmail` unchanged, and mail ingestion normalizes
+ * nothing), so the comparison must be a normalized EXPRESSION over the
+ * column rather than plain equality — and an unindexed expression means a
+ * sequential scan of every conversation on every customer read.
+ *
+ * `lower`, `btrim`, and `normalize` are all IMMUTABLE, which is what makes
+ * the expression indexable at all. The trailing sort columns match the
+ * customer list's keyset order so one index serves both filter and sort.
+ *
+ * This does NOT rewrite the column. Normalizing storage, and normalizing at
+ * every ingestion path, is a larger change with its own migration; the
+ * customer API is written to be correct without it.
+ */
+const MIGRATION_034_CUSTOMER_EMAIL_LOOKUP = `
+CREATE INDEX IF NOT EXISTS conversations_customer_email_normalized_idx
+  ON conversations (lower(normalize(btrim(customer_email), NFC)), updated_at DESC, id DESC);
+`
+
+/**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
  * array by accident is harmless.
@@ -2384,6 +2409,11 @@ const MIGRATIONS: Migration[] = [
     id: 33,
     name: 'module_installs_cleanup_pending_state',
     sql: MIGRATION_033_MODULE_INSTALLS_CLEANUP_PENDING_STATE,
+  },
+  {
+    id: 34,
+    name: 'customer_email_lookup',
+    sql: MIGRATION_034_CUSTOMER_EMAIL_LOOKUP,
   },
 ]
 

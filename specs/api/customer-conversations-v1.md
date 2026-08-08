@@ -1,7 +1,8 @@
 # Customer conversations API v1
 
-Status: §6a implemented (HT-126). §6b–§6d specified, not yet built; `authorKind` is an
-open decision (§4d) and gates the read endpoints, not the create path.
+Status: implemented (HT-126) — §6a create, §6b list, §6c get, §6d reply. §6a's
+`Idempotency-Key` handling is specified and not yet built; a create without one behaves as
+described.
 
 ## 1. Purpose
 
@@ -58,7 +59,7 @@ interface CustomerThreadView {
   bodyHtml: string | null    // ⚠ UNTRUSTED, UNSANITIZED — see §5
   attachments: AttachmentView[]      // as agent-inbox-v1 §2
   createdAt: string          // ISO-8601
-  authorKind: AuthorKind     // ⚠ OPEN DECISION — see §4d
+  authorKind: 'customer' | 'agent' | 'assistant'   // as persisted — see §4d
 }
 ```
 
@@ -226,25 +227,27 @@ them is not.
 
 Outbound threads are unaffected: they come from the support address by construction.
 
-### 4d. OPEN DECISION — how AI-authored replies are attributed
+### 4d. AI-authored replies are attributed as authored
 
 `CHARTER.md` ("Actor model") requires that *"Human staff, external participants, automated
 systems, and AI assistants are never silently conflated."* An approved assistant-authored
-draft is delivered as an ordinary outbound reply, and this surface must say something about
-who wrote it.
+draft is delivered as an ordinary outbound reply, and this surface reports its author as
+persisted: `authorKind` carries `'assistant'`, not `'agent'`.
 
-| Option | Shape | Trade |
-|---|---|---|
-| **Preserve** | `'customer' \| 'agent' \| 'assistant'` | Charter-purest; tells the customer an AI composed the reply. |
-| **Split** | `authorKind` preserved, plus a policy-controlled display label the operator sets | No conflation, disclosure is the operator's call; two fields to keep coherent. |
-| **Separate roles** | distinguish authored-by from approved-and-sent-by | Most accurate for a reviewed AI draft; widest change. |
-| **Coarsen** | `'customer' \| 'organization'` | Simple, but maps human staff and automated systems to one value — conflation, just at a coarser grain. |
-| **Collapse** | `'customer' \| 'agent'` | Reports an assistant as human staff. Contradicts the charter outright. |
+Two alternatives were weighed and rejected. Reporting an assistant as `'agent'` tells the
+customer a human wrote what an AI wrote — the conflation the charter names. Coarsening
+every organization-side author to a single `'organization'` value avoids naming the AI but
+maps human staff and automated systems onto one token, which is the same conflation at a
+coarser grain.
 
-**Collapse is not available.** Coarsen is charter-questionable for the same reason, in
-lesser degree. This spec does not resolve between the first three; `AuthorKind` in §2 is a
-placeholder until it is. Everything else here is implementable in the meantime — this field
-gates the response type, not the rest of the document.
+What this does **not** expose is *which* actor: `authorAgentId` and `authorAssistantId` stay
+absent (§2). The customer learns the kind of author, never the individual.
+
+An operator who needs a different disclosure posture needs a policy layer over this field —
+additive, and out of scope here.
+
+*(Provenance: INFERRED. No maintainer decision on record; this reading follows from the
+charter's actor model rather than from an instruction.)*
 
 ## 5. Trust model
 

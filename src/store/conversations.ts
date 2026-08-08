@@ -530,6 +530,44 @@ export interface ConversationStore {
   ): Promise<{ conversationId: string; threadId: string }>
 
   /**
+   * The customer's own conversations, newest VISIBLE activity first
+   * (customer-conversations-v1 §6b). Scoped to `customerEmail` under §3b
+   * normalization; `spam` and `deleted` rows are never returned (§3c).
+   */
+  listCustomerConversations(options: {
+    customerEmail: string
+    folder: 'open' | 'closed'
+    limit: number
+    cursor?: { updatedAt: Date; id: string }
+  }): Promise<CustomerConversationSummary[]>
+
+  /**
+   * One conversation with only its customer-visible threads (§6c). `null`
+   * when the id is unknown, belongs to another customer, or is `spam`/
+   * `deleted` — the caller renders all four as the same generic 404 (§5's
+   * no-existence-leak rule), so this method deliberately cannot distinguish
+   * them for it.
+   */
+  getCustomerConversation(
+    conversationId: string,
+    customerEmail: string,
+  ): Promise<(CustomerConversationSummary & { threads: StoredThread[] }) | null>
+
+  /**
+   * Append a customer's reply (§6d), applying that section's transition
+   * table. Returns `null` for the same four unreachable cases
+   * {@link getCustomerConversation} collapses, having written nothing —
+   * notably a `spam` conversation, which must NOT reach `appendThread`,
+   * since that reopens `closed` OR `spam` and the reopen would leak the
+   * spam verdict by side-effect.
+   */
+  appendCustomerReply(
+    conversationId: string,
+    customerEmail: string,
+    bodyText: string,
+  ): Promise<{ thread: StoredThread; reopened: boolean } | null>
+
+  /**
    * Append `thread` to the conversation `conversationId`, applying the
    * closed/deleted/missing policy documented at the top of this module.
    * See that doc for the full behavior; summarized: missing → `not-found`,
@@ -926,6 +964,75 @@ export interface ConversationStore {
 // guard this file's other draft-aware queries already use (e.g.
 // `claimThreadForDelivery`), rather than a `NOT IN` that would silently
 // exclude every non-draft row too (`NULL NOT IN (...)` is NULL, not TRUE).
+/**
+ * The normalized form specs/api/customer-conversations-v1.md §3b compares
+ * on: trim → NFC → lowercase. Applied to the STORED column, because rows
+ * written before that spec existed (and every mail-ingested row since) hold
+ * the address verbatim. Migration 034 indexes exactly this expression.
+ */
+const NORMALIZED = (column: string) => `lower(normalize(btrim(${column}), NFC))`
+
+/**
+ * §4a's visibility predicate plus §4c's third-party rule, as SQL. `$1` is the
+ * normalized customer address.
+ *
+ * Four conditions, each load-bearing:
+ * 1. notes never leave the Agent surface (agent-inbox-v1 §5);
+ * 2. an unapproved or discarded draft is unsent internal drafting;
+ * 3. an outbound row is only visible once actually sent — the store persists
+ *    outbound BEFORE the network send, and approval writes `approved` before
+ *    delivery completes, so `approved` alone would disclose text that never
+ *    left;
+ * 4. an inbound row whose sender is not this customer arrived by forwarded
+ *    reply token; routing authority is not disclosure consent (§4c).
+ *
+ * A row in a state the schema forbids (an inbound row carrying a
+ * delivery_status) fails condition 3 and is hidden rather than surfaced —
+ * the predicate is a whitelist over data this API does not exclusively write.
+ */
+const CUSTOMER_VISIBLE_THREAD = `t.direction <> 'note'
+     AND (t.draft_status IS NULL OR t.draft_status = 'approved')
+     AND (t.direction = 'inbound' OR t.delivery_status = 'sent')
+     AND (t.direction = 'outbound' OR ${NORMALIZED('t.from_address')} = $1)`
+
+/** A conversation as the customer API sees it — §2's summary, minus operator-only fields. */
+export interface CustomerConversationSummary {
+  id: string
+  number: number
+  subject: string
+  status: 'active' | 'pending' | 'closed'
+  threadCount: number
+  preview: string
+  createdAt: Date
+  /** §4b: the newest VISIBLE thread's createdAt, falling back to the conversation's. Never the stored `updated_at`, which an internal note bumps. */
+  updatedAt: Date
+}
+
+/** Row shape backing {@link CustomerConversationSummary}. */
+interface CustomerSummaryRow {
+  id: string
+  number: number
+  subject: string
+  status: string
+  created_at: Date | string
+  derived_updated_at: Date | string
+  thread_count: number
+  latest_body_text: string | null
+}
+
+function toCustomerSummary(row: CustomerSummaryRow): CustomerConversationSummary {
+  return {
+    id: row.id,
+    number: row.number,
+    subject: row.subject,
+    status: row.status as CustomerConversationSummary['status'],
+    threadCount: row.thread_count,
+    preview: derivePreview(row.latest_body_text),
+    createdAt: toDate(row.created_at),
+    updatedAt: toDate(row.derived_updated_at),
+  }
+}
+
 const THREAD_COUNT_SUBQUERY =
   "(SELECT count(*) FROM threads t WHERE t.conversation_id = c.id AND t.draft_status IS DISTINCT FROM 'awaiting_review' AND t.draft_status IS DISTINCT FROM 'discarded')::int AS thread_count"
 
@@ -1320,6 +1427,134 @@ export function createConversationStore(db: Db): ConversationStore {
           data: { threadId: created.threadId, reopened: false },
         })
         return created
+      })
+    },
+
+    async listCustomerConversations({ customerEmail, folder, limit, cursor }) {
+      // $1 is the normalized address, referenced by CUSTOMER_VISIBLE_THREAD
+      // and by the conversation-scope predicate alike.
+      const params: SqlValue[] = [customerEmail]
+      const statuses = folder === 'open' ? "('active', 'pending')" : "('closed')"
+
+      // The derived sort key (§4b) is computed in an inner select so the
+      // cursor comparison and ORDER BY can both reference it; a correlated
+      // subquery cannot be reused in the same query's WHERE otherwise.
+      let cursorClause = ''
+      if (cursor !== undefined) {
+        params.push(cursor.updatedAt, cursor.id)
+        cursorClause = `WHERE (s.derived_updated_at, s.id) < ($${params.length - 1}, $${params.length})`
+      }
+      params.push(limit)
+
+      const rows = await db.query<CustomerSummaryRow>(
+        `SELECT * FROM (
+           SELECT c.id, c.number, c.subject, c.status, c.created_at,
+             COALESCE(
+               (SELECT max(t.created_at) FROM threads t
+                 WHERE t.conversation_id = c.id AND ${CUSTOMER_VISIBLE_THREAD}),
+               c.created_at
+             ) AS derived_updated_at,
+             (SELECT count(*) FROM threads t
+               WHERE t.conversation_id = c.id AND ${CUSTOMER_VISIBLE_THREAD})::int AS thread_count,
+             (SELECT t.body_text FROM threads t
+               WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL AND ${CUSTOMER_VISIBLE_THREAD}
+               ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text
+           FROM conversations c
+           WHERE ${NORMALIZED('c.customer_email')} = $1
+             AND c.status IN ${statuses}
+         ) s
+         ${cursorClause}
+         ORDER BY s.derived_updated_at DESC, s.id DESC
+         LIMIT $${params.length}`,
+        params,
+      )
+      return rows.map(toCustomerSummary)
+    },
+
+    async getCustomerConversation(conversationId, customerEmail) {
+      // Ownership, existence, and status are one predicate, so no branch in
+      // this method distinguishes "not yours" from "no such id" (§5).
+      const rows = await db.query<CustomerSummaryRow>(
+        `SELECT c.id, c.number, c.subject, c.status, c.created_at,
+           COALESCE(
+             (SELECT max(t.created_at) FROM threads t
+               WHERE t.conversation_id = c.id AND ${CUSTOMER_VISIBLE_THREAD}),
+             c.created_at
+           ) AS derived_updated_at,
+           (SELECT count(*) FROM threads t
+             WHERE t.conversation_id = c.id AND ${CUSTOMER_VISIBLE_THREAD})::int AS thread_count,
+           (SELECT t.body_text FROM threads t
+             WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL AND ${CUSTOMER_VISIBLE_THREAD}
+             ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text
+         FROM conversations c
+         WHERE c.id = $2
+           AND ${NORMALIZED('c.customer_email')} = $1
+           AND c.status IN ('active', 'pending', 'closed')`,
+        [customerEmail, conversationId],
+      )
+      const row = rows[0]
+      if (row === undefined) return null
+
+      const threadRows = await db.query<ThreadRow>(
+        `SELECT ${THREAD_COLUMNS_T} FROM threads t
+         WHERE t.conversation_id = $2 AND ${CUSTOMER_VISIBLE_THREAD}
+         ORDER BY t.created_at, t.id`,
+        [customerEmail, conversationId],
+      )
+
+      return { ...toCustomerSummary(row), threads: threadRows.map(toStoredThread) }
+    },
+
+    async appendCustomerReply(conversationId, customerEmail, bodyText) {
+      return db.transaction(async (tx) => {
+        // Lock and re-check ownership INSIDE the transaction. A pre-flight
+        // read outside it would let a concurrent status change (a filing to
+        // spam, a soft delete) slip between check and write — the one case
+        // where the leak would be a written row, not a wrong status code.
+        const rows = await tx.query<{ status: string; snoozed_until: Date | string | null }>(
+          `SELECT c.status, c.snoozed_until FROM conversations c
+           WHERE c.id = $2 AND ${NORMALIZED('c.customer_email')} = $1
+           FOR UPDATE`,
+          [customerEmail, conversationId],
+        )
+        const row = rows[0]
+        // §3c: spam and deleted are indistinguishable from absent here, and
+        // crucially this returns BEFORE any append — `appendThread` reopens
+        // closed OR spam, so reaching it would disclose the spam verdict.
+        if (row === undefined || row.status === 'spam' || row.status === 'deleted') return null
+
+        const inserted = await insertThread(tx, conversationId, {
+          direction: 'inbound',
+          messageId: null,
+          fromAddress: customerEmail,
+          bodyText,
+          authorKind: 'customer',
+        })
+
+        // §6d's transition table. A snoozed pending wakes; a plain pending
+        // is an operator statement a reply does not override; closed reopens.
+        const reopened = row.status === 'closed'
+        const wakes = row.status === 'pending' && row.snoozed_until !== null
+        if (reopened || wakes) {
+          await tx.query(
+            "UPDATE conversations SET status = 'active', snoozed_until = NULL, updated_at = now() WHERE id = $1",
+            [conversationId],
+          )
+        } else {
+          await tx.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [
+            conversationId,
+          ])
+        }
+
+        // Emitted in the SAME transaction as the append (§6d) — an append
+        // that commits without its event is a defect, not a tolerated race.
+        await appendOutboxEventInTx(tx, {
+          type: 'conversation.message_received',
+          conversationId,
+          data: { threadId: inserted.threadId, reopened: reopened || wakes },
+        })
+
+        return { thread: toStoredThread(inserted.row), reopened: reopened || wakes }
       })
     },
 

@@ -78,6 +78,9 @@ import {
 } from './conversations.js'
 import {
   handleCustomerCreateConversation,
+  handleCustomerGetConversation,
+  handleCustomerListConversations,
+  handleCustomerReply,
   normalizeCustomerEmail,
 } from './customer-conversations.js'
 import {
@@ -524,6 +527,9 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
         // the async function settle to it OUTSIDE this try — so a handler
         // rejection would escape the catch below and surface as an
         // uncontrolled 500. Awaiting here keeps the rejection inside the try.
+        case 'customer-conversation-list':
+        case 'customer-conversation-get':
+        case 'customer-conversation-reply':
         case 'customer-conversation-create': {
           // specs/api/customer-conversations-v1.md §3a: the Bearer token is
           // already verified above, so a bad header here is the integrator's
@@ -545,6 +551,21 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
               'validation_failed',
               'X-Helpthread-Customer-Email is not a supported address.',
             )
+          }
+          if (route.kind === 'customer-conversation-list') {
+            return await handleCustomerListConversations(customerEmail, request, {
+              store: deps.store,
+            })
+          }
+          if (route.kind === 'customer-conversation-get') {
+            return await handleCustomerGetConversation(customerEmail, route.id, {
+              store: deps.store,
+            })
+          }
+          if (route.kind === 'customer-conversation-reply') {
+            return await handleCustomerReply(customerEmail, route.id, request, {
+              store: deps.store,
+            })
           }
           return await handleCustomerCreateConversation(customerEmail, request, {
             store: deps.store,
