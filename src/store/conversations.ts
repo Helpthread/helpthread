@@ -527,7 +527,7 @@ export interface ConversationStore {
    */
   createCustomerConversation(
     input: NewConversation & { attachments?: readonly Omit<NewThreadAttachment, 'threadId'>[] },
-  ): Promise<{ conversationId: string; threadId: string }>
+  ): Promise<{ conversationId: string; threadId: string; number: number; createdAt: Date }>
 
   /**
    * The customer's own conversations, newest VISIBLE activity first
@@ -1439,7 +1439,20 @@ export function createConversationStore(db: Db): ConversationStore {
           conversationId: created.conversationId,
           data: { threadId: created.threadId, reopened: false },
         })
-        return created
+
+        // Read the generated columns back inside the SAME transaction. The
+        // caller's receipt quotes `number` and `createdAt`, and a second
+        // read afterwards could miss the row (or see it changed) and tempt a
+        // caller into fabricating a fallback.
+        const rows = await tx.query<{ number: number; created_at: Date | string }>(
+          'SELECT number, created_at FROM conversations WHERE id = $1',
+          [created.conversationId],
+        )
+        const row = rows[0]
+        if (row === undefined) {
+          throw new Error('conversation vanished within its own creating transaction')
+        }
+        return { ...created, number: row.number, createdAt: toDate(row.created_at) }
       })
     },
 

@@ -1,11 +1,10 @@
 /**
  * The customer-side conversations API (specs/api/customer-conversations-v1.md).
  *
- * v1 ships §6a only — `POST /api/v1/customer/conversations`, the create path
- * an integrating product calls when its own user submits a help form. The
- * read and reply endpoints (§6b–§6d) are specified and not yet built; until
- * they are, a conversation opened here is worked by the operator in the Agent
- * Inbox and answered by mail.
+ * Implements §6a create, §6b list, §6c get, and §6d reply — everything an
+ * integrating product needs to offer support inside its own interface.
+ * `Idempotency-Key` on create (§6a) is specified and not yet built; a create
+ * without one behaves as documented.
  *
  * Two properties this module is responsible for, both from the spec:
  * - **Identity comes from the header, never the body** (§5). The integrator
@@ -195,6 +194,21 @@ function parseCreateBody(
         failure: { field: 'attachments', message: 'Each attachment needs base64 data.' },
       }
     }
+    // Reject on the ENCODED length first. Decoding allocates a Buffer, and
+    // verifying the decode allocates a second copy of the same size, so a
+    // post-decode size check lets one oversized string drive peak memory
+    // regardless of the cap. Base64 expands by 4/3, so the encoded form of an
+    // allowed payload can never exceed the cap by more than that ratio.
+    const encodedCap = Math.ceil((MAX_ATTACHMENTS_TOTAL_BYTES * 4) / 3) + 4
+    if (entry.data.length > encodedCap) {
+      return {
+        ok: false,
+        failure: {
+          field: 'attachments',
+          message: `Attachments must total at most ${MAX_ATTACHMENTS_TOTAL_BYTES} bytes once decoded.`,
+        },
+      }
+    }
     const bytes = decodeBase64(entry.data)
     if (bytes === null) {
       return {
@@ -302,13 +316,12 @@ export async function handleCustomerCreateConversation(
     attachments: attachmentRefs,
   })
 
-  const conversation = await deps.store.getConversation(created.conversationId)
   return json(201, {
     id: created.conversationId,
-    number: conversation?.number ?? null,
+    number: created.number,
     subject,
     status: 'active',
-    createdAt: (conversation?.createdAt ?? new Date()).toISOString(),
+    createdAt: created.createdAt.toISOString(),
   })
 }
 

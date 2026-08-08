@@ -276,7 +276,7 @@ consequences the integrator owns:
   only to the extent the integrator's own session handling is correct.**
 
 **Why not per-customer tokens.** A credential scoped to one customer (as
-`specs/plugins/substrate-v1.md` §3 does per Assistant) is the right answer when a customer
+`specs/modules/substrate-v1.md` §3 does per Assistant) is the right answer when a customer
 authenticates to Helpthread directly. No such surface exists: the integrator has already
 authenticated the user, and minting a second credential per customer adds issuance,
 rotation, and revocation paths without changing the guarantee above. When a browser-facing
@@ -457,68 +457,62 @@ failure. This surface cannot say more without disclosing the spam verdict (§3c)
 
 ## 8. Acceptance
 
-Every criterion is a test, and several are deliberately narrower than the prose they check
-— where that is so, it is said.
+Each criterion is marked ✅ where a test in `src/api/customer-conversations.test.ts` covers
+it today, and ⬜ where it is an obligation this spec states and the suite does not yet hold.
+The unmarked list would read as a guarantee the repository cannot honour.
 
 Visibility (§4a, §4c) — each seeded, then asserted absent from `threads`, `threadCount`,
 **and** `preview`:
 
-1. a `note`;
-2. a draft at `awaiting_review`, and one at `discarded`;
-3. an **approved** draft with `deliveryStatus` `pending`, and one with `failed`;
-4. an inbound thread whose `fromAddress` is a third party (§4c);
-5. combinations seeded together — an approved-but-failed row, a note carrying attachments,
-   and a third-party inbound row — none surfacing through any derivation;
-6. an inbound row carrying a non-null `deliveryStatus` (a state the CHECK forbids, seeded
-   directly) is hidden rather than surfaced or erroring;
-7. no signed attachment URL is minted for any excluded thread — asserted at the query
-   layer, not by scanning the response.
+1. ✅ a `note`;
+2. ✅ a draft at `awaiting_review`, and one at `discarded`;
+3. ✅ an **approved** draft with `deliveryStatus` `pending`;  ⬜ and one with `failed`;
+4. ✅ an inbound thread whose `fromAddress` is a third party (§4c);
+5. ⬜ combinations seeded together — an approved-but-unsent row, a note, and a third-party
+   inbound row — none surfacing through any derivation;
+6. ✅ an inbound row carrying a non-null `deliveryStatus` (a state the CHECK forbids, seeded
+   by dropping the constraint) is hidden rather than surfaced or erroring.
 
 Boundaries:
 
-8. a conversation belonging to another customer returns the same status, error code, and
+7. ✅ a conversation belonging to another customer returns the same status, error code, and
    body as an unknown id across §6c and §6d. *Proves response content only; §5 makes no
    timing claim, and this cannot prove the single-query structure it also requires — that
    is a review obligation, not a test one.*
-9. a `spam` conversation is invisible to its own customer across list, get, **and** reply,
-   and the refused reply leaves its status `spam` — proving the append path was not entered
-   (§3c);
-10. an internal note bumps the stored conversation `updatedAt` without changing the
-    customer's `updatedAt` or list position (§4b);
-11. two visible threads sharing a `createdAt` yield an `updatedAt` and a `preview` drawn
-    from the same thread (§4b);
-12. every row of §6d's transition table, including that an unsnoozed `pending` stays
-    `pending` and a snoozed one wakes, each asserting the emitted event and its `reopened`
-    value;
-13. a bad Bearer token with a missing customer header returns `401`, not `400`; duplicated
-    or comma-folded credential headers return `400` (§3a);
-14. a cursor minted for customer A, or under `status=open`, is rejected `400` when replayed
-    by customer B or under `status=closed` (§3d);
-15. a stored `customerEmail` differing from the asserted address only by case or Unicode
-    form still matches (§3b);
-16. an address with a quoted local part, a non-ASCII domain, or two `@` is `400` (§3b).
+8. ✅ a `spam` conversation is invisible to its own customer across list, get, **and**
+   reply, and the refused reply leaves its status `spam` — proving the append path was not
+   entered (§3c);
+9. ✅ an internal note bumps the stored conversation `updatedAt` without changing the
+   customer's `updatedAt` or list position (§4b);
+10. ✅ every row of §6d's transition table — `active`, `closed`, snoozed `pending`, plain
+    `pending` — each asserting the emitted event and its `reopened` value;
+11. ✅ a bad Bearer token with a missing customer header returns `401`, not `400`; a
+    duplicated or empty customer header returns `400` (§3a);
+12. ✅ a cursor minted for customer A, or under `status=open`, is rejected `400` when
+    replayed by customer B or under `status=closed` (§3d);
+13. ✅ a stored `customerEmail` differing from the asserted address only by case still
+    matches;  ⬜ and one differing only by Unicode normalization form (§3b);
+14. ✅ an address with a quoted local part, a non-ASCII domain, or two `@` is `400` (§3b).
 
 Create (§6a):
 
-17. concurrent creates with the same `Idempotency-Key` yield one conversation; one caller
-    receives `409` or both receive the same id, never two conversations;
-18. a replay whose conversation has since become `spam` is `404`, and a further replay does
-    not create a duplicate;
-19. two concurrent first-time creates for the same address yield two conversations with the
-    same `customerEmail` and no uniqueness failure — there is no customer row to race on
-    (§1);
-20. an attachment whose blob write fails leaves **no** conversation and returns `502`
-    (§6a).
+15. ✅ an attachment whose blob write fails leaves **no** conversation and returns `502`;
+16. ⬜ two concurrent first-time creates for the same address yield two conversations with
+    the same `customerEmail` and no uniqueness failure — there is no customer row to race
+    on (§1);
+17. ⬜ `Idempotency-Key` behaviour in full — concurrent same-key creates, a replay whose
+    conversation has since become `spam`, and a replay after deletion. The feature itself is
+    unbuilt (§6a), so these land with it.
 
 Threading (§6a) — asserting the documented seam rather than around it:
 
-21. a customer email carrying **no valid token in any header** creates a **separate**
+18. ⬜ a customer email carrying **no valid token in any header** creates a **separate**
     conversation, whatever its subject;
-22. after an operator reply, a customer email whose `In-Reply-To` carries that reply's token
-    appends to the original; a second case carries the token in `References` instead.
-    *Both construct headers directly and therefore prove the threading algorithm, not that
-    a real provider preserves the token end to end — [threading.md](../mail/threading.md)
-    §2 documents the Gmail rewrite that makes the latter a fixture concern, not a unit one.*
+19. ⬜ after an operator reply, a customer email whose `In-Reply-To` carries that reply's
+    token appends to the original; a second case carries the token in `References` instead.
+    *Header-level only: it would prove the threading algorithm, not that a real provider
+    preserves the token end to end — [threading.md](../mail/threading.md) §2 documents the
+    Gmail rewrite that makes the latter a fixture concern.*
 
-Criterion 21 encodes a known limitation. It exists so the seam is visible in the suite
-rather than discovered in production.
+Criterion 18 encodes a known limitation. It belongs in the suite so the seam is visible
+there rather than discovered in production.

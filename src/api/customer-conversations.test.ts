@@ -384,6 +384,7 @@ describe('customer reads and replies (spec §6b–§6d)', () => {
     await migrate(db)
     const mailboxStore = createMailboxStore(db)
     const conversations = createConversationStore(db)
+    const outbox = createEventOutboxStore(db)
     const mailbox = await mailboxStore.upsertConnectedMailbox({
       address: SUPPORT_ADDRESS,
       provider: 'gmail',
@@ -404,7 +405,7 @@ describe('customer reads and replies (spec §6b–§6d)', () => {
       assistants: { store: createAssistantStore(db) },
       savedReplies: { store: createSavedReplyStore(db), mailboxStore },
     })
-    return { db, api, conversations, mailbox }
+    return { db, api, conversations, outbox, mailbox }
   }
 
   function get(path: string, email: string | null = CUSTOMER): Request {
@@ -626,8 +627,8 @@ describe('customer reads and replies (spec §6b–§6d)', () => {
     expect(stored?.threads).toHaveLength(1)
   })
 
-  it('applies §6d’s transition table', async () => {
-    const { api, conversations, mailbox } = await harness()
+  it('applies every row of §6d’s transition table, with its event', async () => {
+    const { api, conversations, outbox, mailbox } = await harness()
 
     async function replyTo(id: string) {
       return api(
@@ -643,17 +644,66 @@ describe('customer reads and replies (spec §6b–§6d)', () => {
       )
     }
 
-    // closed → active
+    /** The `reopened` flag on the message_received event emitted for `id`. */
+    async function reopenedFlagFor(id: string): Promise<boolean | undefined> {
+      const events = await outbox.claimBatch({ batchSize: 200, leaseMs: 30_000 })
+      const mine = events
+        .filter((e) => e.conversationId === id && e.type === 'conversation.message_received')
+        .at(-1)
+      return mine?.data.reopened as boolean | undefined
+    }
+
+    // active → active
+    const active = await seed(conversations, mailbox.id, CUSTOMER, 'Active')
+    expect((await replyTo(active.conversationId)).status).toBe(201)
+    expect((await conversations.getConversation(active.conversationId))?.status).toBe('active')
+    expect(await reopenedFlagFor(active.conversationId)).toBe(false)
+
+    // closed → active, reopened
     const closed = await seed(conversations, mailbox.id, CUSTOMER, 'Closed')
     await conversations.setConversationStatus(closed.conversationId, 'closed')
     expect((await replyTo(closed.conversationId)).status).toBe(201)
     expect((await conversations.getConversation(closed.conversationId))?.status).toBe('active')
+    expect(await reopenedFlagFor(closed.conversationId)).toBe(true)
+
+    // snoozed pending → active, snoozedUntil cleared, reopened
+    const snoozed = await seed(conversations, mailbox.id, CUSTOMER, 'Snoozed')
+    await conversations.setConversationStatus(snoozed.conversationId, 'pending', {
+      snoozedUntil: new Date(Date.now() + 86_400_000),
+    })
+    expect((await replyTo(snoozed.conversationId)).status).toBe(201)
+    const woken = await conversations.getConversation(snoozed.conversationId)
+    expect(woken?.status).toBe('active')
+    expect(woken?.snoozedUntil).toBeNull()
+    expect(await reopenedFlagFor(snoozed.conversationId)).toBe(true)
 
     // plain pending → stays pending (an operator statement a reply must not override)
     const pending = await seed(conversations, mailbox.id, CUSTOMER, 'Pending')
     await conversations.setConversationStatus(pending.conversationId, 'pending')
     expect((await replyTo(pending.conversationId)).status).toBe(201)
     expect((await conversations.getConversation(pending.conversationId))?.status).toBe('pending')
+    expect(await reopenedFlagFor(pending.conversationId)).toBe(false)
+  })
+
+  it('rejects a genuinely duplicated or empty customer header (§3a)', async () => {
+    const { api, mailbox } = await harness()
+
+    // A Record cannot express a repeated header; Headers can, and joins
+    // repeats with ", " — which is the behavior the rejection relies on.
+    const duplicated = new Headers({ Authorization: `Bearer ${TOKEN}` })
+    duplicated.append(CUSTOMER_HEADER, CUSTOMER)
+    duplicated.append(CUSTOMER_HEADER, OTHER)
+    const dupRes = await api(
+      new Request(`https://x.example.test/api/v1/customer/conversations`, {
+        method: 'GET',
+        headers: duplicated,
+      }),
+    )
+    expect(dupRes.status).toBe(400)
+
+    const empty = await api(get('/api/v1/customer/conversations', ''))
+    expect(empty.status).toBe(400)
+    expect(mailbox.id).toBeTruthy()
   })
 
   it('binds the cursor to the customer and folder (§3d)', async () => {
