@@ -644,45 +644,55 @@ describe('customer reads and replies (spec §6b–§6d)', () => {
       )
     }
 
-    /** The `reopened` flag on the message_received event emitted for `id`. */
-    async function reopenedFlagFor(id: string): Promise<boolean | undefined> {
+    /**
+     * The `reopened` flag on the message_received event for one specific
+     * thread. Selected by threadId, never by position: a conversation has two
+     * message_received events (its opening message and this reply), and
+     * `claimBatch` orders by `occurredAt` alone, so a timestamp tie would make
+     * a positional pick nondeterministic.
+     */
+    async function reopenedFlagForThread(threadId: string): Promise<boolean | undefined> {
       const events = await outbox.claimBatch({ batchSize: 200, leaseMs: 30_000 })
-      const mine = events
-        .filter((e) => e.conversationId === id && e.type === 'conversation.message_received')
-        .at(-1)
+      const mine = events.find(
+        (e) => e.type === 'conversation.message_received' && e.data.threadId === threadId,
+      )
       return mine?.data.reopened as boolean | undefined
     }
 
     // active → active
     const active = await seed(conversations, mailbox.id, CUSTOMER, 'Active')
-    expect((await replyTo(active.conversationId)).status).toBe(201)
+    const activeReply = await replyTo(active.conversationId)
+    expect(activeReply.status).toBe(201)
     expect((await conversations.getConversation(active.conversationId))?.status).toBe('active')
-    expect(await reopenedFlagFor(active.conversationId)).toBe(false)
+    expect(await reopenedFlagForThread((await activeReply.json()).id)).toBe(false)
 
     // closed → active, reopened
     const closed = await seed(conversations, mailbox.id, CUSTOMER, 'Closed')
     await conversations.setConversationStatus(closed.conversationId, 'closed')
-    expect((await replyTo(closed.conversationId)).status).toBe(201)
+    const closedReply = await replyTo(closed.conversationId)
+    expect(closedReply.status).toBe(201)
     expect((await conversations.getConversation(closed.conversationId))?.status).toBe('active')
-    expect(await reopenedFlagFor(closed.conversationId)).toBe(true)
+    expect(await reopenedFlagForThread((await closedReply.json()).id)).toBe(true)
 
     // snoozed pending → active, snoozedUntil cleared, reopened
     const snoozed = await seed(conversations, mailbox.id, CUSTOMER, 'Snoozed')
     await conversations.setConversationStatus(snoozed.conversationId, 'pending', {
       snoozedUntil: new Date(Date.now() + 86_400_000),
     })
-    expect((await replyTo(snoozed.conversationId)).status).toBe(201)
+    const snoozedReply = await replyTo(snoozed.conversationId)
+    expect(snoozedReply.status).toBe(201)
     const woken = await conversations.getConversation(snoozed.conversationId)
     expect(woken?.status).toBe('active')
     expect(woken?.snoozedUntil).toBeNull()
-    expect(await reopenedFlagFor(snoozed.conversationId)).toBe(true)
+    expect(await reopenedFlagForThread((await snoozedReply.json()).id)).toBe(true)
 
     // plain pending → stays pending (an operator statement a reply must not override)
     const pending = await seed(conversations, mailbox.id, CUSTOMER, 'Pending')
     await conversations.setConversationStatus(pending.conversationId, 'pending')
-    expect((await replyTo(pending.conversationId)).status).toBe(201)
+    const pendingReply = await replyTo(pending.conversationId)
+    expect(pendingReply.status).toBe(201)
     expect((await conversations.getConversation(pending.conversationId))?.status).toBe('pending')
-    expect(await reopenedFlagFor(pending.conversationId)).toBe(false)
+    expect(await reopenedFlagForThread((await pendingReply.json()).id)).toBe(false)
   })
 
   it('rejects a genuinely duplicated or empty customer header (§3a)', async () => {

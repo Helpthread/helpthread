@@ -165,7 +165,8 @@ A thread is customer-visible **iff all three hold**:
 
 1. `direction` is `inbound` or `outbound` — never `note`.
 2. `draftStatus` is `null` or `approved` — never `awaiting_review` or `discarded`.
-3. `direction` is `inbound`, **or** `deliveryStatus` is `sent`.
+3. either `direction` is `inbound` **and** `deliveryStatus` is null, **or** `direction` is
+   `outbound` **and** `deliveryStatus` is `sent`.
 
 Enforced at the query layer, not by response shaping, and test-enforced (§8). A row whose
 persisted state satisfies no valid combination — an inbound row carrying a non-null
@@ -357,24 +358,11 @@ the customer's hands. Until then the integrator's own UI (§6d) is the only repl
 appends. This is a real seam, stated rather than papered over; closing it means minting a
 token at API-create time and is deferred to its own decision.
 
-**Idempotency.** `Idempotency-Key` is optional here and does **not** inherit
-[agent-inbox-v1 §4a](agent-inbox-v1.md)'s semantics, which are scoped to a conversation and
-to a send this endpoint does not perform. Where supplied: max 255 chars after trim, scoped
-to `(normalized customer email, mailboxId)`, retained 24 hours.
-
-- The key and the conversation id are recorded **in the transaction that creates the
-  conversation**. A process that dies before committing leaves the key unused; one that
-  dies after has already associated it. There is no window in which a key is reserved
-  against a conversation that does not exist.
-- A replay within the window re-reads and returns `200` with the current
-  `CustomerConversationDetail` — a live read, not a stored response snapshot, so later
-  replies and freshly minted attachment URLs are included. Differences in the replayed body
-  are ignored.
-- A replay while the original is still in flight is `409 retry_in_progress`.
-- A replay whose conversation has since become `spam`, `deleted`, or otherwise invisible
-  under §3c/§4 is `404 not_found`. The key stays consumed — retrying must not mint a
-  duplicate — and §3c's non-disclosure holds.
-- A request that fails validation consumes no key.
+**No idempotency in v1.** `Idempotency-Key` is **not** read by this endpoint: two identical
+requests create two conversations and both return `201`. It is deliberately unspecified here
+rather than specified-and-unbuilt — a normative contract an integrator could rely on, with no
+implementation behind it, is worse than its absence. §7 records the gap; a caller that needs
+de-duplication must do it on its own side until it lands.
 
 ### 6b. `GET /api/v1/customer/conversations` — the customer's own list
 
@@ -453,6 +441,7 @@ failure. This surface cannot say more without disclosing the spam verdict (§3c)
   counts v1 deployments carry and is the first thing to revisit if the list slows.
 - No merging of an emailed message with an API-created conversation that has no token yet
   (§6a).
+- No `Idempotency-Key` on create (§6a). A retried create makes a second conversation.
 - No snapshot-consistent pagination. §3d.
 
 ## 8. Acceptance

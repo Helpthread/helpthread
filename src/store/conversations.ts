@@ -1501,11 +1501,17 @@ export function createConversationStore(db: Db): ConversationStore {
     },
 
     async getCustomerConversation(conversationId, customerEmail) {
-      // Both statements run in ONE transaction. The summary query resolves
-      // ownership, existence, and status together, but on its own it only
-      // covers the first read: an operator filing the conversation as spam
-      // between the two queries would otherwise still return 200 with its
-      // threads, defeating §3c. A single snapshot closes that window.
+      // Ownership, existence, and status resolve in one predicate, so no
+      // branch here distinguishes "not yours" from "no such id" (§5).
+      //
+      // The two statements share a transaction AND the status is re-checked
+      // after the threads read. The transaction alone is not enough: at READ
+      // COMMITTED every statement takes a fresh snapshot, so an operator
+      // filing the conversation as spam between the two queries would still
+      // yield a 200 carrying its threads. The trailing re-check is what
+      // actually enforces §3c — it observes any commit that landed during the
+      // read and discards the response. A change committing after the
+      // re-check is not detectable by any design and is not claimed to be.
       return db.transaction(async (tx) => {
         const rows = await tx.query<CustomerSummaryRow>(
           `SELECT c.id, c.number, c.subject, c.status, c.created_at,
@@ -1538,7 +1544,21 @@ export function createConversationStore(db: Db): ConversationStore {
           [customerEmail, conversationId],
         )
 
-        return { ...toCustomerSummary(row), threads: threadRows.map(toStoredThread) }
+        const stillVisible = await tx.query<{ status: string }>(
+          `SELECT c.status FROM conversations c
+         WHERE c.id = $2
+           AND ${NORMALIZED('c.customer_email')} = $1
+           AND c.status IN ('active', 'pending', 'closed')`,
+          [customerEmail, conversationId],
+        )
+        if (stillVisible[0] === undefined) return null
+
+        return {
+          ...toCustomerSummary(row),
+          // Report the status as of the LAST observation, not the first.
+          status: stillVisible[0].status as CustomerConversationSummary['status'],
+          threads: threadRows.map(toStoredThread),
+        }
       })
     },
 
