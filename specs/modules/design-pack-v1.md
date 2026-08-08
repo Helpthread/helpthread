@@ -110,7 +110,7 @@ Concretely, before the first MIT publish:
    can see what was checked and when rather than re-deriving it.
 
 5. **The grantor is named: Resonant IQ, Inc.** (maintainer decision, 2026-08-07). The
-   public `LICENSE` file states this.
+   public `LICENSE` file MUST name Resonant IQ, Inc. as grantor.
 
 **How this gate is enforced, since prose gates drift.** An earlier draft called this
 blocking while providing no mechanism — the same shape as the instructions that failed in
