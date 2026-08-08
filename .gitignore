@@ -10,3 +10,6 @@ coverage/
 *.log
 .vercel/
 CLAUDE.local.md
+
+# local tooling output — not tracked, at any depth
+**/.claude/gpt-critique-logs/
