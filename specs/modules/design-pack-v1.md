@@ -1,6 +1,6 @@
 # Module Design Pack v1 — components and tokens so modules match the desk
 
-Status: **draft for TJ review** (HT-95). Governed by CHARTER.md §3/§4 (module boundary,
+Status: **draft for maintainer review** (HT-95). Governed by CHARTER.md §3/§4 (module boundary,
 out-of-process preference, zero privileged first-party access), `specs/modules/catalog.md`
 (HT-66) §1's born-proprietary discipline, and CLAUDE.md's UI-fidelity rule.
 
@@ -46,15 +46,14 @@ Three ways out; this spec picks the third.
 
 The strategic read: components are not the moat. The mail engine, the modules, and the
 hosted engine are. AGPL on the design pack actively fights the goal in §1; a permissive
-license serves it. (An earlier draft cited `catalog.md` §1's "paid → free stays possible" as authority
-here. That is a **monetization** axis — whether a paid module may later join the free
-core — and says nothing about copyleft→permissive relicensing. The citation was a
-category error and is withdrawn; the argument above stands without it.)
+license serves it. (Why not cite `catalog.md` §1's "paid → free stays possible" as
+authority here? That is a **monetization** axis — whether a paid module may later join
+the free core — and says nothing about copyleft→permissive relicensing.)
 
-**Decision: MIT — ratified by TJ, 2026-07-20** ("yes MIT"), after confirming the scope is
+**Decision: MIT (maintainer decision, 2026-07-20)**, after confirming the scope is
 the design pack alone: the core stays AGPL-3.0, `LICENSE` is untouched, and
-`web/src/components/ds/` remains part of the AGPL core. On the cost, TJ: *"i really don't
-care if someone does anything with design components."* The brand-asset carve-out in §3
+`web/src/components/ds/` remains part of the AGPL core. Broad reuse of the design
+components elsewhere is an accepted cost. The brand-asset carve-out in §3
 is the one boundary that stands.
 
 **The grantor is Resonant IQ, Inc.** Resonant IQ, Inc. publishes these components under
@@ -87,12 +86,12 @@ where the files came from, not what may be granted. Before the first publish:
   human review CLAUDE.md requires was real enough to support authorship, and that nothing
   was adapted from a source whose license forbids relicensing (CHARTER provenance rules).
 
-**This audit is a blocking release gate, not due diligence.** An earlier draft called it
-"not a blocker to design around" on the reasoning that MIT grants only whatever rights
-exist, so a wrongly-published component leaves you unable to enforce rather than
-infringing. That reasoning holds for the *downside*, and it is still true — but it is the
-wrong test for a **one-way door**. Once published under MIT, copies already taken cannot
-be recalled, so the check has to pass *before* the release, not eventually.
+**This audit is a blocking release gate, not due diligence.** Why not treat it as
+non-blocking, since MIT grants only whatever rights exist, so a wrongly-published
+component leaves you unable to enforce rather than infringing? That reasoning holds for
+the *downside*, and it is still true — but it is the wrong test for a **one-way door**.
+Once published under MIT, copies already taken cannot be recalled, so the check has to
+pass *before* the release, not eventually.
 
 Concretely, before the first MIT publish:
 
@@ -112,16 +111,15 @@ Concretely, before the first MIT publish:
 5. **The grantor is named: Resonant IQ, Inc.** (maintainer decision, 2026-08-07). The
    public `LICENSE` file MUST name Resonant IQ, Inc. as grantor.
 
-**How this gate is enforced, since prose gates drift.** An earlier draft called this
-blocking while providing no mechanism — the same shape as the instructions that failed in
-the audit this repo has already run. Concretely:
+**How this gate is enforced, since prose gates drift.** A blocking requirement stated in
+prose only, with no mechanism behind it, is easy to state and easy to skip. Concretely:
 
 - The clearance lives at **`CLEARANCE.md` in the pack repo**, dated, listing each item
   above and what was checked.
 - The pack's **publish workflow asserts that file exists and is newer than the last
   `sources` manifest change**, and fails otherwise. A missing or stale clearance blocks
   `npm publish` mechanically, not by convention.
-- **Owner: TJ**, as the person who must sign the licensing call. No one else can clear it.
+- **Owner: the maintainer**, as the person who must sign the licensing call. No one else can clear it.
 - **Item 5 is answered; items 1–4 are not.** The pack repo is not created until
   `CLEARANCE.md` records all five as checked — that keeps the remaining audit in front of
   a human rather than behind a checkbox nobody reads.
@@ -134,11 +132,10 @@ is the one sequence this gate exists to prevent.
 **Brand assets are excluded, permanently** (maintainer decision, 2026-08-07) — the wordmark and logo artwork, and anything
 that functions as a Helpthread mark: `guidelines/type-wordmark.html` and any logo file.
 
-**What is NOT excluded, stated plainly because an earlier draft implied otherwise.** That
-draft claimed the pack "ships the *system* — never the *identity*", and pointed at
-`theme/helpthread.css` as carrying brand values. Checked: that file is a comment plus
-three `@import`s and contains no brand value at all, so the carve-out as written excluded
-nothing. Meanwhile the token files the pack *does* ship are brand-bearing —
+**What is NOT excluded, stated plainly.** It might seem like `theme/helpthread.css`
+carries the brand values the carve-out is protecting — but that file is a comment plus
+three `@import`s and contains no brand value at all, so treating it as the excluded
+identity layer would exclude nothing. Meanwhile the token files the pack *does* ship are brand-bearing —
 `colors.css` opens with a block literally commented `/* identity */` above
 `--ht-accent: #4a55a2`, and `typography.css` sets `--ht-serif: "Source Serif 4"`, the
 wordmark face. **The palette and type scale ship, and are meant to be overridden** (§4);
@@ -167,7 +164,7 @@ Sourced from the design project (§5), in three layers:
 
 **Totals, verified against the tree on 2026-08-02.** Counted in **published files** —
 every path the package ships, which is the unit §2.1's clearance gate and §5's manifest
-both operate on. Earlier drafts counted only `.jsx` and silently omitted 21 `.d.ts` files
+both operate on. Counting only `.jsx` files would silently omit the 21 `.d.ts` siblings
 plus the shared helper:
 
 | | `.jsx` | `.d.ts` | Files |
@@ -344,8 +341,8 @@ So conformance is a **marketplace listing requirement** (maintainer decision, 20
   burden of proving parity, including after upstream changes.
 - a listed module **MUST NOT** ship a look that impersonates core Helpthread UI while
   behaving differently
-- deviations need the same sign-off any UI deviation needs (CLAUDE.md: TJ's explicit
-  sign-off), recorded on the listing
+- deviations need the same sign-off any UI deviation needs (CLAUDE.md: the maintainer's
+  explicit sign-off), recorded on the listing
 
 The requirement is on the *outcome* (matches the desk), not the *mechanism* (imports the
 pack) — otherwise a module with no operator-visible UI at all, like a notifications
