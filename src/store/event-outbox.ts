@@ -68,6 +68,16 @@ export interface EventOutboxStore {
    * drain step, oldest-`occurred_at`-first, leasing each for `options.
    * leaseMs` (module doc's `FOR UPDATE SKIP LOCKED` idiom — safe under two
    * overlapping drain invocations).
+   *
+   * `occurred_at` is the ONLY sort key, and it ties in TWO cases: events
+   * appended in the same transaction (`now()` is transaction start time, so a
+   * new conversation's `created` and `message_received` share it exactly),
+   * and any two events under a millisecond apart (the re-sort below compares
+   * `Date.getTime()`, which cannot see the column's microseconds). A tied
+   * group's relative order is undefined. That is the contract, not an
+   * oversight: spec §4 grants no cross-event ordering guarantee, and
+   * per-endpoint retries destroy any order this layer could impose. A
+   * tiebreak — here or in the column — would only make the drain LOOK ordered.
    */
   claimBatch(options: { batchSize: number; leaseMs: number }): Promise<StoredOutboxEvent[]>
 
@@ -143,6 +153,9 @@ export function createEventOutboxStore(db: Db): EventOutboxStore {
       // UPDATE...RETURNING emits them in that order (Postgres makes no such
       // promise for RETURNING). Sort the mapped results here so the
       // interface's "oldest-occurred_at-first" contract holds regardless.
+      // This comparison is millisecond-grained (`Date` cannot hold the
+      // column's microseconds), so it leaves BOTH tie classes the interface
+      // doc names unordered — deliberately, not as a gap.
       const rows = await db.query<OutboxEventRow>(
         `UPDATE event_outbox
          SET locked_until = now() + ($1::double precision * interval '1 millisecond')

@@ -189,6 +189,16 @@ change silently drops its event). A drain step — the existing queue/cron drain
 turns outbox rows into `QueueProvider` deliveries. At-least-once end to end; consumers
 dedupe on `eventId`; no cross-event ordering guarantee.
 
+**No ordering — including between two events about the same conversation.** Events
+emitted in one transaction share an `occurredAt` to the microsecond (`now()` is
+transaction start time), and each endpoint's deliveries retry independently of one
+another, so `conversation.message_received` can arrive *before* the
+`conversation.created` for the conversation it belongs to. A consumer MUST treat any
+event as possibly the first it has seen for that `conversationId` — upsert rather than
+insert, and read conversation state from the API rather than reconstructing it from the
+order events arrived in. Sorting by `occurredAt` does not recover an order: the ties are
+exact, and routine.
+
 ## 5. Webhook registration & delivery
 
 `webhook_endpoints` table: `id`, `url` (https only), `secret` (server-generated,
@@ -292,7 +302,7 @@ to land in `specs/api/agent-inbox-v1.md` alongside implementation:
 
 | Surface | Guarantee | Dedupe |
 |---|---|---|
-| Event emission | transactional with the state change | — |
+| Event emission | transactional with the state change; no ordering | — |
 | Outbox → queue | at-least-once | `eventId` as dedupeKey |
 | Webhook delivery | at-least-once per endpoint, no ordering | consumer dedupes on `eventId` |
 | Draft creation | idempotent via `draft:`-scoped Idempotency-Key | key replay returns the original |
