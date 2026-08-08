@@ -42,6 +42,9 @@ interface CustomerConversationSummary {
   status: 'active' | 'pending' | 'closed'   // 'spam'/'deleted' never surface (§3c)
   threadCount: number        // visible threads only (§4a)
   preview: string            // newest visible thread's bodyText excerpt, '' when none
+  previewAuthorKind: 'customer' | 'agent' | 'assistant' | null
+                             // who wrote the previewed thread; null when none. Lets a list
+                             // row label its excerpt without fetching threads per row.
   createdAt: string          // ISO-8601
   updatedAt: string          // ISO-8601 — derived, see §4b
 }

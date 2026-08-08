@@ -1003,6 +1003,8 @@ export interface CustomerConversationSummary {
   status: 'active' | 'pending' | 'closed'
   threadCount: number
   preview: string
+  /** Author kind of the thread `preview` came from — `null` when there is no visible thread with text. */
+  previewAuthorKind: 'customer' | 'agent' | 'assistant' | null
   createdAt: Date
   /** §4b: the newest VISIBLE thread's createdAt, falling back to the conversation's. Never the stored `updated_at`, which an internal note bumps. */
   updatedAt: Date
@@ -1018,6 +1020,7 @@ interface CustomerSummaryRow {
   derived_updated_at: Date | string
   thread_count: number
   latest_body_text: string | null
+  latest_author_kind: string | null
 }
 
 function toCustomerSummary(row: CustomerSummaryRow): CustomerConversationSummary {
@@ -1028,6 +1031,10 @@ function toCustomerSummary(row: CustomerSummaryRow): CustomerConversationSummary
     status: row.status as CustomerConversationSummary['status'],
     threadCount: row.thread_count,
     preview: derivePreview(row.latest_body_text),
+    previewAuthorKind:
+      row.latest_author_kind === null
+        ? null
+        : (row.latest_author_kind as 'customer' | 'agent' | 'assistant'),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.derived_updated_at),
   }
@@ -1458,7 +1465,10 @@ export function createConversationStore(db: Db): ConversationStore {
                WHERE t.conversation_id = c.id AND ${CUSTOMER_VISIBLE_THREAD})::int AS thread_count,
              (SELECT t.body_text FROM threads t
                WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL AND ${CUSTOMER_VISIBLE_THREAD}
-               ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text
+               ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text,
+             (SELECT t.author_kind FROM threads t
+               WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL AND ${CUSTOMER_VISIBLE_THREAD}
+               ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_author_kind
            FROM conversations c
            WHERE ${NORMALIZED('c.customer_email')} = $1
              AND c.status IN ${statuses}
@@ -1485,7 +1495,10 @@ export function createConversationStore(db: Db): ConversationStore {
              WHERE t.conversation_id = c.id AND ${CUSTOMER_VISIBLE_THREAD})::int AS thread_count,
            (SELECT t.body_text FROM threads t
              WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL AND ${CUSTOMER_VISIBLE_THREAD}
-             ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text
+             ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_body_text,
+           (SELECT t.author_kind FROM threads t
+             WHERE t.conversation_id = c.id AND t.body_text IS NOT NULL AND ${CUSTOMER_VISIBLE_THREAD}
+             ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS latest_author_kind
          FROM conversations c
          WHERE c.id = $2
            AND ${NORMALIZED('c.customer_email')} = $1

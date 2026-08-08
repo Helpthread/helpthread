@@ -387,6 +387,7 @@ function toCustomerSummaryJson(summary: CustomerConversationSummary): Record<str
     status: summary.status,
     threadCount: summary.threadCount,
     preview: summary.preview,
+    previewAuthorKind: summary.previewAuthorKind,
     createdAt: summary.createdAt.toISOString(),
     updatedAt: summary.updatedAt.toISOString(),
   }
