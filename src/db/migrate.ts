@@ -2227,8 +2227,14 @@ ALTER TABLE module_installs ADD CONSTRAINT module_installs_state_check CHECK (st
  * sequential scan of every conversation on every customer read.
  *
  * `lower`, `btrim`, and `normalize` are all IMMUTABLE, which is what makes
- * the expression indexable at all. The trailing sort columns match the
- * customer list's keyset order so one index serves both filter and sort.
+ * the expression indexable at all.
+ *
+ * It indexes the OWNERSHIP FILTER only. The customer list sorts by a value
+ * derived from visible threads (§4b), not by `conversations.updated_at`, so
+ * no trailing column here can satisfy that ordering — claiming otherwise
+ * would be worse than the gap. Supporting the derived sort needs either a
+ * maintained denormalized column or a thread-side index, and is deliberately
+ * not attempted here.
  *
  * This does NOT rewrite the column. Normalizing storage, and normalizing at
  * every ingestion path, is a larger change with its own migration; the
@@ -2236,7 +2242,7 @@ ALTER TABLE module_installs ADD CONSTRAINT module_installs_state_check CHECK (st
  */
 const MIGRATION_034_CUSTOMER_EMAIL_LOOKUP = `
 CREATE INDEX IF NOT EXISTS conversations_customer_email_normalized_idx
-  ON conversations (lower(normalize(btrim(customer_email), NFC)), updated_at DESC, id DESC);
+  ON conversations (lower(normalize(btrim(customer_email), NFC)));
 `
 
 /**

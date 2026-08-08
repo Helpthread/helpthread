@@ -511,6 +511,29 @@ describe('customer reads and replies (spec §6b–§6d)', () => {
     expect(body.threads[1].bodyText).toBe('here is your answer')
   })
 
+  it('hides an inbound row carrying a delivery_status the schema forbids (§4a)', async () => {
+    const { api, conversations, db, mailbox } = await harness()
+    const { conversationId } = await seed(conversations, mailbox.id, CUSTOMER)
+
+    // Migration 002's CHECK forbids this combination, so the constraint is
+    // dropped to seed it. That is the scenario: the predicate is a whitelist
+    // over rows this API does not exclusively write, and a future migration
+    // relaxing the CHECK, an import, or a manual repair must not silently
+    // widen what a customer can see.
+    await db.query('ALTER TABLE threads DROP CONSTRAINT threads_delivery_draft_status_check')
+    await db.query(
+      `INSERT INTO threads (conversation_id, direction, from_address, body_text, delivery_status, author_kind)
+       VALUES ($1, 'inbound', $2, 'MALFORMED ROW', 'pending', 'customer')`,
+      [conversationId, CUSTOMER],
+    )
+
+    const res = await api(get(`/api/v1/customer/conversations/${conversationId}`))
+    const body = await res.json()
+    expect(JSON.stringify(body)).not.toContain('MALFORMED')
+    expect(body.threads).toHaveLength(1)
+    expect(body.threadCount).toBe(1)
+  })
+
   it('hides a third-party inbound thread (§4c)', async () => {
     const { api, conversations, mailbox } = await harness()
     const { conversationId } = await seed(conversations, mailbox.id, CUSTOMER)

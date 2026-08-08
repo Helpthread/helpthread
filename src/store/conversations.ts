@@ -986,13 +986,19 @@ const NORMALIZED = (column: string) => `lower(normalize(btrim(${column}), NFC))`
  * 4. an inbound row whose sender is not this customer arrived by forwarded
  *    reply token; routing authority is not disclosure consent (§4c).
  *
- * A row in a state the schema forbids (an inbound row carrying a
- * delivery_status) fails condition 3 and is hidden rather than surfaced —
- * the predicate is a whitelist over data this API does not exclusively write.
+ * Condition 3 is spelled out per direction rather than as `inbound OR
+ * sent`. The looser form admits an inbound row carrying ANY delivery_status,
+ * including a state migration 002's direction↔status CHECK forbids — and
+ * this predicate is a whitelist over rows this API does not exclusively
+ * write (imports, repairs, future writers). Anything outside a known-good
+ * combination is hidden, not surfaced.
  */
 const CUSTOMER_VISIBLE_THREAD = `t.direction <> 'note'
      AND (t.draft_status IS NULL OR t.draft_status = 'approved')
-     AND (t.direction = 'inbound' OR t.delivery_status = 'sent')
+     AND (
+       (t.direction = 'inbound' AND t.delivery_status IS NULL)
+       OR (t.direction = 'outbound' AND t.delivery_status = 'sent')
+     )
      AND (t.direction = 'outbound' OR ${NORMALIZED('t.from_address')} = $1)`
 
 /** A conversation as the customer API sees it — §2's summary, minus operator-only fields. */
@@ -1482,10 +1488,14 @@ export function createConversationStore(db: Db): ConversationStore {
     },
 
     async getCustomerConversation(conversationId, customerEmail) {
-      // Ownership, existence, and status are one predicate, so no branch in
-      // this method distinguishes "not yours" from "no such id" (§5).
-      const rows = await db.query<CustomerSummaryRow>(
-        `SELECT c.id, c.number, c.subject, c.status, c.created_at,
+      // Both statements run in ONE transaction. The summary query resolves
+      // ownership, existence, and status together, but on its own it only
+      // covers the first read: an operator filing the conversation as spam
+      // between the two queries would otherwise still return 200 with its
+      // threads, defeating §3c. A single snapshot closes that window.
+      return db.transaction(async (tx) => {
+        const rows = await tx.query<CustomerSummaryRow>(
+          `SELECT c.id, c.number, c.subject, c.status, c.created_at,
            COALESCE(
              (SELECT max(t.created_at) FROM threads t
                WHERE t.conversation_id = c.id AND ${CUSTOMER_VISIBLE_THREAD}),
@@ -1503,19 +1513,20 @@ export function createConversationStore(db: Db): ConversationStore {
          WHERE c.id = $2
            AND ${NORMALIZED('c.customer_email')} = $1
            AND c.status IN ('active', 'pending', 'closed')`,
-        [customerEmail, conversationId],
-      )
-      const row = rows[0]
-      if (row === undefined) return null
+          [customerEmail, conversationId],
+        )
+        const row = rows[0]
+        if (row === undefined) return null
 
-      const threadRows = await db.query<ThreadRow>(
-        `SELECT ${THREAD_COLUMNS_T} FROM threads t
+        const threadRows = await tx.query<ThreadRow>(
+          `SELECT ${THREAD_COLUMNS_T} FROM threads t
          WHERE t.conversation_id = $2 AND ${CUSTOMER_VISIBLE_THREAD}
          ORDER BY t.created_at, t.id`,
-        [customerEmail, conversationId],
-      )
+          [customerEmail, conversationId],
+        )
 
-      return { ...toCustomerSummary(row), threads: threadRows.map(toStoredThread) }
+        return { ...toCustomerSummary(row), threads: threadRows.map(toStoredThread) }
+      })
     },
 
     async appendCustomerReply(conversationId, customerEmail, bodyText) {

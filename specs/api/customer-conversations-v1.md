@@ -60,7 +60,6 @@ interface CustomerThreadView {
                              // address — never a third party's, see §4c
   bodyText: string | null
   bodyHtml: string | null    // ⚠ UNTRUSTED, UNSANITIZED — see §5
-  attachments: AttachmentView[]      // as agent-inbox-v1 §2
   createdAt: string          // ISO-8601
   authorKind: 'customer' | 'agent' | 'assistant'   // as persisted — see §4d
 }
@@ -68,6 +67,12 @@ interface CustomerThreadView {
 
 Deliberately absent, each operator-only: `assignee`, `tags`, `snoozedUntil`,
 `deliveryStatus`, `customerViewedAt`, `draftStatus`, `authorAgentId`, `authorAssistantId`.
+
+**`attachments` is not on the read surface in v1.** A customer can attach files when opening
+a conversation (§6a) but cannot see them listed back. Serving them means minting signed URLs,
+and a URL is bearer-equivalent — it has to be provably unmintable for an excluded thread
+(§4a), which is a stricter obligation than filtering an array. Deferred rather than shipped
+half-right; §7 records it.
 
 ## 3. Conventions
 
@@ -90,10 +95,12 @@ Two credentials, **checked in this order, always**:
 The order is normative: a bad token with a missing header is `401`, never `400`. A `400`
 therefore confirms the token was valid; that discloses nothing to an unauthenticated party.
 
-**Duplicate or folded headers are rejected.** More than one `Authorization` field, more
-than one `X-Helpthread-Customer-Email` field, or a comma-folded value in either is
-`400 validation_failed` — HTTP runtimes combine repeats inconsistently, and the same wire
-request must never select different customers on different stacks. A deployment whose
+**Duplicate or folded headers are rejected**, each under its own credential's rule. More
+than one `X-Helpthread-Customer-Email`, or a comma-folded value in it, is
+`400 validation_failed`: HTTP runtimes combine repeats inconsistently, and the same wire
+request must never select different customers on different stacks. A duplicated or folded
+`Authorization` is simply not a valid token and is `401` like any other — reporting `400`
+there would confirm to an unauthenticated caller that its header parsed. A deployment whose
 `HELPTHREAD_API_TOKEN` is unset or empty rejects every request `401`; it never treats an
 empty configured token as matching an empty supplied one.
 
@@ -440,6 +447,10 @@ failure. This surface cannot say more without disclosing the spam verdict (§3c)
   implicitly by replying (§6d).
 - No attachment upload on reply (§6a only), mirroring the agent API's own gap.
 - No search, no realtime, no webhooks-out, no read receipts.
+- No attachments on the read surface (§2). Upload works; listing back does not.
+- No index behind the derived list ordering (§4b). Migration 034 indexes the ownership
+  filter only; the visible-thread aggregate is unindexed, which is acceptable at the row
+  counts v1 deployments carry and is the first thing to revisit if the list slows.
 - No merging of an emailed message with an API-created conversation that has no token yet
   (§6a).
 - No snapshot-consistent pagination. §3d.
