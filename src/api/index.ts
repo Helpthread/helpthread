@@ -77,6 +77,13 @@ import {
   handleReply,
 } from './conversations.js'
 import {
+  handleCustomerCreateConversation,
+  handleCustomerGetConversation,
+  handleCustomerListConversations,
+  handleCustomerReply,
+  normalizeCustomerEmail,
+} from './customer-conversations.js'
+import {
   type DraftsHandlerDeps,
   handleApproveDraft,
   handleCreateDraft,
@@ -520,6 +527,53 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
         // the async function settle to it OUTSIDE this try — so a handler
         // rejection would escape the catch below and surface as an
         // uncontrolled 500. Awaiting here keeps the rejection inside the try.
+        case 'customer-conversation-list':
+        case 'customer-conversation-get':
+        case 'customer-conversation-reply':
+        case 'customer-conversation-create': {
+          // specs/api/customer-conversations-v1.md §3a: the Bearer token is
+          // already verified above, so a bad header here is the integrator's
+          // error and 400 is safe — it discloses nothing to an
+          // unauthenticated party. §5: identity comes from this header and
+          // never from the request body.
+          const rawEmail = request.headers.get('x-helpthread-customer-email')
+          if (rawEmail === null || rawEmail.includes(',')) {
+            return apiError(
+              400,
+              'validation_failed',
+              'X-Helpthread-Customer-Email is required and must name exactly one address.',
+            )
+          }
+          const customerEmail = normalizeCustomerEmail(rawEmail)
+          if (customerEmail === null) {
+            return apiError(
+              400,
+              'validation_failed',
+              'X-Helpthread-Customer-Email is not a supported address.',
+            )
+          }
+          if (route.kind === 'customer-conversation-list') {
+            return await handleCustomerListConversations(customerEmail, request, {
+              store: deps.store,
+            })
+          }
+          if (route.kind === 'customer-conversation-get') {
+            return await handleCustomerGetConversation(customerEmail, route.id, {
+              store: deps.store,
+            })
+          }
+          if (route.kind === 'customer-conversation-reply') {
+            return await handleCustomerReply(customerEmail, route.id, request, {
+              store: deps.store,
+            })
+          }
+          return await handleCustomerCreateConversation(customerEmail, request, {
+            store: deps.store,
+            mailboxes: deps.agents.mailboxStore,
+            blobStore: deps.attachments?.blobStore ?? null,
+          })
+        }
+
         case 'conversations-list':
           return await handleListConversations(request, { store: deps.store })
 

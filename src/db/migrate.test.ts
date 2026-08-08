@@ -77,6 +77,7 @@ describe('migrate', () => {
       { id: 31, name: 'webhook_endpoints_url_unique' },
       { id: 32, name: 'module_install_credential_escrow' },
       { id: 33, name: 'module_installs_cleanup_pending_state' },
+      { id: 34, name: 'customer_email_lookup' },
     ])
   })
 
@@ -120,6 +121,7 @@ describe('migrate', () => {
       { id: 31 },
       { id: 32 },
       { id: 33 },
+      { id: 34 },
     ])
   })
 
