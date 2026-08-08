@@ -631,10 +631,33 @@ function isSelfEchoMessage(labelIds: string[]): boolean {
  * `SENT`+`SPAM` self-echo (our own reply that Gmail happened to file as
  * junk) is never ingested at all rather than being filed as a spam
  * conversation.
+ *
+ * ## `TRASH` counts too, and the field's name undersells why
+ *
+ * `TRASH` is NOT a classifier verdict — it is the operator's own mailbox
+ * having thrown the message away, either by hand or by a filter of theirs
+ * that deletes on arrival. It reaches us for the same reason `SPAM` does:
+ * `history.list` is a delta stream over the whole mailbox, and the client
+ * set-unions `labelsAdded` without ever REMOVING a label, so both
+ * `['TRASH']` (a filter that deleted at delivery) and `['INBOX','TRASH']`
+ * (deleted by hand inside the reconcile window) arrive here intact. Before
+ * this, both fell through to `'clean'` and became live support work in an
+ * inbox — mail the operator had already discarded.
+ *
+ * Mapping it onto `'spam'` deliberately widens what that value asserts:
+ * not "a classifier called this junk" but "the source mailbox has already
+ * discarded this as unwanted." specs/mail/spam-classification.md §3.1
+ * carries the widened definition, and §7's D7 records that collapsing the
+ * two into one value was a decision, not an oversight. The properties that
+ * make it safe are the ones `'spam'` already had: nothing is dropped
+ * (inbound-ingestion.md §1), the message is fully parsed and stored, an
+ * Agent can see it in the Spam folder, and a reply reopens it to `active`
+ * (agent-inbox-v1.md §4a) — so a message trashed in error self-heals the
+ * moment the sender writes back.
  */
 function spamVerdictOf(labelIds: string[]): ProviderSpamVerdict {
   if (labelIds.length === 0) return 'unknown'
-  return labelIds.includes('SPAM') ? 'spam' : 'clean'
+  return labelIds.includes('SPAM') || labelIds.includes('TRASH') ? 'spam' : 'clean'
 }
 
 /**
