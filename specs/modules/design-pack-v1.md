@@ -57,26 +57,8 @@ the design pack alone: the core stays AGPL-3.0, `LICENSE` is untouched, and
 care if someone does anything with design components."* The brand-asset carve-out in §3
 is the one boundary that stands.
 
-**Who may grant MIT is an open question, not a settled one.** An earlier draft asserted
-that "Resonant IQ holds the copyright outright (`ds/` has a single author)." That does not
-survive checking, and the error mattered because everything downstream rested on it:
-
-- `git log --format='%an' -- web/src/components/ds/` returns exactly one name — **TJ
-  Baker, an individual.** Not Resonant IQ, Inc. Single authorship in `git log` records who
-  *committed*; it is not a determination of who *owns*.
-- **CHARTER.md §3 says the opposite of what that draft assumed:** contributions come in
-  under **DCO**, no CLA, no copyright assignment, and "Contributors keep the copyright on
-  their work." The project holds an inbound AGPL-3.0 licence, not title. That is the
-  structural feature making the core's licence permanent — and it cuts against a casual
-  claim of corporate ownership.
-- If a written assignment to Resonant IQ exists (e.g. an IP-assignment instrument
-  executed as a founder), **that instrument is the operative authority and must be cited
-  by name here.** Absent it, the grantor is TJ Baker personally.
-
-Publishing under MIT still works either way — a sole author may licence their own work
-however they like. What must not ship is a public claim about *which entity* holds title
-that the repository's own constitution contradicts. Resolving this is item 5 of the §2.1
-gate.
+**The grantor is Resonant IQ, Inc.** Resonant IQ, Inc. publishes these components under
+MIT (maintainer decision, 2026-08-07). This closes item 5 of the §2.1 gate below.
 
 Apache-2.0 was considered for its express patent grant and rejected —
 there is no patentable invention in a component library, so the grant covers a threat
@@ -85,7 +67,7 @@ MIT is the ecosystem norm for React component libraries (React, Radix, Tailwind,
 and a third-party module author can read it without legal review. Adoption friction is
 the live constraint; patent exposure is not.
 
-**Decision: its own repo** — `helpthread-design-pack`, published as
+**Decision: its own repo** (maintainer decision, 2026-08-07) — `helpthread-design-pack`, published as
 `@helpthread/design-pack`. A permissively-licensed directory inside an AGPL tree is a
 recurring source of misreading by exactly the audience that needs to trust it, and the
 pack has its own release cadence.
@@ -127,10 +109,8 @@ Concretely, before the first MIT publish:
 4. **The clearance is written down** in the pack repo and dated, so a later contributor
    can see what was checked and when rather than re-deriving it.
 
-5. **The grantor is named.** Either the assignment instrument transferring `ds/` to
-   Resonant IQ is cited, or the licence is granted by TJ Baker personally. The public
-   `LICENSE` file must name whoever actually holds title (see the copyright discussion
-   in §2).
+5. **The grantor is named: Resonant IQ, Inc.** (maintainer decision, 2026-08-07). The
+   public `LICENSE` file states this.
 
 **How this gate is enforced, since prose gates drift.** An earlier draft called this
 blocking while providing no mechanism — the same shape as the instructions that failed in
@@ -142,15 +122,16 @@ the audit this repo has already run. Concretely:
   `sources` manifest change**, and fails otherwise. A missing or stale clearance blocks
   `npm publish` mechanically, not by convention.
 - **Owner: TJ**, as the person who must sign the licensing call. No one else can clear it.
-- **The pack repo is not created until item 5 is answered** — that keeps the question in
-  front of a human rather than behind a checkbox nobody reads.
+- **Item 5 is answered; items 1–4 are not.** The pack repo is not created until
+  `CLEARANCE.md` records all five as checked — that keeps the remaining audit in front of
+  a human rather than behind a checkbox nobody reads.
 
 If any item is unresolved, the release does not ship. Publishing first and auditing after
 is the one sequence this gate exists to prevent.
 
 ## 3. Scope of the pack
 
-**Brand assets are excluded, permanently** — the wordmark and logo artwork, and anything
+**Brand assets are excluded, permanently** (maintainer decision, 2026-08-07) — the wordmark and logo artwork, and anything
 that functions as a Helpthread mark: `guidelines/type-wordmark.html` and any logo file.
 
 **What is NOT excluded, stated plainly because an earlier draft implied otherwise.** That
@@ -353,7 +334,7 @@ An out-of-process module renders its own UI on its own origin. **Nothing in the 
 can force it to use the pack** — no runtime check exists, and per the marketplace's
 distribution-credential-only rule, none ever will.
 
-So conformance is a **marketplace listing requirement**, checked at review:
+So conformance is a **marketplace listing requirement** (maintainer decision, 2026-08-07), checked at review:
 
 - a listed module **MUST** match the desk's design on every operator-visible surface,
   **subject to §4's cross-origin exemption** — a module that cannot inherit the desk's
