@@ -65,19 +65,22 @@ export interface StoredOutboxEvent {
 export interface EventOutboxStore {
   /**
    * Claim up to `options.batchSize` undispatched, unleased rows for the
-   * drain step, oldest-`occurred_at`-first, leasing each for `options.
-   * leaseMs` (module doc's `FOR UPDATE SKIP LOCKED` idiom — safe under two
-   * overlapping drain invocations).
+   * drain step, oldest-`occurred_at`-first with ties broken by `event_id`
+   * ascending, leasing each for `options.leaseMs` (module doc's `FOR UPDATE
+   * SKIP LOCKED` idiom — safe under two overlapping drain invocations).
    *
-   * `occurred_at` is the ONLY sort key, and it ties in TWO cases: events
-   * appended in the same transaction (`now()` is transaction start time, so a
-   * new conversation's `created` and `message_received` share it exactly),
-   * and any two events under a millisecond apart (the re-sort below compares
-   * `Date.getTime()`, which cannot see the column's microseconds). A tied
-   * group's relative order is undefined. That is the contract, not an
-   * oversight: spec §4 grants no cross-event ordering guarantee, and
-   * per-endpoint retries destroy any order this layer could impose. A
-   * tiebreak — here or in the column — would only make the drain LOOK ordered.
+   * `(occurred_at, event_id)` is a stable total order — `event_id` is the
+   * table's primary key, so it never ties — which makes draining and replay
+   * reproducible: the same rows come out in the same order every time. It is
+   * NOT a meaningful (insertion or causal) order: `event_id` is a random v4
+   * UUID uncorrelated with when a row was written, so within a tied
+   * `occurred_at` group (events appended in the same transaction, where
+   * `now()` is transaction start time, or any two events under a
+   * millisecond apart) the tiebreak just picks a fixed-but-arbitrary
+   * ordering. That is the contract, not a gap: spec §4 grants no
+   * cross-event ordering guarantee, and each event's webhook deliveries
+   * retry independently once claimed, so no order this layer could impose
+   * would reach a consumer anyway.
    */
   claimBatch(options: { batchSize: number; leaseMs: number }): Promise<StoredOutboxEvent[]>
 
@@ -148,14 +151,15 @@ export async function appendOutboxEventInTx(
 export function createEventOutboxStore(db: Db): EventOutboxStore {
   return {
     async claimBatch(options) {
-      // The subquery's `ORDER BY occurred_at` picks WHICH rows are claimed
-      // (the oldest-eligible batch) — it does NOT guarantee the outer
-      // UPDATE...RETURNING emits them in that order (Postgres makes no such
-      // promise for RETURNING). Sort the mapped results here so the
-      // interface's "oldest-occurred_at-first" contract holds regardless.
-      // This comparison is millisecond-grained (`Date` cannot hold the
-      // column's microseconds), so it leaves BOTH tie classes the interface
-      // doc names unordered — deliberately, not as a gap.
+      // The subquery's `ORDER BY occurred_at, event_id` picks WHICH rows are
+      // claimed (the oldest-eligible batch, ties broken by event_id) — it
+      // does NOT guarantee the outer UPDATE...RETURNING emits them in that
+      // order (Postgres makes no such promise for RETURNING). Sort the
+      // mapped results here with the same tiebreak so the interface's
+      // contract holds regardless of RETURNING's actual order. `event_id`
+      // compares as a string (lexicographic on the UUID's text form), which
+      // only needs to be SOME fixed total order, not a meaningful one — see
+      // the interface doc.
       const rows = await db.query<OutboxEventRow>(
         `UPDATE event_outbox
          SET locked_until = now() + ($1::double precision * interval '1 millisecond')
@@ -163,7 +167,7 @@ export function createEventOutboxStore(db: Db): EventOutboxStore {
            SELECT event_id FROM event_outbox
            WHERE dispatched_at IS NULL
              AND (locked_until IS NULL OR locked_until < now())
-           ORDER BY occurred_at
+           ORDER BY occurred_at, event_id
            FOR UPDATE SKIP LOCKED
            LIMIT $2
          )
@@ -172,7 +176,11 @@ export function createEventOutboxStore(db: Db): EventOutboxStore {
       )
       return rows
         .map(toStoredOutboxEvent)
-        .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime())
+        .sort(
+          (a, b) =>
+            a.occurredAt.getTime() - b.occurredAt.getTime() ||
+            (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0),
+        )
     },
 
     async markDispatched(eventId) {
