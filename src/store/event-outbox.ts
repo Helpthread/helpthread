@@ -70,9 +70,13 @@ export interface EventOutboxStore {
    * SKIP LOCKED` idiom — safe under two overlapping drain invocations).
    *
    * `(occurred_at, event_id)` is a stable total order — `event_id` is the
-   * table's primary key, so it never ties — which makes draining and replay
-   * reproducible: the same rows come out in the same order every time. It is
-   * NOT a meaningful (insertion or causal) order: `event_id` is a random v4
+   * table's primary key, so it never ties — which makes a single caller's
+   * repeated claims against a fixed, unchanging eligible set reproducible:
+   * the same rows come out in the same order every time. It does NOT mean
+   * concurrent drainers see one global order — `SKIP LOCKED` partitions the
+   * eligible rows between them unpredictably, so two overlapping calls can
+   * each claim a different subset. It is NOT a meaningful (insertion or
+   * causal) order either: `event_id` is a random v4
    * UUID uncorrelated with when a row was written, so within a tied
    * `occurred_at` group (events appended in the same transaction, where
    * `now()` is transaction start time, or any two events under a
