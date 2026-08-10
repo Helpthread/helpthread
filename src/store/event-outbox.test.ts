@@ -147,6 +147,88 @@ describe('EventOutboxStore', () => {
     expect(claimed.map((e) => e.eventId)).toEqual([eventIds[2], eventIds[1]])
   })
 
+  it('events appended in ONE transaction share an identical occurred_at, so their claimed order is undefined (spec §4: no cross-event ordering guarantee)', async () => {
+    const { db, store } = await freshStore()
+    const conversationId = await insertConversation(db)
+
+    // The pair every new conversation emits — `now()` is transaction start
+    // time in Postgres, so both rows land on the same instant to the
+    // microsecond. This is the fact spec §4's "No ordering — including
+    // between two events about the same conversation" rests on: `occurredAt`
+    // cannot separate them, `event_id` is a random v4 uuid, and `created_at`
+    // is the same `now()`. Nothing here is a usable tiebreak.
+    await db.transaction(async (tx) => {
+      await appendOutboxEventInTx(tx, { type: 'conversation.created', conversationId, data: {} })
+      await appendOutboxEventInTx(tx, {
+        type: 'conversation.message_received',
+        conversationId,
+        data: { threadId: 'thread-1', reopened: false },
+      })
+    })
+
+    const claimed = await store.claimBatch({ batchSize: 10, leaseMs: 60_000 })
+    expect(claimed).toHaveLength(2)
+    expect(new Set(claimed.map((e) => e.type))).toEqual(
+      new Set(['conversation.created', 'conversation.message_received']),
+    )
+    expect(claimed[0].occurredAt.getTime()).toBe(claimed[1].occurredAt.getTime())
+
+    // Sub-millisecond ties are invisible to `Date`, so assert against the
+    // raw column too — equal to the microsecond, not merely to the ms.
+    const [{ distinct }] = await db.query<{ distinct: number }>(
+      'SELECT count(DISTINCT occurred_at)::int AS distinct FROM event_outbox WHERE conversation_id = $1',
+      [conversationId],
+    )
+    expect(distinct).toBe(1)
+  })
+
+  it('claimBatch breaks occurred_at ties by event_id, giving a stable, repeatable drain order', async () => {
+    const { db, store } = await freshStore()
+    const conversationId = await insertConversation(db)
+
+    // All appended in ONE transaction, so occurred_at ties exactly (same
+    // premise as the test above) — this test is about what breaks the tie,
+    // not that the tie exists.
+    const inserted: string[] = []
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < 5; i++) {
+        const event = await appendOutboxEventInTx(tx, {
+          type: 'conversation.created',
+          conversationId,
+          data: { i },
+        })
+        inserted.push(event.eventId)
+      }
+    })
+
+    // The order the documented tiebreak predicts: event_id ascending,
+    // computed independently of claimBatch. Deliberately NOT `inserted` in
+    // insertion order — event_id is a random v4 uuid, so insertion order and
+    // event_id order are different permutations with overwhelming
+    // probability. A test that only asserted "the same order on every call"
+    // would also pass against code that merely preserved Postgres's
+    // arbitrary (but often physically-stable) RETURNING order without an
+    // explicit tiebreak; comparing against this independently-derived order
+    // is what actually pins the `event_id` tiebreak down.
+    const byEventIdAsc = await db.query<{ event_id: string }>(
+      'SELECT event_id FROM event_outbox WHERE conversation_id = $1 ORDER BY event_id ASC',
+      [conversationId],
+    )
+    const expectedOrder = byEventIdAsc.map((r) => r.event_id)
+    expect(new Set(expectedOrder)).toEqual(new Set(inserted))
+
+    // Claim, release the lease without dispatching, and claim again — three
+    // times — asserting the identical order every time, matching the
+    // independently-computed event_id order above.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const claimed = await store.claimBatch({ batchSize: 10, leaseMs: 60_000 })
+      expect(claimed.map((e) => e.eventId)).toEqual(expectedOrder)
+      await db.query('UPDATE event_outbox SET locked_until = NULL WHERE conversation_id = $1', [
+        conversationId,
+      ])
+    }
+  })
+
   it('markDispatched on an unknown or already-dispatched eventId is a harmless no-op', async () => {
     const { store } = await freshStore()
     await expect(
