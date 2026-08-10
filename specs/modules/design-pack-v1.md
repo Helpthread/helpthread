@@ -164,8 +164,7 @@ Sourced from the design project (§5), in three layers:
 
 **Totals, verified against the tree on 2026-08-02.** Counted in **published files** —
 every path the package ships, which is the unit §2.1's clearance gate and §5's manifest
-both operate on. Counting only `.jsx` files would silently omit the 21 `.d.ts` siblings
-plus the shared helper:
+both operate on. Counting only `.jsx` files would silently omit the 21 `.d.ts` siblings:
 
 | | `.jsx` | `.d.ts` | Files |
 | --- | --- | --- | --- |
