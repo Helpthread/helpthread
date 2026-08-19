@@ -480,11 +480,18 @@ open to every Agent so the picker works regardless of who authored the library.
   DOMPurify), or it is a stored-XSS vector against the Agent. The inbox UI renders sanitized
   HTML in an isolated container; a server-side sanitized variant is a candidate hardening.
   Flagged, not solved, here.
-- **Notes are never customer-visible.** `direction: 'note'` rows ride the same `ThreadView`
-  shape as mail. Any customer-side API, webhook, or export MUST exclude them. Agent-side
-  consumers of this API — analytics, reporting, and other integrations built on the Agent
-  Inbox surface (CHARTER §96) — may read notes, and inherit the same obligation: a note must
-  never reach a customer through them.
+- **Notes are never customer-visible, and only the customer API enforces that.**
+  `direction: 'note'` rows ride the same `ThreadView` shape as mail. Any customer-side API,
+  webhook, or export MUST exclude them — the customer API does, via the store's
+  `direction <> 'note'` visibility predicate, which also governs preview, counts and
+  timestamps.
+
+  This endpoint applies no such filter, and the service token grants the whole inbox, so
+  **any integration holding that token receives notes and is responsible for what it does
+  with them.** That responsibility is contractual, not enforced: the API cannot distinguish
+  an analytics consumer from a customer-facing one, because both authenticate with the same
+  credential. Scoping integration credentials so the distinction is enforceable is tracked
+  separately. Note that `preview` (§3a) carries note text for the same reason.
 - **No existence leak.** Not-found and not-authorized are distinct status codes (404 vs 401),
   but neither body distinguishes "never existed" from "deleted" or from "you can't see it".
   The open-tracking pixel (§4g) extends the same rule to its unauthenticated surface: `200` +
