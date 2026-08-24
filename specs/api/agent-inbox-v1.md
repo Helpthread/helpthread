@@ -505,11 +505,12 @@ open to every Agent so the picker works regardless of who authored the library.
   gif regardless of token validity.
 - **The Bearer token is a service credential.** It grants the whole inbox. Compared in
   constant time, read only from server configuration, never logged.
-- **Web-app login is a web-layer door in front of this same token, not a second auth model.**
-  The API authenticates every request by `HELPTHREAD_API_TOKEN` alone and has no knowledge of
-  UI sessions or cookies; anything holding the token can call the API directly, session or
-  no. **The current session and identity contract lives in `specs/auth/agents-and-auth.md` §8
-  — read it rather than this bullet**, which predates real per-Agent identity.
+- **Web-app login is a web-layer door in front of the same credentials, not a second auth
+  model.** The API knows nothing of UI sessions or cookies; anything holding a valid
+  credential can call it directly, session or no. Two credential classes reach it — the
+  service token and a per-Assistant token — as described above; neither is a UI session.
+  **The current session and identity contract lives in `specs/auth/agents-and-auth.md` §8 —
+  read it rather than this bullet.**
 
 ## 6. What v1 is NOT
 
