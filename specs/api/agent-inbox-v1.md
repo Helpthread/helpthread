@@ -484,19 +484,21 @@ open to every Agent so the picker works regardless of who authored the library.
   it is narrower than "notes stay internal".** `direction: 'note'` rows ride the same
   `ThreadView` shape as mail. Any customer-side API, webhook, or export MUST exclude them.
   Two independent controls enforce that today: the store's `direction <> 'note'` visibility
-  predicate, which the customer read path applies to detail rows, `threadCount`, `preview`
-  and the derived `updatedAt`; and the delivery path, where a note never enters `sendReply`
-  and the outbox selects only `direction = 'outbound'` (§4c).
+  predicate, which the customer read path applies to detail rows, `threadCount`, `preview`,
+  `previewAuthorKind` and the derived `updatedAt`; and the delivery path, where a note never
+  enters `sendReply` and the outbox selects only `direction = 'outbound'` (§4c).
 
-  **Reads on THIS endpoint are unfiltered**, and both credential classes that reach it — the
-  service token and an Assistant token — receive notes from the list and detail paths.
-  `preview` (§2) can carry a note's text whenever a note is the newest thread with a body.
+  **This endpoint applies no note filter** — its reads are filtered by folder, deletion and
+  draft state, never by direction — so both credential classes that reach it, the service
+  token and an Assistant token, receive notes from the list and detail paths. `preview` (§2)
+  can carry a note's text whenever a note is the newest thread with a body.
 
-  What the API cannot do is distinguish *who is calling*: the route decides the filter, the
-  caller does not. An integrator whose product has a customer-facing surface may therefore
-  read notes here, and is responsible for keeping them away from customers. **That
-  responsibility is contractual, not enforced.** Scoping integration credentials so it can
-  be enforced is issue #215.
+  The API does distinguish the two credential *classes*; what it cannot distinguish is
+  **which integrator holds the service token**, because there is exactly one and it is
+  shared. An integrator whose product also has a customer-facing surface may therefore read
+  notes here, and is responsible for keeping them away from customers. **That responsibility
+  is contractual, not enforced.** Scoping integration credentials so it can be enforced is
+  issue #215.
 - **No existence leak.** Not-found and not-authorized are distinct status codes (404 vs 401),
   but neither body distinguishes "never existed" from "deleted" or from "you can't see it".
   The open-tracking pixel (§4g) extends the same rule to its unauthenticated surface: `200` +
@@ -514,8 +516,8 @@ open to every Agent so the picker works regardless of who authored the library.
 - No multi-Agent identity, teams, or per-user authorization (the single-Agent `assignee`
   flag, §4f, is deliberately not identity).
 - No customer-side / self-service surface **on this API**. The customer-facing surface is a
-  separate API with its own spec (`specs/api/customer-conversations-v1.md`) and its own note
-  exclusion (§5).
+  separate API with its own spec (`specs/api/customer-conversations-v1.md`), whose §4a
+  defines a customer-visible thread as never `direction: 'note'`.
 - No mailbox management, no search, no realtime, no webhooks-out, no tag-filtered listing.
 - No attachment upload on reply — the READ side is wired (`ThreadView.attachments`), but an
   Agent still cannot attach a file to an outbound reply.
