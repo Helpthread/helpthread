@@ -28,7 +28,7 @@
     "mimetext": "^3.0.28",
     "nodemailer": "^9.0.5",
     "pg": "^8.22.0",
-    "postal-mime": "^2.7.5"
+    "postal-mime": "^2.7.6"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.6",
