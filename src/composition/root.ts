@@ -166,6 +166,9 @@ export async function buildApp(
   config: AppConfig,
   overrides?: BuildAppOverrides,
 ): Promise<(request: Request) => Promise<Response>> {
+  for (const warning of config.warnings ?? []) {
+    console.warn(`[composition] ${warning}`)
+  }
   const db = overrides?.db ?? (await createPostgresDb({ connectionString: config.databaseUrl }))
   const blobStore =
     overrides?.blobStore ??

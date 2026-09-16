@@ -87,14 +87,37 @@ export class ApiError extends Error {
 /** Upstream fetch timeout — a hung API must fail fast, not hang the render. */
 const REQUEST_TIMEOUT_MS = 15_000
 
+/**
+ * Where the engine is. In a single-project deployment it is mounted at this
+ * app's own origin (`src/engine/mount.ts`), so the base is the deployment's
+ * `PUBLIC_BASE_URL` — or, on a non-production Vercel deployment (a preview),
+ * that deployment's own URL, so a preview never talks to production's data.
+ * `HELPTHREAD_API_URL` overrides both: it is how the split deployment (engine
+ * and UI as separate projects) and the local dev harness point elsewhere.
+ */
+function apiBaseUrl(): string | undefined {
+  const explicit = process.env.HELPTHREAD_API_URL
+  if (explicit !== undefined) return explicit
+  const vercelEnv = process.env.VERCEL_ENV
+  if (vercelEnv !== undefined && vercelEnv !== 'production' && process.env.VERCEL_URL) {
+    return `https://${process.env.VERCEL_URL}`
+  }
+  return process.env.PUBLIC_BASE_URL
+}
+
+/** True when the API call is a self-call to this deployment's own origin (no `HELPTHREAD_API_URL` override). */
+function isSelfCall(): boolean {
+  return process.env.HELPTHREAD_API_URL === undefined
+}
+
 function config(): { baseUrl: string; token: string } {
-  const baseUrl = process.env.HELPTHREAD_API_URL
+  const baseUrl = apiBaseUrl()
   const token = process.env.HELPTHREAD_API_TOKEN
-  // A deployment MUST set both. Falling back to the dev harness's values in
-  // production would silently point the app at localhost with a well-known
-  // token — fail loud at the first RUNTIME request instead. Skipped during
-  // `next build` (NEXT_PHASE), where prerendering runs in production mode
-  // without the runtime env and dev defaults are harmless.
+  // A deployment MUST provide both. Falling back to the dev harness's values
+  // in production would silently point the app at localhost with a
+  // well-known token — fail loud at the first RUNTIME request instead.
+  // Skipped during `next build` (NEXT_PHASE), where prerendering runs in
+  // production mode without the runtime env and dev defaults are harmless.
   const isBuild = process.env.NEXT_PHASE === 'phase-production-build'
   if (
     process.env.NODE_ENV === 'production' &&
@@ -102,7 +125,7 @@ function config(): { baseUrl: string; token: string } {
     (baseUrl === undefined || token === undefined)
   ) {
     throw new Error(
-      'HELPTHREAD_API_URL and HELPTHREAD_API_TOKEN must be set in production — refusing to fall back to dev defaults.',
+      'PUBLIC_BASE_URL (or HELPTHREAD_API_URL) and HELPTHREAD_API_TOKEN must be set in production — refusing to fall back to dev defaults.',
     )
   }
   // Dev defaults match the HT-24 harness (`npm run dev:api`); the default
@@ -110,6 +133,25 @@ function config(): { baseUrl: string; token: string } {
   return {
     baseUrl: (baseUrl ?? 'http://localhost:8787').replace(/\/+$/, ''),
     token: token ?? 'helpthread-dev-token',
+  }
+}
+
+/**
+ * On a Vercel preview deployment behind Deployment Protection, a self-call
+ * is a second request to the protected origin and is rejected before Next
+ * sees it — unless it carries the viewer's own `_vercel_jwt` cookie, which
+ * Vercel's documentation says to forward for exactly this case. Forwarded
+ * only on a self-call, only off production, and never a failure: outside a
+ * request scope there is simply nothing to forward.
+ */
+async function deploymentProtectionHeaders(): Promise<Record<string, string>> {
+  const vercelEnv = process.env.VERCEL_ENV
+  if (!isSelfCall() || vercelEnv === undefined || vercelEnv === 'production') return {}
+  try {
+    const jwt = (await cookies()).get('_vercel_jwt')?.value
+    return jwt ? { Cookie: `_vercel_jwt=${jwt}` } : {}
+  } catch {
+    return {}
   }
 }
 
@@ -128,6 +170,7 @@ async function request<T>(
   let headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
     ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    ...(await deploymentProtectionHeaders()),
     ...init.headers,
   }
 

@@ -5,7 +5,9 @@
   "description": "Helpthread Agent Inbox — the UI client of the Agent Inbox API (HT-23; API-first per CHARTER.md).",
   "type": "module",
   "scripts": {
+    "predev": "npm run build:engine --prefix ..",
     "dev": "next dev",
+    "prebuild": "npm run build:engine --prefix ..",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc -p tsconfig.json"

@@ -1,4 +1,30 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "crons": [
+    {
+      "path": "/api/v1/internal/queue/drain",
+      "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/v1/internal/outbox/drain",
+      "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/v1/internal/cron/snooze-wake",
+      "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/v1/internal/cron/reconcile-sweep",
+      "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/v1/internal/cron/watch-maintenance",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/v1/internal/cron/imap-fetch",
+      "schedule": "*/2 * * * *"
+    }
+  ]
 }
