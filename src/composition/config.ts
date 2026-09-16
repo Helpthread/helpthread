@@ -108,12 +108,13 @@ export interface AppConfig {
   /**
    * The web UI's base origin (HT-54; specs/auth/agents-and-auth.md §8) —
    * invite links are `${uiBaseUrl}/invite/${token}` and passkeys bind to it.
-   * In a single-project deployment the UI shares the engine's origin, so
-   * this is `publicBaseUrl` unless `HELPTHREAD_UI_BASE_URL` overrides it (a
-   * split deployment, where the UI is its own project). OPTIONAL, unlike
-   * every other field above: absent — no override, and `publicBaseUrl` is
-   * plain http off loopback — means invite email deps are simply absent and
-   * passkeys are off; the Agents API still works, `sendInvite` creates
+   * When the caller says the UI is served from `PUBLIC_BASE_URL`
+   * (`LoadConfigOptions.uiAtPublicBaseUrl` — the single-project deployment),
+   * this is `publicBaseUrl` unless `HELPTHREAD_UI_BASE_URL` overrides it.
+   * OPTIONAL, unlike every other field above: absent — not set, not derived,
+   * or derived from a plain-http origin off loopback — means invite email
+   * deps are simply absent and passkeys are off; the Agents API still works,
+   * `sendInvite` creates
    * `invited` Agents with `inviteSent: false`, and `POST /agents/{id}/invite`
    * refuses with `409 conflict` (the admin-set-password fallback remains).
    */
@@ -168,7 +169,22 @@ class ConfigErrors {
  * missing or malformed. `env` defaults to `process.env`; injectable purely
  * for tests.
  */
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+/** How the deployment is shaped — what the env alone cannot say. */
+export interface LoadConfigOptions {
+  /**
+   * The operator UI is served from `PUBLIC_BASE_URL` itself (the single-project
+   * deployment, where `web/src/engine/mount.ts` hosts this engine). Only that
+   * caller knows this, so only it may say so; the UI origin then derives from
+   * `PUBLIC_BASE_URL` unless `HELPTHREAD_UI_BASE_URL` overrides it. An engine
+   * deployed on its own (`api/index.ts`) never derives — unset means absent.
+   */
+  uiAtPublicBaseUrl?: boolean
+}
+
+export function loadConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  options: LoadConfigOptions = {},
+): AppConfig {
   const errors = new ConfigErrors()
 
   const databaseUrl = errors.requireString(env, 'DATABASE_URL')
@@ -190,7 +206,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   const tokenEncryptionKey = resolveEncryptionKey(env, errors)
   const publicBaseUrl = resolvePublicBaseUrl(env, errors)
-  const ui = resolveUiBaseUrl(env, errors, publicBaseUrl)
+  const ui = resolveUiBaseUrl(
+    env,
+    errors,
+    options.uiAtPublicBaseUrl === true ? publicBaseUrl : null,
+  )
 
   errors.throwIfAny()
 
@@ -287,15 +307,16 @@ function resolvePublicBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): str
 
 /**
  * The UI origin (`AppConfig.uiBaseUrl`). `HELPTHREAD_UI_BASE_URL` is OPTIONAL
- * (HT-54; unlike every `require*` field above): unset, the origin is derived
- * from `PUBLIC_BASE_URL` — in a single-project deployment the UI IS that
- * origin. The derived value keeps this validator's plaintext rule (invite
+ * (HT-54; unlike every `require*` field above). Unset, and the caller has
+ * said the UI is served from `PUBLIC_BASE_URL` (`derivedFrom`), the origin is
+ * that one; the derived value keeps this validator's plaintext rule (invite
  * links carry a signed credential) but degrades instead of failing: plain
  * http off loopback yields no UI origin plus a warning, so a LAN or bare-IP
- * install still boots with invites and passkeys off. When SET (a split
- * deployment, where the UI is its own project), the value must be a
- * well-formed http(s) origin — a malformed value IS a boot-time error, since
- * a garbage invite link is worse than no invite feature at all.
+ * install still boots with invites and passkeys off. Unset with no
+ * `derivedFrom` means absent — an engine deployed on its own has no UI
+ * origin to assume. When SET, the value must be a well-formed http(s) origin
+ * — a malformed value IS a boot-time error, since a garbage invite link is
+ * worse than no invite feature at all.
  */
 /** Hosts whose traffic never leaves the machine — the one place plain http is acceptable for invite links. */
 function isLoopbackHost(hostname: string): boolean {
@@ -359,19 +380,19 @@ function resolveGmailPush(
 function resolveUiBaseUrl(
   env: NodeJS.ProcessEnv,
   errors: ConfigErrors,
-  publicBaseUrl: string | null,
+  derivedFrom: string | null,
 ): { uiBaseUrl?: string; warning?: string } {
   const raw = env.HELPTHREAD_UI_BASE_URL
   if (raw === undefined || raw.trim().length === 0) {
-    if (publicBaseUrl === null) return {}
-    const derived = new URL(publicBaseUrl)
+    if (derivedFrom === null) return {}
+    const derived = new URL(derivedFrom)
     if (derived.protocol === 'http:' && !isLoopbackHost(derived.hostname)) {
       return {
         warning:
           'HELPTHREAD_UI_BASE_URL is unset and PUBLIC_BASE_URL is plain http on a non-loopback host — invite links and passkeys are disabled for this deployment (both need https); every other feature is unaffected',
       }
     }
-    return { uiBaseUrl: publicBaseUrl }
+    return { uiBaseUrl: derivedFrom }
   }
 
   let parsed: URL

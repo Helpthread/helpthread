@@ -91,23 +91,30 @@ const REQUEST_TIMEOUT_MS = 15_000
  * Where the engine is. In a single-project deployment it is mounted at this
  * app's own origin (`src/engine/mount.ts`), so the base is the deployment's
  * `PUBLIC_BASE_URL` — or, on a non-production Vercel deployment (a preview),
- * that deployment's own URL, so a preview never talks to production's data.
+ * that deployment's own URL, so a preview calls its own deployment rather
+ * than production's.
  * `HELPTHREAD_API_URL` overrides both: it is how the split deployment (engine
  * and UI as separate projects) and the local dev harness point elsewhere.
  */
 function apiBaseUrl(): string | undefined {
   const explicit = process.env.HELPTHREAD_API_URL
   if (explicit !== undefined) return explicit
-  const vercelEnv = process.env.VERCEL_ENV
-  if (vercelEnv !== undefined && vercelEnv !== 'production' && process.env.VERCEL_URL) {
-    return `https://${process.env.VERCEL_URL}`
-  }
-  return process.env.PUBLIC_BASE_URL
+  const preview = previewSelfOrigin()
+  return preview ?? process.env.PUBLIC_BASE_URL
 }
 
-/** True when the API call is a self-call to this deployment's own origin (no `HELPTHREAD_API_URL` override). */
-function isSelfCall(): boolean {
-  return process.env.HELPTHREAD_API_URL === undefined
+/**
+ * On a non-production Vercel deployment with no `HELPTHREAD_API_URL`
+ * override, the self-call goes to that deployment's own URL. One function
+ * decides both the base and whether the protection cookie travels, so the
+ * two can never disagree about where the request is going.
+ */
+function previewSelfOrigin(): string | undefined {
+  if (process.env.HELPTHREAD_API_URL !== undefined) return undefined
+  const vercelEnv = process.env.VERCEL_ENV
+  const vercelUrl = process.env.VERCEL_URL
+  if (vercelEnv === undefined || vercelEnv === 'production' || !vercelUrl) return undefined
+  return `https://${vercelUrl}`
 }
 
 function config(): { baseUrl: string; token: string } {
@@ -141,18 +148,15 @@ function config(): { baseUrl: string; token: string } {
  * is a second request to the protected origin and is rejected before Next
  * sees it — unless it carries the viewer's own `_vercel_jwt` cookie, which
  * Vercel's documentation says to forward for exactly this case. Forwarded
- * only on a self-call, only off production, and never a failure: outside a
- * request scope there is simply nothing to forward.
+ * only when `previewSelfOrigin()` chose the base — the same condition, so the
+ * cookie can only ever go to this deployment's own URL — and never during
+ * `next build`, where there is no request to read it from.
  */
 async function deploymentProtectionHeaders(): Promise<Record<string, string>> {
-  const vercelEnv = process.env.VERCEL_ENV
-  if (!isSelfCall() || vercelEnv === undefined || vercelEnv === 'production') return {}
-  try {
-    const jwt = (await cookies()).get('_vercel_jwt')?.value
-    return jwt ? { Cookie: `_vercel_jwt=${jwt}` } : {}
-  } catch {
-    return {}
-  }
+  if (previewSelfOrigin() === undefined) return {}
+  if (process.env.NEXT_PHASE === 'phase-production-build') return {}
+  const jwt = (await cookies()).get('_vercel_jwt')?.value
+  return jwt ? { Cookie: `_vercel_jwt=${jwt}` } : {}
 }
 
 async function request<T>(

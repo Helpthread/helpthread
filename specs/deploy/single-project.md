@@ -16,7 +16,9 @@ transition described at the end.
   `predev` scripts run it, so `next build` and `next dev` never see a stale or missing `dist/`.
 - The UI still calls the API over HTTP, at its own origin (`web/src/lib/api.ts`). On a
   non-production Vercel deployment it calls that deployment's own URL and forwards the
-  viewer's Deployment Protection cookie, so a preview never reaches production data.
+  viewer's Deployment Protection cookie, so a preview calls its own deployment rather than
+  production's. Its engine still reaches whatever database the Preview environment's
+  variables name — scope those to Production if previews must not touch production data.
 - `web/vercel.json` declares the six cron schedules. Five run more than once a day, which
   Vercel allows on Pro and above, not Hobby.
 
@@ -43,7 +45,10 @@ dependencies live in the workspace root.
 The UI project already has Root Directory `web`, so it becomes the single project.
 
 1. Add the engine's variables to the UI project. Set `PUBLIC_BASE_URL` to the UI's origin.
-   Do this only when ready to cut over — once set, this project's crons run too.
+   The crons in `web/vercel.json` fire from the first deploy of this change; until the
+   variables exist each tick logs one boot failure (variable names, never values). Once they
+   exist, both projects drain the same queue until step 4 — the queue's leases keep that
+   safe, but do the steps in one sitting.
 2. Google Cloud: add `${PUBLIC_BASE_URL}/api/v1/inbound/gmail/callback` to the OAuth client's
    redirect URIs; set the Pub/Sub push subscription's endpoint to
    `${PUBLIC_BASE_URL}/api/v1/inbound/gmail` and its OIDC audience to the same value.

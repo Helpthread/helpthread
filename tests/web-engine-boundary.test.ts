@@ -13,14 +13,15 @@ import { describe, expect, it } from 'vitest'
 
 const WEB_SRC = fileURLToPath(new URL('../web/src', import.meta.url))
 const MOUNT = 'engine/mount.ts'
-/** The alias the mount uses, or any relative path that climbs out of `web/` into `dist/` or `src/`. */
-const ENGINE_IMPORT = /from\s+['"](?:@helpthread\/engine|(?:\.\.\/)+(?:dist|src)\/)/
+/** The alias the mount uses, or any relative path that climbs out of `web/` into `dist/` or `src/` — static, dynamic, or `require`. */
+const ENGINE_IMPORT =
+  /(?:from\s+|import\s*\(\s*|require\s*\(\s*)['"](?:@helpthread\/engine|(?:\.\.\/)+(?:dist|src)\/)/
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) return sourceFiles(path)
-    return /\.(?:ts|tsx)$/.test(entry.name) ? [path] : []
+    return /\.(?:[cm]?[jt]sx?)$/.test(entry.name) ? [path] : []
   })
 }
 

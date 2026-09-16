@@ -21,7 +21,9 @@ import { getApp } from '@helpthread/engine'
 
 export async function handleEngineRequest(request: Request): Promise<Response> {
   try {
-    const handler = await getApp()
+    // Only the mount knows the UI is served from `PUBLIC_BASE_URL` (see
+    // `LoadConfigOptions`); an engine deployed alone never assumes it.
+    const handler = await getApp({ uiAtPublicBaseUrl: true })
     return await handler(request)
   } catch (err) {
     // A thrown error here is a build/config failure (getApp rejected) or a

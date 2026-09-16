@@ -240,6 +240,8 @@ privilege).
      it, it is how mail arrives at all).
    - `0 6 * * *` → `GET /api/v1/internal/cron/watch-maintenance` (daily `watch()`
      renewal; UTC). Reports a skip when push is not configured.
+   - `*/2 * * * *` → `GET /api/v1/internal/cron/imap-fetch` (HT-101: fetch new
+     mail for every connected IMAP mailbox; a no-op when there are none).
    Vercel Cron invokes these as HTTP GETs; the handlers require the
    `CRON_SECRET` (Vercel sends it as a bearer via the `Authorization` header on
    cron requests) and are idempotent + lease-bounded.
