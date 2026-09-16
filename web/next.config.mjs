@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** @type {import('next').NextConfig} */
@@ -8,7 +9,7 @@ const nextConfig = {
   // The engine is mounted from the repo root's compiled `dist/` (see
   // `src/engine/mount.ts`), so file tracing must start one level up or the
   // deployed function bundle would omit it.
-  outputFileTracingRoot: fileURLToPath(new URL('..', import.meta.url)),
+  outputFileTracingRoot: path.resolve(fileURLToPath(new URL('..', import.meta.url))),
   // Native-backed engine dependencies are loaded from node_modules at runtime
   // rather than bundled.
   serverExternalPackages: ['pg', 'imapflow', 'nodemailer'],

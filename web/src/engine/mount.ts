@@ -8,8 +8,8 @@
  *
  * This is a mount, not a client. The UI itself still reaches the engine
  * only over HTTP through `src/lib/api.ts` (CHARTER.md: the operator inbox
- * is a client). `tests/web-engine-boundary.test.ts` fails the build if any
- * other file under `web/src` imports the engine.
+ * is a client). `tests/web-engine-boundary.test.ts` fails the suite if any
+ * other file under `web/` so much as mentions the engine.
  *
  * The `@helpthread/engine` alias (`tsconfig.json` `paths`) resolves to the
  * repo root's compiled `dist/composition/root.js`, produced by

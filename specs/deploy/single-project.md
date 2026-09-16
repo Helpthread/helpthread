@@ -9,8 +9,8 @@ transition described at the end.
 
 - `web/src/engine/mount.ts` hands every `/api/**` request to the engine's composition root
   (`src/composition/root.ts`), unchanged. The engine's router, auth, and error envelopes do
-  all the work. It is the one file in `web/` allowed to import the engine
-  (`tests/web-engine-boundary.test.ts`).
+  all the work. It is the one file in `web/` allowed to import the engine;
+  `tests/web-engine-boundary.test.ts` fails if any other file mentions it.
 - The engine is compiled first: `npm run build:engine` emits `src/**` to `dist/`, and the
   `@helpthread/engine` alias in `web/tsconfig.json` points at it. `web`'s `prebuild` and
   `predev` scripts run it, so `next build` and `next dev` never see a stale or missing `dist/`.
