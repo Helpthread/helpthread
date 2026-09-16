@@ -10,6 +10,7 @@
     "prebuild": "npm run build:engine --prefix ..",
     "build": "next build",
     "start": "next start",
+    "pretypecheck": "npm run build:engine --prefix ..",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

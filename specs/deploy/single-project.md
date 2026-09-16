@@ -33,8 +33,10 @@ Passkeys bind to the `PUBLIC_BASE_URL` host and cannot be moved: set the final d
 anyone registers one. A plain-http `PUBLIC_BASE_URL` off loopback boots with invites and
 passkeys disabled (one warning at startup).
 
-Vercel project settings: Root Directory `web`; the default install and build commands;
-"Include source files outside of the Root Directory" enabled (the default).
+Vercel project settings: Root Directory `web`; the default build command; "Include source
+files outside of the Root Directory" enabled (the default). `web/vercel.json` sets the install
+command to `cd .. && npm ci`: Vercel installs the Root Directory alone, and the engine's
+dependencies live in the workspace root.
 
 ## Moving a split deployment onto one project
 
