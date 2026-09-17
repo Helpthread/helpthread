@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "dev:api": "tsx scripts/dev-api.ts",
-    "migrate": "tsx scripts/migrate.ts"
+    "migrate": "tsx scripts/migrate.ts",
+    "build:engine": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",

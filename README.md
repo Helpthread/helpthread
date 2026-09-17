@@ -22,6 +22,7 @@ into infrastructure they choose and control.
 - **[Roadmap](https://github.com/orgs/Helpthread/projects/1)** — public delivery status and planned work
 - **[Governance](GOVERNANCE.md)** — how project decisions are made today
 - **[Legal and licensing](legal/README.md)** — the AGPL core and commercial-module boundary
+- **[Deploying](specs/deploy/single-project.md)** — one Vercel project, one origin
 - **[`specs/`](specs/)** — the maintained behavioral and product contracts
 - **[`fixtures/`](fixtures/)** — the mail engine's black-box acceptance suite
 
@@ -47,6 +48,7 @@ Scripts:
 - `npm run format` — Biome format.
 - `npm test` / `npm run test:watch` — Vitest.
 - `npm run test:coverage` — Vitest with v8 coverage (text + lcov).
+- `npm run build:engine` — compile the engine to `dist/` (the web app's `prebuild`/`predev` run this).
 
 ## Contributing
 

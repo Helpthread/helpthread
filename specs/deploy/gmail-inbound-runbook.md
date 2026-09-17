@@ -1,5 +1,9 @@
 # Gmail inbound — deployment & provisioning runbook
 
+> This runbook provisions the split deployment (engine and UI as separate projects). For
+> the supported single-project shape, see [single-project.md](single-project.md); the
+> Google Cloud steps here apply unchanged, with `PUBLIC_BASE_URL` as the one origin.
+
 Status: executed 2026-07-17 and live-verified. The threading round-trip passed
 on the second run, after the first run exposed two Gmail transport bugs fixed
 the same day in PRs #52 and #53. These are the one-time operator steps required
@@ -222,7 +226,7 @@ privilege).
 2. `PUBLIC_BASE_URL` = your production URL (e.g. `https://desk.example.com`),
    matching the OAuth redirect URI (A2.3) and the Pub/Sub push endpoint (A3.4).
    No trailing slash (the composition root strips one defensively either way).
-3. Deploy. `vercel.json` (in the repo) declares **five** Vercel Cron jobs:
+3. Deploy. `vercel.json` (in the repo) declares **six** Vercel Cron jobs:
    - `*/1 * * * *` → `GET /api/v1/internal/queue/drain` (drain the job queue —
      also delivers webhooks, : `WEBHOOK_DELIVERY_TOPIC` is handled here).
    - `*/1 * * * *` → `GET /api/v1/internal/outbox/drain` (turn
@@ -236,6 +240,8 @@ privilege).
      it, it is how mail arrives at all).
    - `0 6 * * *` → `GET /api/v1/internal/cron/watch-maintenance` (daily `watch()`
      renewal; UTC). Reports a skip when push is not configured.
+   - `*/2 * * * *` → `GET /api/v1/internal/cron/imap-fetch` (HT-101: fetch new
+     mail for every connected IMAP mailbox; a no-op when there are none).
    Vercel Cron invokes these as HTTP GETs; the handlers require the
    `CRON_SECRET` (Vercel sends it as a bearer via the `Authorization` header on
    cron requests) and are idempotent + lease-bounded.

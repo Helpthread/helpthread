@@ -42,7 +42,19 @@ export function isPublicPath(pathname: string): boolean {
 }
 
 export async function middleware(request: NextRequest): Promise<NextResponse> {
-  if (isPublicPath(request.nextUrl.pathname)) {
+  // `next.config.mjs` turns off Next's trailing-slash redirect so the engine
+  // sees `/api/**` paths verbatim; UI paths keep the canonical redirect here.
+  // A plain `URL`, not `nextUrl.clone()`: NextURL remembers that the request
+  // had a trailing slash and re-appends it on format, which turns this
+  // redirect into a loop.
+  const { pathname } = request.nextUrl
+  if (pathname !== '/' && pathname.endsWith('/')) {
+    const canonical = new URL(request.url)
+    canonical.pathname = pathname.replace(/\/+$/, '')
+    return NextResponse.redirect(canonical, 308)
+  }
+
+  if (isPublicPath(pathname)) {
     return NextResponse.next()
   }
 
@@ -75,10 +87,13 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 }
 
 export const config = {
-  // Next/static build assets and image-optimizer output are never
-  // meaningfully "the app" — no session check needed, and running one on
-  // every asset request would be pure overhead. Everything else (including
-  // routes not yet imagined) is guarded by default; PUBLIC_PATHS above is
-  // the only other carve-out.
-  matcher: ['/((?!_next/static|_next/image).*)'],
+  // `/api` and `/api/**` are the engine (`src/engine/mount.ts`), which has
+  // its own auth — the gate never runs there. Only that exact prefix is
+  // exempt: a UI route such as `/api-keys` is still guarded. Next/static
+  // build assets and image-optimizer output are never meaningfully "the
+  // app" — no session check needed, and running one on every asset request
+  // would be pure overhead. Everything else (including routes not yet
+  // imagined) is guarded by default; PUBLIC_PATHS above is the only other
+  // carve-out.
+  matcher: ['/((?!api(?:/|$)|_next/static|_next/image).*)'],
 }

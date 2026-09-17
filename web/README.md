@@ -16,9 +16,12 @@ npm run -w web dev        # the app on :3000
 ```
 
 The app's dev defaults match the harness (`http://localhost:8787`,
-`helpthread-dev-token`). A deployment sets both env vars:
+`helpthread-dev-token`). Deployed, the app serves the engine itself at its own
+origin (`src/engine/mount.ts`; `specs/deploy/single-project.md`) and calls it
+there:
 
-- `HELPTHREAD_API_URL` — the Agent Inbox API's base URL.
+- `PUBLIC_BASE_URL` — the deployment's origin, shared with the engine.
+  `HELPTHREAD_API_URL` overrides it only for a split deployment or the harness.
 - `HELPTHREAD_API_TOKEN` — the service Bearer token. **Server-side only**: the
   API client (`src/lib/api.ts`) imports `server-only`, so the token can never
   reach a client bundle; every API call runs in a server component or server

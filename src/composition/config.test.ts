@@ -206,15 +206,51 @@ describe('loadConfig — gmailPush / GMAIL_PUBSUB_* trio (HT-94, optional-but-al
   })
 })
 
-describe('loadConfig — HELPTHREAD_UI_BASE_URL (HT-54, optional)', () => {
-  it('is absent from AppConfig when unset — no error, invite deps simply absent', () => {
+describe('loadConfig — HELPTHREAD_UI_BASE_URL (HT-54, optional; derivable since HT-150)', () => {
+  it('is absent from AppConfig when unset — an engine deployed alone assumes no UI origin', () => {
     const config = loadConfig(validEnv())
     expect(config.uiBaseUrl).toBeUndefined()
+    expect(config.warnings).toBeUndefined()
   })
 
   it('is absent when set to whitespace only — treated the same as unset', () => {
     const config = loadConfig({ ...validEnv(), HELPTHREAD_UI_BASE_URL: '   ' })
     expect(config.uiBaseUrl).toBeUndefined()
+  })
+
+  it('derives from PUBLIC_BASE_URL when the caller says the UI is served from it', () => {
+    const config = loadConfig(validEnv(), { uiAtPublicBaseUrl: true })
+    expect(config.uiBaseUrl).toBe('https://desk.resonantiq.app')
+    expect(config.warnings).toBeUndefined()
+  })
+
+  it('derives a loopback http PUBLIC_BASE_URL (local development)', () => {
+    const config = loadConfig(
+      { ...validEnv(), PUBLIC_BASE_URL: 'http://localhost:3000' },
+      { uiAtPublicBaseUrl: true },
+    )
+    expect(config.uiBaseUrl).toBe('http://localhost:3000')
+    expect(config.warnings).toBeUndefined()
+  })
+
+  it('degrades, not fails, when the derived origin would be plain http off loopback', () => {
+    const config = loadConfig(
+      { ...validEnv(), PUBLIC_BASE_URL: 'http://helpthread.lan' },
+      { uiAtPublicBaseUrl: true },
+    )
+    expect(config.uiBaseUrl).toBeUndefined()
+    expect(config.warnings).toEqual([
+      expect.stringMatching(/invite links and passkeys are disabled/),
+    ])
+    expect(config.warnings?.[0]).not.toMatch(/helpthread\.lan/)
+  })
+
+  it('an explicit HELPTHREAD_UI_BASE_URL wins over derivation', () => {
+    const config = loadConfig(
+      { ...validEnv(), HELPTHREAD_UI_BASE_URL: 'https://inbox.example.com' },
+      { uiAtPublicBaseUrl: true },
+    )
+    expect(config.uiBaseUrl).toBe('https://inbox.example.com')
   })
 
   it('is read and normalized to a bare origin when set', () => {

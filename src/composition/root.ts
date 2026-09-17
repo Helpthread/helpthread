@@ -115,7 +115,7 @@ import {
 } from '../webhooks/delivery.js'
 import { drainEventOutbox } from '../webhooks/outbox-drain.js'
 import { createAppHandler } from './app.js'
-import { type AppConfig, loadConfig } from './config.js'
+import { type AppConfig, type LoadConfigOptions, loadConfig } from './config.js'
 import { runHealthCheck } from './health.js'
 
 /**
@@ -166,6 +166,9 @@ export async function buildApp(
   config: AppConfig,
   overrides?: BuildAppOverrides,
 ): Promise<(request: Request) => Promise<Response>> {
+  for (const warning of config.warnings ?? []) {
+    console.warn(`[composition] ${warning}`)
+  }
   const db = overrides?.db ?? (await createPostgresDb({ connectionString: config.databaseUrl }))
   const blobStore =
     overrides?.blobStore ??
@@ -292,7 +295,7 @@ export async function buildApp(
       rp = resolveWebAuthnRp(config.uiBaseUrl)
     } catch (err) {
       console.error(
-        '[composition] HELPTHREAD_UI_BASE_URL is set but not WebAuthn-usable (an IP literal, not a domain) — passkeys are disabled for this deployment; every other feature is unaffected',
+        '[composition] the UI origin (HELPTHREAD_UI_BASE_URL, or PUBLIC_BASE_URL when the UI is served from it) is not WebAuthn-usable (an IP literal, not a domain) — passkeys are disabled for this deployment; every other feature is unaffected',
         err,
       )
     }
@@ -629,11 +632,14 @@ export async function buildApp(
  */
 let appPromise: Promise<(request: Request) => Promise<Response>> | undefined
 
-export function getApp(): Promise<(request: Request) => Promise<Response>> {
+export function getApp(
+  options: LoadConfigOptions = {},
+): Promise<(request: Request) => Promise<Response>> {
   if (appPromise === undefined) {
     // The IIFE turns even loadConfig's synchronous throw into a rejected
-    // promise, so the entry's single try/await/catch covers both.
-    appPromise = (async () => buildApp(loadConfig()))()
+    // promise, so the entry's single try/await/catch covers both. `options`
+    // are read on the first call only — one entry per process.
+    appPromise = (async () => buildApp(loadConfig(process.env, options)))()
   }
   return appPromise
 }

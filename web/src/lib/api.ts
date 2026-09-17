@@ -87,14 +87,44 @@ export class ApiError extends Error {
 /** Upstream fetch timeout — a hung API must fail fast, not hang the render. */
 const REQUEST_TIMEOUT_MS = 15_000
 
+/**
+ * Where the engine is. In a single-project deployment it is mounted at this
+ * app's own origin (`src/engine/mount.ts`), so the base is the deployment's
+ * `PUBLIC_BASE_URL` — or, on a non-production Vercel deployment (a preview),
+ * that deployment's own URL, so a preview calls its own deployment rather
+ * than production's.
+ * `HELPTHREAD_API_URL` overrides both: it is how the split deployment (engine
+ * and UI as separate projects) and the local dev harness point elsewhere.
+ */
+function apiBaseUrl(): string | undefined {
+  const explicit = process.env.HELPTHREAD_API_URL
+  if (explicit !== undefined) return explicit
+  const preview = previewSelfOrigin()
+  return preview ?? process.env.PUBLIC_BASE_URL
+}
+
+/**
+ * On a non-production Vercel deployment with no `HELPTHREAD_API_URL`
+ * override, the self-call goes to that deployment's own URL. One function
+ * decides both the base and whether the protection cookie travels, so the
+ * two can never disagree about where the request is going.
+ */
+function previewSelfOrigin(): string | undefined {
+  if (process.env.HELPTHREAD_API_URL !== undefined) return undefined
+  const vercelEnv = process.env.VERCEL_ENV
+  const vercelUrl = process.env.VERCEL_URL
+  if (vercelEnv === undefined || vercelEnv === 'production' || !vercelUrl) return undefined
+  return `https://${vercelUrl}`
+}
+
 function config(): { baseUrl: string; token: string } {
-  const baseUrl = process.env.HELPTHREAD_API_URL
+  const baseUrl = apiBaseUrl()
   const token = process.env.HELPTHREAD_API_TOKEN
-  // A deployment MUST set both. Falling back to the dev harness's values in
-  // production would silently point the app at localhost with a well-known
-  // token — fail loud at the first RUNTIME request instead. Skipped during
-  // `next build` (NEXT_PHASE), where prerendering runs in production mode
-  // without the runtime env and dev defaults are harmless.
+  // A deployment MUST provide both. Falling back to the dev harness's values
+  // in production would silently point the app at localhost with a
+  // well-known token — fail loud at the first RUNTIME request instead.
+  // Skipped during `next build` (NEXT_PHASE), where prerendering runs in
+  // production mode without the runtime env and dev defaults are harmless.
   const isBuild = process.env.NEXT_PHASE === 'phase-production-build'
   if (
     process.env.NODE_ENV === 'production' &&
@@ -102,7 +132,7 @@ function config(): { baseUrl: string; token: string } {
     (baseUrl === undefined || token === undefined)
   ) {
     throw new Error(
-      'HELPTHREAD_API_URL and HELPTHREAD_API_TOKEN must be set in production — refusing to fall back to dev defaults.',
+      'PUBLIC_BASE_URL (or HELPTHREAD_API_URL) and HELPTHREAD_API_TOKEN must be set in production — refusing to fall back to dev defaults.',
     )
   }
   // Dev defaults match the HT-24 harness (`npm run dev:api`); the default
@@ -111,6 +141,22 @@ function config(): { baseUrl: string; token: string } {
     baseUrl: (baseUrl ?? 'http://localhost:8787').replace(/\/+$/, ''),
     token: token ?? 'helpthread-dev-token',
   }
+}
+
+/**
+ * On a Vercel preview deployment behind Deployment Protection, a self-call
+ * is a second request to the protected origin and is rejected before Next
+ * sees it — unless it carries the viewer's own `_vercel_jwt` cookie, which
+ * Vercel's documentation says to forward for exactly this case. Forwarded
+ * only when `previewSelfOrigin()` chose the base — the same condition, so the
+ * cookie can only ever go to this deployment's own URL — and never during
+ * `next build`, where there is no request to read it from.
+ */
+async function deploymentProtectionHeaders(): Promise<Record<string, string>> {
+  if (previewSelfOrigin() === undefined) return {}
+  if (process.env.NEXT_PHASE === 'phase-production-build') return {}
+  const jwt = (await cookies()).get('_vercel_jwt')?.value
+  return jwt ? { Cookie: `_vercel_jwt=${jwt}` } : {}
 }
 
 async function request<T>(
@@ -128,6 +174,7 @@ async function request<T>(
   let headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
     ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    ...(await deploymentProtectionHeaders()),
     ...init.headers,
   }
 
