@@ -116,7 +116,7 @@ import {
 import { drainEventOutbox } from '../webhooks/outbox-drain.js'
 import { createAppHandler } from './app.js'
 import { type AppConfig, type LoadConfigOptions, loadConfig } from './config.js'
-import { runHealthCheck } from './health.js'
+import { assessSchema, readSchemaState, runHealthCheck } from './health.js'
 
 /**
  * The OAuth scopes the connect flow requests (gmail-connect.md §3, least
@@ -158,9 +158,13 @@ export interface BuildAppOverrides {
  * `PostgresDb` is (it validates any configured schema before returning —
  * though the dogfood uses none, so no network round-trip happens at build).
  *
- * Does NOT run migrations: schema creation is a separate one-shot
- * (`scripts/migrate.ts`, runbook Part B2), never something every cold start
- * re-runs.
+ * Does NOT run migrations: schema creation is a separate step, never
+ * something every cold start re-runs. On Vercel, a PRODUCTION deploy applies
+ * pending migrations at build time (`scripts/migrate-if-production.ts`,
+ * issue #152); everywhere else it's the manual one-shot
+ * (`scripts/migrate.ts`, runbook Part B2). Either way, this function itself
+ * never touches the schema — it only builds `checkSchemaSkew` below, which
+ * REPORTS a version skew to requests/cron ticks without ever fixing one.
  */
 export async function buildApp(
   config: AppConfig,
@@ -170,6 +174,32 @@ export async function buildApp(
     console.warn(`[composition] ${warning}`)
   }
   const db = overrides?.db ?? (await createPostgresDb({ connectionString: config.databaseUrl }))
+
+  // --- Version-skew guard (issue #152). Reuses the EXACT schema assessment
+  // `runHealthCheck` (below) computes for HealthReport.schema — one
+  // comparison, not two that could drift. Memoized: the result cannot change
+  // during this instance's lifetime (this build never migrates at runtime —
+  // see the module doc above), so re-querying `_migrations` on every request
+  // would just repeat the same answer. Returns `null` when in step; a
+  // one-line actionable message when the database is BEHIND this build.
+  // Deliberately silent on the "ahead" case (a rollback, or a stray
+  // hand-applied migration) — that isn't a request-blocking condition, only
+  // the health endpoint's own diagnostic. ---
+  let schemaSkewCache: Promise<string | null> | undefined
+  const checkSchemaSkew = (): Promise<string | null> => {
+    if (schemaSkewCache === undefined) {
+      schemaSkewCache = readSchemaState(db).then(({ applied }) => {
+        const { section } = assessSchema(applied)
+        if (section.missing.length === 0) {
+          return null
+        }
+        const at = section.appliedMigrationId ?? 'none applied'
+        return `database schema is at migration ${at}, this build needs ${section.expectedMigrationId} — run \`npm run migrate\`.`
+      })
+    }
+    return schemaSkewCache
+  }
+
   const blobStore =
     overrides?.blobStore ??
     createSupabaseStorageBlobStore({
@@ -412,6 +442,7 @@ export async function buildApp(
     keyring,
     mailDomain: config.mailDomain,
     supportAddress: config.supportAddress,
+    checkSchemaSkew,
     gmailPush,
     gmailConnect,
     gmailDisconnect,
@@ -520,6 +551,7 @@ export async function buildApp(
   return createAppHandler({
     inboxApi,
     cronSecret: config.cronSecret,
+    checkSchemaSkew,
     // `GET /`'s redirect target (app.ts's bare-root response) — spread in
     // only when configured, like agents.uiBaseUrl above.
     ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),

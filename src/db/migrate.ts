@@ -2201,9 +2201,13 @@ CREATE INDEX IF NOT EXISTS conversations_customer_email_normalized_idx
 /**
  * Every migration, in the order they must apply. `id` is the sole ordering
  * key (ascending) — array position is not relied upon, so re-sorting this
- * array by accident is harmless.
+ * array by accident is harmless. Exported (read-only) so
+ * `migrate.test.ts` can assert every id is unique and strictly increasing —
+ * the CI check for the id collision that nearly shipped silently (issue
+ * #152): a duplicate id is recorded as already-applied and SKIPPED, not
+ * rejected, so nothing short of this source-level check catches it.
  */
-const MIGRATIONS: Migration[] = [
+export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'conversations_and_threads', sql: MIGRATION_001_CONVERSATIONS_AND_THREADS },
   {
     id: 2,

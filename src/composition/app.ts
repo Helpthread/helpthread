@@ -122,6 +122,18 @@ export interface AppHandlerDeps {
   /** Assemble the health report (`./health.ts`) — the {@link HEALTH_PATH} endpoint's work. */
   runHealthCheck: () => Promise<HealthReport>
   /**
+   * Version-skew diagnostic (issue #152): `null` when the database matches
+   * this build's migrations, else a one-line actionable message (`root.ts`'s
+   * `checkSchemaSkew`, memoized per warm instance). Checked for every cron
+   * endpoint BELOW — after auth/method, before the endpoint's own work — so a
+   * behind-schema deploy answers a clear `503` naming the gap instead of
+   * failing partway through with a generic `500`. Deliberately NOT consulted
+   * for {@link HEALTH_PATH}: that endpoint runs the same assessment itself,
+   * in full, as part of {@link HealthReport}. Optional so a caller with
+   * nothing to check (e.g. a test with no `Db`) can omit it entirely.
+   */
+  checkSchemaSkew?: () => Promise<string | null>
+  /**
    * The operator UI's bare origin (`AppConfig.uiBaseUrl`,
    * `HELPTHREAD_UI_BASE_URL`) — when configured, `GET /` 302-redirects
    * there; absent, `GET /` answers a tiny service-identifying JSON instead.
@@ -143,16 +155,44 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
     const { pathname } = new URL(request.url)
 
     if (pathname === QUEUE_DRAIN_PATH) {
-      return handleCronEndpoint(request, deps.cronSecret, 'queue-drain', deps.drainQueue)
+      return handleCronEndpoint(
+        request,
+        deps.cronSecret,
+        'queue-drain',
+        deps.drainQueue,
+        undefined,
+        deps.checkSchemaSkew,
+      )
     }
     if (pathname === OUTBOX_DRAIN_PATH) {
-      return handleCronEndpoint(request, deps.cronSecret, 'outbox-drain', deps.drainOutbox)
+      return handleCronEndpoint(
+        request,
+        deps.cronSecret,
+        'outbox-drain',
+        deps.drainOutbox,
+        undefined,
+        deps.checkSchemaSkew,
+      )
     }
     if (pathname === SNOOZE_WAKE_PATH) {
-      return handleCronEndpoint(request, deps.cronSecret, 'snooze-wake', deps.runSnoozeWake)
+      return handleCronEndpoint(
+        request,
+        deps.cronSecret,
+        'snooze-wake',
+        deps.runSnoozeWake,
+        undefined,
+        deps.checkSchemaSkew,
+      )
     }
     if (pathname === RECONCILE_SWEEP_PATH) {
-      return handleCronEndpoint(request, deps.cronSecret, 'reconcile-sweep', deps.runReconcileSweep)
+      return handleCronEndpoint(
+        request,
+        deps.cronSecret,
+        'reconcile-sweep',
+        deps.runReconcileSweep,
+        undefined,
+        deps.checkSchemaSkew,
+      )
     }
     if (pathname === WATCH_MAINTENANCE_PATH) {
       return handleCronEndpoint(
@@ -160,16 +200,25 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
         deps.cronSecret,
         'watch-maintenance',
         deps.runWatchMaintenance,
+        undefined,
+        deps.checkSchemaSkew,
       )
     }
     if (pathname === IMAP_FETCH_PATH) {
-      return handleCronEndpoint(request, deps.cronSecret, 'imap-fetch', deps.runImapFetch)
+      return handleCronEndpoint(
+        request,
+        deps.cronSecret,
+        'imap-fetch',
+        deps.runImapFetch,
+        undefined,
+        deps.checkSchemaSkew,
+      )
     }
     if (pathname === HEALTH_PATH) {
       // The report is the body verbatim (it carries its own `ok`/`alerts`),
       // and the status pivots on it — 503 on any tripped alert so a
       // status-code-only monitor alerts without parsing JSON (HEALTH_PATH's
-      // doc comment).
+      // doc comment). No `checkSchemaSkew` here — see that field's doc.
       return handleCronEndpoint(request, deps.cronSecret, 'health', deps.runHealthCheck, (report) =>
         json(report.ok ? 200 : 503, report),
       )
@@ -221,6 +270,11 @@ export function createAppHandler(deps: AppHandlerDeps): (request: Request) => Pr
  * health endpoint substitutes its own 200-vs-503 pivot ({@link HEALTH_PATH}).
  * Auth, the method check, and the generic-500 catch stay identical across
  * all of them.
+ *
+ * `checkSchemaSkew`, when given, runs AFTER auth/method and BEFORE `work` —
+ * a behind-schema database answers a clear `503 schema_migration_pending`
+ * naming the gap instead of `work` throwing partway through and this
+ * function's own catch answering an unexplained generic `500` (issue #152).
  */
 async function handleCronEndpoint<T>(
   request: Request,
@@ -228,12 +282,19 @@ async function handleCronEndpoint<T>(
   label: string,
   work: () => Promise<T>,
   respond: (report: T) => Response = (report) => json(200, { ok: true, report }),
+  checkSchemaSkew?: () => Promise<string | null>,
 ): Promise<Response> {
   if (!authenticateRequest(request, cronSecret)) {
     return apiError(401, 'unauthorized', 'Missing or invalid credentials.')
   }
   if (request.method !== 'GET') {
     return apiError(405, 'method_not_allowed', 'This method is not supported here.')
+  }
+  if (checkSchemaSkew !== undefined) {
+    const skew = await checkSchemaSkew()
+    if (skew !== null) {
+      return apiError(503, 'schema_migration_pending', skew)
+    }
   }
 
   try {

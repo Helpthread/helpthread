@@ -492,6 +492,108 @@ describe('createAppHandler — health endpoint (HT-44)', () => {
   })
 })
 
+describe('createAppHandler — version-skew guard (issue #152)', () => {
+  it('answers 503 schema_migration_pending on a cron endpoint, WITHOUT running the work, when checkSchemaSkew reports a gap', async () => {
+    const inboxApi = vi.fn(async () => new Response(null, { status: 299 }))
+    const drainQueue = vi.fn(async () => ({ claimed: 1 }))
+    const checkSchemaSkew = vi.fn(
+      async () =>
+        'database schema is at migration 26, this build needs 29 — run `npm run migrate`.',
+    )
+    const handler = createAppHandler({
+      inboxApi,
+      cronSecret: CRON_SECRET,
+      checkSchemaSkew,
+      drainQueue,
+      drainOutbox: vi.fn(async () => ({})),
+      runSnoozeWake: vi.fn(async () => ({})),
+      runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
+      runImapFetch: vi.fn(async () => ({})),
+      runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
+    })
+
+    const res = await handler(req(QUEUE_DRAIN_PATH))
+    const body = await res.json()
+
+    expect(res.status).toBe(503)
+    expect(body).toEqual({
+      error: {
+        code: 'schema_migration_pending',
+        message: 'database schema is at migration 26, this build needs 29 — run `npm run migrate`.',
+      },
+    })
+    expect(drainQueue).not.toHaveBeenCalled()
+  })
+
+  it('still checks auth BEFORE the schema skew — a wrong secret is 401, not 503', async () => {
+    const checkSchemaSkew = vi.fn(async () => 'behind')
+    const handler = createAppHandler({
+      inboxApi: vi.fn(async () => new Response(null, { status: 299 })),
+      cronSecret: CRON_SECRET,
+      checkSchemaSkew,
+      drainQueue: vi.fn(async () => ({})),
+      drainOutbox: vi.fn(async () => ({})),
+      runSnoozeWake: vi.fn(async () => ({})),
+      runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
+      runImapFetch: vi.fn(async () => ({})),
+      runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
+    })
+
+    const res = await handler(req(QUEUE_DRAIN_PATH, { secret: 'wrong-secret-9999999999' }))
+
+    expect(res.status).toBe(401)
+    expect(checkSchemaSkew).not.toHaveBeenCalled()
+  })
+
+  it('never consults checkSchemaSkew for the health endpoint — health runs its own full assessment', async () => {
+    const checkSchemaSkew = vi.fn(async () => 'behind')
+    const runHealthCheck = vi.fn(async () => HEALTHY_REPORT)
+    const handler = createAppHandler({
+      inboxApi: vi.fn(async () => new Response(null, { status: 299 })),
+      cronSecret: CRON_SECRET,
+      checkSchemaSkew,
+      drainQueue: vi.fn(async () => ({})),
+      drainOutbox: vi.fn(async () => ({})),
+      runSnoozeWake: vi.fn(async () => ({})),
+      runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
+      runImapFetch: vi.fn(async () => ({})),
+      runHealthCheck,
+    })
+
+    const res = await handler(req(HEALTH_PATH))
+
+    expect(res.status).toBe(200)
+    expect(checkSchemaSkew).not.toHaveBeenCalled()
+    expect(runHealthCheck).toHaveBeenCalledOnce()
+  })
+
+  it('runs the work normally when checkSchemaSkew reports no gap (null)', async () => {
+    const checkSchemaSkew = vi.fn(async () => null)
+    const drainQueue = vi.fn(async () => ({ claimed: 1 }))
+    const handler = createAppHandler({
+      inboxApi: vi.fn(async () => new Response(null, { status: 299 })),
+      cronSecret: CRON_SECRET,
+      checkSchemaSkew,
+      drainQueue,
+      drainOutbox: vi.fn(async () => ({})),
+      runSnoozeWake: vi.fn(async () => ({})),
+      runWatchMaintenance: vi.fn(async () => ({})),
+      runReconcileSweep: vi.fn(async () => ({})),
+      runImapFetch: vi.fn(async () => ({})),
+      runHealthCheck: vi.fn(async () => HEALTHY_REPORT),
+    })
+
+    const res = await handler(req(QUEUE_DRAIN_PATH))
+
+    expect(res.status).toBe(200)
+    expect(checkSchemaSkew).toHaveBeenCalledOnce()
+    expect(drainQueue).toHaveBeenCalledOnce()
+  })
+})
+
 describe('createAppHandler — bare root path (friendly response for GET /)', () => {
   it('302-redirects GET / to the UI origin when uiBaseUrl is configured, without touching the inbox API', async () => {
     const { handler, inboxApi } = makeHandler({ uiBaseUrl: 'https://inbox.example.test' })

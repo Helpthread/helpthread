@@ -204,6 +204,18 @@ export interface InboxApiDeps {
   /** The deployment's configured support address — the `from` on every Agent reply (spec §4a). */
   supportAddress: string
   /**
+   * Version-skew diagnostic (issue #152): `null` when the database matches
+   * this build's migrations, else a one-line actionable message (`root.ts`'s
+   * `checkSchemaSkew`, memoized per warm instance — see its doc for why the
+   * "ahead" case is deliberately not checked here). Checked right after auth,
+   * before any route's own work, so a request against a behind-schema
+   * database answers a clear `503 schema_migration_pending` instead of
+   * whatever store call happens to fail first turning into a generic `500`.
+   * Optional so tests that inject their own already-migrated `Db` (i.e. all
+   * of them) can omit it.
+   */
+  checkSchemaSkew?: () => Promise<string | null>
+  /**
    * Agents & Authentication (HT-54; specs/auth/agents-and-auth.md) — REQUIRED,
    * unlike every `?`-suffixed field below: this is core product surface, not
    * an absent-by-default feature. See `src/api/agents.ts`'s `AgentsApiDeps`
@@ -468,6 +480,17 @@ export function createInboxApi(deps: InboxApiDeps): (request: Request) => Promis
         return apiError(401, 'unauthorized', 'Missing or invalid credentials.')
       }
       caller = { kind: 'assistant', assistant }
+    }
+
+    // Version-skew guard (issue #152), right after auth: a behind-schema
+    // database answers a clear 503 naming the gap instead of some route's
+    // store call throwing partway through and surfacing as an unexplained
+    // generic 500. See `checkSchemaSkew`'s doc above for what it checks.
+    if (deps.checkSchemaSkew !== undefined) {
+      const skew = await deps.checkSchemaSkew()
+      if (skew !== null) {
+        return apiError(503, 'schema_migration_pending', skew)
+      }
     }
 
     // Everything past auth runs inside a catch-all so no store/serialization

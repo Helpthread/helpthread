@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createPgliteDb, type Db } from './client.js'
 import {
   MIGRATION_027_LOCK_DOWN_DATA_API as MIGRATION_027_SQL,
+  MIGRATIONS,
   migrate,
   splitStatements,
 } from './migrate.js'
@@ -12,6 +13,13 @@ describe('migrate', () => {
   afterEach(async () => {
     await db?.close()
     db = undefined
+  })
+
+  it('has a unique, strictly increasing id for every migration — the source-level guard against the id collision that nearly shipped silently (issue #152: a duplicate id is recorded as already-applied and SKIPPED by migrate(), never rejected, so this is the one check that catches it, including on a PR whose id collides with a migration main already merged)', () => {
+    const ids = MIGRATIONS.map((m) => m.id)
+    for (let i = 1; i < ids.length; i += 1) {
+      expect(ids[i]).toBeGreaterThan(ids[i - 1])
+    }
   })
 
   it('creates the conversations and threads tables, with gen_random_uuid() working', async () => {

@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Db } from '../db/client.js'
+import type { Db, Row, SqlValue } from '../db/client.js'
 import { createPgliteDb } from '../db/client.js'
 import { migrate } from '../db/migrate.js'
 import type { BlobStore } from '../providers/index.js'
@@ -421,5 +421,108 @@ describe('buildApp — passkeys (HT-75; specs/auth/passkeys.md §3)', () => {
       }),
     )
     expect(res.status).toBe(200)
+  })
+})
+
+describe('buildApp — version-skew guard (issue #152)', () => {
+  it('answers 503 schema_migration_pending — not the generic 500, and without running the route — on both the inbox API and a cron endpoint when the database has never been migrated', async () => {
+    const db = await createPgliteDb()
+    try {
+      const handler = await buildApp(testConfig(), { db, blobStore: fakeBlobStore() })
+
+      const apiRes = await handler(
+        new Request(`${ORIGIN}/api/v1/conversations`, {
+          headers: { Authorization: `Bearer ${API_TOKEN}` },
+        }),
+      )
+      expect(apiRes.status).toBe(503)
+      expect(await apiRes.json()).toMatchObject({ error: { code: 'schema_migration_pending' } })
+
+      const cronRes = await handler(
+        new Request(`${ORIGIN}/api/v1/internal/queue/drain`, {
+          headers: { Authorization: `Bearer ${CRON_SECRET}` },
+        }),
+      )
+      expect(cronRes.status).toBe(503)
+      expect(await cronRes.json()).toMatchObject({ error: { code: 'schema_migration_pending' } })
+    } finally {
+      await db.close()
+    }
+  })
+
+  it('still gives the FULL health report (never the generic schema_migration_pending envelope) when unmigrated — 503 with the schema-migration-pending alert', async () => {
+    const db = await createPgliteDb()
+    try {
+      const handler = await buildApp(testConfig(), { db, blobStore: fakeBlobStore() })
+
+      const res = await handler(
+        new Request(`${ORIGIN}/api/v1/internal/health`, {
+          headers: { Authorization: `Bearer ${CRON_SECRET}` },
+        }),
+      )
+      expect(res.status).toBe(503)
+      const body = (await res.json()) as { ok: boolean; alerts: string[] }
+      expect(body.ok).toBe(false)
+      expect(body.alerts.some((alert) => alert.startsWith('schema-migration-pending'))).toBe(true)
+    } finally {
+      await db.close()
+    }
+  })
+
+  it('checks the database at most once per warm instance — later requests reuse the cached verdict instead of re-querying _migrations', async () => {
+    const real = await createPgliteDb()
+    let migrationsQueryCount = 0
+    const counting: Db = {
+      query: async <T = Row>(sql: string, params?: SqlValue[]): Promise<T[]> => {
+        if (sql.includes('_migrations')) migrationsQueryCount += 1
+        return real.query<T>(sql, params)
+      },
+      transaction: (fn) => real.transaction(fn),
+      close: () => real.close(),
+    }
+
+    try {
+      const handler = await buildApp(testConfig(), { db: counting, blobStore: fakeBlobStore() })
+
+      await handler(
+        new Request(`${ORIGIN}/api/v1/conversations`, {
+          headers: { Authorization: `Bearer ${API_TOKEN}` },
+        }),
+      )
+      await handler(
+        new Request(`${ORIGIN}/api/v1/internal/queue/drain`, {
+          headers: { Authorization: `Bearer ${CRON_SECRET}` },
+        }),
+      )
+      await handler(
+        new Request(`${ORIGIN}/api/v1/conversations`, {
+          headers: { Authorization: `Bearer ${API_TOKEN}` },
+        }),
+      )
+
+      // readSchemaState issues exactly one `_migrations`-touching query per
+      // call (the `to_regclass` existence check — the table doesn't exist
+      // yet, so it never reaches the second SELECT). Three requests, one
+      // check: the memoized verdict, not a fresh query, answered the other two.
+      expect(migrationsQueryCount).toBe(1)
+    } finally {
+      await real.close()
+    }
+  })
+
+  it('resumes normal 200s once the database is migrated', async () => {
+    const db = await createPgliteDb()
+    await migrate(db)
+    try {
+      const handler = await buildApp(testConfig(), { db, blobStore: fakeBlobStore() })
+      const res = await handler(
+        new Request(`${ORIGIN}/api/v1/conversations`, {
+          headers: { Authorization: `Bearer ${API_TOKEN}` },
+        }),
+      )
+      expect(res.status).toBe(200)
+    } finally {
+      await db.close()
+    }
   })
 })
