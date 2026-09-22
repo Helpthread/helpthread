@@ -7,10 +7,12 @@
  * everywhere. `decideMigrationGate` (`src/composition/migration-gate.ts`) is
  * the actual rule; this script only acts on its verdict and does the I/O:
  *
- * - `skip` (not a production build): log one line naming why, touch nothing,
- *   exit 0. A preview/development build must never migrate — or be
- *   migrated against — a database it does not own.
- * - `fail` (a production build with no `DATABASE_URL`): log the fix and
+ * - `skip` (not a production build, OR a production build of the SPLIT
+ *   deployment's UI project — `HELPTHREAD_API_URL` set, meaning this `web/`
+ *   project doesn't host the engine): log one line naming why, touch
+ *   nothing, exit 0. Neither a preview/development build nor a split-UI
+ *   build owns the database it would be migrating.
+ * - `fail` (a production, single-project build with no `DATABASE_URL`): log the fix and
  *   exit 1, FAILING THE BUILD. Deploying code against a database nobody
  *   migrated is exactly the outage this gate exists to prevent — the outage
  *   observed and written up in issue #152's field-evidence comment.

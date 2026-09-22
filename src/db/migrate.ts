@@ -16,6 +16,24 @@
  * a bad migration is fixed by shipping a new forward migration that
  * corrects it, not by reversing history on a database that may already have
  * production writes against it.
+ *
+ * ## A new migration must keep working with the previous release's code
+ *
+ * A production deploy now migrates itself as part of the same build (issue
+ * #152; specs/deploy/single-project.md's Migrations section) — schema and
+ * code from the SAME commit, but the deploy still going out briefly runs the
+ * PREVIOUS release's code against the just-migrated schema. That is only
+ * safe when a migration is additive: code that has never heard of the change
+ * keeps working unmodified against it. Removing or tightening something —
+ * `DROP COLUMN`, `SET NOT NULL` with no `DEFAULT`, narrowing a `CHECK` —
+ * ships in two releases, not one: first stop requiring the old shape, then
+ * remove it once nothing depends on it. This is a written rule, not a
+ * mechanical check — nothing in CI enforces it.
+ *
+ * Two migrations below predate this rule and would have needed the two-step:
+ * migration 018 drops `conversations.assignee` outright, and migration 021
+ * adds `threads.author_kind NOT NULL` with no `DEFAULT`. Both shipped before
+ * this rule existed and are left as-is; new migrations are held to it.
  */
 
 import type { Db } from './client.js'

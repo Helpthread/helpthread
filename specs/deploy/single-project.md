@@ -51,6 +51,16 @@ live. **Preview and development builds never touch the database**: `VERCEL_ENV` 
 build that cannot migrate (`DATABASE_URL` missing, or a migration failing) **fails the
 build** rather than deploying code against an unmigrated schema — the error names the fix.
 
+**A split deployment's UI project also skips**, even in Production: `HELPTHREAD_API_URL`
+being set (the Configuration table above — the split/dev-harness override) is the same
+signal `web/src/lib/api.ts`'s `apiBaseUrl()` already uses to mean "the engine is somewhere
+else," so this `web/` project doesn't own the database either. That separate engine
+project's database keeps migrating manually, exactly as in
+[gmail-inbound-runbook.md](gmail-inbound-runbook.md) Part B — this build-time step only ever
+applies to the single-project shape. The root-level engine project (`api/index.ts`) is
+unaffected regardless: its `package.json` has no `build`/`prebuild` script, so nothing here
+ever runs there.
+
 `DATABASE_URL` must be set as a Production environment variable for this to work at build
 time. Get the connection string from the **Supabase dashboard → your project → Connect**
 (the transaction-mode pooler URI, port 6543). Note that Vercel marks `DATABASE_URL`
@@ -75,6 +85,27 @@ like `schema-migration-pending: database is missing migration(s) 27, 28, 29; thi
 expects through 29. Run \`npm run migrate\`.` — and every other request/cron tick answers a
 clear `503 schema_migration_pending` naming the same gap instead of a generic `500`. Run
 `npm run migrate` (or wait for the next production build) to clear it.
+
+### New migrations must keep working with the code already running
+
+Because a production deploy now migrates itself as part of the SAME build, the schema moves
+ahead of the code for the length of that deploy — the release still going out briefly runs
+against the new schema before its own rollout finishes. A migration is safe across that
+window only if it is additive: code that has never heard of the change keeps working
+unmodified against the migrated schema.
+
+**A new migration must keep working with the previous release's code.** Removing or
+tightening something — dropping a column, adding `NOT NULL` with no `DEFAULT`, narrowing a
+`CHECK` — ships in two releases, not one: a first migration that only stops the old thing
+being *required* (a `DEFAULT`, a widened constraint, a backfill), then a later migration,
+once nothing still depends on the old shape, that actually removes it. This is a written
+rule, not a mechanical check — nothing in CI enforces it.
+
+Two migrations already in `src/db/migrate.ts` predate this rule and would have needed the
+two-step: migration 018 (`agents_and_auth`) drops `conversations.assignee` outright in one
+step, and migration 021 (`threads_actor_model`) adds `threads.author_kind` `NOT NULL` with no
+`DEFAULT`, so an old-shaped `INSERT` into `threads` would fail against it. Both shipped
+before this rule existed and are left as-is; new migrations are held to it going forward.
 
 ## Moving a split deployment onto one project
 

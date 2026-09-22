@@ -45,6 +45,31 @@ describe('decideMigrationGate', () => {
     expect(decision).toEqual({ action: 'migrate' })
   })
 
+  it('skips a production build for the split deployment (HELPTHREAD_API_URL set) — it does not host the engine, so it does not own the database', () => {
+    const decision = decideMigrationGate({
+      VERCEL_ENV: 'production',
+      HELPTHREAD_API_URL: 'https://engine.example.test',
+    })
+    expect(decision.action).toBe('skip')
+    expect(decision).toMatchObject({
+      reason: expect.stringContaining('HELPTHREAD_API_URL'),
+    })
+  })
+
+  it('skips the split deployment even when DATABASE_URL is ALSO set — HELPTHREAD_API_URL wins outright', () => {
+    const decision = decideMigrationGate({
+      VERCEL_ENV: 'production',
+      HELPTHREAD_API_URL: 'https://engine.example.test',
+      DATABASE_URL: 'postgres://coincidentally-set',
+    })
+    expect(decision.action).toBe('skip')
+  })
+
+  it("treats a blank HELPTHREAD_API_URL as unset — still fails without DATABASE_URL, doesn't skip", () => {
+    const decision = decideMigrationGate({ VERCEL_ENV: 'production', HELPTHREAD_API_URL: '   ' })
+    expect(decision.action).toBe('fail')
+  })
+
   it('never echoes DATABASE_URL itself in any reason string', () => {
     const secretUrl = 'postgres://user:supersecret@host/db'
     const decisions = [

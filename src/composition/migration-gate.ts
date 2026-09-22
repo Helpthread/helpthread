@@ -15,9 +15,22 @@
  *
  * A non-production build always `skip`s: it must never touch the database,
  * migrated or not — a preview deployment does not own the database it's
- * configured against. A production build with no `DATABASE_URL` `fail`s
- * rather than silently skipping: deploying code against a database nobody
- * migrated is exactly the outage this gate exists to prevent.
+ * configured against.
+ *
+ * A production build for a SPLIT deployment (the UI and the engine as
+ * separate Vercel projects — specs/deploy/single-project.md's Configuration
+ * table, and `web/src/lib/api.ts`'s own `apiBaseUrl()`) also `skip`s: this
+ * `web/` project doesn't host the engine, so it doesn't own the database
+ * either — the separate engine project's database keeps migrating manually
+ * (`npm run migrate`). `HELPTHREAD_API_URL` being set is the SAME signal
+ * `apiBaseUrl()` already uses to mean "point elsewhere"; reused here rather
+ * than invented twice. (The root-level engine project, `api/index.ts`, is
+ * unaffected either way — its `package.json` has no `build`/`prebuild`
+ * script, so this gate never runs there at all.)
+ *
+ * A production, single-project build with no `DATABASE_URL` `fail`s rather
+ * than silently skipping: deploying code against a database nobody migrated
+ * is exactly the outage this gate exists to prevent.
  */
 
 /** What `scripts/migrate-if-production.ts` should do, and why. */
@@ -34,12 +47,20 @@ export type MigrationGateDecision =
 export function decideMigrationGate(env: {
   VERCEL_ENV?: string
   DATABASE_URL?: string
+  HELPTHREAD_API_URL?: string
 }): MigrationGateDecision {
   if (env.VERCEL_ENV !== 'production') {
     const observed = env.VERCEL_ENV === undefined ? 'unset' : `'${env.VERCEL_ENV}'`
     return {
       action: 'skip',
       reason: `VERCEL_ENV is ${observed}, not 'production' — preview and development builds never touch the database.`,
+    }
+  }
+  if (env.HELPTHREAD_API_URL !== undefined && env.HELPTHREAD_API_URL.trim().length > 0) {
+    return {
+      action: 'skip',
+      reason:
+        "HELPTHREAD_API_URL is set — this is the split deployment's UI project, not the one hosting the engine. Its database is a separate engine project's, migrated manually with `npm run migrate`.",
     }
   }
   if (env.DATABASE_URL === undefined || env.DATABASE_URL.trim().length === 0) {
