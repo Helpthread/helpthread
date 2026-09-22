@@ -35,6 +35,8 @@
  * migrated is exactly the outage this gate exists to prevent.
  */
 
+import { withLibpqSslCompat } from './postgres-url-compat.js'
+
 /** What `scripts/migrate-if-production.ts` should do, and why. */
 export type MigrationGateDecision =
   | { action: 'skip'; reason: string }
@@ -45,9 +47,14 @@ export type MigrationGateDecision =
  * `DATABASE_URL`, falling back to `POSTGRES_URL` — the Vercel⇄Supabase
  * Marketplace integration's pooled connection string (issue #151/#153) —
  * when `DATABASE_URL` itself is unset or blank. An explicit `DATABASE_URL`
- * always wins; mirrors `src/composition/config.ts`'s identical fallback
- * (kept separate rather than shared, since this module intentionally takes
- * no dependency on `config.ts` — see the module doc).
+ * always wins and is returned byte-for-byte untouched; mirrors
+ * `src/composition/config.ts`'s identical fallback (kept separate rather
+ * than shared, since this module intentionally takes no dependency on
+ * `config.ts` — see the module doc). The `POSTGRES_URL` fallback gets
+ * `withLibpqSslCompat` (`./postgres-url-compat.ts`) applied, same as
+ * `config.ts`'s own fallback: the integration's URL carries
+ * `sslmode=require`, which our `pg`/`pg-connection-string` treats as
+ * verify-full unless told otherwise.
  */
 function resolveDatabaseUrl(env: {
   DATABASE_URL?: string
@@ -57,7 +64,7 @@ function resolveDatabaseUrl(env: {
     return env.DATABASE_URL
   }
   if (env.POSTGRES_URL !== undefined && env.POSTGRES_URL.trim().length > 0) {
-    return env.POSTGRES_URL
+    return withLibpqSslCompat(env.POSTGRES_URL)
   }
   return undefined
 }

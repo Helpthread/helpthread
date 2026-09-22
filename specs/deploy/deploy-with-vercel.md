@@ -33,9 +33,21 @@ between dashboards:
 > `src/db/postgres.ts` cares about. This document assumes it follows the same convention
 > Vercel's other Postgres-compatible marketplace integrations use — `POSTGRES_URL` pooled,
 > `POSTGRES_URL_NON_POOLING` direct — which is also the shape `DATABASE_URL` already expects
-> from a hand-copied Supabase pooler URI (`specs/deploy/gmail-inbound-runbook.md` Part B1). If
-> your deployment's queries behave oddly under load, check the actual value Vercel wrote and
+> from a hand-copied Supabase pooler URI (`specs/deploy/gmail-inbound-runbook.md` Part B1).
+> Supporting evidence, still unconfirmed against a real button install: Supabase's own
+> [serverless-drivers guide](https://supabase.com/docs/guides/database/connecting-to-postgres/serverless-drivers)
+> tells users to set `POSTGRES_URL` to the Transaction pooler URI (port 6543). If your
+> deployment's queries behave oddly under load, check the actual value Vercel wrote and
 > compare it against the Supabase dashboard's **Connect** dialog's pooler URI.
+>
+> The `POSTGRES_URL` fallback also carries `?sslmode=require`. Helpthread rewrites that to
+> `sslmode=require&uselibpqcompat=true` before connecting (`src/composition/postgres-url-compat.ts`),
+> matching Supabase's own meaning for `require`: the connection is encrypted, but the server
+> certificate chain (which chains to Supabase's own CA, not one in Node's default trust store —
+> see [Supabase's SSL enforcement docs](https://supabase.com/docs/guides/platform/ssl-enforcement))
+> is not verified. If you want full chain verification instead, set `DATABASE_URL` explicitly
+> with `sslmode=verify-full` and Supabase's CA certificate — an explicit `DATABASE_URL` is never
+> rewritten.
 
 Vercel also sets `VERCEL_PROJECT_PRODUCTION_URL`, which Helpthread uses to fill in
 `PUBLIC_BASE_URL` automatically on your first Production deploy — see below.

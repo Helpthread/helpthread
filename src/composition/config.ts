@@ -25,6 +25,7 @@
  */
 
 import { decodeEncryptionKey } from '../store/token-crypto.js'
+import { withLibpqSslCompat } from './postgres-url-compat.js'
 
 /**
  * Minimum service Bearer token length — mirrors `createInboxApi`'s own
@@ -166,7 +167,16 @@ class ConfigErrors {
 
   /** A present, non-empty (after trim) string, or `null` with a recorded "missing" problem. */
   requireString(env: NodeJS.ProcessEnv, name: string): string | null {
-    const raw = env[name]
+    return this.requireStringValue(name, env[name])
+  }
+
+  /**
+   * {@link requireString}'s check, given the value directly rather than an
+   * `env` + name pair — for a field whose value may already be a resolved
+   * platform-integration fallback (`resolvePlatformIntegrationOverrides`)
+   * rather than a bare `env[name]` read.
+   */
+  requireStringValue(name: string, raw: string | undefined): string | null {
     if (raw === undefined || raw.trim().length === 0) {
       this.add(`${name} is required but missing or empty`)
       return null
@@ -218,15 +228,21 @@ export function loadConfig(
   rawEnv: NodeJS.ProcessEnv = process.env,
   options: LoadConfigOptions = {},
 ): AppConfig {
-  const env = withPlatformIntegrationFallbacks(rawEnv)
+  const overrides = resolvePlatformIntegrationOverrides(rawEnv)
   const errors = new ConfigErrors()
 
-  const databaseUrl = errors.requireString(env, 'DATABASE_URL')
-  const supabaseUrl = errors.requireString(env, 'SUPABASE_URL')
-  const supabaseServiceRoleKey = errors.requireString(env, 'SUPABASE_SERVICE_ROLE_KEY')
-  const blobBucket = errors.requireString(env, 'HELPTHREAD_BLOB_BUCKET')
-  const gmailOAuth = resolveGmailOAuth(env, errors)
-  const gmailPush = resolveGmailPush(env, errors)
+  const databaseUrl = errors.requireStringValue(
+    'DATABASE_URL',
+    overrides.databaseUrl ?? rawEnv.DATABASE_URL,
+  )
+  const supabaseUrl = errors.requireString(rawEnv, 'SUPABASE_URL')
+  const supabaseServiceRoleKey = errors.requireStringValue(
+    'SUPABASE_SERVICE_ROLE_KEY',
+    overrides.supabaseServiceRoleKey ?? rawEnv.SUPABASE_SERVICE_ROLE_KEY,
+  )
+  const blobBucket = errors.requireString(rawEnv, 'HELPTHREAD_BLOB_BUCKET')
+  const gmailOAuth = resolveGmailOAuth(rawEnv, errors)
+  const gmailPush = resolveGmailPush(rawEnv, errors)
   if (
     gmailPush !== undefined &&
     (gmailOAuth.clientId === undefined || gmailOAuth.clientSecret === undefined)
@@ -238,21 +254,24 @@ export function loadConfig(
         'or remove the three push variables to run on IMAP/SMTP alone.',
     )
   }
-  const apiToken = errors.requireMinLength(env, 'HELPTHREAD_API_TOKEN', MIN_API_TOKEN_LENGTH)
+  const apiToken = errors.requireMinLength(rawEnv, 'HELPTHREAD_API_TOKEN', MIN_API_TOKEN_LENGTH)
   const signingSecret = errors.requireMinLength(
-    env,
+    rawEnv,
     'HELPTHREAD_SIGNING_SECRET',
     MIN_SIGNING_SECRET_LENGTH,
   )
-  const cronSecret = errors.requireMinLength(env, 'CRON_SECRET', MIN_CRON_SECRET_LENGTH)
-  const setupSecret = resolveSetupSecret(env, errors)
-  const mailDomain = errors.requireString(env, 'HELPTHREAD_MAIL_DOMAIN')
-  const supportAddress = errors.requireString(env, 'HELPTHREAD_SUPPORT_ADDRESS')
+  const cronSecret = errors.requireMinLength(rawEnv, 'CRON_SECRET', MIN_CRON_SECRET_LENGTH)
+  const setupSecret = resolveSetupSecret(rawEnv, errors)
+  const mailDomain = errors.requireString(rawEnv, 'HELPTHREAD_MAIL_DOMAIN')
+  const supportAddress = errors.requireString(rawEnv, 'HELPTHREAD_SUPPORT_ADDRESS')
 
-  const tokenEncryptionKey = resolveEncryptionKey(env, errors)
-  const publicBaseUrl = resolvePublicBaseUrl(env, errors)
+  const tokenEncryptionKey = resolveEncryptionKey(rawEnv, errors)
+  const publicBaseUrl = resolvePublicBaseUrl(
+    overrides.publicBaseUrl ?? rawEnv.PUBLIC_BASE_URL,
+    errors,
+  )
   const ui = resolveUiBaseUrl(
-    env,
+    rawEnv,
     errors,
     options.uiAtPublicBaseUrl === true ? publicBaseUrl : null,
   )
@@ -343,8 +362,8 @@ function resolveSetupSecret(env: NodeJS.ProcessEnv, errors: ConfigErrors): strin
  * (`https://x/foo` + `/api/...` → `https://x/foo/api/...`, a mismatch), and
  * silently stripping it could hide a real operator misconfiguration.
  */
-function resolvePublicBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | null {
-  const raw = errors.requireString(env, 'PUBLIC_BASE_URL')
+function resolvePublicBaseUrl(rawValue: string | undefined, errors: ConfigErrors): string | null {
+  const raw = errors.requireStringValue('PUBLIC_BASE_URL', rawValue)
   if (raw === null) return null
   let parsed: URL
   try {
@@ -558,19 +577,31 @@ function isBlank(value: string | undefined): boolean {
   return value === undefined || value.trim().length === 0
 }
 
+/** The handful of fields {@link resolvePlatformIntegrationOverrides} can supply in place of their primary env var. */
+interface PlatformIntegrationOverrides {
+  databaseUrl?: string
+  supabaseServiceRoleKey?: string
+  publicBaseUrl?: string
+}
+
 /**
  * Platform-integration variable aliases (issue #151/#153, the Deploy with
- * Vercel path), resolved into a COPY of `env` before any field is validated
- * — so every error message and every `AppConfig` field still speaks in the
- * engine's own variable names, and an explicit value under the primary name
- * always wins over its alias (only a missing/blank primary falls back).
- * `rawEnv` itself (typically `process.env`) is never mutated.
+ * Vercel path), resolved by reading each named var straight off `rawEnv`
+ * into a small overrides object — NOT by copying the whole of `rawEnv`
+ * (typically `process.env`, which can hold arbitrary secrets Helpthread
+ * never needs to touch as a value; a bulk copy of it is exactly the kind of
+ * flow CodeQL's clear-text-logging query flags, even though nothing here
+ * ever logs a raw value). Every field {@link loadConfig} doesn't override
+ * here is read directly off `rawEnv` at its own call site, same as before;
+ * an explicit value under the primary name always wins over its alias (only
+ * a missing/blank primary falls back).
  *
- * - `DATABASE_URL` ← `POSTGRES_URL`: the Vercel⇄Supabase Marketplace
- *   integration writes the transaction-mode pooler connection string
- *   (Supabase's own Vercel-integration docs) under this name — the same
- *   shape `src/db/postgres.ts` already expects from a hand-copied
- *   `DATABASE_URL` (unnamed prepared statements; pooler-agnostic).
+ * - `DATABASE_URL` ← `POSTGRES_URL`, with {@link withLibpqSslCompat} applied
+ *   ONLY on this fallback path: the Vercel⇄Supabase Marketplace integration
+ *   writes the transaction-mode pooler connection string (Supabase's own
+ *   Vercel-integration docs) under this name, with `sslmode=require` — see
+ *   `./postgres-url-compat.ts` for why that needs the libpq-compat shim. An
+ *   explicit `DATABASE_URL` is never touched.
  * - `SUPABASE_SERVICE_ROLE_KEY` ← `SUPABASE_SECRET_KEY`: the integration's
  *   current name for the same server-only key. `SUPABASE_URL` needs no
  *   alias — the integration already writes that exact name.
@@ -582,20 +613,22 @@ function isBlank(value: string | undefined): boolean {
  *   `specs/deploy/deploy-with-vercel.md` for the passkey caveat this creates
  *   (passkeys bind to whichever host was current when one was registered).
  */
-function withPlatformIntegrationFallbacks(rawEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...rawEnv }
-  if (isBlank(env.DATABASE_URL) && !isBlank(env.POSTGRES_URL)) {
-    env.DATABASE_URL = env.POSTGRES_URL
+function resolvePlatformIntegrationOverrides(
+  rawEnv: NodeJS.ProcessEnv,
+): PlatformIntegrationOverrides {
+  const overrides: PlatformIntegrationOverrides = {}
+  if (isBlank(rawEnv.DATABASE_URL) && !isBlank(rawEnv.POSTGRES_URL)) {
+    overrides.databaseUrl = withLibpqSslCompat(rawEnv.POSTGRES_URL as string)
   }
-  if (isBlank(env.SUPABASE_SERVICE_ROLE_KEY) && !isBlank(env.SUPABASE_SECRET_KEY)) {
-    env.SUPABASE_SERVICE_ROLE_KEY = env.SUPABASE_SECRET_KEY
+  if (isBlank(rawEnv.SUPABASE_SERVICE_ROLE_KEY) && !isBlank(rawEnv.SUPABASE_SECRET_KEY)) {
+    overrides.supabaseServiceRoleKey = rawEnv.SUPABASE_SECRET_KEY
   }
   if (
-    isBlank(env.PUBLIC_BASE_URL) &&
-    env.VERCEL_ENV === 'production' &&
-    !isBlank(env.VERCEL_PROJECT_PRODUCTION_URL)
+    isBlank(rawEnv.PUBLIC_BASE_URL) &&
+    rawEnv.VERCEL_ENV === 'production' &&
+    !isBlank(rawEnv.VERCEL_PROJECT_PRODUCTION_URL)
   ) {
-    env.PUBLIC_BASE_URL = `https://${env.VERCEL_PROJECT_PRODUCTION_URL}`
+    overrides.publicBaseUrl = `https://${rawEnv.VERCEL_PROJECT_PRODUCTION_URL}`
   }
-  return env
+  return overrides
 }

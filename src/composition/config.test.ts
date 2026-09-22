@@ -322,6 +322,29 @@ describe('loadConfig — Vercel⇄Supabase Marketplace integration fallbacks (is
     expect(config.databaseUrl).toBe('postgres://user:pass@db.pooler.supabase.com:6543/postgres')
   })
 
+  it('applies the libpq-compat shim to a POSTGRES_URL fallback carrying sslmode=require', () => {
+    const env = validEnv()
+    delete (env as Record<string, string | undefined>).DATABASE_URL
+    const config = loadConfig({
+      ...env,
+      POSTGRES_URL: 'postgres://user:pass@db.pooler.supabase.com:6543/postgres?sslmode=require',
+    })
+    expect(config.databaseUrl).toBe(
+      'postgres://user:pass@db.pooler.supabase.com:6543/postgres?sslmode=require&uselibpqcompat=true',
+    )
+  })
+
+  it('never touches an explicit DATABASE_URL even when it carries sslmode=require — passed through byte-for-byte', () => {
+    const config = loadConfig({
+      ...validEnv(),
+      DATABASE_URL: 'postgres://user:pass@db.pooler.supabase.com:6543/postgres?sslmode=require',
+      POSTGRES_URL: 'postgres://integration-pooled-db',
+    })
+    expect(config.databaseUrl).toBe(
+      'postgres://user:pass@db.pooler.supabase.com:6543/postgres?sslmode=require',
+    )
+  })
+
   it('a blank DATABASE_URL still falls back to POSTGRES_URL', () => {
     const config = loadConfig({
       ...validEnv(),
