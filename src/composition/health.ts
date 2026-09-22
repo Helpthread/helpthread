@@ -244,7 +244,7 @@ const ALL_DELIVERY_STATUSES: InboundDeliveryStatus[] = [
  * path, but manual repair and hand-edited bookkeeping are exactly when a
  * health check earns its place.
  */
-async function readSchemaState(db: Db): Promise<{ applied: number[] | null }> {
+export async function readSchemaState(db: Db): Promise<{ applied: number[] | null }> {
   const table = await db.query<{ exists: string | null }>(
     `SELECT to_regclass('_migrations')::text AS exists`,
   )
@@ -255,8 +255,14 @@ async function readSchemaState(db: Db): Promise<{ applied: number[] | null }> {
   return { applied: rows.map((r) => r.id) }
 }
 
-/** Build the schema section + any alert it trips. Pure, so the ordering above stays obvious. */
-function assessSchema(applied: number[] | null): {
+/**
+ * Build the schema section + any alert it trips. Pure, so the ordering above
+ * stays obvious. Exported (alongside {@link readSchemaState}) so
+ * `src/composition/root.ts` can reuse this SAME assessment for the
+ * request/cron-path version-skew guard (issue #152) — one schema comparison,
+ * not two copies that could drift.
+ */
+export function assessSchema(applied: number[] | null): {
   section: HealthReport['schema']
   alerts: string[]
 } {

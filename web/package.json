@@ -7,7 +7,7 @@
   "scripts": {
     "predev": "npm run build:engine --prefix ..",
     "dev": "next dev",
-    "prebuild": "npm run build:engine --prefix ..",
+    "prebuild": "npm run build:engine --prefix .. && npm run migrate:deploy --prefix ..",
     "build": "next build",
     "start": "next start",
     "pretypecheck": "npm run build:engine --prefix ..",

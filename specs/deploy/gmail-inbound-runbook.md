@@ -195,13 +195,25 @@ privilege).
 ## Part B — Supabase: Postgres + Storage
 
 1. Create the Supabase project. From *Project Settings → Database → Connection
-   string*, take the **transaction-mode pooler** URI (**port 6543**, host
+   string* (or the **Connect** button on the project dashboard), take the
+   **transaction-mode pooler** URI (**port 6543**, host
    `...pooler.supabase.com`) → `DATABASE_URL`. (Port 6543, not 5432 — the
-   serverless-correct pooled connection; see `src/db/postgres.ts`.)
+   serverless-correct pooled connection; see `src/db/postgres.ts`.) Once this
+   is set as a Vercel Production environment variable, note that Vercel marks
+   it **sensitive** — `vercel env pull` returns it **empty**; go back to the
+   Supabase dashboard's Connect dialog if you need the value again, don't rely
+   on pulling it back out of Vercel.
 2. **Run migrations** against that database once (from a machine with the URL):
    the engine's `migrate` applies every migration including the new job-queue
    table. (A `scripts/migrate.ts` one-shot is provided with the composition
-   root; or run against the direct 5432 URL for the one-time DDL.)
+   root; or run against the direct 5432 URL for the one-time DDL.) This split
+   deployment has no build-time migration step — that's
+   [single-project.md](single-project.md)'s Migrations section, where a
+   Production build applies pending migrations itself. Here, migrate manually
+   before every deploy that adds one, or watch `GET
+   /api/v1/internal/health` — it fails loudly with a
+   `schema-migration-pending` alert (and every other request/cron tick answers
+   a `503 schema_migration_pending` instead of a generic `500`) if you forget.
 3. *Storage → Create bucket*, e.g. `helpthread-blobs` (**private**) →
    `HELPTHREAD_BLOB_BUCKET`.
 4. *Project Settings → API* → `SUPABASE_URL` and the **service_role** key →
