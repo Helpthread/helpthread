@@ -266,13 +266,17 @@ privilege).
    still-running drain can never race a concurrent drain that reclaimed one of
    its rows. If you raise the lease, keep `maxDuration` comfortably under it.
 
-All engine code is served by a single catch-all Vercel Function
-(`api/[...path].ts`, the Node runtime — NOT Edge, since the engine needs
-`node:crypto`) that hands every request to the composition root; no per-route
-function files. The cron paths above resolve through that same function.
+All engine code is served by a single Vercel Function (`api/index.ts`, the Node
+runtime — NOT Edge, since the engine needs `node:crypto`) that hands every request
+to the composition root; no per-route function files. Requests reach it through the
+explicit `rewrites` rule in `vercel.json`, not through a bracketed `[...path]`
+catch-all filename: the Vercel CLI's zero-config route generation emits a
+single-segment route for that filename and 404s every multi-segment `/api/v1/...`
+path (see `api/index.ts`'s own header). The cron paths above resolve through that
+same function.
 
 <a name="env-reference"></a>
-## Env reference
+## Part D — Env reference
 
 | Var | Source | Notes |
 |---|---|---|
@@ -280,15 +284,11 @@ function files. The cron paths above resolve through that same function.
 | `SUPABASE_URL` | Supabase B4 | project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase B4 | server-only secret |
 | `HELPTHREAD_BLOB_BUCKET` | Supabase B3 | private bucket name |
-| `GMAIL_OAUTH_CLIENT_ID` | Google A2 | |
-| `GMAIL_OAUTH_CLIENT_SECRET` | Google A2 | secret |
+| `GMAIL_OAUTH_CLIENT_ID` | Google A2 | required at boot even for an IMAP-only deployment |
+| `GMAIL_OAUTH_CLIENT_SECRET` | Google A2 | secret; required at boot even for an IMAP-only deployment |
 | `GMAIL_PUBSUB_TOPIC` | Google A3.1 | **OPTIONAL** — `projects/…/topics/…` |
 | `GMAIL_PUBSUB_SUBSCRIPTION` | Google A3.4 | **OPTIONAL** — `projects/…/subscriptions/…` |
 | `GMAIL_PUSH_SERVICE_ACCOUNT` | Google A3.3 | **OPTIONAL** — the push SA email (JWT `email` claim) |
-
-> The three `GMAIL_PUBSUB*` / `GMAIL_PUSH*` vars are **all-or-nothing**. Set all
-> three to enable push, or none to run on the scheduled sweep alone. Any partial
-> combination fails at boot with an error naming what's missing.
 | `HELPTHREAD_TOKEN_ENC_KEY` | you mint (C1) | 32-byte base64; encrypts tokens at rest |
 | `HELPTHREAD_API_TOKEN` | you mint (C1) | Agent-inbox Bearer, ≥16 chars |
 | `CRON_SECRET` | you mint (C1) | guards internal cron endpoints |
@@ -296,6 +296,19 @@ function files. The cron paths above resolve through that same function.
 | `HELPTHREAD_MAIL_DOMAIN` | you choose | domain minted into outbound Message-IDs |
 | `HELPTHREAD_SUPPORT_ADDRESS` | the mailbox | e.g. `support@example.com` |
 | `HELPTHREAD_SIGNING_SECRET` | you mint | ≥32 chars; HMAC keyring for reply/state/view tokens |
+| `HELPTHREAD_UI_SESSION_SECRET` | you mint | ≥32 chars; the UI's session-cookie secret (`web/README.md`). Enforced in production by `web/src/lib/session.ts` |
+
+> The three `GMAIL_PUBSUB*` / `GMAIL_PUSH*` vars are **all-or-nothing**. Set all
+> three to enable push, or none to run on the scheduled sweep alone. Any partial
+> combination fails at boot with an error naming what's missing.
+
+> `GMAIL_OAUTH_CLIENT_ID` and `GMAIL_OAUTH_CLIENT_SECRET` are **not** optional,
+> whether or not you ever connect a Gmail mailbox: `src/composition/config.ts`
+> requires both at boot. An IMAP-only deployment still needs a Google Cloud
+> OAuth app (Part A2), or placeholder values it never exercises.
+
+[`.env.example`](../../.env.example) at the repository root lists every variable in this
+table, in this order, with the same notes.
 
 ## Part E — Connect the mailbox (operator action)
 
