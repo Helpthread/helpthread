@@ -20,8 +20,9 @@
  * - the durable Postgres job queue,
  * - the Gmail connect/consent service and its disconnect counterpart (HT-47),
  * - `createInboxApi` with `gmailPush` + `gmailConnect` + `gmailDisconnect`
- *   PRESENT (they are absent-by-default on the engine; this root is where
- *   they get wired), and
+ *   wired when configured (they are absent-by-default on the engine; this
+ *   root is where they get wired) — all three stay absent when Gmail OAuth
+ *   isn't configured (issue #151: optional, both-or-neither), and
  * - the six internal cron closures (queue drain, outbox drain, snooze wake,
  *   Gmail watch maintenance, Gmail reconcile sweep, IMAP fetch) — the count
  *   grew with HT-69/77/94/101 while this line still said "two",
@@ -62,7 +63,7 @@ import type { Db } from '../db/client.js'
 import { createPostgresDb } from '../db/postgres.js'
 import { createGmailConnectService } from '../mail/gmail-connect.js'
 import { createGmailDisconnectService } from '../mail/gmail-disconnect.js'
-import { createGmailOAuthTokenService } from '../mail/gmail-oauth.js'
+import { createGmailOAuthTokenService, type GmailOAuthTokenService } from '../mail/gmail-oauth.js'
 import { createGmailReconcileHandler } from '../mail/gmail-reconcile.js'
 import {
   type GmailReconcileSweepDeps,
@@ -90,6 +91,7 @@ import { createPostgresQueue } from '../providers/adapters/postgres-queue/index.
 import { createSmtpEmailSender, verifySmtpConnection } from '../providers/adapters/smtp/index.js'
 import { createSupabaseStorageBlobStore } from '../providers/adapters/supabase-storage/index.js'
 import type { BlobStore } from '../providers/blob.js'
+import type { EmailSender } from '../providers/email-sender.js'
 import type { QueueMessage, QueueMessageHandler } from '../providers/queue.js'
 import { createAgentStore } from '../store/agents.js'
 import { createAssistantStore } from '../store/assistants.js'
@@ -252,29 +254,57 @@ export async function buildApp(
   // maintenance sweep enqueue, and the drain, so they share tunables. ---
   const queue = createPostgresQueue(db)
 
-  // --- Gmail OAuth token service (reads the encrypted refresh token, refreshes). ---
-  const tokenService = createGmailOAuthTokenService({
-    tokenStore,
-    mailboxStore,
-    clientId: config.gmailOAuthClientId,
-    clientSecret: config.gmailOAuthClientSecret,
-  })
+  // --- Gmail OAuth token service (reads the encrypted refresh token,
+  // refreshes) — ABSENT when Gmail OAuth isn't configured (issue #151:
+  // `GMAIL_OAUTH_CLIENT_ID`/`_SECRET` are optional, both-or-neither). A
+  // deployment with no Gmail OAuth can never have a Gmail-provider mailbox
+  // (connect is disabled below), so nothing downstream ever calls into a
+  // stand-in for this — the `GMAIL_NOT_CONFIGURED` stubs a few lines down
+  // exist only so the always-required `sender`/`senderResolver` shapes stay
+  // unchanged, not because they're expected to run. ---
+  const gmailOAuthConfigured =
+    config.gmailOAuthClientId !== undefined && config.gmailOAuthClientSecret !== undefined
+  const tokenService = gmailOAuthConfigured
+    ? createGmailOAuthTokenService({
+        tokenStore,
+        mailboxStore,
+        clientId: config.gmailOAuthClientId as string,
+        clientSecret: config.gmailOAuthClientSecret as string,
+      })
+    : undefined
+
+  /** Thrown by the Gmail-shaped stand-ins below if ever actually invoked (see `tokenService`'s comment for why that shouldn't happen). */
+  const GMAIL_NOT_CONFIGURED =
+    'Gmail is not configured for this deployment (GMAIL_OAUTH_CLIENT_ID/GMAIL_OAUTH_CLIENT_SECRET are unset) — connect a mailbox over IMAP/SMTP instead, or set both Gmail variables and redeploy.'
 
   // --- Outbound EmailSender. Gmail sends are per-mailbox (per access token);
   // for the single-mailbox dogfood, resolve the support mailbox by address at
   // SEND time (it is created dynamically at connect, so it may not exist when
-  // this root is first built) and bind its live token. ---
-  const sender = createGmailEmailSender({
-    getAccessToken: async () => {
-      const mailbox = await mailboxStore.getMailboxByAddress(config.supportAddress)
-      if (mailbox === null) {
-        throw new Error(
-          `composition: no connected mailbox for support address ${config.supportAddress} — connect it via the OAuth flow first`,
-        )
+  // this root is first built) and bind its live token. Without Gmail OAuth,
+  // this is a stub that refuses on send() — invite/passkey email callers
+  // already treat a `sender.send()` failure as "email didn't go out", not a
+  // request failure (`src/api/agents.ts`'s `sendInviteEmail`). ---
+  const sender: EmailSender = tokenService
+    ? createGmailEmailSender({
+        getAccessToken: async () => {
+          const mailbox = await mailboxStore.getMailboxByAddress(config.supportAddress)
+          if (mailbox === null) {
+            throw new Error(
+              `composition: no connected mailbox for support address ${config.supportAddress} — connect it via the OAuth flow first`,
+            )
+          }
+          return tokenService.getAccessToken(mailbox.id)
+        },
+      })
+    : {
+        // Rejects immediately and never actually waits, so any small bound
+        // satisfies the `maxSendMs < leaseMs` invariant `EmailSender`'s own
+        // doc comment requires.
+        maxSendMs: 1,
+        send: async () => {
+          throw new Error(GMAIL_NOT_CONFIGURED)
+        },
       }
-      return tokenService.getAccessToken(mailbox.id)
-    },
-  })
 
   // --- Per-conversation sender resolution (HT-101 Stage 2b-ii) — routes each
   // outbound reply through the SAME inbox its conversation arrived at,
@@ -284,10 +314,16 @@ export async function buildApp(
   // root rule (mirrors every other `createWatchClient`/`createImapClient`
   // injection in this file). `defaultAddress: config.supportAddress` is what
   // a `null` mailboxId (a pre-2b-i conversation) falls back to — see that
-  // module's doc comment. ---
+  // module's doc comment. `tokenService`'s stand-in mirrors `sender`'s above:
+  // only ever reached by resolving a Gmail-provider mailbox, which cannot
+  // exist without Gmail OAuth configured. ---
   const senderResolver = createSenderResolver({
     mailboxStore,
-    tokenService,
+    tokenService: tokenService ?? {
+      getAccessToken: async () => {
+        throw new Error(GMAIL_NOT_CONFIGURED)
+      },
+    },
     imapConfigStore,
     imapCredentialStore,
     createGmailEmailSender,
@@ -370,40 +406,52 @@ export async function buildApp(
           queue,
         }
 
-  // --- Gmail connect/consent service. ---
-  const connectService = createGmailConnectService({
-    db,
-    clientId: config.gmailOAuthClientId,
-    clientSecret: config.gmailOAuthClientSecret,
-    redirectUri: `${config.publicBaseUrl}/api/v1/inbound/gmail/callback`,
-    // Absent when push isn't configured: connect then skips the watch() arm
-    // and seeds the baseline from getProfile() (HT-94, gmail-connect.ts step 4).
-    ...(config.gmailPush !== undefined ? { topicName: config.gmailPush.topic } : {}),
-    scopes: GMAIL_SCOPES,
-    keyring,
-    mailboxStore,
-    tokenStore,
-    watchStateStore,
-    createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
-  })
-  const gmailConnect: GmailConnectDeps = {
-    service: connectService,
-    // Optional (HT-123): when configured, the callback redirects the
-    // operator back into the app instead of rendering a bare HTML page —
-    // same field `app.ts` uses for the bare-root redirect.
-    ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),
-  }
+  // --- Gmail connect/consent service — ABSENT when Gmail OAuth isn't
+  // configured (issue #151): a deployment with no Internal OAuth app has
+  // nothing to redirect a consent grant to, so `gmailConnect` stays
+  // undefined and `POST/GET .../gmail/connect|callback` 404 exactly like
+  // any other not-yet-provisioned optional feature (`src/api/index.ts`'s
+  // own degrade-by-omission convention for this same field). ---
+  const gmailConnect: GmailConnectDeps | undefined = gmailOAuthConfigured
+    ? {
+        service: createGmailConnectService({
+          db,
+          clientId: config.gmailOAuthClientId as string,
+          clientSecret: config.gmailOAuthClientSecret as string,
+          redirectUri: `${config.publicBaseUrl}/api/v1/inbound/gmail/callback`,
+          // Absent when push isn't configured: connect then skips the watch() arm
+          // and seeds the baseline from getProfile() (HT-94, gmail-connect.ts step 4).
+          ...(config.gmailPush !== undefined ? { topicName: config.gmailPush.topic } : {}),
+          scopes: GMAIL_SCOPES,
+          keyring,
+          mailboxStore,
+          tokenStore,
+          watchStateStore,
+          createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
+        }),
+        // Optional (HT-123): when configured, the callback redirects the
+        // operator back into the app instead of rendering a bare HTML page —
+        // same field `app.ts` uses for the bare-root redirect.
+        ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),
+      }
+    : undefined
 
-  // --- Gmail disconnect admin action (HT-47) — the inverse of connect. ---
-  const disconnectService = createGmailDisconnectService({
-    db,
-    mailboxStore,
-    tokenStore,
-    watchStateStore,
-    tokenService,
-    createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
-  })
-  const gmailDisconnect: GmailDisconnectDeps = { service: disconnectService }
+  // --- Gmail disconnect admin action (HT-47) — the inverse of connect.
+  // Same absence as `gmailConnect` above: there is never a Gmail mailbox to
+  // disconnect without Gmail OAuth configured. ---
+  const gmailDisconnect: GmailDisconnectDeps | undefined =
+    gmailOAuthConfigured && tokenService !== undefined
+      ? {
+          service: createGmailDisconnectService({
+            db,
+            mailboxStore,
+            tokenStore,
+            watchStateStore,
+            tokenService,
+            createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),
+          }),
+        }
+      : undefined
 
   // --- IMAP/SMTP connect/check service (HT-101 Stage 2a-ii) — the per-inbox
   // counterpart of the Gmail connect service above, wired to the SAME `db`
@@ -483,8 +531,8 @@ export async function buildApp(
     // HT-49: Gmail delivers a sent reply's own copy back into the
     // SAME mailbox it was sent from, where reconcile would otherwise re-ingest
     // it as a phantom inbound message (src/mail/send.ts's "The reply token's
-    // own self-echo" section). Wired unconditionally here — every deployment
-    // this root builds is Gmail-backed.
+    // own self-echo" section). Wired unconditionally here — harmless (a no-op
+    // check) on a deployment with no Gmail mailboxes at all.
     selfEchoGuard: { mailboxStore, inboundDeliveryStore },
   })
 
@@ -494,15 +542,20 @@ export async function buildApp(
   // per transport. ---
   const ingestDeps: IngestDeps = { db, inboundDeliveryStore, blobStore, keyring }
 
-  // --- The reconcile handler the queue drain dispatches to. ---
-  const reconcileHandler = createGmailReconcileHandler({
-    tokenService,
-    mailboxStore,
-    watchStateStore,
-    blobStore,
-    ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
-    createHistoryClient: (getAccessToken) => createGmailHistoryClient({ getAccessToken }),
-  })
+  // --- The reconcile handler the queue drain dispatches to — ABSENT when
+  // Gmail OAuth isn't configured: without it there is no Gmail mailbox that
+  // could ever enqueue a `GMAIL_RECONCILE_TOPIC` job (connect is disabled
+  // above), so the drain simply never registers a handler for that topic. ---
+  const reconcileHandler = tokenService
+    ? createGmailReconcileHandler({
+        tokenService,
+        mailboxStore,
+        watchStateStore,
+        blobStore,
+        ingest: (raw) => ingestInboundMessage(raw, ingestDeps),
+        createHistoryClient: (getAccessToken) => createGmailHistoryClient({ getAccessToken }),
+      })
+    : undefined
 
   // --- The webhook delivery handler the SAME queue drain also dispatches to
   // (HT-69) — the outbox drain (wired below, its own cron tick) is what
@@ -518,8 +571,12 @@ export async function buildApp(
   // at this single wiring point is the honest boundary between "any queued
   // job" and "this topic's job shape".
   const drainHandlers: Record<string, QueueMessageHandler<unknown>> = {
-    [GMAIL_RECONCILE_TOPIC]: (message) =>
-      reconcileHandler(message as QueueMessage<GmailReconcileJob>),
+    ...(reconcileHandler !== undefined
+      ? {
+          [GMAIL_RECONCILE_TOPIC]: (message: QueueMessage<unknown>) =>
+            reconcileHandler(message as QueueMessage<GmailReconcileJob>),
+        }
+      : {}),
     [WEBHOOK_DELIVERY_TOPIC]: (message) =>
       webhookDeliveryHandler(message as QueueMessage<WebhookDeliveryJob>),
   }
@@ -536,12 +593,17 @@ export async function buildApp(
   // --- Watch-maintenance deps (daily re-arm). Only meaningful when push is
   // configured — with no topic there is no watch to re-arm. The reconciliation
   // sweep is NOT part of this any more (HT-94): it runs on its own every-minute
-  // cron as the primary intake, independent of whether push exists. ---
+  // cron as the primary intake, independent of whether push exists.
+  // `tokenService as GmailOAuthTokenService`: `config.gmailPush` being set
+  // guarantees Gmail OAuth is ALSO set (`config.ts`'s `loadConfig` rejects the
+  // opposite at boot, since push has nothing to authenticate without it), so
+  // `tokenService` is never the stub here — TypeScript just can't see that
+  // cross-field invariant. ---
   const watchMaintenanceDeps: GmailWatchMaintenanceDeps | undefined =
     config.gmailPush === undefined
       ? undefined
       : {
-          tokenService,
+          tokenService: tokenService as GmailOAuthTokenService,
           mailboxStore,
           watchStateStore,
           createWatchClient: (getAccessToken) => createGmailWatchClient({ getAccessToken }),

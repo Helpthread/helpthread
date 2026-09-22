@@ -23,6 +23,20 @@ into infrastructure they choose and control.
 > ([`specs/mail/mailbox-connection.md`](specs/mail/mailbox-connection.md)) with an open
 > question about transport-stable message ids.
 
+## Deploy with Vercel (alpha, developer preview)
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FHelpthread%2Fhelpthread&project-name=helpthread&repository-name=helpthread&root-directory=web&env=HELPTHREAD_TOKEN_ENC_KEY%2CHELPTHREAD_API_TOKEN%2CHELPTHREAD_SIGNING_SECRET%2CCRON_SECRET%2CHELPTHREAD_UI_SESSION_SECRET%2CHELPTHREAD_SETUP_SECRET%2CHELPTHREAD_MAIL_DOMAIN%2CHELPTHREAD_SUPPORT_ADDRESS%2CHELPTHREAD_BLOB_BUCKET&envDescription=Secrets%20you%20generate%20yourself%2C%20plus%20your%20mail%20domain%20and%20support%20address%20%E2%80%94%20see%20the%20setup%20guide.&envLink=https%3A%2F%2Fgithub.com%2FHelpthread%2Fhelpthread%2Fblob%2Fmain%2Fspecs%2Fdeploy%2Fdeploy-with-vercel.md&stores=%5B%7B%22type%22%3A%22integration%22%2C%22integrationSlug%22%3A%22supabase%22%2C%22productSlug%22%3A%22supabase%22%7D%5D)
+
+This is an **alpha, developer-preview install path** (issues #151/#153) — a guided one-click
+route into a real Helpthread deployment, not a polished onboarding flow. It creates a Vercel
+project rooted at `web/`, attaches the Supabase Marketplace integration to provision a
+connected Postgres database, and asks you only for the handful of values Vercel and Supabase
+can't generate on your behalf. Read
+**[Deploy with Vercel](specs/deploy/deploy-with-vercel.md)** before you click — it explains
+every prompted variable, how to generate the secrets, the Vercel Pro requirement, and what
+happens on first visit. This path has not yet been exercised end to end (no deployment has
+been created from this exact button); the manual runbook below remains the proven path.
+
 ## Start here
 
 - **[Founding Charter](CHARTER.md)** — identity, principles, and project commitments
@@ -31,6 +45,7 @@ into infrastructure they choose and control.
 - **[Governance](GOVERNANCE.md)** — how project decisions are made today
 - **[Legal and licensing](legal/README.md)** — the AGPL core and commercial-module boundary
 - **[Deploying](specs/deploy/single-project.md)** — one Vercel project, one origin
+- **[Deploy with Vercel](specs/deploy/deploy-with-vercel.md)** — the alpha one-click install path
 - **[`specs/`](specs/)** — the maintained behavioral and product contracts
 - **[`fixtures/`](fixtures/)** — the mail engine's black-box acceptance suite
 

@@ -81,10 +81,13 @@ the row commits) is what protects invariant #1.
 
 ## Part A — Google Cloud: OAuth app (+ optional Pub/Sub)
 
-> **Read this before starting.** As of HT-94, only **A1 and A2** are required.
-> A3 and A4 configure Gmail **push**, which is now optional: inbound mail
-> arrives either by push webhook or by the bounded scheduled fetch that runs
-> every minute (CHARTER.md §2, amended 2026-07-20).
+> **Read this before starting.** This whole Part is only needed if you want Gmail. As of
+> issue #151, `GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET` are optional
+> both-or-neither — an IMAP/SMTP-only deployment can skip this Part entirely. If you do
+> want Gmail, only **A1 and A2** (this Part's OAuth app) are required. A3 and A4
+> configure Gmail **push**, which is separately optional: inbound mail arrives either by
+> push webhook or by the bounded scheduled fetch that runs every minute (CHARTER.md §2,
+> amended 2026-07-20).
 >
 > **Skipping A3/A4 is the recommended path for most operators.** It removes six
 > setup steps — including the two that fail *silently*, the
@@ -298,12 +301,12 @@ same function.
 
 | Var | Source | Notes |
 |---|---|---|
-| `DATABASE_URL` | Supabase B1 | 6543 pooler URI |
+| `DATABASE_URL` | Supabase B1 | 6543 pooler URI. Falls back to `POSTGRES_URL` if unset — the name the Vercel⇄Supabase Marketplace integration writes (`deploy-with-vercel.md`) |
 | `SUPABASE_URL` | Supabase B4 | project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase B4 | server-only secret |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase B4 | server-only secret. Falls back to `SUPABASE_SECRET_KEY` if unset — that integration's current name for the same key |
 | `HELPTHREAD_BLOB_BUCKET` | Supabase B3 | private bucket name |
-| `GMAIL_OAUTH_CLIENT_ID` | Google A2 | required at boot even for an IMAP-only deployment |
-| `GMAIL_OAUTH_CLIENT_SECRET` | Google A2 | secret; required at boot even for an IMAP-only deployment |
+| `GMAIL_OAUTH_CLIENT_ID` | Google A2 | **OPTIONAL, both-or-neither with `GMAIL_OAUTH_CLIENT_SECRET`** (issue #151). Unset (both), Gmail connect is disabled and IMAP/SMTP is unaffected; one set without the other fails at boot |
+| `GMAIL_OAUTH_CLIENT_SECRET` | Google A2 | secret; **OPTIONAL** — see `GMAIL_OAUTH_CLIENT_ID` |
 | `GMAIL_PUBSUB_TOPIC` | Google A3.1 | **OPTIONAL** — `projects/…/topics/…` |
 | `GMAIL_PUBSUB_SUBSCRIPTION` | Google A3.4 | **OPTIONAL** — `projects/…/subscriptions/…` |
 | `GMAIL_PUSH_SERVICE_ACCOUNT` | Google A3.3 | **OPTIONAL** — the push SA email (JWT `email` claim) |
@@ -321,10 +324,12 @@ same function.
 > three to enable push, or none to run on the scheduled sweep alone. Any partial
 > combination fails at boot with an error naming what's missing.
 
-> `GMAIL_OAUTH_CLIENT_ID` and `GMAIL_OAUTH_CLIENT_SECRET` are **not** optional,
-> whether or not you ever connect a Gmail mailbox: `src/composition/config.ts`
-> requires both at boot. An IMAP-only deployment still needs a Google Cloud
-> OAuth app (Part A2), or placeholder values it never exercises.
+> `GMAIL_OAUTH_CLIENT_ID` and `GMAIL_OAUTH_CLIENT_SECRET` are **both-or-neither** (issue
+> #151, superseding an earlier version of this note that called them always required):
+> set both to enable Gmail, or leave both unset to run an IMAP/SMTP-only deployment with
+> no Google Cloud OAuth app at all. Setting exactly one fails at boot naming the missing
+> one. Leaving both unset disables the Gmail connect/OAuth routes (a clear 404/refusal,
+> not a crash) and logs one warning at boot; IMAP/SMTP mailboxes are unaffected.
 
 [`.env.example`](../../.env.example) at the repository root lists every variable in this
 table, in this order, with the same notes.

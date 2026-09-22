@@ -526,3 +526,79 @@ describe('buildApp — version-skew guard (issue #152)', () => {
     }
   })
 })
+
+describe('buildApp — Gmail OAuth absent (issue #151: optional for IMAP/SMTP-only deployments)', () => {
+  /** `testConfig()` with Gmail OAuth (and, since push requires it, gmailPush too) removed. */
+  function configWithoutGmail(): AppConfig {
+    const config = testConfig()
+    const { gmailOAuthClientId, gmailOAuthClientSecret, gmailPush, ...rest } = config
+    return rest
+  }
+
+  let db: Db
+  let handler: (request: Request) => Promise<Response>
+
+  beforeEach(async () => {
+    db = await createPgliteDb()
+    await migrate(db)
+    handler = await buildApp(configWithoutGmail(), { db, blobStore: fakeBlobStore() })
+  })
+
+  afterEach(async () => {
+    await db.close()
+  })
+
+  it('boots successfully and serves ordinary routes — Gmail absence never takes down the whole engine', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/conversations`, {
+        headers: { Authorization: `Bearer ${API_TOKEN}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+  })
+
+  it('POST /inbound/gmail/connect → 404, same as any other not-provisioned optional route', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/gmail/connect`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${API_TOKEN}` },
+      }),
+    )
+    expect(res.status).toBe(404)
+    const body = (await res.json()) as { error: { code: string } }
+    expect(body.error.code).toBe('not_found')
+  })
+
+  it('POST /inbound/gmail/disconnect → 404', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/gmail/disconnect`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: 'nobody@example.test' }),
+      }),
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('POST /inbound/gmail (the push webhook) → the same uniform rejection as push simply not being configured', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/inbound/gmail`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      }),
+    )
+    expect(res.status).toBe(403)
+    const body = (await res.json()) as { error: { code: string } }
+    expect(body.error.code).toBe('gmail_push_rejected')
+  })
+
+  it('the internal health check still runs (no Gmail watch/mailbox state to report)', async () => {
+    const res = await handler(
+      new Request(`${ORIGIN}/api/v1/internal/health`, {
+        headers: { Authorization: `Bearer ${CRON_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+  })
+})

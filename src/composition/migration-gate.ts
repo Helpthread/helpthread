@@ -28,16 +28,39 @@
  * unaffected either way — its `package.json` has no `build`/`prebuild`
  * script, so this gate never runs there at all.)
  *
- * A production, single-project build with no `DATABASE_URL` `fail`s rather
- * than silently skipping: deploying code against a database nobody migrated
- * is exactly the outage this gate exists to prevent.
+ * A production, single-project build with no `DATABASE_URL` (or its
+ * `POSTGRES_URL` fallback — issue #151/#153, the Vercel⇄Supabase Marketplace
+ * integration's own name for the same pooled connection string) `fail`s
+ * rather than silently skipping: deploying code against a database nobody
+ * migrated is exactly the outage this gate exists to prevent.
  */
 
 /** What `scripts/migrate-if-production.ts` should do, and why. */
 export type MigrationGateDecision =
   | { action: 'skip'; reason: string }
   | { action: 'fail'; reason: string }
-  | { action: 'migrate' }
+  | { action: 'migrate'; databaseUrl: string }
+
+/**
+ * `DATABASE_URL`, falling back to `POSTGRES_URL` — the Vercel⇄Supabase
+ * Marketplace integration's pooled connection string (issue #151/#153) —
+ * when `DATABASE_URL` itself is unset or blank. An explicit `DATABASE_URL`
+ * always wins; mirrors `src/composition/config.ts`'s identical fallback
+ * (kept separate rather than shared, since this module intentionally takes
+ * no dependency on `config.ts` — see the module doc).
+ */
+function resolveDatabaseUrl(env: {
+  DATABASE_URL?: string
+  POSTGRES_URL?: string
+}): string | undefined {
+  if (env.DATABASE_URL !== undefined && env.DATABASE_URL.trim().length > 0) {
+    return env.DATABASE_URL
+  }
+  if (env.POSTGRES_URL !== undefined && env.POSTGRES_URL.trim().length > 0) {
+    return env.POSTGRES_URL
+  }
+  return undefined
+}
 
 /**
  * Decide the action for this build. `env` is shaped like `process.env` so a
@@ -47,6 +70,7 @@ export type MigrationGateDecision =
 export function decideMigrationGate(env: {
   VERCEL_ENV?: string
   DATABASE_URL?: string
+  POSTGRES_URL?: string
   HELPTHREAD_API_URL?: string
 }): MigrationGateDecision {
   if (env.VERCEL_ENV !== 'production') {
@@ -63,12 +87,13 @@ export function decideMigrationGate(env: {
         "HELPTHREAD_API_URL is set — this is the split deployment's UI project, not the one hosting the engine. Its database is a separate engine project's, migrated manually with `npm run migrate`.",
     }
   }
-  if (env.DATABASE_URL === undefined || env.DATABASE_URL.trim().length === 0) {
+  const databaseUrl = resolveDatabaseUrl(env)
+  if (databaseUrl === undefined) {
     return {
       action: 'fail',
       reason:
-        'DATABASE_URL is required for a production build (it applies pending migrations before the deploy goes live). Set it in the Production environment variables — Supabase dashboard → the project → Connect — then redeploy.',
+        'DATABASE_URL (or POSTGRES_URL, written by the Vercel Supabase integration) is required for a production build (it applies pending migrations before the deploy goes live). Set it in the Production environment variables — Supabase dashboard → the project → Connect — then redeploy.',
     }
   }
-  return { action: 'migrate' }
+  return { action: 'migrate', databaseUrl }
 }

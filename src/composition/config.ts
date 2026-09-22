@@ -70,10 +70,22 @@ export interface AppConfig {
   supabaseServiceRoleKey: string
   /** Private Storage bucket name attachment/oversized-raw blobs are namespaced within. */
   blobBucket: string
-  /** The Internal OAuth app's client id (connect flow + token refresh). */
-  gmailOAuthClientId: string
-  /** The Internal OAuth app's client secret. */
-  gmailOAuthClientSecret: string
+  /**
+   * The Internal OAuth app's client id (connect flow + token refresh).
+   * OPTIONAL as of the Vercel Deploy Button path (issue #151): unlike every
+   * `require*` field above, `GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET`
+   * are BOTH-OR-NEITHER (see {@link resolveGmailOAuth}) — a deployment that
+   * only ever connects IMAP/SMTP mailboxes no longer needs a placeholder
+   * Google Cloud OAuth app just to boot. Absent, `./root.ts` never
+   * constructs the Gmail token service, connect/disconnect services, or the
+   * push webhook deps: Gmail connect/OAuth routes refuse (existing
+   * degrade-by-omission convention, matching `gmailPush`/`gmailConnect`
+   * being absent-by-default in `src/api/index.ts`), and one warning is
+   * logged at boot (`warnings` below). IMAP/SMTP mailboxes are unaffected.
+   */
+  gmailOAuthClientId?: string
+  /** The Internal OAuth app's client secret. OPTIONAL — see {@link gmailOAuthClientId}. */
+  gmailOAuthClientSecret?: string
   /**
    * Gmail push configuration — OPTIONAL as of HT-94.
    *
@@ -203,18 +215,29 @@ export interface LoadConfigOptions {
 }
 
 export function loadConfig(
-  env: NodeJS.ProcessEnv = process.env,
+  rawEnv: NodeJS.ProcessEnv = process.env,
   options: LoadConfigOptions = {},
 ): AppConfig {
+  const env = withPlatformIntegrationFallbacks(rawEnv)
   const errors = new ConfigErrors()
 
   const databaseUrl = errors.requireString(env, 'DATABASE_URL')
   const supabaseUrl = errors.requireString(env, 'SUPABASE_URL')
   const supabaseServiceRoleKey = errors.requireString(env, 'SUPABASE_SERVICE_ROLE_KEY')
   const blobBucket = errors.requireString(env, 'HELPTHREAD_BLOB_BUCKET')
-  const gmailOAuthClientId = errors.requireString(env, 'GMAIL_OAUTH_CLIENT_ID')
-  const gmailOAuthClientSecret = errors.requireString(env, 'GMAIL_OAUTH_CLIENT_SECRET')
+  const gmailOAuth = resolveGmailOAuth(env, errors)
   const gmailPush = resolveGmailPush(env, errors)
+  if (
+    gmailPush !== undefined &&
+    (gmailOAuth.clientId === undefined || gmailOAuth.clientSecret === undefined)
+  ) {
+    errors.add(
+      'GMAIL_PUBSUB_TOPIC/GMAIL_PUBSUB_SUBSCRIPTION/GMAIL_PUSH_SERVICE_ACCOUNT are set, but ' +
+        'GMAIL_OAUTH_CLIENT_ID/GMAIL_OAUTH_CLIENT_SECRET are not — Gmail push has nothing to ' +
+        'authenticate against without Gmail OAuth configured. Set both Gmail OAuth variables, ' +
+        'or remove the three push variables to run on IMAP/SMTP alone.',
+    )
+  }
   const apiToken = errors.requireMinLength(env, 'HELPTHREAD_API_TOKEN', MIN_API_TOKEN_LENGTH)
   const signingSecret = errors.requireMinLength(
     env,
@@ -236,6 +259,13 @@ export function loadConfig(
 
   errors.throwIfAny()
 
+  // Secret-free notes for `./root.ts` to log once at boot — collected from
+  // every resolver above that can degrade instead of failing (gmailOAuth,
+  // ui), rather than one field per warning source.
+  const warnings = [gmailOAuth.warning, ui.warning].filter(
+    (warning): warning is string => warning !== undefined,
+  )
+
   // Every value above is non-null here: throwIfAny() would have thrown
   // otherwise. The non-null assertions make that guarantee explicit to the
   // type system rather than defeating it with a cast on the whole object.
@@ -244,8 +274,9 @@ export function loadConfig(
     supabaseUrl: supabaseUrl as string,
     supabaseServiceRoleKey: supabaseServiceRoleKey as string,
     blobBucket: blobBucket as string,
-    gmailOAuthClientId: gmailOAuthClientId as string,
-    gmailOAuthClientSecret: gmailOAuthClientSecret as string,
+    ...(gmailOAuth.clientId !== undefined && gmailOAuth.clientSecret !== undefined
+      ? { gmailOAuthClientId: gmailOAuth.clientId, gmailOAuthClientSecret: gmailOAuth.clientSecret }
+      : {}),
     ...(gmailPush !== undefined ? { gmailPush } : {}),
     tokenEncryptionKey: tokenEncryptionKey as Buffer,
     apiToken: apiToken as string,
@@ -256,7 +287,7 @@ export function loadConfig(
     mailDomain: mailDomain as string,
     supportAddress: supportAddress as string,
     ...(ui.uiBaseUrl !== undefined ? { uiBaseUrl: ui.uiBaseUrl } : {}),
-    ...(ui.warning !== undefined ? { warnings: [ui.warning] } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
   }
 }
 
@@ -372,6 +403,50 @@ function isLoopbackHost(hostname: string): boolean {
 }
 
 /**
+ * Resolve the BOTH-OR-NEITHER `GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET`
+ * pair (issue #151 — the Deploy with Vercel path makes Gmail optional for
+ * installs that only ever connect IMAP/SMTP mailboxes). Three outcomes:
+ *
+ * - both unset  → `{ warning }`; Gmail connect is disabled for this
+ *   deployment (`./root.ts` never builds the Gmail token/connect/disconnect
+ *   services), IMAP/SMTP is unaffected, and one secret-free line is logged
+ *   at boot.
+ * - both set    → `{ clientId, clientSecret }`, exactly the pre-#151 shape.
+ * - one set     → a config ERROR naming the missing one. Half a Gmail OAuth
+ *   app is not a usable Gmail OAuth app, and a deployment that believes
+ *   Gmail is configured because ONE var is present is the same silent-half-
+ *   config failure {@link resolveGmailPush} already refuses for the push trio.
+ */
+function resolveGmailOAuth(
+  env: NodeJS.ProcessEnv,
+  errors: ConfigErrors,
+): { clientId?: string; clientSecret?: string; warning?: string } {
+  const clientIdRaw = env.GMAIL_OAUTH_CLIENT_ID
+  const clientSecretRaw = env.GMAIL_OAUTH_CLIENT_SECRET
+  const clientId =
+    clientIdRaw !== undefined && clientIdRaw.trim().length > 0 ? clientIdRaw : undefined
+  const clientSecret =
+    clientSecretRaw !== undefined && clientSecretRaw.trim().length > 0 ? clientSecretRaw : undefined
+
+  if (clientId === undefined && clientSecret === undefined) {
+    return {
+      warning:
+        'GMAIL_OAUTH_CLIENT_ID/GMAIL_OAUTH_CLIENT_SECRET are unset — Gmail connect is disabled ' +
+        'for this deployment (the Gmail connect/OAuth routes refuse); IMAP/SMTP mailboxes are unaffected.',
+    }
+  }
+  if (clientId === undefined || clientSecret === undefined) {
+    errors.add(
+      `GMAIL_OAUTH_CLIENT_ID and GMAIL_OAUTH_CLIENT_SECRET must be set together — ${
+        clientId === undefined ? 'GMAIL_OAUTH_CLIENT_ID' : 'GMAIL_OAUTH_CLIENT_SECRET'
+      } is unset. Set both to enable Gmail, or unset both to run on IMAP/SMTP alone.`,
+    )
+    return {}
+  }
+  return { clientId, clientSecret }
+}
+
+/**
  * Resolve the OPTIONAL Gmail push trio, all-or-nothing (HT-94).
  *
  * Three outcomes, and only three:
@@ -476,4 +551,51 @@ function resolveUiBaseUrl(
     return {}
   }
   return { uiBaseUrl: parsed.origin }
+}
+
+/** `env[name]`, treating unset OR whitespace-only as absent — the convention every resolver above already uses. */
+function isBlank(value: string | undefined): boolean {
+  return value === undefined || value.trim().length === 0
+}
+
+/**
+ * Platform-integration variable aliases (issue #151/#153, the Deploy with
+ * Vercel path), resolved into a COPY of `env` before any field is validated
+ * — so every error message and every `AppConfig` field still speaks in the
+ * engine's own variable names, and an explicit value under the primary name
+ * always wins over its alias (only a missing/blank primary falls back).
+ * `rawEnv` itself (typically `process.env`) is never mutated.
+ *
+ * - `DATABASE_URL` ← `POSTGRES_URL`: the Vercel⇄Supabase Marketplace
+ *   integration writes the transaction-mode pooler connection string
+ *   (Supabase's own Vercel-integration docs) under this name — the same
+ *   shape `src/db/postgres.ts` already expects from a hand-copied
+ *   `DATABASE_URL` (unnamed prepared statements; pooler-agnostic).
+ * - `SUPABASE_SERVICE_ROLE_KEY` ← `SUPABASE_SECRET_KEY`: the integration's
+ *   current name for the same server-only key. `SUPABASE_URL` needs no
+ *   alias — the integration already writes that exact name.
+ * - `PUBLIC_BASE_URL` ← `https://${VERCEL_PROJECT_PRODUCTION_URL}`, but ONLY
+ *   on a Production build (`VERCEL_ENV === 'production'`; Vercel's own
+ *   stable per-project system env var, present on every environment, unlike
+ *   the per-deployment `VERCEL_URL`): a button-installed deployment gets a
+ *   working origin before anyone has set a custom domain. See
+ *   `specs/deploy/deploy-with-vercel.md` for the passkey caveat this creates
+ *   (passkeys bind to whichever host was current when one was registered).
+ */
+function withPlatformIntegrationFallbacks(rawEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...rawEnv }
+  if (isBlank(env.DATABASE_URL) && !isBlank(env.POSTGRES_URL)) {
+    env.DATABASE_URL = env.POSTGRES_URL
+  }
+  if (isBlank(env.SUPABASE_SERVICE_ROLE_KEY) && !isBlank(env.SUPABASE_SECRET_KEY)) {
+    env.SUPABASE_SERVICE_ROLE_KEY = env.SUPABASE_SECRET_KEY
+  }
+  if (
+    isBlank(env.PUBLIC_BASE_URL) &&
+    env.VERCEL_ENV === 'production' &&
+    !isBlank(env.VERCEL_PROJECT_PRODUCTION_URL)
+  ) {
+    env.PUBLIC_BASE_URL = `https://${env.VERCEL_PROJECT_PRODUCTION_URL}`
+  }
+  return env
 }

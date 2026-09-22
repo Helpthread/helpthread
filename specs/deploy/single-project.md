@@ -5,6 +5,9 @@ operator UI and the whole API from one origin. The split shape — the engine as
 project from the repo root (`api/index.ts`) — still builds and is kept only for the
 transition described at the end.
 
+> Setting this up by hand? This document is the reference. Want the guided, fewer-clicks
+> route instead? See [`deploy-with-vercel.md`](deploy-with-vercel.md) (alpha).
+
 ## How it fits together
 
 - `web/src/engine/mount.ts` hands every `/api/**` request to the engine's composition root
@@ -26,7 +29,7 @@ transition described at the end.
 
 | Variable | Role |
 |---|---|
-| `PUBLIC_BASE_URL` | The deployment's one origin. Forms the OAuth redirect URI, the Gmail push audience, invite links, and the passkey relying-party id. |
+| `PUBLIC_BASE_URL` | The deployment's one origin. Forms the OAuth redirect URI, the Gmail push audience, invite links, and the passkey relying-party id. On Vercel, if unset on a Production deploy, derived from `VERCEL_PROJECT_PRODUCTION_URL` ([`deploy-with-vercel.md`](deploy-with-vercel.md)) — an explicit value always wins. |
 | Every engine variable in [`gmail-inbound-runbook.md`](gmail-inbound-runbook.md#env-reference) Part D | Unchanged. [`.env.example`](../../.env.example) lists them all. |
 | `HELPTHREAD_UI_SESSION_SECRET` | The UI's session-cookie secret (`web/README.md`). |
 | `HELPTHREAD_API_URL`, `HELPTHREAD_UI_BASE_URL` | Optional overrides, for a split deployment or the local dev harness only. Leave unset. |

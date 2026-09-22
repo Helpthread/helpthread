@@ -92,15 +92,34 @@ const REQUEST_TIMEOUT_MS = 15_000
  * app's own origin (`src/engine/mount.ts`), so the base is the deployment's
  * `PUBLIC_BASE_URL` — or, on a non-production Vercel deployment (a preview),
  * that deployment's own URL, so a preview calls its own deployment rather
- * than production's.
- * `HELPTHREAD_API_URL` overrides both: it is how the split deployment (engine
- * and UI as separate projects) and the local dev harness point elsewhere.
+ * than production's — or, on a Production deployment with `PUBLIC_BASE_URL`
+ * unset (issue #151's Deploy with Vercel button, before a custom domain is
+ * set), the deployment's own stable production URL (`derivedProductionOrigin`).
+ * `HELPTHREAD_API_URL` overrides all of these: it is how the split deployment
+ * (engine and UI as separate projects) and the local dev harness point elsewhere.
  */
 function apiBaseUrl(): string | undefined {
   const explicit = process.env.HELPTHREAD_API_URL
   if (explicit !== undefined) return explicit
   const preview = previewSelfOrigin()
-  return preview ?? process.env.PUBLIC_BASE_URL
+  return preview ?? process.env.PUBLIC_BASE_URL ?? derivedProductionOrigin()
+}
+
+/**
+ * On a Production Vercel deployment with no `PUBLIC_BASE_URL` set explicitly
+ * — a Deploy with Vercel button install (issue #151), before the operator
+ * has pointed a custom domain at it — derive the origin from Vercel's own
+ * stable per-project system env var. Mirrors
+ * `src/composition/config.ts`'s identical `PUBLIC_BASE_URL` fallback;
+ * duplicated in this small a form rather than imported, since this package
+ * may only ever reach the engine through `src/engine/mount.ts`
+ * (`tests/web-engine-boundary.test.ts`). See `specs/deploy/deploy-with-vercel.md`
+ * for the passkey caveat this creates.
+ */
+function derivedProductionOrigin(): string | undefined {
+  if (process.env.VERCEL_ENV !== 'production') return undefined
+  const productionUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL
+  return productionUrl ? `https://${productionUrl}` : undefined
 }
 
 /**

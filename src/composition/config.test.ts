@@ -309,6 +309,151 @@ describe('loadConfig — HELPTHREAD_SETUP_SECRET (issue #227, optional)', () => 
   })
 })
 
+describe('loadConfig — Vercel⇄Supabase Marketplace integration fallbacks (issue #151/#153)', () => {
+  it('falls back to POSTGRES_URL when DATABASE_URL is unset', () => {
+    const env = validEnv()
+    delete (env as Record<string, string | undefined>).DATABASE_URL
+    const config = loadConfig({ ...env, POSTGRES_URL: 'postgres://integration-pooled-db' })
+    expect(config.databaseUrl).toBe('postgres://integration-pooled-db')
+  })
+
+  it('an explicit DATABASE_URL wins over POSTGRES_URL', () => {
+    const config = loadConfig({ ...validEnv(), POSTGRES_URL: 'postgres://integration-pooled-db' })
+    expect(config.databaseUrl).toBe('postgres://user:pass@db.pooler.supabase.com:6543/postgres')
+  })
+
+  it('a blank DATABASE_URL still falls back to POSTGRES_URL', () => {
+    const config = loadConfig({
+      ...validEnv(),
+      DATABASE_URL: '   ',
+      POSTGRES_URL: 'postgres://integration-pooled-db',
+    })
+    expect(config.databaseUrl).toBe('postgres://integration-pooled-db')
+  })
+
+  it('falls back to SUPABASE_SECRET_KEY when SUPABASE_SERVICE_ROLE_KEY is unset', () => {
+    const env = validEnv()
+    delete (env as Record<string, string | undefined>).SUPABASE_SERVICE_ROLE_KEY
+    const config = loadConfig({ ...env, SUPABASE_SECRET_KEY: 'sb_secret_from_integration' })
+    expect(config.supabaseServiceRoleKey).toBe('sb_secret_from_integration')
+  })
+
+  it('an explicit SUPABASE_SERVICE_ROLE_KEY wins over SUPABASE_SECRET_KEY', () => {
+    const config = loadConfig({
+      ...validEnv(),
+      SUPABASE_SECRET_KEY: 'sb_secret_from_integration',
+    })
+    expect(config.supabaseServiceRoleKey).toBe('service-role-key-value')
+  })
+
+  it('neither fallback fires when nothing is set — still reports the primary name missing', () => {
+    const env = validEnv()
+    delete (env as Record<string, string | undefined>).DATABASE_URL
+    expect(() => loadConfig(env)).toThrow(/DATABASE_URL/)
+  })
+
+  it('derives PUBLIC_BASE_URL from VERCEL_PROJECT_PRODUCTION_URL on a production Vercel build when unset', () => {
+    const env = validEnv()
+    delete (env as Record<string, string | undefined>).PUBLIC_BASE_URL
+    const config = loadConfig({
+      ...env,
+      VERCEL_ENV: 'production',
+      VERCEL_PROJECT_PRODUCTION_URL: 'my-desk.vercel.app',
+    })
+    expect(config.publicBaseUrl).toBe('https://my-desk.vercel.app')
+  })
+
+  it('an explicit PUBLIC_BASE_URL wins over the VERCEL_PROJECT_PRODUCTION_URL derivation', () => {
+    const config = loadConfig({
+      ...validEnv(),
+      VERCEL_ENV: 'production',
+      VERCEL_PROJECT_PRODUCTION_URL: 'my-desk.vercel.app',
+    })
+    expect(config.publicBaseUrl).toBe('https://desk.resonantiq.app')
+  })
+
+  it('never derives PUBLIC_BASE_URL on a preview or unset VERCEL_ENV, even with VERCEL_PROJECT_PRODUCTION_URL set', () => {
+    const env = validEnv()
+    delete (env as Record<string, string | undefined>).PUBLIC_BASE_URL
+    expect(() =>
+      loadConfig({
+        ...env,
+        VERCEL_ENV: 'preview',
+        VERCEL_PROJECT_PRODUCTION_URL: 'my-desk.vercel.app',
+      }),
+    ).toThrow(/PUBLIC_BASE_URL/)
+    expect(() =>
+      loadConfig({ ...env, VERCEL_PROJECT_PRODUCTION_URL: 'my-desk.vercel.app' }),
+    ).toThrow(/PUBLIC_BASE_URL/)
+  })
+})
+
+describe('loadConfig — Gmail OAuth is optional, both-or-neither (issue #151)', () => {
+  function envWithoutGmailOAuth(): Record<string, string> {
+    const env = validEnv()
+    delete (env as Record<string, string | undefined>).GMAIL_OAUTH_CLIENT_ID
+    delete (env as Record<string, string | undefined>).GMAIL_OAUTH_CLIENT_SECRET
+    // Gmail push requires Gmail OAuth (config.ts cross-validates), so an
+    // IMAP-only env has none of the push trio either.
+    delete (env as Record<string, string | undefined>).GMAIL_PUBSUB_TOPIC
+    delete (env as Record<string, string | undefined>).GMAIL_PUBSUB_SUBSCRIPTION
+    delete (env as Record<string, string | undefined>).GMAIL_PUSH_SERVICE_ACCOUNT
+    return env
+  }
+
+  it('both unset: loadConfig SUCCEEDS, both fields are absent, and one warning is recorded', () => {
+    const config = loadConfig(envWithoutGmailOAuth())
+    expect(config.gmailOAuthClientId).toBeUndefined()
+    expect(config.gmailOAuthClientSecret).toBeUndefined()
+    expect(config.warnings).toEqual([expect.stringMatching(/Gmail connect is disabled/)])
+  })
+
+  it('both set: read verbatim, exactly like before Gmail became optional', () => {
+    const config = loadConfig(validEnv())
+    expect(config.gmailOAuthClientId).toBe('client-id.apps.googleusercontent.com')
+    expect(config.gmailOAuthClientSecret).toBe('gmail-oauth-client-secret')
+    expect(config.warnings).toBeUndefined()
+  })
+
+  it('only GMAIL_OAUTH_CLIENT_ID set: throws naming the missing secret', () => {
+    const env = envWithoutGmailOAuth()
+    expect(() =>
+      loadConfig({ ...env, GMAIL_OAUTH_CLIENT_ID: 'client-id.apps.googleusercontent.com' }),
+    ).toThrow(/GMAIL_OAUTH_CLIENT_SECRET/)
+  })
+
+  it('only GMAIL_OAUTH_CLIENT_SECRET set: throws naming the missing id', () => {
+    const env = envWithoutGmailOAuth()
+    expect(() => loadConfig({ ...env, GMAIL_OAUTH_CLIENT_SECRET: 'a-secret' })).toThrow(
+      /GMAIL_OAUTH_CLIENT_ID/,
+    )
+  })
+
+  it('a whitespace-only GMAIL_OAUTH_CLIENT_ID counts as unset, same as absent entirely', () => {
+    const env = envWithoutGmailOAuth()
+    expect(() =>
+      loadConfig({ ...env, GMAIL_OAUTH_CLIENT_ID: '   ', GMAIL_OAUTH_CLIENT_SECRET: 'a-secret' }),
+    ).toThrow(/GMAIL_OAUTH_CLIENT_ID/)
+  })
+
+  it('Gmail push set without Gmail OAuth: rejected at boot — push has nothing to authenticate against', () => {
+    const env = envWithoutGmailOAuth()
+    let message = ''
+    try {
+      loadConfig({
+        ...env,
+        GMAIL_PUBSUB_TOPIC: 'projects/x/topics/y',
+        GMAIL_PUBSUB_SUBSCRIPTION: 'projects/x/subscriptions/y',
+        GMAIL_PUSH_SERVICE_ACCOUNT: 'invoker@x.iam.gserviceaccount.com',
+      })
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+    expect(message).toContain('GMAIL_OAUTH_CLIENT_ID')
+    expect(message).toContain('GMAIL_PUBSUB_TOPIC')
+  })
+})
+
 describe('loadConfig — never leaks a secret value', () => {
   it('reports a too-short token by LENGTH, never echoing the secret value', () => {
     const secretValue = 'sekret'
