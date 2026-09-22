@@ -51,7 +51,7 @@
  * `DeployProvider` contract every other implementation upholds.
  */
 
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, rm, writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
 import type {
   CreateDeploymentInput,
@@ -198,11 +198,11 @@ export function createLocalManualDeployProvider(
         }
       }
       const lines = input.vars.map((v) => `${v.key}=${v.value}`)
-      // Owner-only: this file carries engine-minted secrets.
-      await writeFile(path.join(dir, '.env.local'), `${lines.join('\n')}\n`, {
-        encoding: 'utf8',
-        mode: 0o600,
-      })
+      // Owner-only: this file carries engine-minted secrets. `mode` only
+      // applies on creation, so tighten an existing file too.
+      const envPath = path.join(dir, '.env.local')
+      await writeFile(envPath, `${lines.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 })
+      await chmod(envPath, 0o600)
     },
 
     async deleteProject(input: DeleteProjectInput): Promise<void> {

@@ -180,7 +180,7 @@ interface VerifiedInstallArgs {
   tarballBytes: Buffer
 }
 
-/** Verify-then-extract, split out so the caller's `finally` owns temp-file cleanup on every path. */
+/** Verify-then-extract, entirely in memory: nothing is written until the signature and digest check out. */
 async function installVerifiedArtifact({
   deps,
   fsImpl,

@@ -250,7 +250,7 @@ async function request<T>(
  */
 function segment(value: string): string {
   if (value === '.' || value === '..' || /^%2e(%2e)?$/i.test(value)) {
-    throw new Error('Invalid id.')
+    throw new ApiError(404, 'not_found', 'Invalid id.')
   }
   return encodeURIComponent(value)
 }
