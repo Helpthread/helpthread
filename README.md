@@ -10,10 +10,18 @@ It is serverless-native and optimized first for Vercel and Supabase, while keepi
 platform services behind Helpthread-owned interfaces. Organizations deploy Helpthread
 into infrastructure they choose and control.
 
-> **Status: pre-release and dogfooded in production.** Helpthread is developed by
-> Resonant IQ, Inc. and runs the company's support operation today, but it is not ready
-> for general deployment. Current work is tracked in the
+> **Status: developer preview.** Helpthread is developed by Resonant IQ, Inc. and runs
+> the company's own support operation in production today. You can deploy it now if you
+> are comfortable running pre-release software: APIs and interfaces may change before
+> 1.0, and there is no upgrade-compatibility promise until then. Start at
+> [Deploying](specs/deploy/single-project.md). Current work is tracked in the
 > [Helpthread OSS Roadmap](https://github.com/orgs/Helpthread/projects/1).
+>
+> Worth knowing before you deploy: it needs a **Vercel Pro** plan or above (five of the
+> six cron schedules run more than once a day, which Hobby does not allow), Gmail is the
+> proven inbound path, and IMAP intake is still a draft spec
+> ([`specs/mail/mailbox-connection.md`](specs/mail/mailbox-connection.md)) with an open
+> question about transport-stable message ids.
 
 ## Start here
 

@@ -27,7 +27,7 @@ transition described at the end.
 | Variable | Role |
 |---|---|
 | `PUBLIC_BASE_URL` | The deployment's one origin. Forms the OAuth redirect URI, the Gmail push audience, invite links, and the passkey relying-party id. |
-| Every engine variable in [`gmail-inbound-runbook.md`](gmail-inbound-runbook.md) Part D | Unchanged. |
+| Every engine variable in [`gmail-inbound-runbook.md`](gmail-inbound-runbook.md#env-reference) Part D | Unchanged. [`.env.example`](../../.env.example) lists them all. |
 | `HELPTHREAD_UI_SESSION_SECRET` | The UI's session-cookie secret (`web/README.md`). |
 | `HELPTHREAD_API_URL`, `HELPTHREAD_UI_BASE_URL` | Optional overrides, for a split deployment or the local dev harness only. Leave unset. |
 
@@ -39,6 +39,24 @@ Vercel project settings: Root Directory `web`; the default build command; "Inclu
 files outside of the Root Directory" enabled (the default). `web/vercel.json` sets the install
 command to `cd .. && npm ci`: Vercel installs the Root Directory alone, and the engine's
 dependencies live in the workspace root.
+
+## Migrations
+
+Apply the schema once, before the first deploy serves traffic, from any machine that can
+reach the database:
+
+```
+DATABASE_URL='postgres://…' npm run migrate
+```
+
+`scripts/migrate.ts` applies every migration in `src/db/migrate.ts` in order and is
+idempotent — re-running it on an up-to-date database is a no-op, so it is safe to repeat
+after each upgrade that adds one. Nothing in the build or the deploy runs it for you: a
+project deployed without this step comes up against an empty schema and every request that
+touches the database fails.
+
+Use the pooler URI (port 6543) as normal; the direct 5432 URI also works for the one-time
+DDL if your provider prefers it for schema changes.
 
 ## Moving a split deployment onto one project
 
