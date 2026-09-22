@@ -3,11 +3,9 @@ name: PR verdict
 # High-blast-radius changes — the constitution, legal text, licensing and pricing —
 # must carry a verdict and a decision-provenance table in the PR body.
 #
-# Why this is a CI check and not a documented convention: on 2026-07-20 an audit of
-# PRs #87-#100 found nine normative decisions merged that the maintainer never made,
-# including two amendments to CHARTER.md. Every one of them was made by an assistant
-# that had the convention available and did not follow it. Instructions drift; a
-# required check does not.
+# Why this is a CI check and not a documented convention: an assistant can have a
+# convention available and still not follow it. Instructions drift; a required check
+# does not.
 #
 # The rule this enforces lives at .claude/rules/pr-verdict.md.
 

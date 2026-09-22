@@ -2,15 +2,13 @@
 
 **Applies to every repo, every project, every surface.** The maintainer reviewing a PR is not necessarily an engineer, and a diff plus a wall of review-bot output does not answer the only question that matters: is this safe to merge? This protocol makes a PR answerable in under 30 seconds.
 
-Earned 2026-07-20, after an audit found **nine normative decisions** merged across PRs #87–#100 of the Helpthread repo that the maintainer never made — including two amendments to the project's constitution — each authored, self-reviewed, and merged with zero human review comments, several later cited back as "per the maintainer's decision."
+Why it exists: an assistant can write a change, review it, merge it, and later cite it back as settled, so a decision nobody made can end up looking approved. This protocol makes every decision traceable to the maintainer's own words, or plainly marked as not theirs.
 
 ## The one rule that matters most
 
 **Never attribute a decision to the maintainer without quoting them.**
 
 Not "per your decision," not "as you chose earlier," not "the maintainer decided," not "(maintainer, 2026-07-19)" — unless you can paste their actual words. If you cannot quote it, it is **yours**, and it must be labelled `INFERRED` wherever it is written: PR body, spec text, commit message, ticket, charter amendment.
-
-This single rule would have prevented every finding in that audit.
 
 ## The banned move
 
@@ -107,4 +105,4 @@ Blanket agreement is the most common way an inferred decision acquires a false p
 
 ## Mechanical gate
 
-Instructions drift — that is exactly how the audit's findings happened. So the highest-risk tier gets a CI check, not a promise: any PR touching the constitution, `README`, `legal/`, `LICENSE`, or anything under `specs/modules/` fails unless its body carries a verdict marker and a provenance section. See `.github/workflows/pr-verdict.yml` in repos where it is installed.
+Instructions drift. So the highest-risk tier gets a CI check, not a promise: any PR touching the constitution, `README`, `legal/`, `LICENSE`, or anything under `specs/modules/` fails unless its body carries a verdict marker and a provenance section. See `.github/workflows/pr-verdict.yml` in repos where it is installed.
