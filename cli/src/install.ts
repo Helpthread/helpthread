@@ -8,7 +8,6 @@
  * implementations.
  */
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
 import { parseModuleConfig, safeExtract } from '../../src/modules/artifact/index.js'
 import type { InstallOptions } from './args.js'
@@ -53,11 +52,32 @@ export class InstallError extends Error {
   }
 }
 
+/**
+ * The license key travels to the catalog origin as a Bearer token, so that
+ * origin must be HTTPS. Plain HTTP is allowed only for a loopback host
+ * (local development against a marketplace running on this machine).
+ */
+function assertSecureCatalogOrigin(origin: string): void {
+  let url: URL
+  try {
+    url = new URL(origin)
+  } catch {
+    throw new InstallError(`the catalog origin '${origin}' is not a valid URL`)
+  }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+    throw new InstallError(
+      `refusing to send a license key to '${origin}': the catalog origin must use https://`,
+    )
+  }
+}
+
 export async function runInstall(options: InstallOptions, deps: InstallDeps): Promise<void> {
   const fsImpl = deps.fsImpl ?? fs
   const trustStore = deps.trustStore ?? TRUST_STORE
   const catalogOrigin =
     options.catalogOrigin ?? process.env.HELPTHREAD_CATALOG_ORIGIN ?? DEFAULT_CATALOG_ORIGIN
+  assertSecureCatalogOrigin(catalogOrigin)
 
   deps.log(`1. Looking up '${options.moduleSlug}' on ${catalogOrigin}`)
   const catalog = await fetchCatalog(catalogOrigin, deps.fetchImpl)
@@ -136,32 +156,18 @@ export async function runInstall(options: InstallOptions, deps: InstallDeps): Pr
 
   deps.log('4. Downloading the release artifact...')
   const tarballBytes = await fetchTarball(download.downloadUrl, deps.fetchImpl)
-  const tmpDir = fsImpl.mkdtempSync(path.join(os.tmpdir(), 'helpthread-module-'))
-  const tmpTarballPath = path.join(tmpDir, `${mod.slug}-${servedEntry.version}.tar.gz`)
-  fsImpl.writeFileSync(tmpTarballPath, tarballBytes)
-
-  // Everything from here runs inside try/finally: this is PAID, proprietary
-  // software sitting in a world-readable temp directory, and any failure
-  // below — a refused destination, a bad archive entry, a missing config —
-  // would otherwise leave it there indefinitely. Cleanup must not depend on
-  // reaching a particular branch.
-  try {
-    await installVerifiedArtifact({
-      deps,
-      fsImpl,
-      trustStore,
-      options,
-      mod,
-      servedEntry,
-      tarballBytes,
-    })
-  } finally {
-    try {
-      fsImpl.rmSync(tmpDir, { recursive: true, force: true })
-    } catch {
-      // best-effort cleanup
-    }
-  }
+  // The verified bytes stay in memory: `installVerifiedArtifact` checks the
+  // signature and digest against `tarballBytes` and extracts from them, so
+  // nothing unverified is ever written to disk.
+  await installVerifiedArtifact({
+    deps,
+    fsImpl,
+    trustStore,
+    options,
+    mod,
+    servedEntry,
+    tarballBytes,
+  })
 }
 
 interface VerifiedInstallArgs {

@@ -198,7 +198,11 @@ export function createLocalManualDeployProvider(
         }
       }
       const lines = input.vars.map((v) => `${v.key}=${v.value}`)
-      await writeFile(path.join(dir, '.env.local'), `${lines.join('\n')}\n`, 'utf8')
+      // Owner-only: this file carries engine-minted secrets.
+      await writeFile(path.join(dir, '.env.local'), `${lines.join('\n')}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      })
     },
 
     async deleteProject(input: DeleteProjectInput): Promise<void> {

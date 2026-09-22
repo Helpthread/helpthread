@@ -203,6 +203,22 @@ describe('createVercelDeployProvider — team-id binding', () => {
   })
 })
 
+describe('createVercelDeployProvider — dot-segment ids', () => {
+  // `new URL()` collapses `.`/`..` segments AFTER the allowlist has checked
+  // the path string, so a dot id would reach a route the allowlist never saw.
+  it.each(['.', '..'])('refuses id %j before any request is made', async (id) => {
+    const { fetchImpl } = mockFetch([])
+    const provider = createVercelDeployProvider(baseConfig(fetchImpl))
+    await expect(provider.deleteProject({ teamId: TEAM_ID, projectId: id })).rejects.toThrow(
+      VercelAdapterError,
+    )
+    await expect(
+      provider.getDeploymentState({ teamId: TEAM_ID, deploymentId: id }),
+    ).rejects.toThrow(VercelAdapterError)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
 describe('createVercelDeployProvider — token never leaks', () => {
   it('a failing API call throws an error whose message contains no token substring', async () => {
     const { fetchImpl } = mockFetch([

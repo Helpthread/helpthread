@@ -964,3 +964,111 @@ describe('runInstall: module.config.json must name the same module the verified 
     ).rejects.toThrow(/module.config.json declares module 'a-completely-different-module'/)
   })
 })
+
+describe('runInstall: nothing unverified touches the disk', () => {
+  it('never writes the downloaded bytes to a path built from an unsigned catalog version', async () => {
+    const keypair = makeTestKeypair()
+    const tarball = buildTarGz([regularFile('index.js', 'console.log("attacker")')])
+    // A hostile catalog controls the version string. Before verification it
+    // must not steer a write outside any temp directory.
+    const hostileVersion = `1.0.0/${'../'.repeat(24)}${workDir.slice(1)}/escaped`
+    const manifest = canonicalizeManifest({
+      schema: 'helpthread-module-manifest/1',
+      module: 'fixture-module',
+      semver: hostileVersion,
+      artifactSha256: sha256Hex(tarball),
+      artifactBytes: tarball.length,
+      sourceRevision: 'abc1234',
+      minEngineApi: '1.0.0',
+      builtAt: '2026-08-04T00:00:00.000Z',
+      keyId: keypair.keyId,
+    })
+    const catalog: CatalogResponse = {
+      generatedAt: '2026-08-04T00:00:00.000Z',
+      modules: [
+        {
+          slug: 'fixture-module',
+          name: 'Fixture Module',
+          summary: 'test',
+          cluster: 'test',
+          latestVersion: hostileVersion,
+          changelogUrl: 'https://example.test/changelog',
+          priceUsd: 0,
+          billingInterval: 'year',
+          docsUrl: 'https://example.test/docs',
+          versions: [
+            {
+              version: hostileVersion,
+              checksumSha256: sha256Hex(tarball),
+              publishedAt: '2026-08-04T00:00:00.000Z',
+              manifest,
+              manifestSignature: keypair.sign(manifest),
+              manifestKeyId: keypair.keyId,
+              minEngineApi: '1.0.0',
+              yanked: false,
+            },
+          ],
+        },
+      ],
+    }
+    const fetchImpl = fakeFetch({
+      'https://catalog.example/api/v1/modules': () => ({ ok: true, status: 200, json: catalog }),
+      'https://catalog.example/api/v1/download': () => ({
+        ok: true,
+        status: 200,
+        json: { downloadUrl: 'https://signed.example/a.tar.gz', version: hostileVersion },
+      }),
+      'https://signed.example/a.tar.gz': () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: toArrayBuffer(tarball),
+      }),
+    })
+
+    await expect(
+      runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'https://catalog.example',
+          version: undefined,
+          dir: path.join(workDir, 'dest'),
+          force: false,
+        },
+        {
+          fetchImpl,
+          getLicenseKey: async () => 'unused',
+          log: () => {},
+          // The signing key is not trusted, so verification must refuse.
+          trustStore: {},
+        },
+      ),
+    ).rejects.toThrow()
+
+    expect(fs.existsSync(path.join(workDir, 'escaped.tar.gz'))).toBe(false)
+  })
+})
+
+describe('runInstall: the license key only travels over HTTPS', () => {
+  it('refuses a plain-http catalog origin before making any request', async () => {
+    const calls: string[] = []
+    const fetchImpl: FetchLike = async (url) => {
+      calls.push(String(url))
+      throw new Error('should not be called')
+    }
+    await expect(
+      runInstall(
+        {
+          help: false,
+          moduleSlug: 'fixture-module',
+          catalogOrigin: 'http://catalog.example',
+          version: undefined,
+          dir: path.join(workDir, 'dest'),
+          force: false,
+        },
+        { fetchImpl, getLicenseKey: async () => 'secret', log: () => {} },
+      ),
+    ).rejects.toThrow(/must use https/)
+    expect(calls).toEqual([])
+  })
+})

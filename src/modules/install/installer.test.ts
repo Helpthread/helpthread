@@ -311,6 +311,36 @@ describe('createModuleInstallHandler', () => {
     expect(assistants[0].status).toBe('active')
   })
 
+  it('stores engine-minted credentials as sensitive even when the module config says otherwise', async () => {
+    const fixtures = await freshFixtures()
+    const install = await fixtures.installs.create(newInstallInput(fixtures.connectionId))
+    const { provider, setEnvVarsCalls } = createFakeDeployProvider()
+    const config = moduleConfig()
+    const lax: ModuleConfigV1 = {
+      ...config,
+      env: config.env.map((v) => (v.owner === 'engine-managed' ? { ...v, sensitive: false } : v)),
+    }
+
+    const deps = baseDeps(fixtures, provider, {
+      challenge: { send: correctChallengeSend(fixtures.installs, install.id) },
+      extractArtifact: async () => ({
+        files: [{ path: 'index.js', data: new Uint8Array([1, 2, 3]) }],
+        moduleConfig: lax,
+      }),
+    })
+
+    await createModuleInstallHandler(deps)(
+      makeMessage({
+        installId: install.id,
+        operatorEnvVars: { THIRD_PARTY_KEY: 'operator-value' },
+      }),
+    )
+
+    const vars = setEnvVarsCalls[0]
+    expect(vars.find((v) => v.key === ENV_ASSISTANT_TOKEN)?.sensitive).toBe(true)
+    expect(vars.find((v) => v.key === ENV_WEBHOOK_SECRET)?.sensitive).toBe(true)
+  })
+
   it('a stale fence token loses — the worker stops instead of overwriting a newer transition, and never touches assistants', async () => {
     const fixtures = await freshFixtures()
     const install = await fixtures.installs.create(newInstallInput(fixtures.connectionId))

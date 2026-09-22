@@ -18,8 +18,24 @@ export function SanitizedHtml({ html }: { html: string }) {
     () =>
       DOMPurify.sanitize(html, {
         USE_PROFILES: { html: true },
-        FORBID_TAGS: ['img', 'style', 'form', 'input', 'button'],
-        FORBID_ATTR: ['style'],
+        // Every element or attribute that makes the browser fetch a remote
+        // resource or overlay the app is stripped, not just <img>: table
+        // `background`, media `poster`/`src`, and `<dialog open>` all survive
+        // the html profile otherwise.
+        FORBID_TAGS: [
+          'img',
+          'style',
+          'form',
+          'input',
+          'button',
+          'video',
+          'audio',
+          'source',
+          'track',
+          'picture',
+          'dialog',
+        ],
+        FORBID_ATTR: ['style', 'background', 'poster', 'srcset', 'popover'],
       }),
     [html],
   )
