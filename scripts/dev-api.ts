@@ -26,6 +26,9 @@
  *   at least 16 characters — see `MIN_API_TOKEN_LENGTH`, `src/api/index.ts`
  *   — so the default is chosen to clear that floor) — never reuse this
  *   default outside a local machine.
+ * - `HT_DEV_SETUP_SECRET` — the `/setup` bootstrap secret (issue #227).
+ *   Defaults to the clearly-dev-only `helpthread-dev-setup-secret` — never
+ *   reuse this default outside a local machine.
  * - `HT_DEV_PORT` — HTTP port to listen on. Defaults to `8787`.
  * - `HT_DEV_DB_PATH` — optional PGlite data directory. Omitted (the default)
  *   runs a fresh in-memory database, seeded with demo conversations on every
@@ -66,6 +69,11 @@ import { createWebhookEndpointStore } from '../src/store/webhook-endpoints.js'
 
 const PORT = Number(process.env.HT_DEV_PORT ?? 8787)
 const API_TOKEN = process.env.HT_DEV_TOKEN ?? 'helpthread-dev-token'
+// The `/setup` bootstrap secret (issue #227) — same dev-default pattern as
+// `HT_DEV_TOKEN` above, so a fresh in-memory harness (zero Agents, seed.ts
+// creates none) can still reach `/setup` locally. Never reuse outside a
+// local machine.
+const SETUP_SECRET = process.env.HT_DEV_SETUP_SECRET ?? 'helpthread-dev-setup-secret'
 const DB_PATH = process.env.HT_DEV_DB_PATH
 const MAIL_DOMAIN = 'mail.dev.localhost'
 const SUPPORT_ADDRESS = 'support@dev.localhost'
@@ -167,7 +175,12 @@ async function main(): Promise<void> {
     keyring: KEYRING,
     mailDomain: MAIL_DOMAIN,
     supportAddress: SUPPORT_ADDRESS,
-    agents: { store: agentStore, providers: authProviders, mailboxStore },
+    agents: {
+      store: agentStore,
+      providers: authProviders,
+      mailboxStore,
+      setupSecret: SETUP_SECRET,
+    },
     assistants: { store: createAssistantStore(db) },
     webhooks: {
       // Same throwaway dev key as the IMAP credential store above — webhook

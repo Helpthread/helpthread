@@ -223,6 +223,12 @@ privilege).
      tokens (`openssl rand -base64 32`; ≥32 chars). Rotating it breaks
      threading of replies to already-sent mail (single-secret dogfood limit).
    - `CRON_SECRET` — guards the internal cron/drain endpoints (`openssl rand -base64 24`; ≥16 chars).
+   - `HELPTHREAD_SETUP_SECRET` — the `/setup` bootstrap secret (issue #227;
+     `openssl rand -base64 24`; ≥16 chars). **Optional, but strongly recommended**: without
+     it, `POST /api/v1/setup` refuses to create the first admin at all (`409 setup_locked`),
+     which is safer than the alternative — a public deployment with no secret set is one
+     whoever visits `/setup` first away from being its permanent admin. Set it before the
+     first deploy, complete setup, then it may be removed (specs/auth/agents-and-auth.md §9).
 2. `PUBLIC_BASE_URL` = your production URL (e.g. `https://desk.example.com`),
    matching the OAuth redirect URI (A2.3) and the Pub/Sub push endpoint (A3.4).
    No trailing slash (the composition root strips one defensively either way).
@@ -297,6 +303,7 @@ same function.
 | `HELPTHREAD_SUPPORT_ADDRESS` | the mailbox | e.g. `support@example.com` |
 | `HELPTHREAD_SIGNING_SECRET` | you mint | ≥32 chars; HMAC keyring for reply/state/view tokens |
 | `HELPTHREAD_UI_SESSION_SECRET` | you mint | ≥32 chars; the UI's session-cookie secret (`web/README.md`). Enforced in production by `web/src/lib/session.ts` |
+| `HELPTHREAD_SETUP_SECRET` | you mint (C1) | **OPTIONAL, recommended** — ≥16 chars; gates `POST /setup` (issue #227), removable once the first admin exists |
 
 > The three `GMAIL_PUBSUB*` / `GMAIL_PUSH*` vars are **all-or-nothing**. Set all
 > three to enable push, or none to run on the scheduled sweep alone. Any partial

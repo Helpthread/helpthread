@@ -48,6 +48,14 @@ const MIN_SIGNING_SECRET_LENGTH = 32
 const MIN_CRON_SECRET_LENGTH = 16
 
 /**
+ * Minimum `HELPTHREAD_SETUP_SECRET` length (issue #227) — mirrors
+ * `MIN_API_TOKEN_LENGTH`: like the API token, it is a bearer-style credential
+ * a human pastes into a form rather than an HMAC key, so it shares that
+ * floor rather than `MIN_SIGNING_SECRET_LENGTH`'s 32.
+ */
+const MIN_SETUP_SECRET_LENGTH = 16
+
+/**
  * The fully-validated deploy configuration `./root.ts` builds concrete
  * adapters from. Every field is present and well-formed by construction — a
  * missing or malformed value is a {@link loadConfig} throw, never a
@@ -119,6 +127,19 @@ export interface AppConfig {
    * refuses with `409 conflict` (the admin-set-password fallback remains).
    */
   uiBaseUrl?: string
+  /**
+   * The bootstrap secret `POST /api/v1/setup` requires alongside the
+   * existing zero-Agents guard (issue #227; specs/auth/agents-and-auth.md
+   * §6) — closes the window where whoever first opens a public `/setup` URL
+   * becomes the permanent admin. OPTIONAL, unlike every other field above:
+   * "required" (the issue's word) and "may be removed once an Agent exists"
+   * would conflict if `loadConfig` failed boot without it, so unset is a
+   * valid (if less safe) state and `handleSetup` (`src/api/agents.ts`)
+   * refuses every request while it's absent. When SET, {@link
+   * MIN_SETUP_SECRET_LENGTH} is enforced, same discipline as every other
+   * secret here — never logged.
+   */
+  setupSecret?: string
   /** Secret-free notes about features this configuration turned off, for the composition root to log once at boot. */
   warnings?: readonly string[]
 }
@@ -201,6 +222,7 @@ export function loadConfig(
     MIN_SIGNING_SECRET_LENGTH,
   )
   const cronSecret = errors.requireMinLength(env, 'CRON_SECRET', MIN_CRON_SECRET_LENGTH)
+  const setupSecret = resolveSetupSecret(env, errors)
   const mailDomain = errors.requireString(env, 'HELPTHREAD_MAIL_DOMAIN')
   const supportAddress = errors.requireString(env, 'HELPTHREAD_SUPPORT_ADDRESS')
 
@@ -229,6 +251,7 @@ export function loadConfig(
     apiToken: apiToken as string,
     signingSecret: signingSecret as string,
     cronSecret: cronSecret as string,
+    ...(setupSecret !== undefined ? { setupSecret } : {}),
     publicBaseUrl: publicBaseUrl as string,
     mailDomain: mailDomain as string,
     supportAddress: supportAddress as string,
@@ -256,6 +279,26 @@ function resolveEncryptionKey(env: NodeJS.ProcessEnv, errors: ConfigErrors): Buf
     )
     return null
   }
+}
+
+/**
+ * Resolve the OPTIONAL `HELPTHREAD_SETUP_SECRET` (issue #227; see
+ * {@link AppConfig.setupSecret}). Unset (or whitespace-only) yields
+ * `undefined` — a valid state, not an error. Present-but-short IS an error
+ * (a trivially guessable value would defeat the whole point of gating
+ * `/setup`). Not trimmed, matching {@link ConfigErrors.requireString}'s own
+ * convention for every other secret in this module.
+ */
+function resolveSetupSecret(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | undefined {
+  const raw = env.HELPTHREAD_SETUP_SECRET
+  if (raw === undefined || raw.trim().length === 0) return undefined
+  if (raw.length < MIN_SETUP_SECRET_LENGTH) {
+    errors.add(
+      `HELPTHREAD_SETUP_SECRET must be at least ${MIN_SETUP_SECRET_LENGTH} characters (got ${raw.length})`,
+    )
+    return undefined
+  }
+  return raw
 }
 
 /**

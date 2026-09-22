@@ -35,6 +35,8 @@ const SUPPORT_ADDRESS = 'support@example.test'
 const UI_BASE_URL = 'https://desk.example.test'
 const KEYRING: Keyring = { current: { keyId: 'k1', secret: 'a'.repeat(32) } }
 const AGENT_HEADER = 'X-Helpthread-Agent-Id'
+/** The default `/setup` bootstrap secret (issue #227) every `freshApi()` call configures unless `setupSecret: null` asks for it to be left unset. */
+const SETUP_SECRET = 'test-setup-secret-for-the-agents-and-auth-suite'
 
 /** A fake `EmailSender` that records every send and never fails. */
 function createFakeSender(): { sender: EmailSender; sent: OutboundEmail[] } {
@@ -69,7 +71,14 @@ describe('Agents & Authentication API', () => {
     db = undefined
   })
 
-  async function freshApi(overrides: { uiBaseUrl?: string; sender?: EmailSender } = {}): Promise<{
+  async function freshApi(
+    overrides: {
+      uiBaseUrl?: string
+      sender?: EmailSender
+      /** `null` leaves `HELPTHREAD_SETUP_SECRET` unset (the "locked" state); omitted defaults to {@link SETUP_SECRET}. */
+      setupSecret?: string | null
+    } = {},
+  ): Promise<{
     db: Db
     agentStore: AgentStore
     mailboxStore: MailboxStore
@@ -81,6 +90,8 @@ describe('Agents & Authentication API', () => {
     const agentStore = createAgentStore(db)
     const mailboxStore = createMailboxStore(db)
     const { sender: defaultSender, sent } = createFakeSender()
+    const setupSecret =
+      overrides.setupSecret === null ? undefined : (overrides.setupSecret ?? SETUP_SECRET)
     const api = createInboxApi({
       store: createConversationStore(db),
       apiToken: TOKEN,
@@ -96,6 +107,7 @@ describe('Agents & Authentication API', () => {
         providers: [createPasswordAuthProvider({ agentStore })],
         mailboxStore,
         ...(overrides.uiBaseUrl !== undefined ? { uiBaseUrl: overrides.uiBaseUrl } : {}),
+        ...(setupSecret !== undefined ? { setupSecret } : {}),
       },
       webhooks: {
         store: createWebhookEndpointStore(db, WEBHOOKS_ENC_KEY),
@@ -172,7 +184,12 @@ describe('Agents & Authentication API', () => {
       const { api } = await freshApi()
       const res = await api(
         req('POST', '/api/v1/setup', {
-          body: { name: 'Ada Admin', email: 'ada@example.test', password: 'correct-horse-battery' },
+          body: {
+            name: 'Ada Admin',
+            email: 'ada@example.test',
+            password: 'correct-horse-battery',
+            setupSecret: SETUP_SECRET,
+          },
         }),
       )
       expect(res.status).toBe(201)
@@ -193,29 +210,103 @@ describe('Agents & Authentication API', () => {
       expect(verify.status).toBe(200)
     })
 
-    it('409s once an Agent already exists', async () => {
+    it('409 conflicts once an Agent already exists, even with the right secret — the zero-Agents guard stays', async () => {
       const { api, agentStore } = await freshApi()
       await createActiveAgent(agentStore)
       const res = await api(
         req('POST', '/api/v1/setup', {
-          body: { name: 'Late Admin', email: 'late@example.test', password: 'another-password' },
+          body: {
+            name: 'Late Admin',
+            email: 'late@example.test',
+            password: 'another-password',
+            setupSecret: SETUP_SECRET,
+          },
         }),
       )
       expect(res.status).toBe(409)
       expect(await res.json()).toEqual({ error: { code: 'conflict', message: expect.any(String) } })
     })
 
-    it('400s on missing/invalid fields', async () => {
+    it('400s on missing/invalid fields, given the right secret', async () => {
       const { api } = await freshApi()
       for (const body of [
-        {},
-        { name: '', email: 'a@example.test', password: 'password123' },
-        { name: 'A', email: 'not-an-email', password: 'password123' },
-        { name: 'A', email: 'a@example.test', password: 'short' },
+        { setupSecret: SETUP_SECRET },
+        { name: '', email: 'a@example.test', password: 'password123', setupSecret: SETUP_SECRET },
+        {
+          name: 'A',
+          email: 'not-an-email',
+          password: 'password123',
+          setupSecret: SETUP_SECRET,
+        },
+        { name: 'A', email: 'a@example.test', password: 'short', setupSecret: SETUP_SECRET },
       ]) {
         const res = await api(req('POST', '/api/v1/setup', { body }))
         expect(res.status).toBe(400)
       }
+    })
+
+    // --- Bootstrap secret (issue #227) ----------------------------------
+
+    it('409 setup_locked when HELPTHREAD_SETUP_SECRET is unset on the server, regardless of the body', async () => {
+      const { api } = await freshApi({ setupSecret: null })
+      const res = await api(
+        req('POST', '/api/v1/setup', {
+          body: {
+            name: 'Ada Admin',
+            email: 'ada@example.test',
+            password: 'correct-horse-battery',
+            setupSecret: 'anything-at-all',
+          },
+        }),
+      )
+      expect(res.status).toBe(409)
+      expect(await res.json()).toEqual({
+        error: { code: 'setup_locked', message: expect.any(String) },
+      })
+    })
+
+    it('401s when the request carries no setupSecret at all', async () => {
+      const { api } = await freshApi()
+      const res = await api(
+        req('POST', '/api/v1/setup', {
+          body: { name: 'Ada Admin', email: 'ada@example.test', password: 'correct-horse-battery' },
+        }),
+      )
+      expect(res.status).toBe(401)
+      expect(await res.json()).toEqual({
+        error: { code: 'unauthorized', message: expect.any(String) },
+      })
+    })
+
+    it('401s when the request carries the wrong setupSecret', async () => {
+      const { api } = await freshApi()
+      const res = await api(
+        req('POST', '/api/v1/setup', {
+          body: {
+            name: 'Ada Admin',
+            email: 'ada@example.test',
+            password: 'correct-horse-battery',
+            setupSecret: 'not-the-configured-secret',
+          },
+        }),
+      )
+      expect(res.status).toBe(401)
+    })
+
+    it('never leaks the configured setup secret in a response body', async () => {
+      const { api } = await freshApi()
+      const res = await api(
+        req('POST', '/api/v1/setup', {
+          body: {
+            name: 'Ada Admin',
+            email: 'ada@example.test',
+            password: 'correct-horse-battery',
+            setupSecret: 'not-the-configured-secret',
+          },
+        }),
+      )
+      const text = await res.text()
+      expect(text).not.toContain(SETUP_SECRET)
     })
   })
 

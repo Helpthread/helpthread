@@ -325,11 +325,17 @@ export function getAuthProviders(): Promise<{
   return request('/api/v1/auth/providers')
 }
 
-/** `POST /api/v1/setup` — creates the first admin. No acting-Agent header (pre-session). */
+/**
+ * `POST /api/v1/setup` — creates the first admin. No acting-Agent header
+ * (pre-session). `setupSecret` (issue #227) must match the deploy-time
+ * `HELPTHREAD_SETUP_SECRET`, in addition to the engine's existing
+ * zero-Agents guard.
+ */
 export function postSetup(input: {
   name: string
   email: string
   password: string
+  setupSecret: string
 }): Promise<{ agent: Agent }> {
   return request('/api/v1/setup', { method: 'POST', body: input })
 }
