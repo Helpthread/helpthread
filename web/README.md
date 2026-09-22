@@ -38,6 +38,9 @@ per-Agent accounts. There is no env-var password anymore: on a fresh
 deployment (zero Agents), the app routes to `/setup` to create the first
 Admin; from then on, each Agent signs in with their own email/password at
 `/login`, verified by the engine (`POST /auth/verify`), never the web layer.
+`/setup` itself is gated by the engine's `HELPTHREAD_SETUP_SECRET` (issue
+#227; `specs/auth/agents-and-auth.md` §6/§9) — without it set, the screen's
+form submits but the engine refuses to create the first admin.
 
 `HELPTHREAD_UI_SESSION_SECRET` has an obviously-dev-only fallback in local
 development (matching the `HELPTHREAD_API_TOKEN` dev-default pattern above)

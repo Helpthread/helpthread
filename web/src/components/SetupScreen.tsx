@@ -8,6 +8,10 @@
  * login screen this borrows its register from; see `LoginScreen`'s module
  * doc for the two documented `ds/` workarounds this screen reuses verbatim
  * rather than inventing new ones).
+ *
+ * The "Setup key" field (issue #227) is an APP-FIRST addition, not yet
+ * upstreamed — CLAUDE.md's "App → design" rule: it belongs in the design
+ * project's `components/app/` once the maintainer signs off on this screen.
  */
 
 import { useRef, useState, useTransition } from 'react'
@@ -23,6 +27,7 @@ export function SetupScreen() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  const [setupSecret, setSetupSecret] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
 
@@ -32,13 +37,14 @@ export function SetupScreen() {
     name.trim().length > 0 &&
     email.length > 0 &&
     password.length >= MIN_PASSWORD_LENGTH &&
-    password === confirm
+    password === confirm &&
+    setupSecret.length > 0
 
   function submit(): void {
     if (isPending || !canSubmit) return
     setError(null)
     startTransition(async () => {
-      const result = await setupAction(name.trim(), email, password)
+      const result = await setupAction(name.trim(), email, password, setupSecret)
       // A successful setup redirects server-side and never returns here.
       if (!result.ok) {
         setError(result.message ?? 'Could not complete setup. Please try again.')
@@ -213,6 +219,46 @@ export function SetupScreen() {
             outline: 'none',
           }}
         />
+
+        <label
+          htmlFor="ht-setup-secret"
+          style={{
+            display: 'block',
+            fontSize: 12,
+            fontWeight: 600,
+            color: 'var(--ht-ink-dim)',
+            margin: '14px 0 6px',
+          }}
+        >
+          Setup key
+        </label>
+        {/* Native input, not ds/core/TextInput — see LoginScreen's module doc. */}
+        <input
+          id="ht-setup-secret"
+          name="setup-secret"
+          type="password"
+          autoComplete="off"
+          required
+          disabled={isPending}
+          value={setupSecret}
+          onChange={(event) => setSetupSecret(event.target.value)}
+          style={{
+            width: '100%',
+            boxSizing: 'border-box',
+            fontFamily: 'var(--ht-sans)',
+            fontSize: 12.5,
+            color: 'var(--ht-ink)',
+            background: 'var(--ht-bg)',
+            border: '1px solid var(--ht-divider)',
+            borderRadius: 'var(--ht-radius-sm)',
+            padding: '8px 10px',
+            outline: 'none',
+          }}
+        />
+        <div style={{ marginTop: 6, fontSize: 11.5, lineHeight: 1.5, color: 'var(--ht-ink-dim)' }}>
+          Set by whoever deployed this instance, as the <code>HELPTHREAD_SETUP_SECRET</code>{' '}
+          environment variable.
+        </div>
 
         {tooShort && (
           <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ht-ink-dim)' }}>

@@ -283,6 +283,32 @@ describe('loadConfig — HELPTHREAD_UI_BASE_URL (HT-54, optional; derivable sinc
   })
 })
 
+describe('loadConfig — HELPTHREAD_SETUP_SECRET (issue #227, optional)', () => {
+  it('is absent from AppConfig when unset — "required" and "removable once an Agent exists" would conflict if boot failed without it', () => {
+    const config = loadConfig(validEnv())
+    expect(config.setupSecret).toBeUndefined()
+  })
+
+  it('is absent when set to whitespace only — treated the same as unset', () => {
+    const config = loadConfig({ ...validEnv(), HELPTHREAD_SETUP_SECRET: '   ' })
+    expect(config.setupSecret).toBeUndefined()
+  })
+
+  it('is read verbatim when set and long enough', () => {
+    const config = loadConfig({
+      ...validEnv(),
+      HELPTHREAD_SETUP_SECRET: 'a-perfectly-fine-setup-secret',
+    })
+    expect(config.setupSecret).toBe('a-perfectly-fine-setup-secret')
+  })
+
+  it('rejects a too-short HELPTHREAD_SETUP_SECRET', () => {
+    expect(() => loadConfig({ ...validEnv(), HELPTHREAD_SETUP_SECRET: 'short' })).toThrow(
+      /HELPTHREAD_SETUP_SECRET/,
+    )
+  })
+})
+
 describe('loadConfig — never leaks a secret value', () => {
   it('reports a too-short token by LENGTH, never echoing the secret value', () => {
     const secretValue = 'sekret'
@@ -293,6 +319,18 @@ describe('loadConfig — never leaks a secret value', () => {
       message = err instanceof Error ? err.message : String(err)
     }
     expect(message).toContain('HELPTHREAD_API_TOKEN')
+    expect(message).not.toContain(secretValue)
+  })
+
+  it('reports a too-short HELPTHREAD_SETUP_SECRET by LENGTH, never echoing the secret value', () => {
+    const secretValue = 'sekret'
+    let message = ''
+    try {
+      loadConfig({ ...validEnv(), HELPTHREAD_SETUP_SECRET: secretValue })
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+    expect(message).toContain('HELPTHREAD_SETUP_SECRET')
     expect(message).not.toContain(secretValue)
   })
 
