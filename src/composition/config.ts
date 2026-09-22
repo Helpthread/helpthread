@@ -195,6 +195,22 @@ class ConfigErrors {
     return value
   }
 
+  /**
+   * {@link requireMinLength}'s check for an OPTIONAL variable: absent (or
+   * whitespace-only) is a valid state — `undefined`, no problem recorded —
+   * but present-but-short IS one, same message shape as
+   * {@link requireMinLength}.
+   */
+  optionalMinLength(env: NodeJS.ProcessEnv, name: string, min: number): string | undefined {
+    const raw = env[name]
+    if (raw === undefined || raw.trim().length === 0) return undefined
+    if (raw.length < min) {
+      this.add(`${name} must be at least ${min} characters (got ${raw.length})`)
+      return undefined
+    }
+    return raw
+  }
+
   throwIfAny(): void {
     if (this.#problems.length > 0) {
       throw new Error(
@@ -340,15 +356,7 @@ function resolveEncryptionKey(env: NodeJS.ProcessEnv, errors: ConfigErrors): Buf
  * convention for every other secret in this module.
  */
 function resolveSetupSecret(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | undefined {
-  const raw = env.HELPTHREAD_SETUP_SECRET
-  if (raw === undefined || raw.trim().length === 0) return undefined
-  if (raw.length < MIN_SETUP_SECRET_LENGTH) {
-    errors.add(
-      `HELPTHREAD_SETUP_SECRET must be at least ${MIN_SETUP_SECRET_LENGTH} characters (got ${raw.length})`,
-    )
-    return undefined
-  }
-  return raw
+  return errors.optionalMinLength(env, 'HELPTHREAD_SETUP_SECRET', MIN_SETUP_SECRET_LENGTH)
 }
 
 /**
