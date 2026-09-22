@@ -42,14 +42,17 @@
  *
  * ## Error codes
  *
- * Two NEW slugs beyond the existing `unauthorized`/`not_found`/
+ * Three NEW slugs beyond the existing `unauthorized`/`not_found`/
  * `validation_failed`/`send_failed`/`server_error` set: `forbidden` (403, an
- * authenticated-but-not-permitted acting Agent) and `conflict` (409 — email
+ * authenticated-but-not-permitted acting Agent), `conflict` (409 — email
  * taken, last-admin violation, an invited Agent's status/password touched
- * outside its lifecycle, invites unavailable). Never `secret_hash`,
- * a password, or a token anywhere in a response body.
+ * outside its lifecycle, invites unavailable), and `setup_locked` (409 —
+ * `POST /setup` called before `HELPTHREAD_SETUP_SECRET` is configured on the
+ * server; issue #227). Never `secret_hash`, a password, a token, or the
+ * setup secret anywhere in a response body.
  */
 
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { buildInviteEmail } from '../auth/invite-email.js'
 import { mintInviteToken, verifyInviteToken } from '../auth/invite-token.js'
 import { hashPassword, MAX_PASSWORD_LENGTH } from '../auth/password-hash.js'
@@ -84,6 +87,14 @@ export interface AgentsApiDeps {
   mailboxStore: MailboxStore
   /** The web UI's base URL (`HELPTHREAD_UI_BASE_URL`) — ABSENT when unset (spec §8's "a fresh deploy can't email before it can"): `sendInvite` still creates the Agent (`inviteSent: false`), and `/agents/{id}/invite` refuses with `409 conflict`. */
   uiBaseUrl?: string
+  /**
+   * The `/setup` bootstrap secret (`HELPTHREAD_SETUP_SECRET`; issue #227) —
+   * ABSENT when unset, same convention as `uiBaseUrl` above.
+   * {@link handleSetup} refuses every call with `409 setup_locked` while
+   * this is absent; once set, a request must carry the matching value
+   * (`body.setupSecret`) in addition to the existing zero-Agents guard.
+   */
+  setupSecret?: string
 }
 
 /** Dependencies every handler in this module may need. Built once per request by `src/api/index.ts`, merging `InboxApiDeps.agents` with the top-level `keyring`/`sender`/`mailDomain`/`supportAddress` fields every request already carries. */
@@ -247,16 +258,51 @@ export async function handleAuthProviders(
 
 // --- POST /api/v1/setup -----------------------------------------------------
 
-/** `POST /api/v1/setup` (spec §6) — creates the first admin. No acting-Agent header (pre-session). */
+/**
+ * Compare `provided` to `secret` in constant time, regardless of either
+ * string's length. Hashing both sides first (rather than
+ * `auth.ts`'s length-guard-then-`timingSafeEqual` pattern) sidesteps needing
+ * a length check at all: `timingSafeEqual` only ever sees two 32-byte SHA-256
+ * digests, and `provided` is untrusted request-body input whose length is
+ * otherwise unbounded. Never throws.
+ */
+function constantTimeEquals(provided: string, secret: string): boolean {
+  const providedDigest = createHash('sha256').update(provided).digest()
+  const secretDigest = createHash('sha256').update(secret).digest()
+  return timingSafeEqual(providedDigest, secretDigest)
+}
+
+/**
+ * `POST /api/v1/setup` (spec §6) — creates the first admin. No acting-Agent
+ * header (pre-session). **Two independent guards, both required (issue
+ * #227):** the pre-existing zero-Agents check (`store.createFirstAdmin`,
+ * unchanged) and, new here, a bootstrap secret
+ * (`HELPTHREAD_SETUP_SECRET`/`deps.setupSecret`) the caller must present as
+ * `body.setupSecret`. A deployment that hasn't set the secret refuses every
+ * call outright (`409 setup_locked`) rather than falling back to
+ * "zero-Agents guard only" — the secret is exactly what prevents whoever
+ * opens a public `/setup` URL first from becoming the permanent admin.
+ */
 export async function handleSetup(
   request: Request,
-  deps: Pick<AgentsHandlerDeps, 'store'>,
+  deps: Pick<AgentsHandlerDeps, 'store' | 'setupSecret'>,
 ): Promise<Response> {
+  if (deps.setupSecret === undefined) {
+    return apiError(409, 'setup_locked', 'Setup is locked until HELPTHREAD_SETUP_SECRET is set.')
+  }
+
   const parsed = await parseJsonBody(request)
   if (!parsed.ok) return apiError(400, 'validation_failed', 'Request body must be valid JSON.')
   const body = asRecord(parsed.value)
   if (body === null)
     return apiError(400, 'validation_failed', 'Request body must be a JSON object.')
+
+  if (
+    typeof body.setupSecret !== 'string' ||
+    !constantTimeEquals(body.setupSecret, deps.setupSecret)
+  ) {
+    return apiError(401, 'unauthorized', 'Invalid or missing setup secret.')
+  }
 
   const name = validateName(body.name)
   const email = normalizeEmail(body.email)

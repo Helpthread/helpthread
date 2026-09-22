@@ -268,14 +268,23 @@ throughout, extensible without breaking clients.
 - **`GET /api/v1/auth/providers`** → `{ providers: AuthProviderDescriptor[], needsSetup:
   boolean }`. `needsSetup` = zero Agents exist. The web reads this to decide login vs.
   `/setup`, and to render the right controls.
-- **`POST /api/v1/setup`** `{ name, email, password }` → creates the **first admin**
-  (role=admin, status=active, a `password` identity). **Guarded atomically — a predicate
-  alone is not enough:** under READ COMMITTED, two concurrent `INSERT ... WHERE NOT EXISTS
-  (SELECT 1 FROM agents)` calls each see an empty table in their own snapshots and both
-  insert (different emails, so no unique index saves it). The setup transaction takes the
-  same **`pg_advisory_xact_lock`** §5 uses before the zero-Agents check + insert; the `WHERE
-  NOT EXISTS` predicate stays as a guard inside it. Exactly one concurrent call wins; the
-  other gets `409`. The one endpoint that creates an Agent without an acting admin.
+- **`POST /api/v1/setup`** `{ name, email, password, setupSecret }` → creates the **first
+  admin** (role=admin, status=active, a `password` identity). **Guarded atomically — a
+  predicate alone is not enough:** under READ COMMITTED, two concurrent `INSERT ... WHERE NOT
+  EXISTS (SELECT 1 FROM agents)` calls each see an empty table in their own snapshots and
+  both insert (different emails, so no unique index saves it). The setup transaction takes
+  the same **`pg_advisory_xact_lock`** §5 uses before the zero-Agents check + insert; the
+  `WHERE NOT EXISTS` predicate stays as a guard inside it. Exactly one concurrent call wins;
+  the other gets `409`. The one endpoint that creates an Agent without an acting admin.
+  **Two independent guards, both required (issue #227):** the zero-Agents check above, and a
+  bootstrap secret — `setupSecret` must match the deploy-time `HELPTHREAD_SETUP_SECRET`
+  (§9), or the call is rejected, closing the window where whoever opens a public `/setup` URL
+  first becomes the permanent admin. `HELPTHREAD_SETUP_SECRET` itself is **OPTIONAL** at the
+  config layer (`loadConfig`) — unset, the endpoint refuses every call with `409
+  setup_locked` rather than falling back to the zero-Agents guard alone; wrong or missing
+  `setupSecret` in the body is `401`. Once the first admin exists, the secret is inert (every
+  further call 409s on the zero-Agents guard regardless) and may be removed from the
+  deployment's environment.
 - **`POST /api/v1/auth/verify`** `{ providerKey, ... }` → dispatches to the named provider's
   `authenticate`; returns `{ agent }` or a **generic `401`**. For `password`: `{
   providerKey:'password', email, password }`. **All failure modes return the same generic
@@ -346,7 +355,9 @@ Claude Design project has the login template but not these. Copy uses Agent/Team
 (§2), never "user".
 
 1. **`/setup` — first run.** Shown when `needsSetup`. Create the first admin: name, email,
-   password (+ confirm). One-shot; once an Agent exists, `/setup` redirects to `/login`.
+   password (+ confirm), and the deployment's **setup key** (issue #227) — copy points at
+   `HELPTHREAD_SETUP_SECRET` as the deploy-time env var to find it in. One-shot; once an
+   Agent exists, `/setup` redirects to `/login`.
 2. **`/login` — per-Agent.** Extends the original login screen: **email + password** (was
    password only), verified against the engine. Renders whatever `/auth/providers` reports —
    a password form in core; premium builds add a "Sign in with …" button here.
@@ -466,6 +477,19 @@ Document the retirement in the runbook and README.
   *operator's own* Google Workspace (OIDC), not ours.
 - **No secret in the client bundle:** password verification and hashing are server-only
   (engine); the web never sees a hash. `web/` gains no DB access.
+- **`/setup` bootstrap secret (issue #227).** `/setup` is public and unauthenticated by
+  design (§6, §7) — on a fresh external deployment, "zero Agents exist" alone is a state
+  check, not authorization, so whoever opens a guessable `*.vercel.app` URL first would
+  otherwise become the permanent admin. `HELPTHREAD_SETUP_SECRET` closes that window: the
+  engine compares it to the request's `setupSecret` in constant time (`node:crypto
+  .timingSafeEqual` over SHA-256 digests of both values, so the comparison never depends on
+  either string's length) and never logs it. It is validated (a minimum length, never the
+  value) by `loadConfig`, same discipline as every other secret in
+  `src/composition/config.ts` — but unlike those, it is **optional at the config layer**:
+  `POST /api/v1/setup` itself enforces "required" by refusing every call while it's unset
+  (`409 setup_locked`), which is what lets the deployment doc's "may be removed once an Agent
+  exists" (below) be literally true without `loadConfig` failing boot on a
+  deployment that has already bootstrapped and dropped the var.
 
 ## 10. Rollout
 
@@ -515,6 +539,18 @@ Everything else is additive — new tables, new endpoints, new screens.
    later.)*
 
 ## Changelog
+
+- **2026-09-22** (issue #227): **`/setup` bootstrap secret.** `HELPTHREAD_SETUP_SECRET`
+  (§6, §9) closes the "first visitor to a public `/setup` URL becomes the permanent admin"
+  gap — the zero-Agents guard alone is a state check, not authorization. `setupSecret` is now
+  a required request field alongside the existing zero-Agents guard; the env var itself is
+  **optional** at `loadConfig` (`INFERRED` engineering reading of the issue: "required" and
+  "may be removed once an Agent exists" would conflict if boot failed without it), with
+  `POST /setup` refusing every call (`409 setup_locked`) while it's unset. `/setup` gains a
+  "Setup key" field pointing at the env var; the design project does not have this field yet
+  (app-first, CLAUDE.md's "App → design"). Follows #150 (shares `config.ts`); the
+  Deploy-with-Vercel env prompt (#151) should list this var once that issue lands — not done
+  here, #151 does not exist yet.
 
 - **2026-07-19** (PR #82, PR #88): **Passkey login reclassified from marketplace to core**
   (§1, §3.2, §11). The module catalog made passkey login core the previous day — security

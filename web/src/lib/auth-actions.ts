@@ -79,27 +79,44 @@ export interface SetupActionResult {
 
 /**
  * First-run bootstrap (`/setup`, spec §6): creates the first admin, signs
- * them in, and redirects to the inbox. The engine's own `409` ("setup has
+ * them in, and redirects to the inbox. `setupSecret` (issue #227) is the
+ * deploy-time `HELPTHREAD_SETUP_SECRET`, required alongside the engine's
+ * existing zero-Agents guard. The engine's own `409 conflict` ("setup has
  * already been completed") is safe to show verbatim — it tells whoever
- * lands here late to go to `/login` instead.
+ * lands here late to go to `/login` instead; its `409 setup_locked` and
+ * `401` (wrong/missing secret) each get their own copy so an operator can
+ * tell "not configured yet" apart from "wrong value" and from "beaten to
+ * it."
  */
 export async function setupAction(
   name: string,
   email: string,
   password: string,
+  setupSecret: string,
 ): Promise<SetupActionResult> {
   let agentId: string
   try {
-    const { agent } = await postSetup({ name, email, password })
+    const { agent } = await postSetup({ name, email, password, setupSecret })
     agentId = agent.id
   } catch (error) {
     if (error instanceof ApiError) {
-      // Only the 409 (someone else completed setup first / a concurrent
-      // submit) carries engine copy that is meaningful to show; any other
+      // Only these engine codes carry copy meaningful to show; any other
       // ApiError (a bearer-token 401's internal prefix, a 500) surfaces as
       // generic copy — raw internal messages never reach this screen.
+      if (error.code === 'setup_locked') {
+        return {
+          ok: false,
+          message: 'Setup is locked until HELPTHREAD_SETUP_SECRET is set in this deployment.',
+        }
+      }
       if (error.status === 409) {
         return { ok: false, message: 'Setup has already been completed. Sign in instead.' }
+      }
+      if (error.status === 401) {
+        return {
+          ok: false,
+          message: "That setup key doesn't match. Check the value and try again.",
+        }
       }
       return { ok: false, message: 'Could not create the account. Please try again.' }
     }

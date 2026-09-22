@@ -428,6 +428,11 @@ export async function buildApp(
       providers: authProviders,
       mailboxStore,
       ...(config.uiBaseUrl !== undefined ? { uiBaseUrl: config.uiBaseUrl } : {}),
+      // The `/setup` bootstrap secret (issue #227) — absent-by-default,
+      // same spread convention as `uiBaseUrl` above: `handleSetup` treats a
+      // missing key as "locked", not "undefined field", so this must stay
+      // genuinely ABSENT rather than present-with-undefined.
+      ...(config.setupSecret !== undefined ? { setupSecret: config.setupSecret } : {}),
     },
     // Webhooks admin API (HT-69) — CORE, required like `agents` (spec §1:
     // the substrate is core, free forever). `queue` is the SAME
