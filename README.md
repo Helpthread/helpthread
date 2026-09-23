@@ -34,8 +34,9 @@ connected Postgres database, and asks you only for the handful of values Vercel 
 can't generate on your behalf. Read
 **[Deploy with Vercel](specs/deploy/deploy-with-vercel.md)** before you click — it explains
 every prompted variable, how to generate the secrets, the Vercel Pro requirement, and what
-happens on first visit. This path has not yet been exercised end to end (no deployment has
-been created from this exact button); the manual runbook below remains the proven path.
+happens on first visit. A test install through this button on 2026-09-23 set up its database
+and served the setup page. Sending and receiving mail on a button install has not been tested
+yet, so for mail the manual runbook below remains the proven path.
 
 ## Start here
 

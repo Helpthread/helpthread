@@ -102,7 +102,11 @@ function apiBaseUrl(): string | undefined {
   const explicit = process.env.HELPTHREAD_API_URL
   if (explicit !== undefined) return explicit
   const preview = previewSelfOrigin()
-  return preview ?? process.env.PUBLIC_BASE_URL ?? derivedProductionOrigin()
+  // Blank counts as unset, as in `src/composition/config.ts`.
+  const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim()
+    ? process.env.PUBLIC_BASE_URL
+    : undefined
+  return preview ?? publicBaseUrl ?? derivedProductionOrigin()
 }
 
 /**
