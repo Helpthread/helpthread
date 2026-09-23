@@ -3,9 +3,10 @@
 Status: **alpha, developer preview** (issues #151/#153). This is a guided one-click route into
 a real Helpthread deployment — it still asks you for real secrets and a mailbox, but it removes
 almost every manual setup step in [`single-project.md`](single-project.md) and
-[`gmail-inbound-runbook.md`](gmail-inbound-runbook.md). The button has **not** been clicked
-end to end yet (no live deployment has been created from it); if something here doesn't match
-what Vercel shows you, please open an issue.
+[`gmail-inbound-runbook.md`](gmail-inbound-runbook.md). A live install through the button on
+2026-09-23 confirmed the deploy through first boot (see the `POSTGRES_URL` note below);
+sending/receiving mail and creating the first admin through `/setup` were not part of that test.
+If something here doesn't match what Vercel shows you, please open an issue.
 
 The button (README, top) does three things in one flow:
 
@@ -15,6 +16,13 @@ The button (README, top) does three things in one flow:
    Vercel project's environment automatically.
 3. Prompts you for the handful of values below that neither Vercel nor Supabase can generate
    for you.
+
+**Two things a live install surfaced:** when you reach the Supabase integration step, leave
+"Public Environment Variables Prefix" alone — that field is for Supabase's own variables, not
+Helpthread's. Helpthread's values (below) go in the separate per-variable fields Vercel shows
+for your project, not in that prefix field. Separately, the new repository Vercel creates for
+you may carry over the source repository's dependabot branches, and Vercel will build preview
+deployments for them — a failed preview there does not affect your production deployment.
 
 ## What Vercel/Supabase fill in for you
 
@@ -27,6 +35,7 @@ between dashboards:
 | `POSTGRES_URL` | `DATABASE_URL` (fallback) | The pooled Postgres connection string. An explicit `DATABASE_URL` always wins if you set one yourself. |
 | `SUPABASE_URL` | `SUPABASE_URL` | Same name — no fallback needed. |
 | `SUPABASE_SECRET_KEY` | `SUPABASE_SERVICE_ROLE_KEY` (fallback) | The integration's current name for the server-only key. An explicit `SUPABASE_SERVICE_ROLE_KEY` always wins. |
+| `SUPABASE_SERVICE_ROLE_KEY` | `SUPABASE_SERVICE_ROLE_KEY` | Same name — the integration also writes this one directly, so `SUPABASE_SECRET_KEY` above is only a fallback. |
 
 > **Not independently confirmed:** Supabase's own Vercel-integration docs did not spell out
 > `POSTGRES_URL`'s pooling mode (transaction vs. session) or port number in the terms
@@ -38,7 +47,8 @@ between dashboards:
 > [serverless-drivers guide](https://supabase.com/docs/guides/database/connecting-to-postgres/serverless-drivers)
 > tells users to set `POSTGRES_URL` to the Transaction pooler URI (port 6543). If your
 > deployment's queries behave oddly under load, check the actual value Vercel wrote and
-> compare it against the Supabase dashboard's **Connect** dialog's pooler URI.
+> compare it against the Supabase dashboard's **Connect** dialog's pooler URI. (The pooling
+> mode/port itself is still unconfirmed — see below for what a real install did confirm.)
 >
 > The `POSTGRES_URL` fallback also carries `?sslmode=require`. Helpthread rewrites that to
 > `sslmode=require&uselibpqcompat=true` before connecting (`src/composition/postgres-url-compat.ts`),
@@ -48,6 +58,15 @@ between dashboards:
 > is not verified. If you want full chain verification instead, set `DATABASE_URL` explicitly
 > with `sslmode=verify-full` and Supabase's CA certificate — an explicit `DATABASE_URL` is never
 > rewritten.
+>
+> **Confirmed by a live install (2026-09-23):** this path works end to end against a fresh
+> Supabase database. The production build log showed
+> `scripts/migrate-if-production: production build — all migrations applied.` running against
+> `POSTGRES_URL` through this same TLS-compat rewrite, then `next build` succeeded and the
+> deployment went READY. At runtime, `/setup` correctly rendered its "Set up your team" form —
+> which only renders when the engine's live `countAgents()` query returns 0 — confirming the
+> app reads the database through this same path in production, not just at build time. Not
+> covered by this test: sending/receiving mail and creating the first admin through `/setup`.
 
 Vercel also sets `VERCEL_PROJECT_PRODUCTION_URL`, which Helpthread uses to fill in
 `PUBLIC_BASE_URL` automatically on your first Production deploy — see below.
@@ -143,7 +162,6 @@ After setup, connect a mailbox:
 ## Open questions this document does not resolve
 
 - The Supabase Marketplace integration's exact `stores` parameters
-  (`integrationSlug`/`productSlug`, both `"supabase"`) are the current values Vercel's own
-  Deploy Button and Marketplace docs point to, but were not confirmed by clicking the button
-  end to end.
+  (`integrationSlug`/`productSlug`, both `"supabase"`) worked in the 2026-09-23 live install —
+  don't change the button URL.
 - `POSTGRES_URL`'s pooling mode — see the callout above.
