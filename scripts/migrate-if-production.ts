@@ -12,10 +12,11 @@
  *   project doesn't host the engine): log one line naming why, touch
  *   nothing, exit 0. Neither a preview/development build nor a split-UI
  *   build owns the database it would be migrating.
- * - `fail` (a production, single-project build with no `DATABASE_URL`): log the fix and
- *   exit 1, FAILING THE BUILD. Deploying code against a database nobody
- *   migrated is exactly the outage this gate exists to prevent — the outage
- *   observed and written up in issue #152's field-evidence comment.
+ * - `fail` (a production, single-project build with no `DATABASE_URL`/
+ *   `POSTGRES_URL`): log the fix and exit 1, FAILING THE BUILD. Deploying
+ *   code against a database nobody migrated is exactly the outage this gate
+ *   exists to prevent — the outage observed and written up in issue #152's
+ *   field-evidence comment.
  * - `migrate`: apply every pending migration via `runMigration`
  *   (`./migrate.ts`) — the SAME advisory-locked, one-transaction, idempotent
  *   `migrate()` (`src/db/migrate.ts`) a manual `npm run migrate` uses. A
@@ -23,7 +24,7 @@
  *   deploying code against a half-migrated schema, which is worse than not
  *   deploying.
  *
- * Never logs `DATABASE_URL` (or any part of it), on any path.
+ * Never logs `DATABASE_URL`/`POSTGRES_URL` (or any part of either), on any path.
  */
 
 import { decideMigrationGate } from '../src/composition/migration-gate.js'
@@ -42,8 +43,9 @@ async function main(): Promise<void> {
   }
 
   try {
-    // decision.action === 'migrate' guarantees DATABASE_URL is set and non-blank.
-    await runMigration(process.env.DATABASE_URL as string)
+    // decision.databaseUrl is DATABASE_URL, or its POSTGRES_URL fallback —
+    // decideMigrationGate resolved whichever is set (issue #151/#153).
+    await runMigration(decision.databaseUrl)
     console.log('scripts/migrate-if-production: production build — all migrations applied.')
   } catch (err) {
     console.error(

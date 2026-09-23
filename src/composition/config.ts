@@ -25,6 +25,7 @@
  */
 
 import { decodeEncryptionKey } from '../store/token-crypto.js'
+import { withLibpqSslCompat } from './postgres-url-compat.js'
 
 /**
  * Minimum service Bearer token length — mirrors `createInboxApi`'s own
@@ -70,10 +71,22 @@ export interface AppConfig {
   supabaseServiceRoleKey: string
   /** Private Storage bucket name attachment/oversized-raw blobs are namespaced within. */
   blobBucket: string
-  /** The Internal OAuth app's client id (connect flow + token refresh). */
-  gmailOAuthClientId: string
-  /** The Internal OAuth app's client secret. */
-  gmailOAuthClientSecret: string
+  /**
+   * The Internal OAuth app's client id (connect flow + token refresh).
+   * OPTIONAL as of the Vercel Deploy Button path (issue #151): unlike every
+   * `require*` field above, `GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET`
+   * are BOTH-OR-NEITHER (see {@link resolveGmailOAuth}) — a deployment that
+   * only ever connects IMAP/SMTP mailboxes no longer needs a placeholder
+   * Google Cloud OAuth app just to boot. Absent, `./root.ts` never
+   * constructs the Gmail token service, connect/disconnect services, or the
+   * push webhook deps: Gmail connect/OAuth routes refuse (existing
+   * degrade-by-omission convention, matching `gmailPush`/`gmailConnect`
+   * being absent-by-default in `src/api/index.ts`), and one warning is
+   * logged at boot (`warnings` below). IMAP/SMTP mailboxes are unaffected.
+   */
+  gmailOAuthClientId?: string
+  /** The Internal OAuth app's client secret. OPTIONAL — see {@link gmailOAuthClientId}. */
+  gmailOAuthClientSecret?: string
   /**
    * Gmail push configuration — OPTIONAL as of HT-94.
    *
@@ -154,7 +167,16 @@ class ConfigErrors {
 
   /** A present, non-empty (after trim) string, or `null` with a recorded "missing" problem. */
   requireString(env: NodeJS.ProcessEnv, name: string): string | null {
-    const raw = env[name]
+    return this.requireStringValue(name, env[name])
+  }
+
+  /**
+   * {@link requireString}'s check, given the value directly rather than an
+   * `env` + name pair — for a field whose value may already be a resolved
+   * platform-integration fallback (`resolvePlatformIntegrationOverrides`)
+   * rather than a bare `env[name]` read.
+   */
+  requireStringValue(name: string, raw: string | undefined): string | null {
     if (raw === undefined || raw.trim().length === 0) {
       this.add(`${name} is required but missing or empty`)
       return null
@@ -171,6 +193,22 @@ class ConfigErrors {
       return null
     }
     return value
+  }
+
+  /**
+   * {@link requireMinLength}'s check for an OPTIONAL variable: absent (or
+   * whitespace-only) is a valid state — `undefined`, no problem recorded —
+   * but present-but-short IS one, same message shape as
+   * {@link requireMinLength}.
+   */
+  optionalMinLength(env: NodeJS.ProcessEnv, name: string, min: number): string | undefined {
+    const raw = env[name]
+    if (raw === undefined || raw.trim().length === 0) return undefined
+    if (raw.length < min) {
+      this.add(`${name} must be at least ${min} characters (got ${raw.length})`)
+      return undefined
+    }
+    return raw
   }
 
   throwIfAny(): void {
@@ -203,38 +241,65 @@ export interface LoadConfigOptions {
 }
 
 export function loadConfig(
-  env: NodeJS.ProcessEnv = process.env,
+  rawEnv: NodeJS.ProcessEnv = process.env,
   options: LoadConfigOptions = {},
 ): AppConfig {
+  const overrides = resolvePlatformIntegrationOverrides(rawEnv)
   const errors = new ConfigErrors()
 
-  const databaseUrl = errors.requireString(env, 'DATABASE_URL')
-  const supabaseUrl = errors.requireString(env, 'SUPABASE_URL')
-  const supabaseServiceRoleKey = errors.requireString(env, 'SUPABASE_SERVICE_ROLE_KEY')
-  const blobBucket = errors.requireString(env, 'HELPTHREAD_BLOB_BUCKET')
-  const gmailOAuthClientId = errors.requireString(env, 'GMAIL_OAUTH_CLIENT_ID')
-  const gmailOAuthClientSecret = errors.requireString(env, 'GMAIL_OAUTH_CLIENT_SECRET')
-  const gmailPush = resolveGmailPush(env, errors)
-  const apiToken = errors.requireMinLength(env, 'HELPTHREAD_API_TOKEN', MIN_API_TOKEN_LENGTH)
+  const databaseUrl = errors.requireStringValue(
+    'DATABASE_URL',
+    overrides.databaseUrl ?? rawEnv.DATABASE_URL,
+  )
+  const supabaseUrl = errors.requireString(rawEnv, 'SUPABASE_URL')
+  const supabaseServiceRoleKey = errors.requireStringValue(
+    'SUPABASE_SERVICE_ROLE_KEY',
+    overrides.supabaseServiceRoleKey ?? rawEnv.SUPABASE_SERVICE_ROLE_KEY,
+  )
+  const blobBucket = errors.requireString(rawEnv, 'HELPTHREAD_BLOB_BUCKET')
+  const gmailOAuth = resolveGmailOAuth(rawEnv, errors)
+  const gmailPush = resolveGmailPush(rawEnv, errors)
+  if (
+    gmailPush !== undefined &&
+    (gmailOAuth.clientId === undefined || gmailOAuth.clientSecret === undefined)
+  ) {
+    errors.add(
+      'GMAIL_PUBSUB_TOPIC/GMAIL_PUBSUB_SUBSCRIPTION/GMAIL_PUSH_SERVICE_ACCOUNT are set, but ' +
+        'GMAIL_OAUTH_CLIENT_ID/GMAIL_OAUTH_CLIENT_SECRET are not — Gmail push has nothing to ' +
+        'authenticate against without Gmail OAuth configured. Set both Gmail OAuth variables, ' +
+        'or remove the three push variables to run on IMAP/SMTP alone.',
+    )
+  }
+  const apiToken = errors.requireMinLength(rawEnv, 'HELPTHREAD_API_TOKEN', MIN_API_TOKEN_LENGTH)
   const signingSecret = errors.requireMinLength(
-    env,
+    rawEnv,
     'HELPTHREAD_SIGNING_SECRET',
     MIN_SIGNING_SECRET_LENGTH,
   )
-  const cronSecret = errors.requireMinLength(env, 'CRON_SECRET', MIN_CRON_SECRET_LENGTH)
-  const setupSecret = resolveSetupSecret(env, errors)
-  const mailDomain = errors.requireString(env, 'HELPTHREAD_MAIL_DOMAIN')
-  const supportAddress = errors.requireString(env, 'HELPTHREAD_SUPPORT_ADDRESS')
+  const cronSecret = errors.requireMinLength(rawEnv, 'CRON_SECRET', MIN_CRON_SECRET_LENGTH)
+  const setupSecret = resolveSetupSecret(rawEnv, errors)
+  const mailDomain = errors.requireString(rawEnv, 'HELPTHREAD_MAIL_DOMAIN')
+  const supportAddress = errors.requireString(rawEnv, 'HELPTHREAD_SUPPORT_ADDRESS')
 
-  const tokenEncryptionKey = resolveEncryptionKey(env, errors)
-  const publicBaseUrl = resolvePublicBaseUrl(env, errors)
+  const tokenEncryptionKey = resolveEncryptionKey(rawEnv, errors)
+  const publicBaseUrl = resolvePublicBaseUrl(
+    overrides.publicBaseUrl ?? rawEnv.PUBLIC_BASE_URL,
+    errors,
+  )
   const ui = resolveUiBaseUrl(
-    env,
+    rawEnv,
     errors,
     options.uiAtPublicBaseUrl === true ? publicBaseUrl : null,
   )
 
   errors.throwIfAny()
+
+  // Secret-free notes for `./root.ts` to log once at boot — collected from
+  // every resolver above that can degrade instead of failing (gmailOAuth,
+  // ui), rather than one field per warning source.
+  const warnings = [gmailOAuth.warning, ui.warning].filter(
+    (warning): warning is string => warning !== undefined,
+  )
 
   // Every value above is non-null here: throwIfAny() would have thrown
   // otherwise. The non-null assertions make that guarantee explicit to the
@@ -244,8 +309,9 @@ export function loadConfig(
     supabaseUrl: supabaseUrl as string,
     supabaseServiceRoleKey: supabaseServiceRoleKey as string,
     blobBucket: blobBucket as string,
-    gmailOAuthClientId: gmailOAuthClientId as string,
-    gmailOAuthClientSecret: gmailOAuthClientSecret as string,
+    ...(gmailOAuth.clientId !== undefined && gmailOAuth.clientSecret !== undefined
+      ? { gmailOAuthClientId: gmailOAuth.clientId, gmailOAuthClientSecret: gmailOAuth.clientSecret }
+      : {}),
     ...(gmailPush !== undefined ? { gmailPush } : {}),
     tokenEncryptionKey: tokenEncryptionKey as Buffer,
     apiToken: apiToken as string,
@@ -256,7 +322,7 @@ export function loadConfig(
     mailDomain: mailDomain as string,
     supportAddress: supportAddress as string,
     ...(ui.uiBaseUrl !== undefined ? { uiBaseUrl: ui.uiBaseUrl } : {}),
-    ...(ui.warning !== undefined ? { warnings: [ui.warning] } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
   }
 }
 
@@ -290,15 +356,7 @@ function resolveEncryptionKey(env: NodeJS.ProcessEnv, errors: ConfigErrors): Buf
  * convention for every other secret in this module.
  */
 function resolveSetupSecret(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | undefined {
-  const raw = env.HELPTHREAD_SETUP_SECRET
-  if (raw === undefined || raw.trim().length === 0) return undefined
-  if (raw.length < MIN_SETUP_SECRET_LENGTH) {
-    errors.add(
-      `HELPTHREAD_SETUP_SECRET must be at least ${MIN_SETUP_SECRET_LENGTH} characters (got ${raw.length})`,
-    )
-    return undefined
-  }
-  return raw
+  return errors.optionalMinLength(env, 'HELPTHREAD_SETUP_SECRET', MIN_SETUP_SECRET_LENGTH)
 }
 
 /**
@@ -312,8 +370,8 @@ function resolveSetupSecret(env: NodeJS.ProcessEnv, errors: ConfigErrors): strin
  * (`https://x/foo` + `/api/...` → `https://x/foo/api/...`, a mismatch), and
  * silently stripping it could hide a real operator misconfiguration.
  */
-function resolvePublicBaseUrl(env: NodeJS.ProcessEnv, errors: ConfigErrors): string | null {
-  const raw = errors.requireString(env, 'PUBLIC_BASE_URL')
+function resolvePublicBaseUrl(rawValue: string | undefined, errors: ConfigErrors): string | null {
+  const raw = errors.requireStringValue('PUBLIC_BASE_URL', rawValue)
   if (raw === null) return null
   let parsed: URL
   try {
@@ -369,6 +427,50 @@ function isLoopbackHost(hostname: string): boolean {
     hostname === '[::1]' ||
     hostname === '::1'
   )
+}
+
+/**
+ * Resolve the BOTH-OR-NEITHER `GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET`
+ * pair (issue #151 — the Deploy with Vercel path makes Gmail optional for
+ * installs that only ever connect IMAP/SMTP mailboxes). Three outcomes:
+ *
+ * - both unset  → `{ warning }`; Gmail connect is disabled for this
+ *   deployment (`./root.ts` never builds the Gmail token/connect/disconnect
+ *   services), IMAP/SMTP is unaffected, and one secret-free line is logged
+ *   at boot.
+ * - both set    → `{ clientId, clientSecret }`, exactly the pre-#151 shape.
+ * - one set     → a config ERROR naming the missing one. Half a Gmail OAuth
+ *   app is not a usable Gmail OAuth app, and a deployment that believes
+ *   Gmail is configured because ONE var is present is the same silent-half-
+ *   config failure {@link resolveGmailPush} already refuses for the push trio.
+ */
+function resolveGmailOAuth(
+  env: NodeJS.ProcessEnv,
+  errors: ConfigErrors,
+): { clientId?: string; clientSecret?: string; warning?: string } {
+  const clientIdRaw = env.GMAIL_OAUTH_CLIENT_ID
+  const clientSecretRaw = env.GMAIL_OAUTH_CLIENT_SECRET
+  const clientId =
+    clientIdRaw !== undefined && clientIdRaw.trim().length > 0 ? clientIdRaw : undefined
+  const clientSecret =
+    clientSecretRaw !== undefined && clientSecretRaw.trim().length > 0 ? clientSecretRaw : undefined
+
+  if (clientId === undefined && clientSecret === undefined) {
+    return {
+      warning:
+        'GMAIL_OAUTH_CLIENT_ID/GMAIL_OAUTH_CLIENT_SECRET are unset — Gmail connect is disabled ' +
+        'for this deployment (the Gmail connect/OAuth routes refuse); IMAP/SMTP mailboxes are unaffected.',
+    }
+  }
+  if (clientId === undefined || clientSecret === undefined) {
+    errors.add(
+      `GMAIL_OAUTH_CLIENT_ID and GMAIL_OAUTH_CLIENT_SECRET must be set together — ${
+        clientId === undefined ? 'GMAIL_OAUTH_CLIENT_ID' : 'GMAIL_OAUTH_CLIENT_SECRET'
+      } is unset. Set both to enable Gmail, or unset both to run on IMAP/SMTP alone.`,
+    )
+    return {}
+  }
+  return { clientId, clientSecret }
 }
 
 /**
@@ -476,4 +578,65 @@ function resolveUiBaseUrl(
     return {}
   }
   return { uiBaseUrl: parsed.origin }
+}
+
+/** `env[name]`, treating unset OR whitespace-only as absent — the convention every resolver above already uses. */
+function isBlank(value: string | undefined): boolean {
+  return value === undefined || value.trim().length === 0
+}
+
+/** The handful of fields {@link resolvePlatformIntegrationOverrides} can supply in place of their primary env var. */
+interface PlatformIntegrationOverrides {
+  databaseUrl?: string
+  supabaseServiceRoleKey?: string
+  publicBaseUrl?: string
+}
+
+/**
+ * Platform-integration variable aliases (issue #151/#153, the Deploy with
+ * Vercel path), resolved by reading each named var straight off `rawEnv`
+ * into a small overrides object — NOT by copying the whole of `rawEnv`
+ * (typically `process.env`, which can hold arbitrary secrets Helpthread
+ * never needs to touch as a value; a bulk copy of it is exactly the kind of
+ * flow CodeQL's clear-text-logging query flags, even though nothing here
+ * ever logs a raw value). Every field {@link loadConfig} doesn't override
+ * here is read directly off `rawEnv` at its own call site, same as before;
+ * an explicit value under the primary name always wins over its alias (only
+ * a missing/blank primary falls back).
+ *
+ * - `DATABASE_URL` ← `POSTGRES_URL`, with {@link withLibpqSslCompat} applied
+ *   ONLY on this fallback path: the Vercel⇄Supabase Marketplace integration
+ *   writes the transaction-mode pooler connection string (Supabase's own
+ *   Vercel-integration docs) under this name, with `sslmode=require` — see
+ *   `./postgres-url-compat.ts` for why that needs the libpq-compat shim. An
+ *   explicit `DATABASE_URL` is never touched.
+ * - `SUPABASE_SERVICE_ROLE_KEY` ← `SUPABASE_SECRET_KEY`: the integration's
+ *   current name for the same server-only key. `SUPABASE_URL` needs no
+ *   alias — the integration already writes that exact name.
+ * - `PUBLIC_BASE_URL` ← `https://${VERCEL_PROJECT_PRODUCTION_URL}`, but ONLY
+ *   on a Production build (`VERCEL_ENV === 'production'`; Vercel's own
+ *   stable per-project system env var, present on every environment, unlike
+ *   the per-deployment `VERCEL_URL`): a button-installed deployment gets a
+ *   working origin before anyone has set a custom domain. See
+ *   `specs/deploy/deploy-with-vercel.md` for the passkey caveat this creates
+ *   (passkeys bind to whichever host was current when one was registered).
+ */
+function resolvePlatformIntegrationOverrides(
+  rawEnv: NodeJS.ProcessEnv,
+): PlatformIntegrationOverrides {
+  const overrides: PlatformIntegrationOverrides = {}
+  if (isBlank(rawEnv.DATABASE_URL) && !isBlank(rawEnv.POSTGRES_URL)) {
+    overrides.databaseUrl = withLibpqSslCompat(rawEnv.POSTGRES_URL as string)
+  }
+  if (isBlank(rawEnv.SUPABASE_SERVICE_ROLE_KEY) && !isBlank(rawEnv.SUPABASE_SECRET_KEY)) {
+    overrides.supabaseServiceRoleKey = rawEnv.SUPABASE_SECRET_KEY
+  }
+  if (
+    isBlank(rawEnv.PUBLIC_BASE_URL) &&
+    rawEnv.VERCEL_ENV === 'production' &&
+    !isBlank(rawEnv.VERCEL_PROJECT_PRODUCTION_URL)
+  ) {
+    overrides.publicBaseUrl = `https://${rawEnv.VERCEL_PROJECT_PRODUCTION_URL}`
+  }
+  return overrides
 }
