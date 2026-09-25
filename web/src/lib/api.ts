@@ -265,6 +265,19 @@ async function request<T>(
   return (await response.json()) as T
 }
 
+/**
+ * One path segment built from a caller-supplied id. Ids reach these helpers
+ * from server-action arguments, which the browser controls, and `fetch`
+ * resolves `..` before the request leaves — so encode the segment and refuse
+ * a dot segment rather than let an id walk to a different engine route.
+ */
+function segment(value: string): string {
+  if (value === '.' || value === '..' || /^%2e(%2e)?$/i.test(value)) {
+    throw new ApiError(404, 'not_found', 'Invalid id.')
+  }
+  return encodeURIComponent(value)
+}
+
 export function listConversations(options: {
   folder: ConversationFolder
   cursor?: string
@@ -277,7 +290,7 @@ export function listConversations(options: {
 }
 
 export function getConversation(id: string): Promise<ConversationDetail> {
-  return request(`/api/v1/conversations/${id}`)
+  return request(`/api/v1/conversations/${segment(id)}`)
 }
 
 /**
@@ -290,7 +303,7 @@ export function postReply(
   input: { text: string; html?: string },
   idempotencyKey: string,
 ): Promise<ThreadView> {
-  return request(`/api/v1/conversations/${id}/replies`, {
+  return request(`/api/v1/conversations/${segment(id)}/replies`, {
     method: 'POST',
     body: input,
     headers: { 'Idempotency-Key': idempotencyKey },
@@ -298,15 +311,15 @@ export function postReply(
 }
 
 export function setStatus(id: string, status: ConversationStatus): Promise<ConversationSummary> {
-  return request(`/api/v1/conversations/${id}`, { method: 'PATCH', body: { status } })
+  return request(`/api/v1/conversations/${segment(id)}`, { method: 'PATCH', body: { status } })
 }
 
 export function postNote(id: string, text: string): Promise<ThreadView> {
-  return request(`/api/v1/conversations/${id}/notes`, { method: 'POST', body: { text } })
+  return request(`/api/v1/conversations/${segment(id)}/notes`, { method: 'POST', body: { text } })
 }
 
 export function putTags(id: string, tags: string[]): Promise<ConversationSummary> {
-  return request(`/api/v1/conversations/${id}/tags`, { method: 'PUT', body: { tags } })
+  return request(`/api/v1/conversations/${segment(id)}/tags`, { method: 'PUT', body: { tags } })
 }
 
 /** HT-54 breaking change (spec §3.3, §10): body is `{ assigneeAgentId }` (was `{ assignee: 'me' | null }`). Header-required (spec §8) — this is the one existing inbox op that now records an Agent. */
@@ -314,7 +327,7 @@ export function putAssignee(
   id: string,
   assigneeAgentId: string | null,
 ): Promise<ConversationSummary> {
-  return request(`/api/v1/conversations/${id}/assignee`, {
+  return request(`/api/v1/conversations/${segment(id)}/assignee`, {
     method: 'PUT',
     body: { assigneeAgentId },
     actingAgent: true,
@@ -322,7 +335,7 @@ export function putAssignee(
 }
 
 export function deleteConversation(id: string): Promise<void> {
-  return request(`/api/v1/conversations/${id}`, { method: 'DELETE' })
+  return request(`/api/v1/conversations/${segment(id)}`, { method: 'DELETE' })
 }
 
 // --- Agents & Authentication (HT-54; specs/auth/agents-and-auth.md §6) -----
@@ -383,7 +396,9 @@ export function createAgent(input: {
 
 /** `GET /api/v1/agents/{id}` — admin, or self. */
 export async function getAgent(id: string): Promise<Agent> {
-  const { agent } = await request<{ agent: Agent }>(`/api/v1/agents/${id}`, { actingAgent: true })
+  const { agent } = await request<{ agent: Agent }>(`/api/v1/agents/${segment(id)}`, {
+    actingAgent: true,
+  })
   return agent
 }
 
@@ -392,7 +407,7 @@ export async function patchAgent(
   id: string,
   input: { name?: string; timezone?: string; role?: AgentRole; status?: 'active' | 'disabled' },
 ): Promise<Agent> {
-  const { agent } = await request<{ agent: Agent }>(`/api/v1/agents/${id}`, {
+  const { agent } = await request<{ agent: Agent }>(`/api/v1/agents/${segment(id)}`, {
     method: 'PATCH',
     body: input,
     actingAgent: true,
@@ -402,12 +417,12 @@ export async function patchAgent(
 
 /** `DELETE /api/v1/agents/{id}` (admin) — hard delete. Blocked for the last active admin (`409`). */
 export function deleteAgent(id: string): Promise<void> {
-  return request(`/api/v1/agents/${id}`, { method: 'DELETE', actingAgent: true })
+  return request(`/api/v1/agents/${segment(id)}`, { method: 'DELETE', actingAgent: true })
 }
 
 /** `POST /api/v1/agents/{id}/password` (self, or admin reset). `409` for an `invited` target. */
 export function setAgentPassword(id: string, password: string): Promise<void> {
-  return request(`/api/v1/agents/${id}/password`, {
+  return request(`/api/v1/agents/${segment(id)}/password`, {
     method: 'POST',
     body: { password },
     actingAgent: true,
@@ -416,7 +431,7 @@ export function setAgentPassword(id: string, password: string): Promise<void> {
 
 /** `POST /api/v1/agents/{id}/invite` (admin) — (re)send an invite. */
 export function resendInvite(id: string): Promise<void> {
-  return request(`/api/v1/agents/${id}/invite`, { method: 'POST', actingAgent: true })
+  return request(`/api/v1/agents/${segment(id)}/invite`, { method: 'POST', actingAgent: true })
 }
 
 /** `POST /api/v1/auth/invite/accept` — validates the token, sets the password, activates. No acting-Agent header (pre-session — no session exists yet). */
@@ -437,19 +452,25 @@ export async function listMailboxes(): Promise<MailboxSummary[]> {
 
 /** `GET /api/v1/agents/{id}/mailboxes` — the target Agent's raw grants, returned as stored even for an admin target (the UI shows the implicit-access note instead of checkboxes for those — spec §3.4). */
 export async function getAgentMailboxes(id: string): Promise<string[]> {
-  const { mailboxIds } = await request<{ mailboxIds: string[] }>(`/api/v1/agents/${id}/mailboxes`, {
-    actingAgent: true,
-  })
+  const { mailboxIds } = await request<{ mailboxIds: string[] }>(
+    `/api/v1/agents/${segment(id)}/mailboxes`,
+    {
+      actingAgent: true,
+    },
+  )
   return mailboxIds
 }
 
 /** `PUT /api/v1/agents/{id}/mailboxes` — replace-set in one transaction. Returns the replaced grants as stored (`handlePutAgentMailboxes`, `src/api/agents.ts`). */
 export async function putAgentMailboxes(id: string, mailboxIds: string[]): Promise<string[]> {
-  const result = await request<{ mailboxIds: string[] }>(`/api/v1/agents/${id}/mailboxes`, {
-    method: 'PUT',
-    body: { mailboxIds },
-    actingAgent: true,
-  })
+  const result = await request<{ mailboxIds: string[] }>(
+    `/api/v1/agents/${segment(id)}/mailboxes`,
+    {
+      method: 'PUT',
+      body: { mailboxIds },
+      actingAgent: true,
+    },
+  )
   return result.mailboxIds
 }
 
@@ -489,7 +510,7 @@ export function imapConnect(input: ImapConnectionInput): Promise<ConnectedMailbo
  * that case, same "not found ≠ error" split `getAgent` etc. already use.
  */
 export function getMailboxImapConfig(mailboxId: string): Promise<ImapMailboxConfigView> {
-  return request(`/api/v1/mailboxes/${mailboxId}/imap-config`, { actingAgent: true })
+  return request(`/api/v1/mailboxes/${segment(mailboxId)}/imap-config`, { actingAgent: true })
 }
 
 // --- Gmail OAuth connect (HT-40/HT-123; specs/mail/gmail-connect.md §2a) ---

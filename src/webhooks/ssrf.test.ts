@@ -91,6 +91,8 @@ describe('isDisallowedIpv6', () => {
     ['::ffff:127.0.0.1', true], // IPv4-mapped
     ['::ffff:8.8.8.8', true], // IPv4-mapped, even a public embedded address (module doc: blocked outright)
     ['64:ff9b::1', true], // NAT64
+    ['64:ff9b:1::a00:1', true], // NAT64 local-use (RFC 8215)
+    ['::127.0.0.1', true], // IPv4-compatible (deprecated)
     ['2001:db8::1', true], // documentation
     ['2002:c000:0204::1', true], // 6to4
     ['2001:0:1::1', true], // Teredo

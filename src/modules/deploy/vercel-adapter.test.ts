@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -198,6 +198,22 @@ describe('createVercelDeployProvider — team-id binding', () => {
     const provider = createVercelDeployProvider(baseConfig(fetchImpl))
     await expect(
       provider.getDeploymentState({ teamId: 'team_someone_else', deploymentId: 'dpl_1' }),
+    ).rejects.toThrow(VercelAdapterError)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
+describe('createVercelDeployProvider — dot-segment ids', () => {
+  // `new URL()` collapses `.`/`..` segments AFTER the allowlist has checked
+  // the path string, so a dot id would reach a route the allowlist never saw.
+  it.each(['.', '..', 'prj\\..\\x'])('refuses id %j before any request is made', async (id) => {
+    const { fetchImpl } = mockFetch([])
+    const provider = createVercelDeployProvider(baseConfig(fetchImpl))
+    await expect(provider.deleteProject({ teamId: TEAM_ID, projectId: id })).rejects.toThrow(
+      VercelAdapterError,
+    )
+    await expect(
+      provider.getDeploymentState({ teamId: TEAM_ID, deploymentId: id }),
     ).rejects.toThrow(VercelAdapterError)
     expect(fetchImpl).not.toHaveBeenCalled()
   })
@@ -492,6 +508,16 @@ describe('local-manual DeployProvider — proves the interface is vendor-neutral
     })
     const env = await readFile(path.join(outputDir, project.projectId, '.env.local'), 'utf8')
     expect(env).toBe('FOO=bar\n')
+    // Secrets file is owner-only, even when it already existed with looser
+    // permissions (writeFile's `mode` only applies on creation).
+    await chmod(path.join(outputDir, project.projectId, '.env.local'), 0o644)
+    await provider.setEnvVars({
+      teamId: TEAM_ID,
+      projectId: project.projectId,
+      vars: [{ key: 'FOO', value: 'baz', sensitive: true }],
+    })
+    const envStat = await stat(path.join(outputDir, project.projectId, '.env.local'))
+    expect(envStat.mode & 0o777).toBe(0o600)
 
     await provider.deleteProject({ teamId: TEAM_ID, projectId: project.projectId })
     await expect(

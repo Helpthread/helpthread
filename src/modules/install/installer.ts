@@ -1053,7 +1053,9 @@ async function stepArtifactUploaded(
           retry: await failInstall(deps, install, 'build_failed', 'unsupported_engine_managed_var'),
         }
       }
-      vars.push({ key: envVar.name, value, sensitive: envVar.sensitive })
+      // Engine-minted credentials are always stored as sensitive, whatever
+      // the module's own config says about them.
+      vars.push({ key: envVar.name, value, sensitive: true })
     } else {
       const value = job.operatorEnvVars[envVar.name]
       if (value === undefined) {

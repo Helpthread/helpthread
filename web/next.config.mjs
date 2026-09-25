@@ -18,6 +18,26 @@ const nextConfig = {
   // than be answered by a framework 308. `src/middleware.ts` restores the
   // redirect for UI paths.
   skipTrailingSlashRedirect: true,
+  // Don't advertise the framework in every response.
+  poweredByHeader: false,
+  // Baseline hardening headers on every response. Nothing in the app is
+  // meant to be framed, so framing is refused outright (clickjacking).
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          { key: 'X-Frame-Options', value: 'DENY' },
+          {
+            key: 'Content-Security-Policy',
+            value: "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+          },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+        ],
+      },
+    ]
+  },
 }
 
 export default nextConfig

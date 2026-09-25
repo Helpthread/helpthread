@@ -36,10 +36,24 @@ export function sanitizeNextPath(raw: string | null | undefined): string {
   }
   if (looksUnsafe(decoded)) return DEFAULT_NEXT_PATH
 
+  // Belt and braces: resolve it the way the browser will, and require that it
+  // stays on the origin it started from.
+  const base = 'http://next-path.invalid'
+  try {
+    if (new URL(raw, base).origin !== base) return DEFAULT_NEXT_PATH
+  } catch {
+    return DEFAULT_NEXT_PATH
+  }
+
   return raw
 }
 
 function looksUnsafe(value: string): boolean {
+  // The WHATWG URL parser silently strips tab/CR/LF before parsing, so
+  // "/\t/evil.example" becomes "//evil.example" by the time the browser
+  // navigates — reject every control character outright.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
+  if (/[\u0000-\u001F\u007F]/.test(value)) return true
   if (!value.startsWith('/')) return true // must be a relative path, not "evil.example" or "javascript:..."
   if (value.startsWith('//')) return true // protocol-relative ("//evil.example")
   if (value.startsWith('/\\')) return true // some browsers normalize "/\" the same as "//"

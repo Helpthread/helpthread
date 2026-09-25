@@ -166,7 +166,15 @@ function assertAllowlisted(method: HttpMethod, pathname: string): void {
 
 /** Rejects an id that could smuggle extra path segments or query syntax into a URL this adapter builds by string interpolation. Every `projectId`/`deploymentId` this module receives is additionally `encodeURIComponent`-encoded before being placed in a path, so this is defense in depth, not the only guard. */
 function assertSafeId(id: string, label: string): void {
-  if (id.length === 0 || id.includes('/') || id.includes('?') || id.includes('#')) {
+  if (
+    id.length === 0 ||
+    id === '.' ||
+    id === '..' ||
+    id.includes('/') ||
+    id.includes('\\') ||
+    id.includes('?') ||
+    id.includes('#')
+  ) {
     throw new VercelAdapterError(`vercel-adapter: refusing unsafe ${label}: '${id}'`)
   }
 }
