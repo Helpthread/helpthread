@@ -14,7 +14,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "dompurify": "^3.4.13",
+    "dompurify": "^3.4.16",
     "next": "^16.3.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
