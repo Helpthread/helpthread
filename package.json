@@ -24,7 +24,7 @@
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
     "@simplewebauthn/server": "^13.3.3",
-    "@supabase/supabase-js": "^2.112.2",
+    "@supabase/supabase-js": "^2.116.0",
     "imapflow": "^1.7.7",
     "jose": "^6.2.8",
     "mimetext": "^3.0.28",
